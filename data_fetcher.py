@@ -253,7 +253,7 @@ class HKMarketListFetcher:
     def fetch(self):
         """
         获取港股全市场股票列表
-        
+
         Returns:
             list: 股票代码列表，失败返回空列表
         """
@@ -263,167 +263,187 @@ class HKMarketListFetcher:
             # 腾讯财经港股板块列表 API
             # 获取主板股票（代码范围 00001-99999）
             url = "http://qt.gtimg.cn/q=hk00001,hk00002,hk00003,hk00004,hk00005"
-            
+
             # 使用更高效的方法：获取恒生指数成分股 + 主板股票
             # 方法 1：通过恒生指数成分股获取
             hang_seng_url = "http://qt.gtimg.cn/q=sh000001"
-            
+
             # 更好的方法：直接获取港股板块
             # 使用新浪或腾讯的板块接口
             hk_stocks_url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=10000&sort=symbol&asc=1&node=hk&symbol="
-            
+
             response = requests.get(hk_stocks_url, timeout=15)
             response.raise_for_status()
-            
+
             stocks_data = response.json()
-            
+
             if not stocks_data:
                 print("[WARNING] 未能获取港股列表，使用备用方案...")
                 # 备用方案：使用已知的港股代码范围
                 return self._fetch_alternative()
-            
+
             # 提取股票代码
             for stock in stocks_data:
                 code = stock.get('code', '')
                 name = stock.get('name', '')
-                
+
                 # 过滤出港股（通常是 5 位数字）
                 if code and len(code) == 5 and code.isdigit():
                     self.stocks.append({
                         'code': code,
                         'name': name
                     })
-            
+
             print(f"[OK] 成功获取 {len(self.stocks)} 只港股")
             return self.stocks
-            
+
         except Exception as e:
             print(f"[ERROR] 获取港股列表失败：{e}")
             return self._fetch_alternative()
 
     def _fetch_alternative(self):
         """
-        备用方案：获取常见的港股代码
-        
+        备用方案：多线程并发扫描全市场港股列表
+
+        策略：
+        1. 使用多线程并发扫描 00001-09999
+        2. 分批请求以避免过度连接
+        3. 自动去重和排序
+
         Returns:
             list: 股票代码列表
         """
-        print("[INFO] 使用备用方案获取港股列表...")
-        
+        print("[INFO] 使用多线程并发方案扫描全市场港股列表...")
+        print("[INFO] 扫描范围：00001-09999，使用多线程加速...")
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+
         stock_codes = []
-        
-        # 使用常见的港股代码范围（根据实际市场情况）
-        # 主板股票通常在 00001 到 09999 之间
-        # 这里列出一些实际存在的主要港股
-        known_stocks = [
-            ('00001', '香港交易所'),
-            ('00002', '中电控股'),
-            ('00003', '香港中华煤气'),
-            ('00004', '黑珍珠有限公司'),
-            ('00005', '汇丰控股'),
-            ('00006', '电能实业'),
-            ('00011', '恒生银行'),
-            ('00012', '恒基地产'),
-            ('00016', '新鸿基地产'),
-            ('00017', '新世界发展'),
-            ('00019', '太古股份公司A'),
-            ('00023', '东亚银行'),
-            ('00027', '银河娱乐'),
-            ('00066', '现代牧业'),
-            ('00083', '信和置业'),
-            ('00101', '恒隆地产'),
-            ('00135', '昆仑能源'),
-            ('00144', '中国海外发展'),
-            ('00151', '中国首创'),
-            ('00175', '吉利汽车'),
-            ('00291', '华夏幸福'),
-            ('00330', '中国铁塔'),
-            ('00336', '中国新力'),
-            ('00388', '香港交易所'),
-            ('00388', '香港中华电力'),
-            ('00489', '东亚银行'),
-            ('00700', '腾讯控股'),
-            ('00883', '中国海洋石油'),
-            ('00939', '招商银行'),
-            ('01398', '工商银行'),
-            ('01988', '中国银行'),
-            ('02388', '中银香港'),
-            ('02590', '极智嘉'),
-            ('03633', '中裕能源'),
-            ('03690', '美团'),
-            ('05911', '美图公司'),
-            ('09866', '生物谷'),
-        ]
-        
-        # 扩展列表：添加更多可能存在的股票代码
-        # 通过模式匹配和已知公司
-        for code, name in known_stocks:
-            stock_codes.append({
-                'code': code,
-                'name': name
-            })
-        
-        # 动态获取一些其他股票（可选）
-        # 尝试从腾讯财经API获取一些常见股票
-        try:
-            # 尝试获取恒生指数成分股中的一些公司
-            hk_major_stocks = [
-                '00001', '00005', '00011', '00012', '00016', '00017',
-                '00019', '00023', '00027', '00066', '00083', '00101',
-                '00144', '00175', '00291', '00330', '00336', 
-                '00388', '00700', '00883', '00939', '01398', '01988', '02388',
-                '02590', '03633', '03690', '05911', '09866'
-            ]
-            
-            for code in hk_major_stocks:
-                if not any(s['code'] == code for s in stock_codes):
+        lock = threading.Lock()  # 线程锁，保护 stock_codes 列表
+
+        # 统计信息
+        stats = {
+            'tested': 0,
+            'found': 0,
+            'lock': threading.Lock()
+        }
+
+        def query_stock(code_num):
+            """查询单个股票，返回股票信息或None"""
+            try:
+                code = str(code_num).zfill(5)
+                ticker = f"hk{code}"
+                url = f"http://qt.gtimg.cn/q={ticker}"
+
+                response = requests.get(url, timeout=2)
+
+                if response.status_code == 200 and '~' in response.text:
                     try:
-                        ticker = f"hk{code}"
-                        url = f"http://qt.gtimg.cn/q={ticker}"
-                        response = requests.get(url, timeout=5)
-                        
-                        if response.status_code == 200 and '~' in response.text:
-                            parts = response.text.split('~')
-                            if len(parts) > 1 and parts[1]:
-                                name = parts[1]
-                                stock_codes.append({
-                                    'code': code,
-                                    'name': name
-                                })
+                        content = response.content.decode('gb2312')
                     except:
-                        # 如果获取失败，使用默认名称
-                        stock_codes.append({
-                            'code': code,
-                            'name': f'股票{code}'
-                        })
-        except:
-            pass
-        
-        # 去重
+                        content = response.text
+
+                    parts = content.split('~')
+
+                    # 检查是否有有效的股票名称
+                    if len(parts) > 1 and parts[1] and parts[1] != 'N/A':
+                        name = parts[1].strip()
+                        if name:
+                            return {
+                                'code': code,
+                                'name': name
+                            }
+
+            except requests.exceptions.Timeout:
+                pass
+            except Exception:
+                pass
+
+            return None
+
+        def worker_batch(code_range):
+            """线程工作函数：处理一批股票代码"""
+            local_stocks = []
+
+            for code_num in code_range:
+                stock = query_stock(code_num)
+
+                if stock:
+                    local_stocks.append(stock)
+
+                    # 更新统计信息
+                    with stats['lock']:
+                        stats['found'] += 1
+                        if stats['found'] % 50 == 0:
+                            print(f"[PROGRESS] 已发现 {stats['found']} 只港股 (已扫描 {stats['tested']} 个代码)...")
+
+                with stats['lock']:
+                    stats['tested'] += 1
+                    # 每1000个显示进度
+                    if stats['tested'] % 1000 == 0:
+                        print(f"[SCANNING] 已扫描 {stats['tested']}/9999 个代码...")
+
+            return local_stocks
+
+        # 使用多线程并发扫描
+        # 将 00001-09999 分成 20 个批次，每个批次 500 个代码
+        num_threads = 20
+        batch_size = 500
+        total_codes = 9999
+
+        print(f"[INFO] 使用 {num_threads} 个线程，每线程处理 {batch_size} 个代码...")
+
+        all_stocks = []
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = []
+
+            # 提交任务
+            for i in range(0, total_codes, batch_size):
+                batch_start = i + 1
+                batch_end = min(i + batch_size, total_codes)
+                code_range = range(batch_start, batch_end + 1)
+
+                future = executor.submit(worker_batch, code_range)
+                futures.append(future)
+
+            # 收集结果
+            for future in as_completed(futures):
+                try:
+                    batch_stocks = future.result()
+                    all_stocks.extend(batch_stocks)
+                except Exception as e:
+                    print(f"[ERROR] 线程异常：{e}")
+
+        # 去重和排序
         seen = set()
         unique_stocks = []
-        for stock in stock_codes:
+        for stock in all_stocks:
             if stock['code'] not in seen:
                 seen.add(stock['code'])
                 unique_stocks.append(stock)
-        
+
         self.stocks = sorted(unique_stocks, key=lambda x: x['code'])
-        print(f"[OK] 备用方案获取完成，共 {len(self.stocks)} 只港股")
+
+        print()
+        print(f"[OK] 扫描完成！共发现 {len(self.stocks)} 只港股")
+        print(f"     总扫描次数：{stats['tested']}，发现率：{(stats['found']/stats['tested']*100):.2f}%")
+
         return self.stocks
 
     def save_to_db(self, db_manager):
         """
         将股票列表保存到数据库
-        
+
         Args:
             db_manager: 数据库管理器实例
-            
+
         Returns:
             bool: 是否成功
         """
         if not self.stocks:
             return False
-        
+
         try:
             for stock in self.stocks:
                 # 创建简单的股票信息记录
@@ -441,12 +461,12 @@ class HKMarketListFetcher:
                     '52_week_high': None,
                     '52_week_low': None,
                 }
-                
+
                 db_manager.save_stock_info(stock_info, stock['code'])
-            
+
             print(f"[OK] 已将 {len(self.stocks)} 只股票信息保存到数据库")
             return True
-            
+
         except Exception as e:
             print(f"[ERROR] 保存股票列表到数据库失败：{e}")
             return False

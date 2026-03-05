@@ -60,7 +60,7 @@ if os.path.exists(output_dir):
     files = os.listdir(output_dir)
     json_count = len([f for f in files if f.endswith('.json')])
     png_count = len([f for f in files if f.endswith('.png')])
-    
+
     print(f"📁 输出文件统计")
     print(f"   ├─ JSON文件：{json_count} 个")
     print(f"   ├─ PNG图表：{png_count} 个")

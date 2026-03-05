@@ -25,7 +25,7 @@ print()
 # 2. 本次批处理的5支股票
 print('✅ 本次处理的5只股票统计')
 result = db.execute('''
-    SELECT stock_code, COUNT(*) as records, 
+    SELECT stock_code, COUNT(*) as records,
            MIN(date) as earliest_date, MAX(date) as latest_date
     FROM kline_data
     WHERE stock_code IN ('00001', '00002', '00003', '00004', '00005')
@@ -40,7 +40,7 @@ print()
 # 3. 所有股票汇总
 print('📋 数据库中所有股票汇总')
 result = db.execute('''
-    SELECT stock_code, COUNT(*) as records, 
+    SELECT stock_code, COUNT(*) as records,
            MIN(date) as earliest_date, MAX(date) as latest_date
     FROM kline_data
     GROUP BY stock_code

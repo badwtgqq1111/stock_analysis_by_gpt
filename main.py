@@ -230,7 +230,7 @@ def process_all_stocks(output_path, db_dir, limit=None):
     print_section("[FINAL] 数据库最终统计")
     print(f"[INFO] 数据库中的股票数：{sort_stats.get('total_stocks', 0)}")
     print(f"[INFO] 数据库中的总记录数：{sort_stats.get('total_records', 0)}")
-    
+
     # 获取数据库大小
     try:
         stats_any = saver.get_db_statistics(stocks[0]['code']) if stocks else None

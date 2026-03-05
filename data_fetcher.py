@@ -322,10 +322,21 @@ class HKMarketListFetcher:
         stock_codes = []
         lock = threading.Lock()  # 线程锁，保护 stock_codes 列表
 
+        # 初始化数据库管理器
+        from db_manager import DatabaseManager
+        db_manager = DatabaseManager()
+        
+        # 获取已扫描的股票列表
+        scanned_stocks = db_manager.get_scanned_stocks('active')
+        scanned_codes = {stock['code'] for stock in scanned_stocks}
+        
+        print(f"[INFO] 数据库中已有 {len(scanned_codes)} 只已扫描股票，将跳过...")
+
         # 统计信息
         stats = {
             'tested': 0,
             'found': 0,
+            'skipped': len(scanned_codes),
             'lock': threading.Lock()
         }
 
@@ -333,6 +344,11 @@ class HKMarketListFetcher:
             """查询单个股票，返回股票信息或None"""
             try:
                 code = str(code_num).zfill(5)
+                
+                # 如果已扫描过，跳过
+                if code in scanned_codes:
+                    return None
+                
                 ticker = f"hk{code}"
                 url = f"http://qt.gtimg.cn/q={ticker}"
 
@@ -350,6 +366,8 @@ class HKMarketListFetcher:
                     if len(parts) > 1 and parts[1] and parts[1] != 'N/A':
                         name = parts[1].strip()
                         if name:
+                            # 立即保存到数据库
+                            db_manager.save_scanned_stock(code, name, 'active')
                             return {
                                 'code': code,
                                 'name': name
@@ -380,9 +398,8 @@ class HKMarketListFetcher:
 
                 with stats['lock']:
                     stats['tested'] += 1
-                    # 每1000个显示进度
                     if stats['tested'] % 1000 == 0:
-                        print(f"[SCANNING] 已扫描 {stats['tested']}/9999 个代码...")
+                        print(f"[MILESTONE] 已扫描 {stats['tested']}/9999 个代码，已跳过 {stats['skipped']} 只已扫描股票...")
 
             return local_stocks
 
@@ -415,6 +432,9 @@ class HKMarketListFetcher:
                 except Exception as e:
                     print(f"[ERROR] 线程异常：{e}")
 
+        # 合并已扫描的股票
+        all_stocks.extend(scanned_stocks)
+        
         # 去重和排序
         seen = set()
         unique_stocks = []
@@ -422,13 +442,19 @@ class HKMarketListFetcher:
             if stock['code'] not in seen:
                 seen.add(stock['code'])
                 unique_stocks.append(stock)
-
+        
         self.stocks = sorted(unique_stocks, key=lambda x: x['code'])
 
         print()
         print(f"[OK] 扫描完成！共发现 {len(self.stocks)} 只港股")
-        print(f"     总扫描次数：{stats['tested']}，发现率：{(stats['found']/stats['tested']*100):.2f}%")
-
+        print(f"     新发现：{stats['found']} 只")
+        print(f"     已存在：{stats['skipped']} 只")
+        print(f"     总扫描：{stats['tested']} 个代码")
+        print(f"     发现率：{(stats['found']/stats['tested']*100):.2f}%")
+        
+        # 关闭数据库连接
+        db_manager.close()
+        
         return self.stocks
 
     def save_to_db(self, db_manager):

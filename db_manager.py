@@ -86,6 +86,17 @@ class DatabaseManager:
                 )
             """)
 
+            # 创建已扫描股票代码表（避免重复扫描）
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS scanned_stocks (
+                    stock_code VARCHAR PRIMARY KEY NOT NULL,
+                    name VARCHAR,
+                    scan_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status VARCHAR DEFAULT 'active'  -- active, inactive, error
+                )
+            """)
+
             # 创建索引以提高查询性能
             self.conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_kline_stock_date
@@ -95,6 +106,11 @@ class DatabaseManager:
             self.conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_stock_code
                 ON stock_info(stock_code)
+            """)
+
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scanned_code
+                ON scanned_stocks(stock_code)
             """)
 
             print(f"[OK] DuckDB 数据库已初始化: {self.db_path}")
@@ -519,6 +535,102 @@ class DatabaseManager:
         except Exception as e:
             print(f"[ERROR] 获取股票列表错误：{e}")
             return []
+
+    def save_scanned_stock(self, stock_code, name, status='active'):
+        """
+        保存已扫描的股票代码到数据库
+
+        Args:
+            stock_code (str): 股票代码
+            name (str): 股票名称
+            status (str): 状态 ('active', 'inactive', 'error')
+
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            now = datetime.now().isoformat()
+            self.conn.execute("""
+                INSERT INTO scanned_stocks (stock_code, name, scan_time, last_update, status)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (stock_code) DO UPDATE SET
+                    name = excluded.name,
+                    last_update = excluded.last_update,
+                    status = excluded.status
+            """, (stock_code, name, now, now, status))
+
+            return True
+
+        except Exception as e:
+            print(f"[ERROR] 保存已扫描股票错误：{e}")
+            return False
+
+    def get_scanned_stocks(self, status_filter=None):
+        """
+        获取已扫描的股票列表
+
+        Args:
+            status_filter (str): 状态过滤 ('active', 'inactive', 'error', None表示全部)
+
+        Returns:
+            list: 已扫描的股票列表 [{'code': '00001', 'name': '香港交易所', 'status': 'active'}, ...]
+        """
+        try:
+            if status_filter:
+                result = self.conn.execute(
+                    "SELECT stock_code, name, status FROM scanned_stocks WHERE status = ? ORDER BY stock_code",
+                    (status_filter,)
+                ).fetchall()
+            else:
+                result = self.conn.execute(
+                    "SELECT stock_code, name, status FROM scanned_stocks ORDER BY stock_code"
+                ).fetchall()
+
+            return [{'code': row[0], 'name': row[1], 'status': row[2]} for row in result] if result else []
+
+        except Exception as e:
+            print(f"[ERROR] 获取已扫描股票列表错误：{e}")
+            return []
+
+    def is_stock_scanned(self, stock_code):
+        """
+        检查股票是否已被扫描
+
+        Args:
+            stock_code (str): 股票代码
+
+        Returns:
+            bool: 是否已被扫描
+        """
+        try:
+            result = self.conn.execute(
+                "SELECT COUNT(*) FROM scanned_stocks WHERE stock_code = ?",
+                (stock_code,)
+            ).fetchall()[0][0]
+
+            return result > 0
+
+        except Exception as e:
+            print(f"[ERROR] 检查股票扫描状态错误：{e}")
+            return False
+
+    def get_scanned_stock_count(self):
+        """
+        获取已扫描股票总数
+
+        Returns:
+            int: 已扫描股票数量
+        """
+        try:
+            result = self.conn.execute(
+                "SELECT COUNT(*) FROM scanned_stocks"
+            ).fetchall()[0][0]
+
+            return result
+
+        except Exception as e:
+            print(f"[ERROR] 获取已扫描股票数量错误：{e}")
+            return 0
 
     def get_total_kline_records(self):
         """

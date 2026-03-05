@@ -325,11 +325,11 @@ class HKMarketListFetcher:
         # 初始化数据库管理器
         from db_manager import DatabaseManager
         db_manager = DatabaseManager()
-        
+
         # 获取已扫描的股票列表
         scanned_stocks = db_manager.get_scanned_stocks('active')
         scanned_codes = {stock['code'] for stock in scanned_stocks}
-        
+
         print(f"[INFO] 数据库中已有 {len(scanned_codes)} 只已扫描股票，将跳过...")
 
         # 统计信息
@@ -344,11 +344,11 @@ class HKMarketListFetcher:
             """查询单个股票，返回股票信息或None"""
             try:
                 code = str(code_num).zfill(5)
-                
+
                 # 如果已扫描过，跳过
                 if code in scanned_codes:
                     return None
-                
+
                 ticker = f"hk{code}"
                 url = f"http://qt.gtimg.cn/q={ticker}"
 
@@ -434,7 +434,7 @@ class HKMarketListFetcher:
 
         # 合并已扫描的股票
         all_stocks.extend(scanned_stocks)
-        
+
         # 去重和排序
         seen = set()
         unique_stocks = []
@@ -442,7 +442,7 @@ class HKMarketListFetcher:
             if stock['code'] not in seen:
                 seen.add(stock['code'])
                 unique_stocks.append(stock)
-        
+
         self.stocks = sorted(unique_stocks, key=lambda x: x['code'])
 
         print()
@@ -451,10 +451,10 @@ class HKMarketListFetcher:
         print(f"     已存在：{stats['skipped']} 只")
         print(f"     总扫描：{stats['tested']} 个代码")
         print(f"     发现率：{(stats['found']/stats['tested']*100):.2f}%")
-        
+
         # 关闭数据库连接
         db_manager.close()
-        
+
         return self.stocks
 
     def save_to_db(self, db_manager):

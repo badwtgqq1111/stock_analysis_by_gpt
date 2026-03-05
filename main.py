@@ -8,6 +8,12 @@
 
 import sys
 import argparse
+import asyncio
+try:
+    import uvloop
+    UVLOOP_AVAILABLE = True
+except ImportError:
+    UVLOOP_AVAILABLE = False
 from data_fetcher import StockInfoFetcher, HistoryDataFetcher, HKMarketListFetcher
 from data_display import StockInfoDisplay, HistoryDataDisplay
 from data_saver import DataSaver
@@ -115,9 +121,9 @@ def process_single_stock(stock_code, output_path, db_dir, show_chart=True):
     return True
 
 
-def process_all_stocks(output_path, db_dir, limit=None):
+async def process_all_stocks_async(output_path, db_dir, limit=None):
     """
-    批量处理全市场所有股票
+    异步批量处理全市场所有股票
 
     Args:
         output_path: 输出目录路径
@@ -130,7 +136,7 @@ def process_all_stocks(output_path, db_dir, limit=None):
     print_section("[MODULE] 获取港股全市场股票列表")
 
     market_fetcher = HKMarketListFetcher()
-    stocks = market_fetcher.fetch()
+    stocks = await asyncio.to_thread(market_fetcher.fetch)
 
     if not stocks:
         print("[ERROR] 无法获取股票列表，程序中止")
@@ -150,64 +156,85 @@ def process_all_stocks(output_path, db_dir, limit=None):
 
     print()
 
+    # 创建协程任务
+    semaphore = asyncio.Semaphore(5)  # 限制并发数量，避免过载
+
+    async def process_single_stock_async(idx, stock):
+        async with semaphore:
+            stock_code = stock['code']
+            stock_name = stock['name']
+
+            # 每个任务使用自己的 DataSaver/DatabaseManager 实例，避免线程间共用连接
+            local_saver = DataSaver(db_dir)
+
+            try:
+                # ========== 检查数据库 ==========
+                data_fetcher = HistoryDataFetcher(stock_code, db_dir)
+                update_info = await asyncio.to_thread(data_fetcher.check_update_from_db)
+
+                status = ""
+                if update_info['has_data']:
+                    status = f"[已有数据] {update_info['total_records']}条"
+                else:
+                    status = "[新增]"
+
+                # ========== 下载数据 ==========
+                hist_data = await asyncio.to_thread(data_fetcher.fetch)
+
+                if hist_data is None or hist_data.empty:
+                    print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} [ERROR] 获取数据失败")
+                    return False
+
+                # ========== 保存基本信息 ==========
+                info_fetcher = StockInfoFetcher(stock_code)
+                stock_info = await asyncio.to_thread(info_fetcher.fetch)
+                if stock_info:
+                    await asyncio.to_thread(local_saver.save_stock_info_to_db, stock_info, stock_code)
+
+                # ========== 保存K线数据 ==========
+                db_stats = await asyncio.to_thread(local_saver.save_to_db, hist_data, stock_code)
+
+                if db_stats:
+                    new_records = db_stats.get('new_records', 0)
+                    updated_records = db_stats.get('updated_records', 0)
+                    record_info = f"新增{new_records}, 更新{updated_records}"
+                    print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} {status} ({record_info})")
+                    return True, new_records + updated_records
+                else:
+                    print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} [ERROR] 保存数据失败")
+                    return False, 0
+
+            except Exception as e:
+                print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} [ERROR] {str(e)[:50]}")
+                return False, 0
+
+    # 创建所有任务
+    tasks = []
+    for idx, stock in enumerate(stocks_to_process, 1):
+        task = process_single_stock_async(idx, stock)
+        tasks.append(task)
+
+    # 并发执行所有任务
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 统计结果
     success_count = 0
     fail_count = 0
     total_records = 0
 
-    saver = DataSaver(db_dir)
-
-    for idx, stock in enumerate(stocks_to_process, 1):
-        stock_code = stock['code']
-        stock_name = stock['name']
-
-        try:
-            # ========== 检查数据库 ==========
-            data_fetcher = HistoryDataFetcher(stock_code, db_dir)
-            update_info = data_fetcher.check_update_from_db()
-
-            status = ""
-            if update_info['has_data']:
-                status = f"[已有数据] {update_info['total_records']}条"
-            else:
-                status = "[新增]"
-
-            # ========== 下载数据 ==========
-            hist_data = data_fetcher.fetch()
-
-            if hist_data is None or hist_data.empty:
-                print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} [ERROR] 获取数据失败")
-                fail_count += 1
-                continue
-
-            # ========== 保存基本信息 ==========
-            info_fetcher = StockInfoFetcher(stock_code)
-            stock_info = info_fetcher.fetch()
-            if stock_info:
-                saver.save_stock_info_to_db(stock_info, stock_code)
-
-            # ========== 保存K线数据 ==========
-            db_stats = saver.save_to_db(hist_data, stock_code)
-
-            if db_stats:
-                new_records = db_stats.get('new_records', 0)
-                updated_records = db_stats.get('updated_records', 0)
-                total_records += new_records + updated_records
-                record_info = f"新增{new_records}, 更新{updated_records}"
-                print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} {status} ({record_info})")
-                success_count += 1
-            else:
-                print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} [ERROR] 保存数据失败")
-                fail_count += 1
-
-        except Exception as e:
-            print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} [ERROR] {str(e)[:50]}")
+    for result in results:
+        if isinstance(result, Exception):
+            print(f"[ERROR] 协程执行异常: {result}")
             fail_count += 1
-
-        # 每处理 20 只股票显示进度统计
-        if idx % 20 == 0:
-            print(f"\n[PROGRESS] 已处理 {idx}/{len(stocks_to_process)} 只股票")
-            print(f"           成功：{success_count}, 失败：{fail_count}, 累计记录数：{total_records}")
-            print()
+        elif isinstance(result, tuple) and len(result) == 2:
+            success, records = result
+            if success:
+                success_count += 1
+                total_records += records
+            else:
+                fail_count += 1
+        else:
+            fail_count += 1
 
     # ========== 总结 ==========
     print()
@@ -222,7 +249,9 @@ def process_all_stocks(output_path, db_dir, limit=None):
     print()
     print_section("[MODULE] 整理数据库索引")
 
-    sort_stats = saver.db_manager.sort_database()
+    # 为整理操作创建新的 DataSaver 实例，避免与任务中使用的连接冲突
+    sort_saver = DataSaver(db_dir)
+    sort_stats = await asyncio.to_thread(sort_saver.db_manager.sort_database)
 
     print()
 
@@ -233,11 +262,31 @@ def process_all_stocks(output_path, db_dir, limit=None):
 
     # 获取数据库大小
     try:
-        stats_any = saver.get_db_statistics(stocks[0]['code']) if stocks else None
-        if stats_any:
-            print(f"[INFO] 数据库大小：{stats_any.get('db_file_size', 'N/A')}")
+        if stocks:
+            stats_any = await asyncio.to_thread(sort_saver.get_db_statistics, stocks[0]['code'])
+            if stats_any:
+                print(f"[INFO] 数据库大小：{stats_any.get('db_file_size', 'N/A')}")
     except:
         pass
+
+
+def process_all_stocks(output_path, db_dir, limit=None):
+    """
+    批量处理全市场所有股票（同步包装器）
+
+    Args:
+        output_path: 输出目录路径
+        db_dir: 数据库目录
+        limit (int): 限制处理的股票数量，None 表示不限制
+    """
+    # 设置 uvloop 事件循环策略（可选，提升性能）
+    if UVLOOP_AVAILABLE:
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    else:
+        print("[INFO] uvloop 不可用，使用标准 asyncio 事件循环")
+
+    # 运行异步函数
+    asyncio.run(process_all_stocks_async(output_path, db_dir, limit))
 
 
 def process_multiple_stocks(stock_codes, output_path, db_dir, show_chart=False, verify=True):

@@ -48,7 +48,7 @@ class StockInfoFetcher:
                 except:
                     content = response.content.decode('utf-8', errors='ignore')
 
-            # 解析数据 (格式：v_hk03633="51~软体饮...~")
+            # 解析数据 (格式：v_hk03633="51~软体饮...")
             if '~' not in content:
                 print("[ERROR] 数据格式异常")
                 return None
@@ -237,7 +237,157 @@ class HistoryDataFetcher:
         data = self.db_manager.get_kline_data(self.stock_code)
 
         if data is not None and not data.empty:
-            print(f"[INFO] 从数据库加载数据: {len(data)} 条记录")
+            print(f"[INFO] 从数据库加载数据：{len(data)} 条记录")
             self.data = data
 
         return data
+
+
+class HKMarketListFetcher:
+    """获取港股全市场股票列表"""
+
+    def __init__(self):
+        """初始化港股市场列表获取器"""
+        self.stocks = []
+
+    def fetch(self):
+        """
+        获取港股全市场股票列表
+        
+        Returns:
+            list: 股票代码列表，失败返回空列表
+        """
+        print("[INFO] 正在获取港股全市场股票列表...")
+
+        try:
+            # 腾讯财经港股板块列表 API
+            # 获取主板股票（代码范围 00001-99999）
+            url = "http://qt.gtimg.cn/q=hk00001,hk00002,hk00003,hk00004,hk00005"
+            
+            # 使用更高效的方法：获取恒生指数成分股 + 主板股票
+            # 方法 1：通过恒生指数成分股获取
+            hang_seng_url = "http://qt.gtimg.cn/q=sh000001"
+            
+            # 更好的方法：直接获取港股板块
+            # 使用新浪或腾讯的板块接口
+            hk_stocks_url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=10000&sort=symbol&asc=1&node=hk&symbol="
+            
+            response = requests.get(hk_stocks_url, timeout=15)
+            response.raise_for_status()
+            
+            stocks_data = response.json()
+            
+            if not stocks_data:
+                print("[WARNING] 未能获取港股列表，使用备用方案...")
+                # 备用方案：使用已知的港股代码范围
+                return self._fetch_alternative()
+            
+            # 提取股票代码
+            for stock in stocks_data:
+                code = stock.get('code', '')
+                name = stock.get('name', '')
+                
+                # 过滤出港股（通常是 5 位数字）
+                if code and len(code) == 5 and code.isdigit():
+                    self.stocks.append({
+                        'code': code,
+                        'name': name
+                    })
+            
+            print(f"[OK] 成功获取 {len(self.stocks)} 只港股")
+            return self.stocks
+            
+        except Exception as e:
+            print(f"[ERROR] 获取港股列表失败：{e}")
+            return self._fetch_alternative()
+
+    def _fetch_alternative(self):
+        """
+        备用方案：通过腾讯财经 API 批量获取
+        
+        Returns:
+            list: 股票代码列表
+        """
+        print("[INFO] 使用备用方案获取港股列表...")
+        
+        # 生成常见的港股代码范围（00001-09999 为主板）
+        stock_codes = []
+        
+        # 分批获取，每批 100 个
+        batch_size = 100
+        tested_count = 0
+        valid_count = 0
+        
+        for i in range(1, 10000):
+            code = str(i).zfill(5)
+            ticker = f"hk{code}"
+            
+            try:
+                url = f"http://qt.gtimg.cn/q={ticker}"
+                response = requests.get(url, timeout=2)
+                
+                if response.status_code == 200 and '~' in response.text:
+                    parts = response.text.split('~')
+                    if len(parts) > 1:
+                        name = parts[1]
+                        if name and name != 'N/A':
+                            stock_codes.append({
+                                'code': code,
+                                'name': name
+                            })
+                            valid_count += 1
+                            tested_count += 1
+                            
+                            if valid_count % 100 == 0:
+                                print(f"   已发现 {valid_count} 只股票...")
+            except:
+                continue
+        
+        self.stocks = stock_codes
+        print(f"[OK] 备用方案获取完成，共 {len(stock_codes)} 只港股")
+        return stock_codes
+
+    def save_to_db(self, db_manager):
+        """
+        将股票列表保存到数据库
+        
+        Args:
+            db_manager: 数据库管理器实例
+            
+        Returns:
+            bool: 是否成功
+        """
+        if not self.stocks:
+            return False
+        
+        try:
+            for stock in self.stocks:
+                # 创建简单的股票信息记录
+                stock_info = {
+                    'name': stock['name'],
+                    'code': f"hk{stock['code']}",
+                    'current_price': None,
+                    'close_price': None,
+                    'open_price': None,
+                    'high': None,
+                    'low': None,
+                    'volume': None,
+                    'market_cap': None,
+                    'pe_ratio': None,
+                    '52_week_high': None,
+                    '52_week_low': None,
+                }
+                
+                db_manager.save_stock_info(stock_info, stock['code'])
+            
+            print(f"[OK] 已将 {len(self.stocks)} 只股票信息保存到数据库")
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] 保存股票列表到数据库失败：{e}")
+            return False
+
+    def get_stocks(self):
+        """获取股票列表"""
+        return self.stocks
+

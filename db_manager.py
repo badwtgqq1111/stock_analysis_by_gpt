@@ -9,10 +9,11 @@ import duckdb
 import os
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 
 
 class DatabaseManager:
-    """DuckDB 数据库管理器 - 列式存储，超高性能 OLAP"""
+    """DuckDB 数据库管理器 - 列式存储，高性能 OLAP"""
 
     def __init__(self, db_dir="./assets"):
         """
@@ -33,13 +34,15 @@ class DatabaseManager:
             # 连接到 DuckDB 数据库
             self.conn = duckdb.connect(self.db_path)
 
-            # 创建序列用于自增 ID
-            self.conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_update_log START 1")
+            # 启用扩展
+            self.conn.execute("INSTALL json")
+            self.conn.execute("LOAD json")
 
             # 创建股票基本信息表
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS stock_info (
-                    stock_code VARCHAR PRIMARY KEY,
+                    id INTEGER PRIMARY KEY DEFAULT nextval('seq_stock_info'),
+                    stock_code VARCHAR UNIQUE NOT NULL,
                     name VARCHAR,
                     current_price DOUBLE,
                     close_price DOUBLE,
@@ -55,9 +58,15 @@ class DatabaseManager:
                 )
             """)
 
-            # 创建 K 线数据表（列式存储，超高性能）
+            # 创建序列（用于自增）
+            self.conn.execute("""
+                CREATE SEQUENCE IF NOT EXISTS seq_stock_info START 1
+            """)
+
+            # 创建 K 线数据表（支持增量更新）
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS kline_data (
+                    id INTEGER PRIMARY KEY DEFAULT nextval('seq_kline_data'),
                     stock_code VARCHAR NOT NULL,
                     date DATE NOT NULL,
                     open DOUBLE NOT NULL,
@@ -67,12 +76,17 @@ class DatabaseManager:
                     volume DOUBLE NOT NULL,
                     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (stock_code, date),
+                    UNIQUE (stock_code, date),
                     FOREIGN KEY (stock_code) REFERENCES stock_info(stock_code)
                 )
             """)
 
-            # 创建更新日志表
+            # 创建序列（用于自增）
+            self.conn.execute("""
+                CREATE SEQUENCE IF NOT EXISTS seq_kline_data START 1
+            """)
+
+            # 创建更新日志表（追踪增量更新）
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS update_log (
                     id INTEGER PRIMARY KEY DEFAULT nextval('seq_update_log'),
@@ -85,10 +99,20 @@ class DatabaseManager:
                 )
             """)
 
+            # 创建序列（用于自增）
+            self.conn.execute("""
+                CREATE SEQUENCE IF NOT EXISTS seq_update_log START 1
+            """)
+
             # 创建索引以提高查询性能
             self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_kline_stock_date 
+                CREATE INDEX IF NOT EXISTS idx_kline_stock_date
                 ON kline_data(stock_code, date)
+            """)
+
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stock_code
+                ON stock_info(stock_code)
             """)
 
             print(f"[OK] DuckDB 数据库已初始化: {self.db_path}")
@@ -97,11 +121,21 @@ class DatabaseManager:
             print(f"[ERROR] 数据库初始化错误: {e}")
 
     def save_stock_info(self, stock_info, stock_code):
-        """保存股票基本信息"""
+        """
+        保存股票基本信息
+
+        Args:
+            stock_info (dict): 股票基本信息
+            stock_code (str): 股票代码
+
+        Returns:
+            bool: 是否保存成功
+        """
         if not stock_info:
             return False
 
         try:
+            # 使用 INSERT OR REPLACE 实现 upsert（覆盖更新）
             self.conn.execute("""
                 INSERT OR REPLACE INTO stock_info (
                     stock_code, name, current_price, close_price, open_price,
@@ -122,79 +156,130 @@ class DatabaseManager:
                 stock_info.get('52_week_low'),
                 datetime.now().isoformat()
             ))
+
             return True
+
         except Exception as e:
             print(f"[ERROR] 保存股票信息错误: {e}")
             return False
 
     def save_kline_data(self, data, stock_code):
-        """保存 K 线数据，支持增量更新"""
+        """
+        保存 K 线数据，支持批量插入和增量更新（优化版）
+        
+        Args:
+            data (DataFrame): K 线数据
+            stock_code (str): 股票代码
+            
+        Returns:
+            dict: 包含新增和更新记录数的统计信息
+        """
         if data is None or data.empty:
             print("[ERROR] 没有数据可保存")
             return None
 
         try:
-            new_count = 0
-            updated_count = 0
-
+            # 重置索引以获取日期列
             data_reset = data.reset_index()
-
-            for _, row in data_reset.iterrows():
-                date = row['date'].strftime('%Y-%m-%d') if hasattr(
-                    row['date'], 'strftime') else str(row['date'])
-
-                try:
-                    result = self.conn.execute(
-                        "SELECT 1 FROM kline_data WHERE stock_code = ? AND date = ?",
-                        (stock_code, date)
-                    ).fetchall()
-                    existing = len(result) > 0
-
-                    if existing:
-                        self.conn.execute("""
-                            UPDATE kline_data SET
-                                open = ?, close = ?, high = ?, low = ?, volume = ?, update_time = ?
-                            WHERE stock_code = ? AND date = ?
-                        """, (
-                            row['Open'], row['Close'], row['High'], row['Low'],
-                            row['Volume'], datetime.now().isoformat(),
-                            stock_code, date
-                        ))
-                        updated_count += 1
-                    else:
-                        self.conn.execute("""
-                            INSERT INTO kline_data (
-                                stock_code, date, open, close, high, low, volume, create_time, update_time
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            stock_code, date, row['Open'], row['Close'], row['High'],
-                            row['Low'], row['Volume'], datetime.now().isoformat(),
-                            datetime.now().isoformat()
-                        ))
-                        new_count += 1
-                except Exception:
-                    pass
-
-            # 记录到更新日志
+            
+            # 确保日期列为字符串格式
+            data_reset['date'] = pd.to_datetime(data_reset['date']).dt.strftime('%Y-%m-%d')
+            
+            # 重命名列以匹配数据库表结构
+            df_for_db = data_reset.rename(columns={
+                'Open': 'open',
+                'Close': 'close',
+                'High': 'high',
+                'Low': 'low',
+                'Volume': 'volume'
+            })[['date', 'open', 'close', 'high', 'low', 'volume']].copy()
+            
+            # 添加 stock_code 列
+            df_for_db['stock_code'] = stock_code
+            
+            # 添加时间戳列
+            now = datetime.now().isoformat()
+            df_for_db['create_time'] = now
+            df_for_db['update_time'] = now
+            
+            # 使用 DuckDB 的批量操作进行 UPSERT
+            # 1. 创建临时表
+            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_kline AS SELECT * FROM df_for_db LIMIT 0")
+            self.conn.execute("DELETE FROM temp_kline")
+            
+            # 2. 将 DataFrame 数据插入临时表
+            self.conn.execute("INSERT INTO temp_kline SELECT * FROM df_for_db")
+            
+            # 3. 对现有记录执行 UPDATE
+            updated = self.conn.execute("""
+                UPDATE kline_data 
+                SET open = t.open, 
+                    close = t.close, 
+                    high = t.high, 
+                    low = t.low, 
+                    volume = t.volume,
+                    update_time = t.update_time
+                FROM temp_kline t
+                WHERE kline_data.stock_code = t.stock_code 
+                  AND kline_data.date = t.date
+            """).fetchall()
+            
+            # 获取更新的记录数
+            updated_count = self.conn.execute("""
+                SELECT COUNT(*) FROM kline_data k
+                INNER JOIN temp_kline t ON k.stock_code = t.stock_code AND k.date = t.date
+            """).fetchall()[0][0]
+            
+            # 4. 插入新记录（排除已存在的）
+            new_count = self.conn.execute("""
+                INSERT INTO kline_data (stock_code, date, open, close, high, low, volume, create_time, update_time)
+                SELECT t.stock_code, t.date, t.open, t.close, t.high, t.low, t.volume, t.create_time, t.update_time
+                FROM temp_kline t
+                LEFT JOIN kline_data k ON t.stock_code = k.stock_code AND t.date = k.date
+                WHERE k.date IS NULL
+            """).fetchall()
+            
+            # 获取新增的记录数
+            inserted_count = self.conn.execute("""
+                SELECT COUNT(*) FROM temp_kline t
+                LEFT JOIN kline_data k ON t.stock_code = k.stock_code AND t.date = k.date
+                WHERE k.date IS NULL
+            """).fetchall()[0][0]
+            
+            # 5. 记录到更新日志
             self.conn.execute("""
                 INSERT INTO update_log (stock_code, action, new_records, updated_records, update_time)
                 VALUES (?, ?, ?, ?, ?)
-            """, (stock_code, 'upsert', new_count, updated_count, datetime.now().isoformat()))
-
+            """, (stock_code, 'upsert_batch', inserted_count, updated_count, now))
+            
+            # 清理临时表
+            self.conn.execute("DROP TABLE IF EXISTS temp_kline")
+            
             stats = {
-                'new_records': new_count,
+                'new_records': inserted_count,
                 'updated_records': updated_count,
-                'total_records': new_count + updated_count
+                'total_records': inserted_count + updated_count
             }
-            print(f"[OK] 数据已保存到数据库 (新增: {new_count}, 更新: {updated_count})")
+            
+            print(f"[OK] 数据已批量保存到数据库 (新增：{inserted_count}, 更新：{updated_count})")
             return stats
 
         except Exception as e:
-            print(f"[ERROR] 保存 K 线数据错误: {e}")
+            print(f"[ERROR] 保存 K 线数据错误：{e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def get_latest_date(self, stock_code):
-        """获取数据库中最新的日期（用于增量更新）"""
+        """
+        获取数据库中最新的日期（用于增量更新）
+
+        Args:
+            stock_code (str): 股票代码
+
+        Returns:
+            str: 最新日期字符串，格式 'YYYY-MM-DD'，无数据返回 None
+        """
         try:
             result = self.conn.execute(
                 "SELECT MAX(date) FROM kline_data WHERE stock_code = ?",
@@ -204,12 +289,23 @@ class DatabaseManager:
             if result and result[0] and result[0][0]:
                 return str(result[0][0])
             return None
+
         except Exception as e:
             print(f"[ERROR] 查询最新日期错误: {e}")
             return None
 
     def get_kline_data(self, stock_code, start_date=None, end_date=None):
-        """从数据库获取 K 线数据"""
+        """
+        从数据库获取 K 线数据
+
+        Args:
+            stock_code (str): 股票代码
+            start_date (str): 开始日期（可选），格式 'YYYY-MM-DD'
+            end_date (str): 结束日期（可选），格式 'YYYY-MM-DD'
+
+        Returns:
+            DataFrame: K 线数据
+        """
         try:
             query = "SELECT date, open, close, high, low, volume FROM kline_data WHERE stock_code = ?"
             params = [stock_code]
@@ -239,7 +335,15 @@ class DatabaseManager:
             return None
 
     def get_stock_info(self, stock_code):
-        """从数据库获取股票基本信息"""
+        """
+        从数据库获取股票基本信息
+
+        Args:
+            stock_code (str): 股票代码
+
+        Returns:
+            dict: 股票基本信息，不存在返回 None
+        """
         try:
             result = self.conn.execute(
                 "SELECT * FROM stock_info WHERE stock_code = ?",
@@ -250,7 +354,7 @@ class DatabaseManager:
                 return None
 
             columns = [
-                'stock_code', 'name', 'current_price', 'close_price',
+                'id', 'stock_code', 'name', 'current_price', 'close_price',
                 'open_price', 'high', 'low', 'volume', 'market_cap',
                 'pe_ratio', 'week_52_high', 'week_52_low', 'update_time'
             ]
@@ -262,7 +366,16 @@ class DatabaseManager:
             return None
 
     def get_update_log(self, stock_code=None, limit=10):
-        """获取更新日志"""
+        """
+        获取更新日志
+
+        Args:
+            stock_code (str): 股票代码（可选，为空则查询所有）
+            limit (int): 返回记录数限制
+
+        Returns:
+            list: 更新日志列表
+        """
         try:
             if stock_code:
                 results = self.conn.execute(
@@ -282,18 +395,29 @@ class DatabaseManager:
             return []
 
     def get_statistics(self, stock_code):
-        """获取数据库统计信息"""
+        """
+        获取数据库统计信息
+
+        Args:
+            stock_code (str): 股票代码
+
+        Returns:
+            dict: 统计信息
+        """
         try:
+            # 获取 K 线数据记录数
             kline_count = self.conn.execute(
                 "SELECT COUNT(*) FROM kline_data WHERE stock_code = ?",
                 (stock_code,)
             ).fetchall()[0][0]
 
+            # 获取日期范围
             date_range = self.conn.execute(
                 "SELECT MIN(date), MAX(date) FROM kline_data WHERE stock_code = ?",
                 (stock_code,)
             ).fetchall()[0]
 
+            # 获取数据库大小
             db_size = os.path.getsize(self.db_path) if os.path.exists(
                 self.db_path) else 0
 
@@ -309,35 +433,56 @@ class DatabaseManager:
             return None
 
     def cleanup_old_data(self, stock_code, days=365*5):
-        """清理超过指定天数的旧数据"""
+        """
+        清理超过指定天数的旧数据（可选）
+
+        Args:
+            stock_code (str): 股票代码
+            days (int): 保留天数
+
+        Returns:
+            int: 删除的记录数
+        """
         try:
             from datetime import timedelta
             cutoff_date = (datetime.now() - timedelta(days=days)).date()
 
-            before_count = self.conn.execute(
-                "SELECT COUNT(*) FROM kline_data WHERE stock_code = ? AND date < ?",
-                (stock_code, cutoff_date)
-            ).fetchall()[0][0]
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
 
-            self.conn.execute(
+            cursor.execute(
                 "DELETE FROM kline_data WHERE stock_code = ? AND date < ?",
                 (stock_code, cutoff_date)
             )
 
-            if before_count > 0:
-                print(f"[OK] 已删除 {before_count} 条过期数据")
+            deleted_count = cursor.rowcount
+            conn.commit()
+            conn.close()
 
-            return before_count
+            if deleted_count > 0:
+                print(f"[OK] 已删除 {deleted_count} 条过期数据")
 
-        except Exception as e:
+            return deleted_count
+
+        except sqlite3.Error as e:
             print(f"[ERROR] 清理数据错误: {e}")
             return 0
 
     def export_to_json(self, stock_code, output_path="./output"):
-        """将数据库数据导出为 JSON"""
+        """
+        将数据库数据导出为 JSON
+
+        Args:
+            stock_code (str): 股票代码
+            output_path (str): 输出目录
+
+        Returns:
+            str: 导出文件路径
+        """
         try:
             os.makedirs(output_path, exist_ok=True)
 
+            # 获取股票信息和 K 线数据
             stock_info = self.get_stock_info(stock_code)
             kline_data = self.get_kline_data(stock_code)
 
@@ -345,6 +490,7 @@ class DatabaseManager:
                 print("[ERROR] 无数据可导出")
                 return None
 
+            # 整合数据
             kline_reset = kline_data.reset_index()
             kline_reset['date'] = kline_reset['date'].dt.strftime('%Y-%m-%d')
 
@@ -354,31 +500,15 @@ class DatabaseManager:
                 'record_count': len(kline_data),
                 'date_range': f"{kline_reset['date'].iloc[0]} to {kline_reset['date'].iloc[-1]}",
                 'export_time': datetime.now().isoformat(),
-                'source': 'duckdb_database',
+                'source': 'sqlite_database',
                 'data': kline_reset.to_dict('records')
             }
 
+            # 保存为 JSON
             import json
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"hk_stock_{stock_code}_{timestamp}.json"
             filepath = os.path.join(output_path, filename)
-
-            # Convert all values to JSON-serializable types
-            def make_serializable(obj):
-                if isinstance(obj, dict):
-                    return {k: make_serializable(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [make_serializable(item) for item in obj]
-                elif isinstance(obj, (datetime, pd.Timestamp)):
-                    return obj.isoformat()
-                elif pd.isna(obj):
-                    return None
-                elif isinstance(obj, (int, float, str, bool)):
-                    return obj
-                else:
-                    return str(obj)
-
-            data_dict = make_serializable(data_dict)
 
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data_dict, f, ensure_ascii=False, indent=2)
@@ -390,88 +520,41 @@ class DatabaseManager:
             print(f"[ERROR] 导出数据错误: {e}")
             return None
 
-    def export_to_parquet(self, stock_code, output_path="./output"):
-        """将数据导出为 Parquet 格式（DuckDB 原生支持，超快速）"""
+    def get_all_stocks(self):
+        """
+        获取数据库中所有股票列表
+        
+        Returns:
+            list: 股票代码列表
+        """
         try:
-            os.makedirs(output_path, exist_ok=True)
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"hk_stock_{stock_code}_{timestamp}.parquet"
-            filepath = os.path.join(output_path, filename)
-
-            self.conn.execute(f"""
-                COPY (
-                    SELECT * FROM kline_data WHERE stock_code = '{stock_code}' ORDER BY date
-                ) TO '{filepath}' (FORMAT PARQUET)
-            """)
-
-            print(f"[OK] 数据已导出为 Parquet：{filepath}")
-            return filepath
-
+            result = self.conn.execute(
+                "SELECT DISTINCT stock_code FROM kline_data ORDER BY stock_code"
+            ).fetchall()
+            
+            return [row[0] for row in result] if result else []
+            
         except Exception as e:
-            print(f"[ERROR] 导出 Parquet 错误: {e}")
-            return None
+            print(f"[ERROR] 获取股票列表错误：{e}")
+            return []
 
-    def export_to_csv(self, stock_code, output_path="./output"):
-        """将数据导出为 CSV 格式（DuckDB 原生支持，高效）"""
+    def get_total_kline_records(self):
+        """
+        获取数据库中所有 K 线数据总记录数
+        
+        Returns:
+            int: 总记录数
+        """
         try:
-            os.makedirs(output_path, exist_ok=True)
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"hk_stock_{stock_code}_{timestamp}.csv"
-            filepath = os.path.join(output_path, filename)
-
-            self.conn.execute(f"""
-                COPY (
-                    SELECT * FROM kline_data WHERE stock_code = '{stock_code}' ORDER BY date
-                ) TO '{filepath}' (FORMAT CSV, HEADER)
-            """)
-
-            print(f"[OK] 数据已导出为 CSV：{filepath}")
-            return filepath
-
+            result = self.conn.execute(
+                "SELECT COUNT(*) FROM kline_data"
+            ).fetchall()[0][0]
+            
+            return result
+            
         except Exception as e:
-            print(f"[ERROR] 导出 CSV 错误: {e}")
-            return None
-
-    def get_data_quality_report(self, stock_code):
-        """获取数据质量报告"""
-        try:
-            result = self.conn.execute(f"""
-                SELECT 
-                    COUNT(*) as total_records,
-                    COUNT(date) as valid_dates,
-                    COUNT(open) as valid_opens,
-                    COUNT(close) as valid_closes,
-                    COUNT(high) as valid_highs,
-                    COUNT(low) as valid_lows,
-                    COUNT(volume) as valid_volumes,
-                    MIN(open) as min_open,
-                    MAX(open) as max_open,
-                    AVG(volume) as avg_volume
-                FROM kline_data 
-                WHERE stock_code = '{stock_code}'
-            """).fetchall()
-
-            if not result:
-                return None
-
-            data = result[0]
-            return {
-                'total_records': data[0],
-                'valid_dates': data[1],
-                'valid_opens': data[2],
-                'valid_closes': data[3],
-                'valid_highs': data[4],
-                'valid_lows': data[5],
-                'valid_volumes': data[6],
-                'price_range': (data[7], data[8]),
-                'avg_volume': data[9]
-            }
-
-        except Exception as e:
-            print(f"[ERROR] 获取数据质量报告错误: {e}")
-            return None
+            print(f"[ERROR] 获取总记录数错误：{e}")
+            return 0
 
     def close(self):
         """关闭数据库连接"""

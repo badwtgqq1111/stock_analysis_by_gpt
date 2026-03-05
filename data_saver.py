@@ -143,10 +143,10 @@ class DataSaver:
         try:
             # 检查股票信息
             stock_info = self.db_manager.get_stock_info(stock_code)
-            
+
             # 获取统计信息
             stats = self.db_manager.get_statistics(stock_code)
-            
+
             if stats is None:
                 return {
                     'stock_code': stock_code,
@@ -155,10 +155,10 @@ class DataSaver:
                     'date_range': None,
                     'has_stock_info': False
                 }
-            
+
             total_records = stats['total_records']
             is_valid = total_records > 0
-            
+
             return {
                 'stock_code': stock_code,
                 'exists': is_valid,
@@ -168,7 +168,7 @@ class DataSaver:
                 'db_file_size': stats['db_file_size'],
                 'db_path': stats['db_path']
             }
-        
+
         except Exception as e:
             print(f"[ERROR] 验证数据错误: {e}")
             return {
@@ -188,20 +188,20 @@ class DataSaver:
             dict: 验证汇总结果
         """
         print("[INFO] 开始批量验证数据...")
-        
+
         verification_results = []
         total_records = 0
         all_exist = True
-        
+
         for stock_code in stock_codes:
             result = self.verify_db_data(stock_code)
             verification_results.append(result)
-            
+
             if result['exists']:
                 total_records += result['total_records']
             else:
                 all_exist = False
-        
+
         # 生成汇总报告
         summary = {
             'total_stocks': len(stock_codes),
@@ -211,7 +211,7 @@ class DataSaver:
             'all_verified': all_exist,
             'details': verification_results
         }
-        
+
         return summary
 
     def print_verification_report(self, verification_result):
@@ -224,7 +224,7 @@ class DataSaver:
         print("\n" + "="*80)
         print("[VERIFY] 数据验证报告")
         print("="*80)
-        
+
         if 'details' in verification_result:
             # 批量验证报告
             summary = verification_result
@@ -235,12 +235,12 @@ class DataSaver:
             print(f"  总记录数：{summary['total_records']} 条")
             status_text = "[OK] 全部验证成功" if summary['all_verified'] else "[WARN] 部分验证失败"
             print(f"  验证状态：{status_text}")
-            
+
             print(f"\n[DETAILS] 各股票详情")
             for detail in summary['details']:
                 status = "[OK]" if detail['exists'] else "[FAIL]"
                 stock_code = detail['stock_code']
-                
+
                 if detail['exists']:
                     date_range = detail['date_range']
                     records = detail['total_records']
@@ -252,11 +252,11 @@ class DataSaver:
             # 单个验证报告
             stock_code = verification_result['stock_code']
             exists = verification_result['exists']
-            
+
             print(f"\n[STOCK] 股票代码：{stock_code}")
             status_text = "[OK] 数据已保存" if exists else "[FAIL] 数据未保存"
             print(f"[STATUS] {status_text}")
-            
+
             if exists:
                 print(f"[DATA] 记录数：{verification_result['total_records']} 条")
                 date_range = verification_result['date_range']
@@ -264,5 +264,5 @@ class DataSaver:
                 info_text = "已保存" if verification_result['has_stock_info'] else "未保存"
                 print(f"[INFO] 股票信息：{info_text}")
                 print(f"[SIZE] 数据库大小：{verification_result['db_file_size']}")
-        
+
         print("="*80 + "\n")

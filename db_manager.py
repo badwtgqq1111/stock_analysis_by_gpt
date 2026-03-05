@@ -41,8 +41,7 @@ class DatabaseManager:
             # 创建股票基本信息表
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS stock_info (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('seq_stock_info'),
-                    stock_code VARCHAR UNIQUE NOT NULL,
+                    stock_code VARCHAR PRIMARY KEY NOT NULL,
                     name VARCHAR,
                     current_price DOUBLE,
                     close_price DOUBLE,
@@ -58,15 +57,9 @@ class DatabaseManager:
                 )
             """)
 
-            # 创建序列（用于自增）
-            self.conn.execute("""
-                CREATE SEQUENCE IF NOT EXISTS seq_stock_info START 1
-            """)
-
-            # 创建 K 线数据表（支持增量更新）
+            # 创建索引以提高查询性能
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS kline_data (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('seq_kline_data'),
                     stock_code VARCHAR NOT NULL,
                     date DATE NOT NULL,
                     open DOUBLE NOT NULL,
@@ -76,20 +69,14 @@ class DatabaseManager:
                     volume DOUBLE NOT NULL,
                     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (stock_code, date),
+                    PRIMARY KEY (stock_code, date),
                     FOREIGN KEY (stock_code) REFERENCES stock_info(stock_code)
                 )
-            """)
-
-            # 创建序列（用于自增）
-            self.conn.execute("""
-                CREATE SEQUENCE IF NOT EXISTS seq_kline_data START 1
             """)
 
             # 创建更新日志表（追踪增量更新）
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS update_log (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('seq_update_log'),
                     stock_code VARCHAR NOT NULL,
                     action VARCHAR,
                     new_records INTEGER,
@@ -97,11 +84,6 @@ class DatabaseManager:
                     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (stock_code) REFERENCES stock_info(stock_code)
                 )
-            """)
-
-            # 创建序列（用于自增）
-            self.conn.execute("""
-                CREATE SEQUENCE IF NOT EXISTS seq_update_log START 1
             """)
 
             # 创建索引以提高查询性能
@@ -166,11 +148,11 @@ class DatabaseManager:
     def save_kline_data(self, data, stock_code):
         """
         保存 K 线数据，支持批量插入和增量更新（优化版）
-        
+
         Args:
             data (DataFrame): K 线数据
             stock_code (str): 股票代码
-            
+
         Returns:
             dict: 包含新增和更新记录数的统计信息
         """
@@ -181,10 +163,10 @@ class DatabaseManager:
         try:
             # 重置索引以获取日期列
             data_reset = data.reset_index()
-            
+
             # 确保日期列为字符串格式
             data_reset['date'] = pd.to_datetime(data_reset['date']).dt.strftime('%Y-%m-%d')
-            
+
             # 重命名列以匹配数据库表结构
             df_for_db = data_reset.rename(columns={
                 'Open': 'open',
@@ -193,43 +175,43 @@ class DatabaseManager:
                 'Low': 'low',
                 'Volume': 'volume'
             })[['date', 'open', 'close', 'high', 'low', 'volume']].copy()
-            
+
             # 添加 stock_code 列
             df_for_db['stock_code'] = stock_code
-            
+
             # 添加时间戳列
             now = datetime.now().isoformat()
             df_for_db['create_time'] = now
             df_for_db['update_time'] = now
-            
+
             # 使用 DuckDB 的批量操作进行 UPSERT
             # 1. 创建临时表
             self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_kline AS SELECT * FROM df_for_db LIMIT 0")
             self.conn.execute("DELETE FROM temp_kline")
-            
+
             # 2. 将 DataFrame 数据插入临时表
             self.conn.execute("INSERT INTO temp_kline SELECT * FROM df_for_db")
-            
+
             # 3. 对现有记录执行 UPDATE
             updated = self.conn.execute("""
-                UPDATE kline_data 
-                SET open = t.open, 
-                    close = t.close, 
-                    high = t.high, 
-                    low = t.low, 
+                UPDATE kline_data
+                SET open = t.open,
+                    close = t.close,
+                    high = t.high,
+                    low = t.low,
                     volume = t.volume,
                     update_time = t.update_time
                 FROM temp_kline t
-                WHERE kline_data.stock_code = t.stock_code 
+                WHERE kline_data.stock_code = t.stock_code
                   AND kline_data.date = t.date
             """).fetchall()
-            
+
             # 获取更新的记录数
             updated_count = self.conn.execute("""
                 SELECT COUNT(*) FROM kline_data k
                 INNER JOIN temp_kline t ON k.stock_code = t.stock_code AND k.date = t.date
             """).fetchall()[0][0]
-            
+
             # 4. 插入新记录（排除已存在的）
             new_count = self.conn.execute("""
                 INSERT INTO kline_data (stock_code, date, open, close, high, low, volume, create_time, update_time)
@@ -238,29 +220,29 @@ class DatabaseManager:
                 LEFT JOIN kline_data k ON t.stock_code = k.stock_code AND t.date = k.date
                 WHERE k.date IS NULL
             """).fetchall()
-            
+
             # 获取新增的记录数
             inserted_count = self.conn.execute("""
                 SELECT COUNT(*) FROM temp_kline t
                 LEFT JOIN kline_data k ON t.stock_code = k.stock_code AND t.date = k.date
                 WHERE k.date IS NULL
             """).fetchall()[0][0]
-            
+
             # 5. 记录到更新日志
             self.conn.execute("""
                 INSERT INTO update_log (stock_code, action, new_records, updated_records, update_time)
                 VALUES (?, ?, ?, ?, ?)
             """, (stock_code, 'upsert_batch', inserted_count, updated_count, now))
-            
+
             # 清理临时表
             self.conn.execute("DROP TABLE IF EXISTS temp_kline")
-            
+
             stats = {
                 'new_records': inserted_count,
                 'updated_records': updated_count,
                 'total_records': inserted_count + updated_count
             }
-            
+
             print(f"[OK] 数据已批量保存到数据库 (新增：{inserted_count}, 更新：{updated_count})")
             return stats
 
@@ -523,7 +505,7 @@ class DatabaseManager:
     def get_all_stocks(self):
         """
         获取数据库中所有股票列表
-        
+
         Returns:
             list: 股票代码列表
         """
@@ -531,9 +513,9 @@ class DatabaseManager:
             result = self.conn.execute(
                 "SELECT DISTINCT stock_code FROM kline_data ORDER BY stock_code"
             ).fetchall()
-            
+
             return [row[0] for row in result] if result else []
-            
+
         except Exception as e:
             print(f"[ERROR] 获取股票列表错误：{e}")
             return []
@@ -541,7 +523,7 @@ class DatabaseManager:
     def get_total_kline_records(self):
         """
         获取数据库中所有 K 线数据总记录数
-        
+
         Returns:
             int: 总记录数
         """
@@ -549,12 +531,49 @@ class DatabaseManager:
             result = self.conn.execute(
                 "SELECT COUNT(*) FROM kline_data"
             ).fetchall()[0][0]
-            
+
             return result
-            
+
         except Exception as e:
             print(f"[ERROR] 获取总记录数错误：{e}")
             return 0
+
+    def sort_database(self):
+        """
+        按股票代码和日期排序数据库中的所有数据
+        (DuckDB 中的数据本身已经有序，这里主要确保索引优化)
+
+        Returns:
+            dict: 排序统计信息
+        """
+        try:
+            print("[INFO] 开始整理数据库索引...")
+
+            # 获取统计信息
+            stock_count = self.conn.execute(
+                "SELECT COUNT(DISTINCT stock_code) FROM kline_data"
+            ).fetchall()[0][0]
+
+            total_records = self.get_total_kline_records()
+
+            # 重建索引以优化查询性能
+            self.conn.execute("VACUUM")
+
+            stats = {
+                'total_stocks': stock_count,
+                'total_records': total_records,
+                'status': 'success'
+            }
+
+            print(f"[OK] 数据库整理完成")
+            print(f"     总股票数：{stock_count}")
+            print(f"     总记录数：{total_records}")
+
+            return stats
+
+        except Exception as e:
+            print(f"[ERROR] 排序数据库错误：{e}")
+            return {'status': 'failed', 'error': str(e)}
 
     def close(self):
         """关闭数据库连接"""

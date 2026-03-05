@@ -221,7 +221,7 @@ result = saver.batch_verify_data(stocks)
 ✓ 添加 print_verification_report() 方法（100行）
 ```
 
-### main.py  
+### main.py
 ```
 ✓ 添加 process_multiple_stocks() 函数（62行）
 ✓ 修改 main() 函数（添加--stocks和--verify参数）

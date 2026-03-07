@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python \"d:/stock/stock_analyzer.py\" 03633)",
+      "Bash(python -c \"import json, pathlib, itertools; p=pathlib.Path\\(''d:/stock/output/hk_stock_03633_20260308_013419.json''\\); obj=json.loads\\(p.read_text\\(encoding=''utf-8''\\)\\); print\\(''record_count'', obj.get\\(''record_count''\\)\\); print\\(''date_range'', obj.get\\(''date_range''\\)\\); data=obj[''data'']; print\\(''first'', data[0]\\); print\\(''last'', data[-1]\\); print\\(''target_dates_present'', [d for d in [''2026-03-02'',''2026-02-13'',''2026-01-13''] if any\\(str\\(r.get\\(''date'',''''\\)\\)[:10]==d for r in data\\)]\\)\")"
+    ]
+  }
+}

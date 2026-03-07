@@ -105,6 +105,54 @@ class HistoryDataFetcher:
         self.data = None
         self.db_manager = DatabaseManager(db_dir)
 
+    def _get_next_trading_day(self, date):
+        """
+        Calculate next trading day (skip weekends)
+
+        Args:
+            date (pd.Timestamp): Current date
+
+        Returns:
+            str: Next trading day date string in 'YYYY-MM-DD' format
+        """
+        next_day = date + pd.Timedelta(days=1)
+
+        # If Saturday, skip to Monday
+        if next_day.weekday() == 5:  # Saturday
+            next_day += pd.Timedelta(days=2)
+        # If Sunday, skip to Monday
+        elif next_day.weekday() == 6:  # Sunday
+            next_day += pd.Timedelta(days=1)
+
+        return next_day.strftime('%Y-%m-%d')
+
+    def _is_trading_day(self, date):
+        """
+        Check if date is a trading day (Monday to Friday)
+
+        Args:
+            date (pd.Timestamp): Date
+
+        Returns:
+            bool: True if trading day
+        """
+        return date.weekday() < 5  # 0-4: Monday to Friday
+
+    def _get_last_trading_day(self, date):
+        """
+        Get the most recent trading day before the specified date
+
+        Args:
+            date (pd.Timestamp): Specified date
+
+        Returns:
+            pd.Timestamp: Most recent trading day
+        """
+        current = date
+        while not self._is_trading_day(current):
+            current -= pd.Timedelta(days=1)
+        return current
+
     def fetch(self):
         """
         获取股票历史数据
@@ -229,18 +277,71 @@ class HistoryDataFetcher:
 
     def load_from_db(self):
         """
-        从数据库加载已保存的 K 线数据
+        Load saved K-line data from database
 
         Returns:
-            DataFrame: K 线数据，无数据返回 None
+            DataFrame: K-line data, returns None if no data
         """
         data = self.db_manager.get_kline_data(self.stock_code)
 
         if data is not None and not data.empty:
-            print(f"[INFO] 从数据库加载数据：{len(data)} 条记录")
+            print(f"[INFO] Load data from database: {len(data)} records")
             self.data = data
 
         return data
+
+    def fetch_with_strategy(self):
+        """
+        Smart download strategy method based on database status
+
+        Logic:
+        - If database has no data for stock: download 1000 trading days
+        - If database has data: check if update needed, download only new trading data
+
+        Returns:
+            bool: Success status
+        """
+        # Check database status
+        update_info = self.check_update_from_db()
+
+        if not update_info['has_data']:
+            # Database has no data - download 1000 trading days as initial data
+            print(f"[INFO] Database has no data for {self.stock_code}, downloading 1000 trading days")
+            initial_data = self.fetch(num_records=1000)
+            if initial_data is not None and not initial_data.empty:
+                self.db_manager.save_kline_data(initial_data, self.stock_code)
+                return True
+            return False
+        else:
+            # Database has data - check if update needed
+            latest_date = update_info['latest_date']
+            latest_datetime = pd.to_datetime(latest_date)
+
+            # Get today and most recent trading day
+            today = pd.Timestamp.now().normalize()
+            last_trading_day = self._get_last_trading_day(today)
+
+            # If database latest date is recent trading day or later, no need to download
+            if latest_datetime >= last_trading_day:
+                print(f"[INFO] Database has latest data (latest date: {latest_date}), no download needed")
+                return True
+            else:
+                print(f"[INFO] Database has data (latest date: {latest_date}), downloading updates from {latest_date}")
+
+                # Calculate next trading day
+                next_trading_date = self._get_next_trading_day(latest_datetime)
+
+                # Download from next trading day to current date
+                new_data = self.fetch(start_date=next_trading_date)
+
+                if new_data is not None and not new_data.empty:
+                    # Save new data to database
+                    self.db_manager.save_kline_data(new_data, self.stock_code)
+                    print(f"[INFO] Downloaded {len(new_data)} new records and saved to database")
+                    return True
+                else:
+                    print(f"[INFO] No new data to update")
+                    return True
 
 
 class HKMarketListFetcher:

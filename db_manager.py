@@ -326,6 +326,15 @@ class DatabaseManager:
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
 
+            # 重命名列以匹配标准格式
+            df.rename(columns={
+                'open': 'Open',
+                'close': 'Close',
+                'high': 'High',
+                'low': 'Low',
+                'volume': 'Volume'
+            }, inplace=True)
+
             return df
 
         except Exception as e:

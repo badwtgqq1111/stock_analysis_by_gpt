@@ -58,11 +58,20 @@ def process_single_stock(stock_code, output_path, db_dir, show_chart=True):
 
     print()
 
-    hist_data = data_fetcher.fetch()
+    # ========== Smart download strategy ==========
+    # Download latest data for updates if needed
+    # Always load complete historical data from database for plotting
+    data_fetcher.fetch_with_strategy()
+
+    # Always load complete historical data from database for plotting
+    print("[INFO] Loading complete historical data from database...")
+    hist_data = data_fetcher.db_manager.get_kline_data(stock_code)
 
     if hist_data is None or hist_data.empty:
-        print("[ERROR] 未能获取数据，跳过此股票")
+        print("[ERROR] No data in database, skipping this stock")
         return False
+    else:
+        print(f"[OK] Loaded {len(hist_data)} historical records from database")
 
     print()
 
@@ -178,12 +187,14 @@ async def process_all_stocks_async(output_path, db_dir, limit=None):
                 else:
                     status = "[新增]"
 
-                # ========== 下载数据 ==========
-                hist_data = await asyncio.to_thread(data_fetcher.fetch)
+                # ========== 智能下载数据 ==========
+                # 如果数据库无数据：下载1000个交易日
+                # 如果数据库有数据：下载最新数据进行增量更新
+                hist_data = await asyncio.to_thread(data_fetcher.fetch_with_strategy)
 
                 if hist_data is None or hist_data.empty:
                     print(f"[{idx:04d}/{len(stocks_to_process):04d}] {stock_code} - {stock_name:<15} [ERROR] 获取数据失败")
-                    return False
+                    return False, 0
 
                 # ========== 保存基本信息 ==========
                 info_fetcher = StockInfoFetcher(stock_code)

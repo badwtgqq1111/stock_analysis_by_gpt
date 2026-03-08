@@ -3,6 +3,48 @@ import numpy as np
 import talib
 
 
+def _detect_macd_bullish_divergence(df, lookback=20):
+    divergence = pd.Series(False, index=df.index)
+    lows = df['Low']
+    macd = df['MACD']
+    stoch_k = df['StochRSI_K'] if 'StochRSI_K' in df.columns else pd.Series(np.nan, index=df.index)
+
+    for i in range(lookback, len(df)):
+        current_low = lows.iloc[i]
+        current_macd = macd.iloc[i]
+        current_stoch = stoch_k.iloc[i]
+        if pd.isna(current_low) or pd.isna(current_macd):
+            continue
+
+        window_lows = lows.iloc[i - lookback:i]
+        prior_candidates = window_lows[window_lows <= current_low * 1.03]
+        if prior_candidates.empty:
+            continue
+
+        prior_idx = prior_candidates.idxmin()
+        prior_pos = df.index.get_loc(prior_idx)
+        prior_low = lows.iloc[prior_pos]
+        prior_macd = macd.iloc[prior_pos]
+        if pd.isna(prior_low) or pd.isna(prior_macd):
+            continue
+
+        price_makes_lower_or_equal_low = current_low <= prior_low * 1.01
+        macd_makes_higher_low = current_macd > prior_macd + 0.01
+        oversold_context = pd.notna(current_stoch) and current_stoch <= 35
+
+        if price_makes_lower_or_equal_low and macd_makes_higher_low and oversold_context:
+            divergence.iloc[i] = True
+
+    return divergence
+
+
+def _to_rolling_score(series, window=60, min_periods=20, scale=12):
+    rolling_mean = series.rolling(window=window, min_periods=min_periods).mean()
+    rolling_std = series.rolling(window=window, min_periods=min_periods).std().replace(0, np.nan)
+    zscore = (series - rolling_mean) / rolling_std
+    return (50 + zscore.clip(-3, 3) * scale).clip(0, 100)
+
+
 def calculate_technical_indicators(data):
     """
     使用TA-Lib计算技术指标
@@ -56,6 +98,7 @@ def calculate_technical_indicators(data):
     df['Volume_MA5'] = talib.SMA(volume, timeperiod=5)
     df['Volume_MA10'] = talib.SMA(volume, timeperiod=10)
     df['Volume_MA20'] = talib.SMA(volume, timeperiod=20)
+    df['Volume_MA60'] = talib.SMA(volume, timeperiod=60)
 
     # 价格变化率 / 中期趋势特征
     df['Price_Change'] = df['Close'].pct_change()
@@ -84,6 +127,10 @@ def calculate_technical_indicators(data):
     df['Lower_Shadow_Ratio'] = (np.minimum(df['Open'], df['Close']) - df['Low']) / price_range_safe
     df['Volume_Ratio_5'] = df['Volume'] / df['Volume_MA5']
     df['Volume_Ratio_10'] = df['Volume'] / df['Volume_MA10']
+    df['Volume_Cross_5_60'] = (
+        (df['Volume_MA5'] > df['Volume_MA60']) &
+        (df['Volume_MA5'].shift(1) <= df['Volume_MA60'].shift(1))
+    ).astype(float)
     df['Volume_Spike_10d'] = df['Volume_Ratio_10'].rolling(window=10, min_periods=3).max()
     df['Volume_Trend_Ratio'] = df['Volume_MA5'] / df['Volume_MA20']
     df['MA5_10_Gap'] = df['MA5'] / df['MA10'] - 1
@@ -92,15 +139,51 @@ def calculate_technical_indicators(data):
     df['MACD_Gap'] = df['MACD'] - df['Signal']
     df['Intraday_Return'] = (df['Close'] - df['Open']) / df['Open']
 
+    bb_width = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
+    df['BB_Width'] = bb_width.replace([np.inf, -np.inf], np.nan)
+    df['Range_Position_20'] = (df['Close'] - df['Low_20d']) / (df['High_20d'] - df['Low_20d'])
+    df['Range_Position_20'] = df['Range_Position_20'].replace([np.inf, -np.inf], np.nan)
+    df['Range_Position_10'] = (
+        (df['Close'] - df['Low'].rolling(window=10, min_periods=5).min()) /
+        (df['High'].rolling(window=10, min_periods=5).max() - df['Low'].rolling(window=10, min_periods=5).min())
+    ).replace([np.inf, -np.inf], np.nan)
+    df['Price_vs_VWAP20'] = (
+        (df['Close'] - ((df['Close'] * df['Volume']).rolling(window=20, min_periods=5).sum() /
+                        df['Volume'].rolling(window=20, min_periods=5).sum())) /
+        ((df['Close'] * df['Volume']).rolling(window=20, min_periods=5).sum() /
+         df['Volume'].rolling(window=20, min_periods=5).sum())
+    ).replace([np.inf, -np.inf], np.nan)
+    df['Turnover_Stability_10'] = (df['Volume'] / df['Volume_MA10']).rolling(window=10, min_periods=5).std()
+    df['Mean_Reversion_5'] = -(df['Close'].pct_change(5))
+
     # 波动率
     df['Volatility'] = talib.ATR(high, low, close, timeperiod=20)
     df['Volatility_5d'] = talib.ATR(high, low, close, timeperiod=5)
     df['Volatility_10d'] = talib.ATR(high, low, close, timeperiod=10)
 
+    df['Alpha101_Range_Reversion'] = (
+        (1 - df['Range_Position_20']) * 40 +
+        (1 - df['BB_Position'].clip(0, 1)) * 30 +
+        _to_rolling_score(df['Mean_Reversion_5']) * 0.30
+    ).clip(0, 100)
+    df['Alpha101_Volatility_Compression'] = (
+        (100 - _to_rolling_score(df['BB_Width'], scale=10)) * 0.55 +
+        (100 - _to_rolling_score(df['Volatility_10d'], scale=10)) * 0.45
+    ).clip(0, 100)
+    df['Alpha101_VWAP_Stretch'] = (100 - _to_rolling_score(df['Price_vs_VWAP20'].abs(), scale=14)).clip(0, 100)
+    df['Alpha101_Range_Stability'] = (100 - _to_rolling_score(df['Turnover_Stability_10'], scale=10)).clip(0, 100)
+    df['Alpha101_Range_Long_Composite'] = (
+        df['Alpha101_Range_Reversion'] * 0.40 +
+        df['Alpha101_Volatility_Compression'] * 0.24 +
+        df['Alpha101_VWAP_Stretch'] * 0.18 +
+        df['Alpha101_Range_Stability'] * 0.18
+    ).clip(0, 100)
+
     # StochRSI (使用TA-Lib的STOCHRSI)
     fastk, fastd = talib.STOCHRSI(close, timeperiod=14, fastk_period=14, fastd_period=3, fastd_matype=0)
     df['StochRSI_K'] = fastk
     df['StochRSI_D'] = fastd
+    df['MACD_Bullish_Divergence'] = _detect_macd_bullish_divergence(df).astype(float)
 
     # ATR (平均真实波幅)
     df['ATR'] = talib.ATR(high, low, close, timeperiod=14)

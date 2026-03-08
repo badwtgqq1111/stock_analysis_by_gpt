@@ -81,6 +81,110 @@ def generate_trading_strategy(analysis_results):
     return strategy
 
 
+def generate_strategy_comparison_report(strategy_results, stock_codes):
+    """生成多策略收益对比报告。"""
+    if not strategy_results:
+        return None
+
+    strategy_summaries = []
+    return_matrix = []
+    strategy_rankings = []
+
+    for item in strategy_results:
+        portfolio_result = item.get('portfolio_result') or {}
+        summary = item.get('summary') or {}
+        strategy_summaries.append({
+            'strategy_code': item['strategy_code'],
+            'strategy_name': item['strategy_name'],
+            'estimated_portfolio_return': summary.get('estimated_portfolio_return', 0),
+            'estimated_portfolio_win_rate': summary.get('estimated_portfolio_win_rate', 0),
+            'estimated_trade_count': summary.get('estimated_trade_count', 0),
+            'selected_count': summary.get('selected_count', 0),
+        })
+
+        stock_row = {'strategy_code': item['strategy_code'], 'strategy_name': item['strategy_name']}
+        for stock_code in stock_codes:
+            stock_row[stock_code] = item.get('per_stock_returns', {}).get(stock_code)
+        return_matrix.append(stock_row)
+
+        ranking_rows = []
+        for ranking_item in portfolio_result.get('ranking', [])[:5]:
+            ranking_rows.append({
+                'stock_code': ranking_item.get('stock_code'),
+                'ranking_score': ranking_item.get('ranking_score'),
+                'entry_type': ranking_item.get('entry_type'),
+                'signal_tier': ranking_item.get('signal_tier'),
+                'backtest_return': ranking_item.get('backtest_return'),
+            })
+        strategy_rankings.append({
+            'strategy_code': item['strategy_code'],
+            'strategy_name': item['strategy_name'],
+            'top_rankings': ranking_rows,
+            'selected': portfolio_result.get('selected', []),
+        })
+
+    strategy_summaries.sort(key=lambda x: x['estimated_portfolio_return'], reverse=True)
+
+    return {
+        'strategy_summaries': strategy_summaries,
+        'return_matrix': return_matrix,
+        'strategy_rankings': strategy_rankings,
+    }
+
+
+def build_strategy_comparison_tables(report, stock_codes):
+    """将多策略对比报告整理成表格数据。"""
+    if not report:
+        return None
+
+    summary_df = pd.DataFrame(report.get('strategy_summaries', []))
+    if not summary_df.empty:
+        summary_df = summary_df[[
+            'strategy_name',
+            'estimated_portfolio_return',
+            'estimated_portfolio_win_rate',
+            'estimated_trade_count',
+            'selected_count',
+        ]].rename(columns={
+            'strategy_name': '策略',
+            'estimated_portfolio_return': '组合收益率(%)',
+            'estimated_portfolio_win_rate': '胜率(%)',
+            'estimated_trade_count': '交易次数',
+            'selected_count': '入选数量',
+        })
+
+    returns_df = pd.DataFrame(report.get('return_matrix', []))
+    if not returns_df.empty:
+        returns_df = returns_df[['strategy_name'] + list(stock_codes)].rename(columns={'strategy_name': '策略'})
+
+    ranking_rows = []
+    for strategy_ranking in report.get('strategy_rankings', []):
+        for rank, item in enumerate(strategy_ranking.get('top_rankings', [])[:3], 1):
+            ranking_rows.append({
+                '策略': strategy_ranking.get('strategy_name'),
+                '排名': rank,
+                '股票代码': item.get('stock_code'),
+                '排名分': item.get('ranking_score'),
+                '入场类型': item.get('entry_type'),
+                '信号层级': item.get('signal_tier'),
+                '单股收益率(%)': item.get('backtest_return'),
+            })
+    rankings_df = pd.DataFrame(ranking_rows)
+
+    return {
+        'summary': summary_df,
+        'returns': returns_df,
+        'rankings': rankings_df,
+    }
+
+
+def format_table_for_console(dataframe):
+    """将 DataFrame 渲染为适合控制台输出的表格文本。"""
+    if dataframe is None or dataframe.empty:
+        return "(无数据)"
+    return dataframe.to_string(index=False, na_rep='N/A', float_format=lambda value: f"{value:.1f}")
+
+
 def create_visualization_charts(data, buy_signals, sell_signals, stock_code):
     """
     创建可视化图表 - 主要显示StochRSI、成交量、CYC、RSI、ATR指标

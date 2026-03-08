@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from backtest import backtest_strategy
 from db_manager import DatabaseManager
 from indicators import calculate_technical_indicators
-from reporting import generate_trading_strategy
-from strategy import BuyStrategy, CurrentStrategy, SellStrategy
+from reporting import generate_strategy_comparison_report, generate_trading_strategy
+from strategy import BuyStrategy, CurrentStrategy, STRATEGY_SUITE, SellStrategy
 
 
 class StockAnalyzer:
@@ -162,6 +162,10 @@ class StockAnalyzer:
             actionable_mask = buy_signals['actionable'] if 'actionable' in buy_signals.columns else pd.Series(True, index=buy_signals.index)
             actionable_signals = buy_signals[actionable_mask]
             watch_signals = buy_signals[~actionable_mask]
+            if 'forward_return_60' in actionable_signals:
+                avg_forward_return_60_signal = actionable_signals['forward_return_60'].dropna().mean() * 100 if not actionable_signals['forward_return_60'].dropna().empty else 0
+            if 'forward_return_60' in watch_signals:
+                avg_forward_return_60_watch = watch_signals['forward_return_60'].dropna().mean() * 100 if not watch_signals['forward_return_60'].dropna().empty else 0
 
             latest_signal = buy_signals.iloc[-1]
             latest_entry_type = latest_signal.get('entry_type')
@@ -359,3 +363,50 @@ class StockAnalyzer:
 
     def generate_trading_strategy(self, analysis_results):
         return generate_trading_strategy(analysis_results)
+
+    @staticmethod
+    def compare_strategy_suite(stock_codes, days=365, top_n=3, initial_capital=100000, db_dir="./assets"):
+        suite_results = []
+        for strategy_config in STRATEGY_SUITE:
+            analyzer = StockAnalyzer(
+                db_dir=db_dir,
+                buy_strategy=strategy_config['buy_strategy'],
+                sell_strategy=strategy_config['sell_strategy']
+            )
+            portfolio_result = analyzer.backtest_portfolio(
+                stock_codes,
+                days=days,
+                top_n=top_n,
+                initial_capital=initial_capital
+            )
+            if portfolio_result is None:
+                continue
+
+            per_stock_returns = {
+                item['stock_code']: item.get('backtest', {}).get('total_return', 0)
+                for item in portfolio_result.get('analysis_results', [])
+            }
+            suite_results.append({
+                'strategy_code': strategy_config['code'],
+                'strategy_name': strategy_config['name'],
+                'buy_strategy': strategy_config['buy_strategy'].__class__.__name__,
+                'sell_strategy': strategy_config['sell_strategy'].__class__.__name__,
+                'portfolio_result': portfolio_result,
+                'analysis_results': portfolio_result.get('analysis_results', []),
+                'per_stock_returns': per_stock_returns,
+                'summary': {
+                    'estimated_portfolio_return': portfolio_result.get('estimated_portfolio_return', 0),
+                    'estimated_portfolio_win_rate': portfolio_result.get('estimated_portfolio_win_rate', 0),
+                    'estimated_trade_count': portfolio_result.get('estimated_trade_count', 0),
+                    'selected_count': len(portfolio_result.get('selected', [])),
+                }
+            })
+
+        return {
+            'stock_pool': stock_codes,
+            'days': days,
+            'top_n': top_n,
+            'initial_capital': initial_capital,
+            'strategies': suite_results,
+            'report': generate_strategy_comparison_report(suite_results, stock_codes)
+        }

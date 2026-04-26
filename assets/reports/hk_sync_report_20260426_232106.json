@@ -1,0 +1,8521 @@
+{
+  "generated_at": "2026-04-26T23:21:06.201775",
+  "command": {
+    "db_dir": "./assets",
+    "start_date": "2014-01-01",
+    "end_date": null,
+    "frequencies": "daily,1min,5min,60min",
+    "intraday_start_date": null,
+    "intraday_years": 3,
+    "adjust": "qfq",
+    "workers": 24,
+    "flush_stocks": 64,
+    "flush_rows": 250000,
+    "limit": null,
+    "codes": null,
+    "data_source": null,
+    "skip_existing": false,
+    "no_stock_info": false,
+    "no_compact": false
+  },
+  "summary": {
+    "status": "completed",
+    "start_date": "2014-01-01",
+    "end_date": "2026-04-26",
+    "total_stocks": 2745,
+    "processed_stocks": 2745,
+    "skip_existing_count": 0,
+    "success_count": 2745,
+    "skipped_count": 0,
+    "failed_count": 0,
+    "rows_written": 307102,
+    "rows_by_frequency": {
+      "daily": 13927,
+      "1min": 208350,
+      "5min": 73636,
+      "60min": 11189
+    },
+    "success_by_frequency": {
+      "daily": 2745,
+      "1min": 2194,
+      "5min": 2189,
+      "60min": 2193
+    },
+    "missing_by_frequency": {
+      "daily": 0,
+      "1min": 551,
+      "5min": 556,
+      "60min": 552
+    },
+    "partial_count": 562,
+    "partial_details": [
+      {
+        "code": "00021",
+        "name": "大中华控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00025",
+        "name": "CHEVALIER INT'L",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00007",
+        "name": "智富资源投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00026",
+        "name": "中华汽车",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00033",
+        "name": "INTL GENIUS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00032",
+        "name": "港通控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00036",
+        "name": "远东控股国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00039",
+        "name": "中国北大荒",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00055",
+        "name": "中星集团控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00059",
+        "name": "天誉置业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00060",
+        "name": "香港食品投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00072",
+        "name": "超媒体控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00079",
+        "name": "世纪建业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00076",
+        "name": "谊砾控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00084",
+        "name": "宝光实业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00089",
+        "name": "大生地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00093",
+        "name": "零在科技金融",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00098",
+        "name": "兴发铝业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00099",
+        "name": "王氏国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00106",
+        "name": "朗诗绿色管理",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00115",
+        "name": "钧濠集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00122",
+        "name": "鳄鱼恤",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00130",
+        "name": "慕诗国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00131",
+        "name": "卓能（集团）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00146",
+        "name": "TAI PING CARPET",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00158",
+        "name": "万邦投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00162",
+        "name": "世纪金花",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00174",
+        "name": "盛洋投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00176",
+        "name": "先机企业集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00181",
+        "name": "闽港控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00180",
+        "name": "开达集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00183",
+        "name": "宏辉集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00184",
+        "name": "激成投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00195",
+        "name": "绿科科技国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00202",
+        "name": "润中国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00214",
+        "name": "汇汉控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00212",
+        "name": "NANYANG HOLD",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00213",
+        "name": "NATIONAL ELEC H",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00216",
+        "name": "建业实业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00219",
+        "name": "顺豪物业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00224",
+        "name": "建生国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00222",
+        "name": "闽信集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00225",
+        "name": "博富临置业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00234",
+        "name": "新世纪集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00237",
+        "name": "安全货仓",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00247",
+        "name": "TST PROPERTIES",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00248",
+        "name": "香港通讯国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00251",
+        "name": "爪哇控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00253",
+        "name": "顺豪控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00255",
+        "name": "龙记集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00265",
+        "name": "港誉智慧城市服务",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00266",
+        "name": "天德地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00277",
+        "name": "太兴置业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00274",
+        "name": "复兴亚洲",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00287",
+        "name": "永发置业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00289",
+        "name": "WING ON CO",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00286",
+        "name": "爱帝宫",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00294",
+        "name": "长江制衣",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00299",
+        "name": "宝新置地",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00298",
+        "name": "庄士中国",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00318",
+        "name": "黄河实业",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 5
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00310",
+        "name": "嘉进投资国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00320",
+        "name": "金宝通",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00335",
+        "name": "美建集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00333",
+        "name": "黛丽斯国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00352",
+        "name": "富阳",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00348",
+        "name": "中国智能健康",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00362",
+        "name": "中国天化工",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00367",
+        "name": "庄士机构国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00369",
+        "name": "永泰地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00372",
+        "name": "保德国际发展",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00374",
+        "name": "四洲集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00375",
+        "name": "YGM TRADING",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00377",
+        "name": "中国华君",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00385",
+        "name": "建联集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00391",
+        "name": "美亚娱乐资讯",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00403",
+        "name": "星光集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00411",
+        "name": "南顺（香港）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00417",
+        "name": "谢瑞麟",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00430",
+        "name": "东方兴业控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00431",
+        "name": "大中华金融",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00436",
+        "name": "新宇环保",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00458",
+        "name": "联亚集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00444",
+        "name": "SINCEREWATCH HK",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00455",
+        "name": "天大药业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00468",
+        "name": "纷美包装",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00475",
+        "name": "中发展控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00483",
+        "name": "包浩斯国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00485",
+        "name": "中国华星",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00495",
+        "name": "PALADIN",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00491",
+        "name": "英皇文化产业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00496",
+        "name": "卡森国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00497",
+        "name": "资本策略地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00498",
+        "name": "蓝河控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00509",
+        "name": "世纪阳光",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00513",
+        "name": "恒和集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00515",
+        "name": "中华银科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00532",
+        "name": "WKK INTL (HOLD)",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00529",
+        "name": "SIS INT'L",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00540",
+        "name": "迅捷环球控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00543",
+        "name": "太平洋网络",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00554",
+        "name": "汉思集团控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00559",
+        "name": "德泰新能源集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00557",
+        "name": "天元医疗",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00572",
+        "name": "未来世界控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00573",
+        "name": "稻香控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00602",
+        "name": "佳华百货控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00599",
+        "name": "怡邦行控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00606",
+        "name": "中骏商管",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00607",
+        "name": "丰盛控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00612",
+        "name": "嘉文世纪投资公司",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00627",
+        "name": "共生智筑",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00629",
+        "name": "悦达国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00640",
+        "name": "星谦发展",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00645",
+        "name": "安域亚洲",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00658",
+        "name": "中国高速传动",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00662",
+        "name": "亚洲金融",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00674",
+        "name": "中国唐商",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00675",
+        "name": "坚宝国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00676",
+        "name": "创信国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00691",
+        "name": "山水水泥",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00708",
+        "name": "恒大汽车",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00707",
+        "name": "亚洲电视控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00704",
+        "name": "和嘉控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00703",
+        "name": "FUTURE BRIGHT",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00702",
+        "name": "中国油气控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00713",
+        "name": "世界（集团）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00718",
+        "name": "太和控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00724",
+        "name": "瑞鑫国际集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00725",
+        "name": "恒都集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00733",
+        "name": "合富辉煌",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00755",
+        "name": "大方广瑞德",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00754",
+        "name": "合生创展集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00756",
+        "name": "森美控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00765",
+        "name": "PERFECTECH INTL",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00769",
+        "name": "中国稀土",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00771",
+        "name": "自动系统",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00776",
+        "name": "帝国科技集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00798",
+        "name": "中电光谷",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00794",
+        "name": "锦胜集团（控股）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00814",
+        "name": "北京京客隆",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00828",
+        "name": "王朝酒业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00829",
+        "name": "神冠控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00832",
+        "name": "建业地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00841",
+        "name": "木薯资源",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00840",
+        "name": "天业节水",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00846",
+        "name": "明发集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00851",
+        "name": "盛源控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00852",
+        "name": "海峡石油化工",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00845",
+        "name": "恒盛地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00859",
+        "name": "中昌国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00864",
+        "name": "永利地产发展",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00865",
+        "name": "建德国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00862",
+        "name": "远见控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00871",
+        "name": "中国疏浚环保",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00897",
+        "name": "位元堂",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00907",
+        "name": "高雅光学",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00910",
+        "name": "中国三迪",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00898",
+        "name": "万事昌国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00915",
+        "name": "道和环球",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00919",
+        "name": "现代健康科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00924",
+        "name": "坤集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00936",
+        "name": "佳兆业资本",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00943",
+        "name": "中证国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00954",
+        "name": "常茂生物",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00959",
+        "name": "世纪娱乐国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00969",
+        "name": "华联国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00970",
+        "name": "新耀莱",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00976",
+        "name": "齐合环保",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00979",
+        "name": "绿色能源科技集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01005",
+        "name": "MATRIX HOLDINGS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01007",
+        "name": "龙辉国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01011",
+        "name": "泰凌医药",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01039",
+        "name": "畅由国际集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01046",
+        "name": "寰宇娱乐文化",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01059",
+        "name": "看通集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01073",
+        "name": "大禹金融",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01105",
+        "name": "星岛",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 3
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01094",
+        "name": "承辉国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01101",
+        "name": "华荣能源",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01107",
+        "name": "当代置业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01116",
+        "name": "慧源同创科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01120",
+        "name": "雅视光学",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01118",
+        "name": "高力集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01125",
+        "name": "丽丰控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01145",
+        "name": "勇利投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01150",
+        "name": "米兰站",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01160",
+        "name": "金石资本集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01165",
+        "name": "顺风清洁能源",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01173",
+        "name": "威高国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01170",
+        "name": "信星集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01176",
+        "name": "珠光控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01182",
+        "name": "胜龙国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01188",
+        "name": "正道集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01204",
+        "name": "博维智慧",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01215",
+        "name": "开源控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01220",
+        "name": "志道国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01221",
+        "name": "SINO HOTELS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01226",
+        "name": "中国投融资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01231",
+        "name": "新矿资源",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01237",
+        "name": "中科生物",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01235",
+        "name": "专业旅运",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01241",
+        "name": "双桦控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01240",
+        "name": "青建国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01245",
+        "name": "NIRAKU",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01246",
+        "name": "保集健康",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01253",
+        "name": "绿博生态",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01252",
+        "name": "中国天瑞水泥",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01259",
+        "name": "未来发展控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01273",
+        "name": "香港信贷",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01281",
+        "name": "鑫达投资控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01293",
+        "name": "广汇宝信",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01290",
+        "name": "中国汇融",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01298",
+        "name": "云能国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01314",
+        "name": "翠华控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01315",
+        "name": "绿色经济",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01319",
+        "name": "霭华押业信贷",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01326",
+        "name": "传递娱乐",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01327",
+        "name": "励时集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01345",
+        "name": "上海先锋控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01362",
+        "name": "新龙移动",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01370",
+        "name": "奥威控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01376",
+        "name": "RAFFLESINTERIOR",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01379",
+        "name": "温岭工量刃具",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01406",
+        "name": "清晰医疗",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01402",
+        "name": "超智能控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01412",
+        "name": "隽思集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01417",
+        "name": "浦江中国",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01418",
+        "name": "盛诺集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01420",
+        "name": "川控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01419",
+        "name": "盈健医疗",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01433",
+        "name": "常达控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01442",
+        "name": "鹰辉物流",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01446",
+        "name": "鸿福堂",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01448",
+        "name": "福寿园",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01452",
+        "name": "迪诺斯环保",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01451",
+        "name": "万成集团股份",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01459",
+        "name": "巨匠建设",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01461",
+        "name": "中泰期货",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01470",
+        "name": "富一国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01496",
+        "name": "亚积邦租赁",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 4
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01486",
+        "name": "思城控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01518",
+        "name": "新世纪医疗",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01527",
+        "name": "天洁环境",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01532",
+        "name": "中国派对文化",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01542",
+        "name": "台州水务",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01547",
+        "name": "IBI GROUP HLDGS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01576",
+        "name": "齐鲁高速",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 4
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01552",
+        "name": "BHCC HOLDING",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 132,
+          "daily": 5
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01553",
+        "name": "迈科管业",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 138,
+          "daily": 5
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01549",
+        "name": "永丰集团控股",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 132,
+          "daily": 4
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01577",
+        "name": "汇鑫小贷",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 138,
+          "daily": 1
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01557",
+        "name": "剑虹集团控股",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 138,
+          "daily": 5
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01565",
+        "name": "成实外教育",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 132,
+          "daily": 5
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01566",
+        "name": "华夏文化科技",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 132,
+          "daily": 1
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01561",
+        "name": "联洋智能控股",
+        "missing_frequencies": [
+          "1min",
+          "5min"
+        ],
+        "available_rows": {
+          "60min": 138,
+          "daily": 3
+        },
+        "sources": {
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01587",
+        "name": "欣融国际",
+        "missing_frequencies": [
+          "1min"
+        ],
+        "available_rows": {
+          "5min": 1518,
+          "60min": 138,
+          "daily": 1
+        },
+        "sources": {
+          "5min": "akshare_eastmoney",
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01597",
+        "name": "纳泉能源科技",
+        "missing_frequencies": [
+          "1min"
+        ],
+        "available_rows": {
+          "5min": 1518,
+          "60min": 138,
+          "daily": 5
+        },
+        "sources": {
+          "5min": "akshare_eastmoney",
+          "60min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01599",
+        "name": "城建设计",
+        "missing_frequencies": [
+          "1min",
+          "60min"
+        ],
+        "available_rows": {
+          "5min": 1452,
+          "daily": 5
+        },
+        "sources": {
+          "5min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01601",
+        "name": "中关村科技租赁",
+        "missing_frequencies": [
+          "1min",
+          "60min"
+        ],
+        "available_rows": {
+          "5min": 1518,
+          "daily": 4
+        },
+        "sources": {
+          "5min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01591",
+        "name": "汛和集团",
+        "missing_frequencies": [
+          "1min",
+          "60min"
+        ],
+        "available_rows": {
+          "5min": 1518,
+          "daily": 4
+        },
+        "sources": {
+          "5min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01598",
+        "name": "２１世纪教育",
+        "missing_frequencies": [
+          "1min",
+          "60min"
+        ],
+        "available_rows": {
+          "5min": 1462,
+          "daily": 1
+        },
+        "sources": {
+          "5min": "akshare_eastmoney",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01629",
+        "name": "冠均国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01632",
+        "name": "民商创科",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01627",
+        "name": "安保工程控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01631",
+        "name": "REF HOLDINGS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01636",
+        "name": "中国金属利用",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01656",
+        "name": "亿仕登控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01667",
+        "name": "迪米生活控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01668",
+        "name": "华南城",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01701",
+        "name": "途屹控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01702",
+        "name": "东光化工",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01707",
+        "name": "致浩达控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01708",
+        "name": "三宝科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01711",
+        "name": "欧化",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01739",
+        "name": "齐屹科技",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 4
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01721",
+        "name": "FSM HOLDINGS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01728",
+        "name": "正通汽车",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01736",
+        "name": "中国育儿网络",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01737",
+        "name": "亚洲实业集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01748",
+        "name": "信源企业集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01752",
+        "name": "澳洲成峰高教",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01756",
+        "name": "中国科教产业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01755",
+        "name": "新城悦服务",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01759",
+        "name": "中油洁能控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01758",
+        "name": "博骏教育",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01778",
+        "name": "彩生活",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01780",
+        "name": "荣尊国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01790",
+        "name": "达力环保",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01796",
+        "name": "中国数智科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01802",
+        "name": "文业集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01803",
+        "name": "北京体育文化",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01822",
+        "name": "中木国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01820",
+        "name": "济丰包装",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01827",
+        "name": "卓珈控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01845",
+        "name": "维港环保科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01847",
+        "name": "云南建投混凝土",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01849",
+        "name": "秀商时代控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01853",
+        "name": "春城热力",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01862",
+        "name": "景瑞控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01861",
+        "name": "保宝龙科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01863",
+        "name": "中国龙天集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01867",
+        "name": "标准发展集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01869",
+        "name": "猫屎咖啡控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01884",
+        "name": "ＥＰＲＩＮＴ集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01891",
+        "name": "兴合控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01915",
+        "name": "泰和小贷",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01933",
+        "name": "元力控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01953",
+        "name": "RIMBACO",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01957",
+        "name": "大人国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01960",
+        "name": "TBKS HLDGS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01961",
+        "name": "多牛科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01965",
+        "name": "朗诗绿色生活",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01971",
+        "name": "弘阳服务",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01975",
+        "name": "新兴印刷",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "01991",
+        "name": "大洋集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02011",
+        "name": "进腾集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02116",
+        "name": "江苏创新",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 6
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02088",
+        "name": "西王置业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02101",
+        "name": "福禄控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02113",
+        "name": "世纪集团国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02119",
+        "name": "捷荣国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02127",
+        "name": "汇森股份",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02131",
+        "name": "云想科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02132",
+        "name": "誉燊丰控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02135",
+        "name": "瑞丽医美",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02152",
+        "name": "苏新服务",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02163",
+        "name": "远大住工",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02182",
+        "name": "天长集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02212",
+        "name": "高鹏矿业",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 2
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02195",
+        "name": "盈汇企业控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02205",
+        "name": "康桥悦生活",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02210",
+        "name": "京城佳业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02227",
+        "name": "守益控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02239",
+        "name": "国微控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02281",
+        "name": "兴泸水务",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 6
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02258",
+        "name": "华滋国际海洋",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02262",
+        "name": "梁志天设计集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02280",
+        "name": "慧聪集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02289",
+        "name": "创美药业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02288",
+        "name": "宏基资本",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02307",
+        "name": "锦兴国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02299",
+        "name": "百宏实业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02317",
+        "name": "味丹国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02320",
+        "name": "合丰集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02326",
+        "name": "新源万恒控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02323",
+        "name": "融科控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02340",
+        "name": "昇柏控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02339",
+        "name": "京西国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02352",
+        "name": "东原仁知服务",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02361",
+        "name": "中康科技控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02362",
+        "name": "金川国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02402",
+        "name": "亿华通",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02421",
+        "name": "嘉创地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02479",
+        "name": "天聚地合",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02482",
+        "name": "维天运通",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02483",
+        "name": "Ｋ　ＣＡＳＨ集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02496",
+        "name": "友芝友生物－Ｂ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02519",
+        "name": "傲基股份",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02530",
+        "name": "纽曼思",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02529",
+        "name": "泓盈城市服务",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02536",
+        "name": "百乐皇宫",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02558",
+        "name": "晋商银行",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02627",
+        "name": "中慧生物－Ｂ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02629",
+        "name": "MIRXES-B",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02649",
+        "name": "优乐赛共享",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02663",
+        "name": "应力控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02682",
+        "name": "润利海事",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02728",
+        "name": "金泰能源控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02898",
+        "name": "盛禾生物－Ｂ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02934",
+        "name": "圣马丁国际（旧）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02892",
+        "name": "万城控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "02941",
+        "name": "中国新零售－二千",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "tencent"
+        }
+      },
+      {
+        "code": "02942",
+        "name": "龙升集团（一万）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "tencent"
+        }
+      },
+      {
+        "code": "03336",
+        "name": "巨腾国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03366",
+        "name": "华侨城（亚洲）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03363",
+        "name": "正业国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03616",
+        "name": "恒达集团控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03666",
+        "name": "上海小南国",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03683",
+        "name": "荣丰亿控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03728",
+        "name": "正利控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03778",
+        "name": "中国织材控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03798",
+        "name": "家乡互动",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03822",
+        "name": "三和建筑集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03869",
+        "name": "弘和仁爱医疗",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03893",
+        "name": "易纬集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03903",
+        "name": "瀚华金控",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03889",
+        "name": "大成玉米集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "03963",
+        "name": "融众金融",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "04332",
+        "name": "AMGEN-T",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "04335",
+        "name": "英特尔－Ｔ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "04333",
+        "name": "思科－Ｔ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "04336",
+        "name": "应用材料－Ｔ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "04338",
+        "name": "微软－Ｔ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06033",
+        "name": "电讯数码控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "04337",
+        "name": "星巴克－Ｔ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06068",
+        "name": "光正教育",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06117",
+        "name": "日照港裕廊",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06133",
+        "name": "维太创科",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06119",
+        "name": "天源集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06158",
+        "name": "正荣地产",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06163",
+        "name": "彭顺国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06182",
+        "name": "乙德投资控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06189",
+        "name": "爱得威建设集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06190",
+        "name": "九江银行",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06663",
+        "name": "国际永胜集团",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 6
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06611",
+        "name": "三巽集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06623",
+        "name": "陆控",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06639",
+        "name": "瑞尔集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06633",
+        "name": "青瓷游戏",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06661",
+        "name": "湖州燃气",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06667",
+        "name": "美因基因",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06696",
+        "name": "多想云",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06812",
+        "name": "永顺控股香港",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06816",
+        "name": "瑞港建设",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06822",
+        "name": "科劲国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06830",
+        "name": "华众车载",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06860",
+        "name": "指尖悦动",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06909",
+        "name": "百得利控股",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 5
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06878",
+        "name": "鼎丰集团汽车",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06877",
+        "name": "TE HEALTHCARE",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06883",
+        "name": "颖通控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06890",
+        "name": "康利国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06899",
+        "name": "联众",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06898",
+        "name": "中国铝罐",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06911",
+        "name": "澜沧古茶",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06919",
+        "name": "人瑞人才",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "06999",
+        "name": "领地控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08006",
+        "name": "华泰瑞银",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08019",
+        "name": "皓文控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08018",
+        "name": "汇财金融投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08023",
+        "name": "邝文记",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08033",
+        "name": "爱达利网络",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08031",
+        "name": "易通讯集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08028",
+        "name": "天时资源",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08039",
+        "name": "中国来骑哦",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08042",
+        "name": "高奥士人才集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08043",
+        "name": "ATLINKS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08048",
+        "name": "御德国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08047",
+        "name": "中国海洋发展",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08052",
+        "name": "陆庆娱乐",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08056",
+        "name": "生活概念",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08060",
+        "name": "国联通信",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08057",
+        "name": "麦迪森控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08065",
+        "name": "高萌科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08070",
+        "name": "侨洋国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08076",
+        "name": "新利软件",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08080",
+        "name": "北亚策略",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08087",
+        "name": "中国三三传媒",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08092",
+        "name": "ITE HOLDINGS",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08096",
+        "name": "赏之味",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08100",
+        "name": "名科国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08098",
+        "name": "昌利控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08106",
+        "name": "芯化兰德",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08103",
+        "name": "ＨＭＶＯＤ视频",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08115",
+        "name": "清大东方",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08111",
+        "name": "中国科技产业集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08117",
+        "name": "中国基础能源",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08120",
+        "name": "国农金融投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08118",
+        "name": "中资国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08121",
+        "name": "国恩控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08126",
+        "name": "Ｇ．Ａ．控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08128",
+        "name": "中国恒有源集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08130",
+        "name": "大地国际集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08133",
+        "name": "吉盛集团控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08148",
+        "name": "悟喜生活",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08152",
+        "name": "明梁控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08156",
+        "name": "国药科技股份",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08160",
+        "name": "GOLDWAY EDU",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08172",
+        "name": "拉近网娱",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08187",
+        "name": "积木集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08181",
+        "name": "港深智能管理",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08189",
+        "name": "泰达生物",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08201",
+        "name": "宝联控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08210",
+        "name": "衍汇亚洲",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08206",
+        "name": "神通机器人教育",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08218",
+        "name": "毅高国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08213",
+        "name": "荣晖控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08222",
+        "name": "壹照明",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08226",
+        "name": "树熊金融集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08229",
+        "name": "未来数据集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08241",
+        "name": "英记茶庄集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08245",
+        "name": "烽翼集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08262",
+        "name": "宏强控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08249",
+        "name": "瑞远智控",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08270",
+        "name": "中国煤层气",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08275",
+        "name": "中国新消费集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08280",
+        "name": "中国数字视频",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08282",
+        "name": "智傲控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08283",
+        "name": "中食民安",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08290",
+        "name": "亚势备份",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08293",
+        "name": "星亚控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08296",
+        "name": "中国生命集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08297",
+        "name": "海纳星空科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08307",
+        "name": "密迪斯肌",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08310",
+        "name": "盐城港",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08309",
+        "name": "万成环球控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08311",
+        "name": "圆美光电",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08315",
+        "name": "新都酒店",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08317",
+        "name": "财华社集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08326",
+        "name": "同景新能源",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08331",
+        "name": "倍搏集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08340",
+        "name": "紫荆国际金融",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08348",
+        "name": "滨海泰达物流",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08349",
+        "name": "硅鑫集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08347",
+        "name": "Ｆ８企业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08356",
+        "name": "进业控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08362",
+        "name": "运兴泰集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08368",
+        "name": "中国创意控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08366",
+        "name": "浙江联合投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08367",
+        "name": "倩碧控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08373",
+        "name": "靛蓝星",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08377",
+        "name": "维港育马",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08392",
+        "name": "舍图控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08400",
+        "name": "亚洲先锋娱乐",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08406",
+        "name": "中国口腔产业",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08411",
+        "name": "K W NELSON GP",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08412",
+        "name": "新爱德集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08419",
+        "name": "ＡＶ策划推广",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08420",
+        "name": "NEXION TECH",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08422",
+        "name": "ＷＴ集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08426",
+        "name": "雅居投资控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08428",
+        "name": "汉诺佳池",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08425",
+        "name": "兴铭控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08429",
+        "name": "华美乐乐",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08437",
+        "name": "德斯控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08436",
+        "name": "德宝集团控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08445",
+        "name": "怡康泰工程集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08451",
+        "name": "日光控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08452",
+        "name": "富银融资股份",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08456",
+        "name": "民信国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08462",
+        "name": "中安控股集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08475",
+        "name": "易站绿色科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08481",
+        "name": "盛龙锦秀国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08489",
+        "name": "裕程物流",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08490",
+        "name": "骏码半导体",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08493",
+        "name": "炙龙控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08495",
+        "name": "1957 & CO.",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08500",
+        "name": "天泓文创",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08496",
+        "name": "环球友饮智能",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08501",
+        "name": "庄皇集团公司",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08511",
+        "name": "民富国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08510",
+        "name": "TOPSTANDARDCORP",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08513",
+        "name": "加和国际控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 5
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08525",
+        "name": "百应控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08527",
+        "name": "聚利宝控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08535",
+        "name": "荧德控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08526",
+        "name": "荣丰集团亚洲",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08551",
+        "name": "基地锦标（二万）",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "tencent"
+        }
+      },
+      {
+        "code": "08601",
+        "name": "宝燵控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08616",
+        "name": "新威工程集团",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "08645",
+        "name": "比特元宇宙",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "09638",
+        "name": "法拉帝",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "09677",
+        "name": "威海银行",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 3
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "09881",
+        "name": "容大科技",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 6
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "09906",
+        "name": "宏力医疗管理",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "09908",
+        "name": "嘉兴燃气",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "09918",
+        "name": "丽年国际",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "09986",
+        "name": "大山教育",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "82020",
+        "name": "安踏体育－Ｒ",
+        "missing_frequencies": [
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "1min": 1,
+          "daily": 3
+        },
+        "sources": {
+          "1min": "tencent",
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "80737",
+        "name": "湾区发展－Ｒ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 2
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "82333",
+        "name": "长城汽车－Ｒ",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      }
+    ],
+    "frequencies": [
+      "daily",
+      "1min",
+      "5min",
+      "60min"
+    ],
+    "intraday_start_date": "2023-04-26",
+    "dataset_path": "/home/ccs/code/stock_analysis_by_gpt/assets/data/clean/ohlcv",
+    "failed": [],
+    "compacted_dataset_path": "/home/ccs/code/stock_analysis_by_gpt/assets/data/clean/ohlcv"
+  }
+}

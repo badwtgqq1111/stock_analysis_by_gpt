@@ -115,6 +115,97 @@ df = data_fetcher.fetch()
 python main.py
 ```
 
+### 港股批量同步验证命令
+
+先进入项目目录：
+
+```bash
+cd /home/ccs/code/stock_analysis_by_gpt
+```
+
+局部验证，先抓前 20 只港股，适合检查股票池、并发抓取和落库链路：
+
+- `daily` 使用 `--start-date`
+- `1min/5min/60min` 默认回补最近 3 年
+- 批量同步按 `股票 + 周期` 做增量补数，默认带少量重叠窗口回补，避免漏掉最近修订数据
+- `5min/60min` 原始源拿不到时，会优先尝试用 `1min` 数据本地合并生成
+
+```bash
+/home/ccs/code/stock_analysis_by_gpt/.venv/bin/python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --limit 20 \
+  --workers 8
+```
+
+指定股票做小范围验证：
+
+```bash
+/home/ccs/code/stock_analysis_by_gpt/.venv/bin/python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --workers 4 \
+  --code 00700 \
+  --code 00005 \
+  --code 09988
+```
+
+全港股批量回补，从 2014 年开始下载到今天：
+
+```bash
+/home/ccs/code/stock_analysis_by_gpt/.venv/bin/python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --workers 24
+```
+
+如果只想跑日线全量，不抓分钟级：
+
+```bash
+/home/ccs/code/stock_analysis_by_gpt/.venv/bin/python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --workers 24 \
+  --frequencies daily
+```
+
+如果分钟级想改成别的时间范围，可以显式指定起始日期：
+
+```bash
+/home/ccs/code/stock_analysis_by_gpt/.venv/bin/python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --intraday-start-date 2023-01-01 \
+  --workers 24
+```
+
+如果希望跳过已经入库的日线，只补新股票或未落库股票：
+
+```bash
+/home/ccs/code/stock_analysis_by_gpt/.venv/bin/python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --workers 24 \
+  --skip-existing
+```
+
+如果只想先下载 K 线，不写 stock info 元数据，也不做最后压实：
+
+```bash
+/home/ccs/code/stock_analysis_by_gpt/.venv/bin/python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --workers 24 \
+  --no-stock-info \
+  --no-compact
+```
+
+命令执行完成后，主要数据目录如下：
+
+- 日线 Parquet 数据集：`/home/ccs/code/stock_analysis_by_gpt/assets/data/clean/ohlcv`
+- 元数据 DuckDB：`/home/ccs/code/stock_analysis_by_gpt/assets/data/meta/market_data.duckdb`
+- 旧扫描缓存库：`/home/ccs/code/stock_analysis_by_gpt/assets/stock_data.duckdb`
+
 ### 输出目录
 所有生成的文件保存在 `./output/` 目录下：
 - `hk_stock_03633_YYYYMMDD_HHMMSS.json` - 股票数据

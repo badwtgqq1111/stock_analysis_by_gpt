@@ -4,54 +4,175 @@
 """港股股票池抓取。"""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 import threading
 
 import requests
 
+from data.ingest.providers.hk_common import ak
 from data.store.database_manager import DatabaseManager
 
 
 class HKMarketListFetcher:
     """获取港股全市场股票列表。"""
 
+    INDEX_PRODUCT_ALLOW_KEYWORDS = (
+        "指数",
+        "ETF",
+        "ETP",
+        "TRACKER",
+        "TRUST",
+        "杠杆",
+        "反向",
+        "两倍",
+        "二倍",
+        "三倍",
+        "2X",
+        "3X",
+        "XL2",
+        "XL3",
+        "做多",
+        "做空",
+        "恒指",
+        "国指",
+        "科指",
+        "纳指",
+        "纳斯达克",
+        "标普",
+        "道指",
+        "日经",
+        "罗素",
+        "比特币",
+        "以太币",
+    )
+
+    NON_STOCK_EXCLUDE_KEYWORDS = (
+        "牛证",
+        "熊证",
+        "牛熊证",
+        "认购证",
+        "认沽证",
+        "窝轮",
+        "界内证",
+        "权证",
+        "票据",
+        "债券",
+        "债务",
+        "房托",
+        "房地产投资信托",
+        "REIT",
+    )
+
     def __init__(self):
         self.stocks = []
 
-    def fetch(self):
+    def fetch(self, limit=None):
         print("[INFO] 正在获取港股全市场股票列表...")
+        fetchers = [
+            ("akshare_sina", self._fetch_from_akshare_sina),
+            ("akshare_eastmoney", self._fetch_from_akshare_eastmoney),
+        ]
+
+        for source_name, fetcher in fetchers:
+            try:
+                stocks = fetcher()
+                if stocks:
+                    if limit:
+                        stocks = stocks[:limit]
+                    self.stocks = stocks
+                    print(f"[OK] 成功获取 {len(self.stocks)} 只港股，来源：{source_name}")
+                    return self.stocks
+                print(f"[WARNING] {source_name} 未返回有效港股列表，尝试下一数据源...")
+            except Exception as e:
+                print(f"[WARNING] {source_name} 获取港股列表失败：{e}")
+
+        print("[WARNING] AKShare 港股列表接口不可用，回退到腾讯扫描方案...")
+        return self._fetch_alternative(limit=limit)
+
+    @classmethod
+    def _is_allowed_index_product(cls, name):
+        normalized_name = str(name or "").strip()
+        upper_name = normalized_name.upper()
+        return any(keyword in normalized_name or keyword in upper_name for keyword in cls.INDEX_PRODUCT_ALLOW_KEYWORDS)
+
+    @classmethod
+    def _is_supported_security(cls, code, name):
+        normalized_code = str(code or "").strip()
+        normalized_name = str(name or "").strip()
+        upper_name = normalized_name.upper()
+
+        if not normalized_name:
+            return False
+        if normalized_name in {normalized_code, normalized_code.lstrip("0"), f"HK{normalized_code}", f"hk{normalized_code}"}:
+            return False
+        if re.fullmatch(r"0*\d{5}", normalized_name):
+            return False
+        if not re.search(r"[\u4e00-\u9fffA-Za-z]", normalized_name):
+            return False
+
+        if cls._is_allowed_index_product(normalized_name):
+            return True
+
+        return not any(keyword in normalized_name or keyword in upper_name for keyword in cls.NON_STOCK_EXCLUDE_KEYWORDS)
+
+    def _normalize_spot_frame(self, df, code_column, name_column):
+        if df is None or df.empty:
+            return []
+
+        stocks = []
+        seen = set()
+        filtered_out = 0
+        for _, row in df.iterrows():
+            raw_code = str(row.get(code_column, "")).strip()
+            raw_name = str(row.get(name_column, "")).strip()
+            digits = "".join(ch for ch in raw_code if ch.isdigit())
+            if len(digits) != 5 or not raw_name:
+                continue
+            if not self._is_supported_security(digits, raw_name):
+                filtered_out += 1
+                continue
+            if digits in seen:
+                continue
+            seen.add(digits)
+            stocks.append({"code": digits, "name": raw_name})
+
+        if filtered_out:
+            print(f"[INFO] 已过滤 {filtered_out} 只非目标港股证券")
+        return sorted(stocks, key=lambda item: item["code"])
+
+    def _fetch_from_akshare_sina(self):
+        if ak is None:
+            raise ImportError("akshare 未安装")
+
         try:
-            hk_stocks_url = (
-                "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                "Market_Center.getHQNodeData?page=1&num=10000&sort=symbol&asc=1&node=hk&symbol="
-            )
-            response = requests.get(hk_stocks_url, timeout=15)
-            response.raise_for_status()
-            stocks_data = response.json()
+            df = ak.stock_hk_spot()
+        except AttributeError as exc:
+            raise RuntimeError("当前 akshare 版本不包含 stock_hk_spot 接口") from exc
 
-            if not stocks_data:
-                print("[WARNING] 未能获取港股列表，使用备用方案...")
-                return self._fetch_alternative()
+        return self._normalize_spot_frame(df, code_column="代码", name_column="中文名称")
 
-            for stock in stocks_data:
-                code = stock.get("code", "")
-                name = stock.get("name", "")
-                if code and len(code) == 5 and code.isdigit():
-                    self.stocks.append({"code": code, "name": name})
+    def _fetch_from_akshare_eastmoney(self):
+        if ak is None:
+            raise ImportError("akshare 未安装")
 
-            print(f"[OK] 成功获取 {len(self.stocks)} 只港股")
-            return self.stocks
-        except Exception as e:
-            print(f"[ERROR] 获取港股列表失败：{e}")
-            return self._fetch_alternative()
+        try:
+            df = ak.stock_hk_spot_em()
+        except AttributeError as exc:
+            raise RuntimeError("当前 akshare 版本不包含 stock_hk_spot_em 接口") from exc
 
-    def _fetch_alternative(self):
+        return self._normalize_spot_frame(df, code_column="代码", name_column="名称")
+
+    def _fetch_alternative(self, limit=None):
         print("[INFO] 使用多线程并发方案扫描全市场港股列表...")
         print("[INFO] 扫描范围：00001-09999，使用多线程加速...")
 
         db_manager = DatabaseManager()
-        scanned_stocks = db_manager.get_scanned_stocks("active")
+        cache_available = db_manager.conn is not None
+        scanned_stocks = db_manager.get_scanned_stocks("active") if cache_available else []
         scanned_codes = {stock["code"] for stock in scanned_stocks}
         print(f"[INFO] 数据库中已有 {len(scanned_codes)} 只已扫描股票，将跳过...")
+        if not cache_available:
+            print("[WARNING] 扫描缓存数据库不可用，本次仅做内存扫描，不写入 scanned_stocks 缓存")
 
         stats = {"tested": 0, "found": 0, "skipped": len(scanned_codes), "lock": threading.Lock()}
 
@@ -74,8 +195,9 @@ class HKMarketListFetcher:
                     parts = content.split("~")
                     if len(parts) > 1 and parts[1] and parts[1] != "N/A":
                         name = parts[1].strip()
-                        if name:
-                            db_manager.save_scanned_stock(code, name, "active")
+                        if name and self._is_supported_security(code, name):
+                            if cache_available:
+                                db_manager.save_scanned_stock(code, name, "active")
                             return {"code": code, "name": name}
             except requests.exceptions.Timeout:
                 pass
@@ -86,6 +208,8 @@ class HKMarketListFetcher:
         def worker_batch(code_range):
             local_stocks = []
             for code_num in code_range:
+                if limit and stats["found"] >= limit:
+                    break
                 stock = query_stock(code_num)
                 if stock:
                     local_stocks.append(stock)
@@ -127,9 +251,13 @@ class HKMarketListFetcher:
         seen = set()
         unique_stocks = []
         for stock in all_stocks:
+            if not self._is_supported_security(stock["code"], stock["name"]):
+                continue
             if stock["code"] not in seen:
                 seen.add(stock["code"])
                 unique_stocks.append(stock)
+                if limit and len(unique_stocks) >= limit:
+                    break
 
         self.stocks = sorted(unique_stocks, key=lambda x: x["code"])
 

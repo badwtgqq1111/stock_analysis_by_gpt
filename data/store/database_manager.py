@@ -100,6 +100,8 @@ class DatabaseManager:
 
     def execute_query(self, query, params=None):
         """执行元数据 SQL，主要用于扫描辅助逻辑。"""
+        if self.conn is None:
+            raise RuntimeError(f"数据库连接不可用: {self.db_path}")
         return self.conn.execute(query, params or []).fetchall()
 
     def save_stock_info(self, stock_info, stock_code, market="HK", exchange=None, asset_type="equity"):
@@ -107,6 +109,9 @@ class DatabaseManager:
             return False
 
         try:
+            if self.conn is None:
+                print(f"[WARNING] stock_info 元数据库连接不可用，跳过元表写入: {self.db_path}")
+                return False
             normalized_market = (market or "HK").upper()
             normalized_code = normalize_stock_code(stock_code, market=normalized_market)
             normalized_info = normalize_stock_info(
@@ -153,6 +158,8 @@ class DatabaseManager:
 
     def _ensure_stock_info_exists(self, stock_code, market="HK", exchange=None, asset_type="equity"):
         try:
+            if self.conn is None:
+                return False
             normalized_market = (market or "HK").upper()
             normalized_code = normalize_stock_code(stock_code, market=normalized_market)
             normalized_exchange = (exchange or infer_exchange(normalized_code, market=normalized_market)).upper()
@@ -200,6 +207,9 @@ class DatabaseManager:
             return None
 
         try:
+            if self.conn is None:
+                print(f"[WARNING] 元数据库连接不可用，跳过旧式 save_kline_data 写入: {self.db_path}")
+                return None
             normalized_market = (market or "HK").upper()
             normalized_code = normalize_stock_code(stock_code, market=normalized_market)
             normalized_exchange = (exchange or infer_exchange(normalized_code, market=normalized_market)).upper()
@@ -496,6 +506,8 @@ class DatabaseManager:
 
     def save_scanned_stock(self, stock_code, name, status="active"):
         try:
+            if self.conn is None:
+                return False
             now = datetime.now().isoformat()
             self.conn.execute(
                 """
@@ -515,6 +527,8 @@ class DatabaseManager:
 
     def get_scanned_stocks(self, status_filter=None):
         try:
+            if self.conn is None:
+                return []
             if status_filter:
                 result = self.conn.execute(
                     "SELECT stock_code, name, status FROM scanned_stocks WHERE status = ? ORDER BY stock_code",
@@ -529,6 +543,8 @@ class DatabaseManager:
 
     def is_stock_scanned(self, stock_code):
         try:
+            if self.conn is None:
+                return False
             result = self.conn.execute("SELECT COUNT(*) FROM scanned_stocks WHERE stock_code = ?", (stock_code,)).fetchone()[0]
             return result > 0
         except Exception as e:
@@ -537,6 +553,8 @@ class DatabaseManager:
 
     def get_scanned_stock_count(self):
         try:
+            if self.conn is None:
+                return 0
             return self.conn.execute("SELECT COUNT(*) FROM scanned_stocks").fetchone()[0]
         except Exception as e:
             print(f"[ERROR] 获取已扫描股票数量错误：{e}")

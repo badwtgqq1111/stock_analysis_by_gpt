@@ -30,7 +30,7 @@ class HistoryDataFetcher:
         self.source_priority = build_source_priority(data_source, source_priority)
         self.data = None
         self.last_successful_source = None
-        self.db_manager = DatabaseManager(db_dir)
+        self.db_manager = DatabaseManager(db_dir) if db_dir is not None else None
 
     def _fetch_akshare_sina_hist(self, start_date=None, end_date=None, num_records=None, adjust=None):
         if ak is None:
@@ -371,6 +371,8 @@ class HistoryDataFetcher:
         return self.data
 
     def check_update_from_db(self):
+        if self.db_manager is None:
+            return {"has_data": False, "latest_date": None, "total_records": 0, "date_range": None}
         latest_date = self.db_manager.get_latest_date(self.stock_code)
         if latest_date:
             stats = self.db_manager.get_statistics(self.stock_code)
@@ -383,6 +385,8 @@ class HistoryDataFetcher:
         return {"has_data": False, "latest_date": None, "total_records": 0, "date_range": None}
 
     def load_from_db(self, period="daily"):
+        if self.db_manager is None:
+            return None
         data = self.db_manager.get_kline_data(self.stock_code, frequency=normalize_period(period))
         if data is not None and not data.empty:
             print(f"[INFO] Load data from database: {len(data)} records")

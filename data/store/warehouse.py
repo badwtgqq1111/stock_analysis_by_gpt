@@ -73,18 +73,120 @@ class MarketDataWarehouse:
         )
         return {"rows": len(payload), "dataset_path": str(target)}
 
+    def append_ohlcv(self, frame, dataset_name=OHLCV_DATASET):
+        """批量追加 OHLCV 到分区 parquet 数据集，不做单次去重。"""
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="clean"))}
+
+        payload = frame[CLEAN_OHLCV_COLUMNS].copy()
+        target = self.parquet_store.append_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            layer="clean",
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
     def upsert_stock_info(self, info):
         """保存标准化后的股票信息。"""
         payload = pd.DataFrame([info], columns=STOCK_INFO_FIELDS)
         self.conn.register("stock_info_frame", payload)
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO stock_info_registry
-            SELECT * FROM stock_info_frame
+            INSERT OR REPLACE INTO stock_info_registry (
+                stock_code,
+                market,
+                exchange,
+                asset_type,
+                name,
+                current_price,
+                close_price,
+                open_price,
+                high,
+                low,
+                volume,
+                market_cap,
+                pe_ratio,
+                week_52_high,
+                week_52_low,
+                source,
+                ingest_time
+            )
+            SELECT
+                stock_code,
+                market,
+                exchange,
+                asset_type,
+                name,
+                current_price,
+                close_price,
+                open_price,
+                high,
+                low,
+                volume,
+                market_cap,
+                pe_ratio,
+                week_52_high,
+                week_52_low,
+                source,
+                ingest_time
+            FROM stock_info_frame
             """
         )
         self.conn.unregister("stock_info_frame")
         return {"rows": 1}
+
+    def upsert_stock_info_batch(self, info_list):
+        """批量保存标准化后的股票信息。"""
+        if not info_list:
+            return {"rows": 0}
+
+        payload = pd.DataFrame(info_list, columns=STOCK_INFO_FIELDS)
+        payload.drop_duplicates(subset=["market", "stock_code"], keep="last", inplace=True)
+        self.conn.register("stock_info_frame_batch", payload)
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO stock_info_registry (
+                stock_code,
+                market,
+                exchange,
+                asset_type,
+                name,
+                current_price,
+                close_price,
+                open_price,
+                high,
+                low,
+                volume,
+                market_cap,
+                pe_ratio,
+                week_52_high,
+                week_52_low,
+                source,
+                ingest_time
+            )
+            SELECT
+                stock_code,
+                market,
+                exchange,
+                asset_type,
+                name,
+                current_price,
+                close_price,
+                open_price,
+                high,
+                low,
+                volume,
+                market_cap,
+                pe_ratio,
+                week_52_high,
+                week_52_low,
+                source,
+                ingest_time
+            FROM stock_info_frame_batch
+            """
+        )
+        self.conn.unregister("stock_info_frame_batch")
+        return {"rows": len(payload)}
 
     def read_ohlcv(
         self,
@@ -263,6 +365,16 @@ class MarketDataWarehouse:
             filters=filters,
         )
         return int(total or 0)
+
+    def compact_ohlcv(self, dataset_name=OHLCV_DATASET):
+        """对 OHLCV 数据集进行统一压实去重。"""
+        target = self.parquet_store.compact_dataset(
+            dataset_name=dataset_name,
+            dedupe_keys=["market", "stock_code", "trade_date", "frequency", "adjust"],
+            sort_by=["ingest_time", "trade_date"],
+            layer="clean",
+        )
+        return {"dataset_path": str(target)}
 
     def close(self):
         """关闭仓库连接。"""

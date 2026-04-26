@@ -1,0 +1,94 @@
+{
+  "generated_at": "2026-04-26T22:57:35.435840",
+  "command": {
+    "db_dir": "./assets",
+    "start_date": "2014-01-01",
+    "end_date": null,
+    "frequencies": "daily,1min,5min,60min",
+    "intraday_start_date": null,
+    "intraday_years": 3,
+    "adjust": "qfq",
+    "workers": 8,
+    "flush_stocks": 64,
+    "flush_rows": 250000,
+    "limit": 20,
+    "codes": null,
+    "data_source": null,
+    "skip_existing": false,
+    "no_stock_info": false,
+    "no_compact": false
+  },
+  "summary": {
+    "status": "completed",
+    "start_date": "2014-01-01",
+    "end_date": "2026-04-26",
+    "total_stocks": 20,
+    "processed_stocks": 20,
+    "skip_existing_count": 0,
+    "success_count": 20,
+    "skipped_count": 0,
+    "failed_count": 0,
+    "rows_written": 4995,
+    "rows_by_frequency": {
+      "daily": 112,
+      "1min": 3725,
+      "5min": 1054,
+      "60min": 104
+    },
+    "success_by_frequency": {
+      "daily": 20,
+      "1min": 18,
+      "5min": 18,
+      "60min": 18
+    },
+    "missing_by_frequency": {
+      "daily": 0,
+      "1min": 2,
+      "5min": 2,
+      "60min": 2
+    },
+    "partial_count": 2,
+    "partial_details": [
+      {
+        "code": "00007",
+        "name": "智富资源投资",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 1
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      },
+      {
+        "code": "00021",
+        "name": "大中华控股",
+        "missing_frequencies": [
+          "1min",
+          "5min",
+          "60min"
+        ],
+        "available_rows": {
+          "daily": 4
+        },
+        "sources": {
+          "daily": "akshare_sina"
+        }
+      }
+    ],
+    "frequencies": [
+      "daily",
+      "1min",
+      "5min",
+      "60min"
+    ],
+    "intraday_start_date": "2023-04-26",
+    "dataset_path": "/home/ccs/code/stock_analysis_by_gpt/assets/data/clean/ohlcv",
+    "failed": [],
+    "compacted_dataset_path": "/home/ccs/code/stock_analysis_by_gpt/assets/data/clean/ohlcv"
+  }
+}

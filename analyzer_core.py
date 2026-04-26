@@ -3,7 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta
 
 from backtest import backtest_strategy
-from db_manager import DatabaseManager
+from data.store import DatabaseManager
 from indicators import calculate_technical_indicators
 from reporting import generate_strategy_comparison_report, generate_trading_strategy
 from strategy import BuyStrategy, CurrentStrategy, STRATEGY_SUITE, SellStrategy
@@ -38,13 +38,7 @@ class StockAnalyzer:
             list: 股票代码列表
         """
         try:
-            result = self.db_manager.conn.execute("""
-                SELECT DISTINCT stock_code
-                FROM kline_data
-                ORDER BY stock_code
-            """).fetchall()
-
-            return [row[0] for row in result]
+            return self.db_manager.get_all_stocks()
         except Exception as e:
             print(f"[ERROR] 获取股票列表失败: {e}")
             return []

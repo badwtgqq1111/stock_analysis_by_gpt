@@ -4,7 +4,7 @@
 
 import sys
 import time
-from data_fetcher import HKMarketListFetcher
+from data.ingest import HKMarketListFetcher
 
 print('='*80)
 print('开始多线程并发扫描全市场港股...')

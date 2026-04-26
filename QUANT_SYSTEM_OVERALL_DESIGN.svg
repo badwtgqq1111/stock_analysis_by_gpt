@@ -1,0 +1,141 @@
+<svg width="1800" height="1120" viewBox="0 0 1800 1120" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4a5568"/>
+    </marker>
+    <marker id="arrow-dashed" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#718096"/>
+    </marker>
+    <style>
+      .title { font: 700 30px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1a202c; }
+      .lane-title { font: 700 22px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1f2937; }
+      .box-title { font: 700 18px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #111827; }
+      .box-text { font: 15px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #374151; }
+      .edge-label { font: 14px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #4a5568; }
+      .lane { rx: 16; ry: 16; stroke-width: 2; }
+      .card { fill: #ffffff; stroke-width: 1.5; rx: 12; ry: 12; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1800" height="1120" fill="#f8fafc"/>
+  <text x="900" y="50" text-anchor="middle" class="title">工业级量化交易系统总体架构</text>
+
+  <rect x="40" y="100" width="280" height="520" fill="#dbeafe" stroke="#60a5fa" class="lane"/>
+  <text x="180" y="138" text-anchor="middle" class="lane-title">数据源</text>
+
+  <rect x="60" y="170" width="240" height="110" fill="#ffffff" stroke="#60a5fa" class="card"/>
+  <text x="180" y="205" text-anchor="middle" class="box-title">实时行情</text>
+  <text x="180" y="235" text-anchor="middle" class="box-text">Tick / OrderBook</text>
+
+  <rect x="60" y="310" width="240" height="110" fill="#ffffff" stroke="#60a5fa" class="card"/>
+  <text x="180" y="345" text-anchor="middle" class="box-title">历史数据</text>
+  <text x="180" y="375" text-anchor="middle" class="box-text">日频 / 分钟频</text>
+
+  <rect x="60" y="450" width="240" height="140" fill="#ffffff" stroke="#60a5fa" class="card"/>
+  <text x="180" y="485" text-anchor="middle" class="box-title">基本面与另类数据</text>
+  <text x="180" y="515" text-anchor="middle" class="box-text">财报 / 公告 / 舆情</text>
+  <text x="180" y="540" text-anchor="middle" class="box-text">产业链 / 其他外部数据</text>
+
+  <rect x="390" y="100" width="340" height="620" fill="#dcfce7" stroke="#4ade80" class="lane"/>
+  <text x="560" y="138" text-anchor="middle" class="lane-title">数据与计算基础设施层</text>
+
+  <rect x="415" y="170" width="290" height="100" fill="#ffffff" stroke="#4ade80" class="card"/>
+  <text x="560" y="203" text-anchor="middle" class="box-title">数据采集与清洗</text>
+  <text x="560" y="232" text-anchor="middle" class="box-text">ETL Pipeline</text>
+
+  <rect x="415" y="290" width="290" height="100" fill="#ffffff" stroke="#4ade80" class="card"/>
+  <text x="560" y="323" text-anchor="middle" class="box-title">内存数据库</text>
+  <text x="560" y="352" text-anchor="middle" class="box-text">Redis / Memcached</text>
+
+  <rect x="415" y="410" width="290" height="100" fill="#ffffff" stroke="#4ade80" class="card"/>
+  <text x="560" y="443" text-anchor="middle" class="box-title">高性能时序数据库</text>
+  <text x="560" y="472" text-anchor="middle" class="box-text">DolphinDB / ClickHouse</text>
+
+  <rect x="415" y="530" width="290" height="130" fill="#ffffff" stroke="#4ade80" class="card"/>
+  <text x="560" y="563" text-anchor="middle" class="box-title">数据湖</text>
+  <text x="560" y="592" text-anchor="middle" class="box-text">Parquet / DuckDB / Iceberg</text>
+  <text x="560" y="617" text-anchor="middle" class="box-text">可扩展到 MinIO / 对象存储</text>
+
+  <rect x="800" y="100" width="360" height="620" fill="#fef3c7" stroke="#f59e0b" class="lane"/>
+  <text x="980" y="138" text-anchor="middle" class="lane-title">投研与因子工厂层</text>
+
+  <rect x="830" y="170" width="300" height="100" fill="#ffffff" stroke="#f59e0b" class="card"/>
+  <text x="980" y="203" text-anchor="middle" class="box-title">特征工程</text>
+  <text x="980" y="232" text-anchor="middle" class="box-text">Alpha158 / 表达式引擎</text>
+
+  <rect x="830" y="290" width="300" height="100" fill="#ffffff" stroke="#f59e0b" class="card"/>
+  <text x="980" y="323" text-anchor="middle" class="box-title">因子挖掘与验证</text>
+  <text x="980" y="352" text-anchor="middle" class="box-text">遗传规划 / 深度学习</text>
+
+  <rect x="830" y="410" width="300" height="100" fill="#ffffff" stroke="#f59e0b" class="card"/>
+  <text x="980" y="443" text-anchor="middle" class="box-title">组合优化与风控</text>
+  <text x="980" y="472" text-anchor="middle" class="box-text">Barra 归因 / 头寸优化</text>
+
+  <rect x="830" y="530" width="300" height="130" fill="#ffffff" stroke="#f59e0b" class="card"/>
+  <text x="980" y="563" text-anchor="middle" class="box-title">策略回测平台</text>
+  <text x="980" y="592" text-anchor="middle" class="box-text">事件驱动模拟</text>
+  <text x="980" y="617" text-anchor="middle" class="box-text">绩效归因 / 实验评估</text>
+
+  <rect x="1230" y="100" width="340" height="620" fill="#fee2e2" stroke="#f87171" class="lane"/>
+  <text x="1400" y="138" text-anchor="middle" class="lane-title">策略执行与交易层</text>
+
+  <rect x="1255" y="170" width="290" height="100" fill="#ffffff" stroke="#f87171" class="card"/>
+  <text x="1400" y="203" text-anchor="middle" class="box-title">策略运行时</text>
+  <text x="1400" y="232" text-anchor="middle" class="box-text">沙箱 / 状态管理</text>
+
+  <rect x="1255" y="290" width="290" height="100" fill="#ffffff" stroke="#f87171" class="card"/>
+  <text x="1400" y="323" text-anchor="middle" class="box-title">日内信号生成</text>
+  <text x="1400" y="352" text-anchor="middle" class="box-text">流批一体实时计算</text>
+
+  <rect x="1255" y="410" width="290" height="100" fill="#ffffff" stroke="#f87171" class="card"/>
+  <text x="1400" y="443" text-anchor="middle" class="box-title">算法交易引擎</text>
+  <text x="1400" y="472" text-anchor="middle" class="box-text">下单 / 拆单 / 反拆单</text>
+
+  <rect x="1255" y="530" width="290" height="130" fill="#ffffff" stroke="#f87171" class="card"/>
+  <text x="1400" y="563" text-anchor="middle" class="box-title">订单与仓位管理</text>
+  <text x="1400" y="592" text-anchor="middle" class="box-text">OEMS / 账户状态</text>
+  <text x="1400" y="617" text-anchor="middle" class="box-text">成交回报 / 资金管理</text>
+
+  <rect x="1610" y="310" width="150" height="130" fill="#ede9fe" stroke="#a78bfa" class="lane"/>
+  <text x="1685" y="355" text-anchor="middle" class="box-title">券商</text>
+  <text x="1685" y="385" text-anchor="middle" class="box-title">交易所 API</text>
+
+  <rect x="40" y="740" width="1720" height="55" fill="#e0f2fe" stroke="#38bdf8" class="lane"/>
+  <text x="900" y="772" text-anchor="middle" class="lane-title">Web 展示与交互工作台</text>
+  <text x="900" y="790" text-anchor="middle" class="box-text">Dash + Plotly 动态展示 K 线 因子分析 组合回测与策略诊断</text>
+
+  <rect x="220" y="810" width="1360" height="220" fill="#f1f5f9" stroke="#94a3b8" class="lane"/>
+  <text x="900" y="848" text-anchor="middle" class="lane-title">监控与 DevOps</text>
+
+  <rect x="270" y="890" width="340" height="95" fill="#ffffff" stroke="#94a3b8" class="card"/>
+  <text x="440" y="922" text-anchor="middle" class="box-title">全链路监控</text>
+  <text x="440" y="950" text-anchor="middle" class="box-text">延迟 / 吞吐 / 错误日志</text>
+
+  <rect x="730" y="890" width="340" height="95" fill="#ffffff" stroke="#94a3b8" class="card"/>
+  <text x="900" y="922" text-anchor="middle" class="box-title">CI/CD</text>
+  <text x="900" y="950" text-anchor="middle" class="box-text">发布 / 回滚 / 自动测试</text>
+
+  <rect x="1190" y="890" width="340" height="95" fill="#ffffff" stroke="#94a3b8" class="card"/>
+  <text x="1360" y="922" text-anchor="middle" class="box-title">模型风险管理</text>
+  <text x="1360" y="950" text-anchor="middle" class="box-text">审计 / 告警 / 版本治理</text>
+
+  <line x1="320" y1="360" x2="390" y2="360" stroke="#4a5568" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="355" y="345" text-anchor="middle" class="edge-label">行情 历史 基本面</text>
+
+  <line x1="730" y1="360" x2="800" y2="360" stroke="#4a5568" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="765" y="345" text-anchor="middle" class="edge-label">高性能读写与计算</text>
+
+  <line x1="1160" y1="360" x2="1230" y2="360" stroke="#4a5568" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="1195" y="345" text-anchor="middle" class="edge-label">策略信号与权重</text>
+
+  <line x1="1570" y1="375" x2="1610" y2="375" stroke="#4a5568" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="1590" y="358" text-anchor="middle" class="edge-label">交易指令</text>
+
+  <path d="M 560 720 L 560 740" stroke="#4a5568" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 980 720 L 980 740" stroke="#4a5568" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 1400 720 L 1400 740" stroke="#4a5568" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+
+  <path d="M 500 810 L 500 720" stroke="#718096" stroke-width="2.5" stroke-dasharray="8 8" fill="none" marker-end="url(#arrow-dashed)"/>
+  <path d="M 900 810 L 900 720" stroke="#718096" stroke-width="2.5" stroke-dasharray="8 8" fill="none" marker-end="url(#arrow-dashed)"/>
+  <path d="M 1300 810 L 1300 720" stroke="#718096" stroke-width="2.5" stroke-dasharray="8 8" fill="none" marker-end="url(#arrow-dashed)"/>
+</svg>

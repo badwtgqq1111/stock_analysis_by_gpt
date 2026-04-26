@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """简单测试扫描优化数据库功能"""
 
-from db_manager import DatabaseManager
+from data.store import DatabaseManager
 
 def simple_test():
     """简单测试数据库功能"""

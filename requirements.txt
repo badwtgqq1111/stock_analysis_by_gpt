@@ -1,0 +1,10 @@
+duckdb
+requests
+urllib3
+pandas
+numpy
+pyarrow
+akshare
+baostock
+py-mini-racer
+demjson3

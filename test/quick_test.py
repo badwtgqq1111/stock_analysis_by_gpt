@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from db_manager import DatabaseManager
+from data.store import DatabaseManager
 
 db = DatabaseManager()
 print('数据库连接成功')

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """测试已扫描股票数据库功能"""
 
-from db_manager import DatabaseManager
+from data.store import DatabaseManager
 
 def test_scanned_stocks():
     """测试已扫描股票数据库功能"""

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """测试全市场港股扫描"""
 
-from data_fetcher import HKMarketListFetcher
+from data.ingest import HKMarketListFetcher
 import time
 
 print('开始扫描全市场港股...')

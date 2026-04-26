@@ -4,8 +4,8 @@
 快速功能验证脚本
 """
 
-from db_manager import DatabaseManager
-from data_saver import DataSaver
+from data.store import DatabaseManager
+from data.store.exporters import DataSaver
 
 # 测试1：检查数据库排序功能
 print("="*80)

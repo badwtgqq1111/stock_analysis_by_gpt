@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """测试扫描优化功能"""
 
-from db_manager import DatabaseManager
+from data.store import DatabaseManager
 import time
 
 def test_scan_optimization():

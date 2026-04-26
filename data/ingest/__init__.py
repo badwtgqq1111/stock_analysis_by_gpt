@@ -6,7 +6,14 @@
 from .base import BaseMarketDataLoader
 from .cn_stock_loader import CNStockDataLoader
 from .hk_stock_loader import HKStockDataLoader
-from .providers import CNHistoryDataFetcher, CNStockInfoFetcher, HKMarketListFetcher, HistoryDataFetcher, StockInfoFetcher
+from .providers import (
+    CNHistoryDataFetcher,
+    CNStockInfoFetcher,
+    HKCorporateActionsFetcher,
+    HKMarketListFetcher,
+    HistoryDataFetcher,
+    StockInfoFetcher,
+)
 from .service import MarketDataService
 
 __all__ = [
@@ -14,6 +21,7 @@ __all__ = [
     "CNHistoryDataFetcher",
     "CNStockDataLoader",
     "CNStockInfoFetcher",
+    "HKCorporateActionsFetcher",
     "HKMarketListFetcher",
     "HKStockDataLoader",
     "HistoryDataFetcher",

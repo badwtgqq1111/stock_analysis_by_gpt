@@ -34,7 +34,7 @@ def build_parser():
         default=3,
         help="未显式传入 intraday-start-date 时，分钟级默认回补最近多少年，默认 3",
     )
-    parser.add_argument("--adjust", default="qfq", help="复权方式，默认 qfq")
+    parser.add_argument("--adjust", default="qfq", help="复权方式: raw/qfq/hfq，默认 qfq")
     parser.add_argument("--workers", type=int, default=None, help="抓取线程数，默认自动计算")
     parser.add_argument("--flush-stocks", type=int, default=64, help="每累计多少只股票触发一次批量写入")
     parser.add_argument("--flush-rows", type=int, default=250000, help="每累计多少行触发一次批量写入")
@@ -44,6 +44,7 @@ def build_parser():
     parser.add_argument("--skip-existing", action="store_true", help="跳过 clean 层中已存在日线数据的股票")
     parser.add_argument("--no-stock-info", action="store_true", help="不写入股票基础信息，只写 K 线")
     parser.add_argument("--no-compact", action="store_true", help="完成后不做 parquet 压实去重")
+    parser.add_argument("--no-raw", action="store_true", help="不写入 raw 层原始抓取快照")
     return parser
 
 
@@ -67,6 +68,7 @@ def build_report_payload(args, summary):
             "skip_existing": args.skip_existing,
             "no_stock_info": args.no_stock_info,
             "no_compact": args.no_compact,
+            "no_raw": args.no_raw,
         },
         "summary": summary,
     }
@@ -131,6 +133,7 @@ def main():
             frequencies=frequencies,
             intraday_start_date=effective_intraday_start,
             intraday_years=args.intraday_years,
+            persist_raw=not args.no_raw,
         )
     finally:
         service.close()
@@ -146,15 +149,22 @@ def main():
     print(f"  失败: {summary.get('failed_count', 0)}")
     print(f"  增量完整跳过: {summary.get('skip_existing_count', 0)}")
     print(f"  部分成功: {summary.get('partial_count', 0)}")
+    print(f"  复权口径: {summary.get('adjust', 'qfq')}")
     print(f"  写入行数: {summary.get('rows_written', 0)}")
+    print(f"  Raw 快照数: {summary.get('raw_snapshots_written', 0)}")
     print(f"  周期: {', '.join(summary.get('frequencies', []))}")
     if summary.get("intraday_start_date"):
         print(f"  分钟级起始日期: {summary['intraday_start_date']}")
     print(f"  分周期写入: {summary.get('rows_by_frequency', {})}")
     print(f"  分周期成功股票数: {summary.get('success_by_frequency', {})}")
     print(f"  分周期缺失股票数: {summary.get('missing_by_frequency', {})}")
+    print(f"  质量问题股票数: {summary.get('quality_issue_stocks', 0)}")
+    print(f"  质量问题计数: {summary.get('quality_issue_count', 0)}")
     print(f"  数据集: {summary.get('dataset_path', 'N/A')}")
+    print(f"  Raw 数据集: {summary.get('raw_dataset_path', 'N/A')}")
     print(f"  报表: {report_path}")
+    if summary.get("adjust_profile"):
+        print(f"  复权说明: {summary['adjust_profile'].get('label', '')}")
 
     if summary.get("partial_details"):
         print("  部分成功样本:")
@@ -168,6 +178,15 @@ def main():
         print("  失败样本:")
         for item in summary["failed"][:10]:
             print(f"    - {item['code']} {item['name']}: {item['error']}")
+
+    if summary.get("quality_details"):
+        print("  质量样本:")
+        for item in summary["quality_details"][:10]:
+            frequency_summary = ", ".join(
+                f"{frequency}(E{detail['error_count']}/W{detail['warning_count']})"
+                for frequency, detail in sorted(item["frequencies"].items())
+            )
+            print(f"    - {item['code']} {item['name']}: {frequency_summary}")
 
 
 if __name__ == "__main__":

@@ -78,13 +78,27 @@ def test_hk_bulk_sync_smoke():
                     )
 
             assert summary["status"] == "completed"
+            assert summary["adjust"] == "qfq"
+            assert summary["adjust_profile"]["adjust"] == "qfq"
             assert summary["total_stocks"] == 3
             assert summary["processed_stocks"] == 3
             assert summary["success_count"] == 3
             assert summary["failed_count"] == 0
             assert summary["partial_count"] == 0
             assert summary["rows_written"] == 27
+            assert summary["raw_snapshots_written"] == 12
+            assert summary["quality_issue_stocks"] == 0
+            assert summary["quality_issue_count"] == 0
             assert summary["rows_by_frequency"] == {"daily": 9, "1min": 6, "5min": 6, "60min": 6}
+            assert summary["quality_by_frequency"] == {
+                "daily": {"error_stocks": 0, "warning_stocks": 0, "error_issues": 0, "warning_issues": 0},
+                "1min": {"error_stocks": 0, "warning_stocks": 0, "error_issues": 0, "warning_issues": 0},
+                "5min": {"error_stocks": 0, "warning_stocks": 0, "error_issues": 0, "warning_issues": 0},
+                "60min": {"error_stocks": 0, "warning_stocks": 0, "error_issues": 0, "warning_issues": 0},
+            }
+            raw_dataset = Path(summary["raw_dataset_path"])
+            assert raw_dataset.exists()
+            assert len(list(raw_dataset.rglob("*.parquet"))) == 12
 
             loaded = service.warehouse.read_ohlcv(market="HK", frequency="daily", adjust="qfq")
             assert len(loaded) == 9

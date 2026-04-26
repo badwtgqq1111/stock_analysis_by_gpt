@@ -14,7 +14,7 @@ import pandas as pd
 class ParquetDataStore:
     """基于 DuckDB 的分区 Parquet 数据集存储。"""
 
-    PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "year")
+    DEFAULT_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "year")
 
     def __init__(self, layout):
         self.layout = layout
@@ -85,19 +85,38 @@ class ParquetDataStore:
             conn.close()
         return [row[0] for row in result]
 
-    def write_frame(self, dataset_name, frame, layer="clean"):
+    def write_frame(self, dataset_name, frame, layer="clean", date_column="trade_date", partition_columns=None):
         """覆盖写入 parquet 数据集。"""
         target = self.layout.dataset_path(dataset_name, layer=layer)
-        self._overwrite_dataset(target, frame)
+        self._overwrite_dataset(
+            target,
+            frame,
+            date_column=date_column,
+            partition_columns=partition_columns or self.DEFAULT_PARTITION_COLUMNS,
+        )
         return target
 
-    def append_frame(self, dataset_name, frame, layer="clean"):
+    def append_frame(self, dataset_name, frame, layer="clean", date_column="trade_date", partition_columns=None):
         """向 parquet 数据集追加分区文件，不做去重。"""
         target = self.layout.dataset_path(dataset_name, layer=layer)
-        self._append_dataset(target, frame)
+        self._append_dataset(
+            target,
+            frame,
+            date_column=date_column,
+            partition_columns=partition_columns or self.DEFAULT_PARTITION_COLUMNS,
+        )
         return target
 
-    def upsert_frame(self, dataset_name, frame, dedupe_keys, layer="clean", sort_by=None):
+    def upsert_frame(
+        self,
+        dataset_name,
+        frame,
+        dedupe_keys,
+        layer="clean",
+        sort_by=None,
+        date_column="trade_date",
+        partition_columns=None,
+    ):
         """按主键去重后写回 parquet 数据集。"""
         existing = self.read_frame(dataset_name, layer=layer)
         combined = pd.concat([existing, frame], ignore_index=True) if not existing.empty else frame.copy()
@@ -106,10 +125,22 @@ class ParquetDataStore:
         combined.drop_duplicates(subset=dedupe_keys, keep="last", inplace=True)
         combined.reset_index(drop=True, inplace=True)
         target = self.layout.dataset_path(dataset_name, layer=layer)
-        self._overwrite_dataset(target, combined)
+        self._overwrite_dataset(
+            target,
+            combined,
+            date_column=date_column,
+            partition_columns=partition_columns or self.DEFAULT_PARTITION_COLUMNS,
+        )
         return target
 
-    def compact_dataset(self, dataset_name, dedupe_keys, sort_by=None, layer="clean"):
+    def compact_dataset(
+        self,
+        dataset_name,
+        dedupe_keys,
+        sort_by=None,
+        layer="clean",
+        partition_columns=None,
+    ):
         """使用 DuckDB 对整个数据集去重压实。"""
         if not self.dataset_exists(dataset_name, layer=layer):
             return self.layout.dataset_path(dataset_name, layer=layer)
@@ -122,7 +153,8 @@ class ParquetDataStore:
         dataset_glob = self.layout.dataset_glob(dataset_name, layer=layer)
         dataset_glob_sql = dataset_glob.replace("'", "''")
         temp_dir_sql = str(temp_dir).replace("'", "''")
-        partition_sql = ", ".join(self.PARTITION_COLUMNS)
+        effective_partition_columns = partition_columns or self.DEFAULT_PARTITION_COLUMNS
+        partition_sql = ", ".join(effective_partition_columns)
         partition_by_sql = ", ".join(dedupe_keys)
         order_sql = ", ".join(
             [f"{column} DESC" for column in (sort_by or [])]
@@ -188,7 +220,7 @@ class ParquetDataStore:
             query += f" ORDER BY {order_by}"
         return query, params
 
-    def _overwrite_dataset(self, dataset_dir, frame):
+    def _overwrite_dataset(self, dataset_dir, frame, date_column="trade_date", partition_columns=None):
         dataset_path = Path(dataset_dir)
         dataset_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -199,9 +231,10 @@ class ParquetDataStore:
             return
 
         prepared = frame.copy()
-        prepared["trade_date"] = pd.to_datetime(prepared["trade_date"], errors="coerce")
-        prepared.dropna(subset=["trade_date"], inplace=True)
-        prepared["year"] = prepared["trade_date"].dt.year.astype("int32")
+        effective_partition_columns = partition_columns or self.DEFAULT_PARTITION_COLUMNS
+        prepared[date_column] = pd.to_datetime(prepared[date_column], errors="coerce")
+        prepared.dropna(subset=[date_column], inplace=True)
+        prepared["year"] = prepared[date_column].dt.year.astype("int32")
 
         temp_dir = dataset_path.parent / f".{dataset_path.name}_tmp"
         if temp_dir.exists():
@@ -212,7 +245,7 @@ class ParquetDataStore:
         conn = duckdb.connect(database=":memory:")
         try:
             conn.register("frame_view", prepared)
-            partition_sql = ", ".join(self.PARTITION_COLUMNS)
+            partition_sql = ", ".join(effective_partition_columns)
             conn.execute(
                 f"""
                 COPY (
@@ -229,7 +262,7 @@ class ParquetDataStore:
 
         temp_dir.rename(dataset_path)
 
-    def _append_dataset(self, dataset_dir, frame):
+    def _append_dataset(self, dataset_dir, frame, date_column="trade_date", partition_columns=None):
         dataset_path = Path(dataset_dir)
         dataset_path.mkdir(parents=True, exist_ok=True)
 
@@ -237,9 +270,10 @@ class ParquetDataStore:
             return
 
         prepared = frame.copy()
-        prepared["trade_date"] = pd.to_datetime(prepared["trade_date"], errors="coerce")
-        prepared.dropna(subset=["trade_date"], inplace=True)
-        prepared["year"] = prepared["trade_date"].dt.year.astype("int32")
+        effective_partition_columns = partition_columns or self.DEFAULT_PARTITION_COLUMNS
+        prepared[date_column] = pd.to_datetime(prepared[date_column], errors="coerce")
+        prepared.dropna(subset=[date_column], inplace=True)
+        prepared["year"] = prepared[date_column].dt.year.astype("int32")
         if prepared.empty:
             return
 
@@ -247,7 +281,7 @@ class ParquetDataStore:
         conn = duckdb.connect(database=":memory:")
         try:
             conn.register("frame_view", prepared)
-            partition_sql = ", ".join(self.PARTITION_COLUMNS)
+            partition_sql = ", ".join(effective_partition_columns)
             conn.execute(
                 f"""
                 COPY (

@@ -5,7 +5,6 @@
 
 import pandas as pd
 import requests
-from datetime import time
 
 from data.ingest.providers.hk_common import ak, build_source_priority, normalize_hk_stock_code
 from data.ingest.providers.history_utils import (
@@ -17,7 +16,11 @@ from data.ingest.providers.history_utils import (
     normalize_period,
     to_akshare_intraday_period,
 )
+from data.model import get_market_calendar, normalize_adjust
 from data.store.database_manager import DatabaseManager
+
+
+HK_CALENDAR = get_market_calendar("HK")
 
 
 class HistoryDataFetcher:
@@ -26,7 +29,7 @@ class HistoryDataFetcher:
     def __init__(self, stock_code, db_dir="./assets", data_source=None, adjust="qfq", source_priority=None):
         self.stock_code = normalize_hk_stock_code(stock_code)
         self.ticker_symbol = f"hk{self.stock_code}"
-        self.default_adjust = adjust
+        self.default_adjust = normalize_adjust(adjust)
         self.source_priority = build_source_priority(data_source, source_priority)
         self.data = None
         self.last_successful_source = None
@@ -158,72 +161,16 @@ class HistoryDataFetcher:
 
     @staticmethod
     def _filter_hk_trading_session(frame, include_closing_auction=False):
-        """过滤到港股正常交易时段。"""
-        if frame is None or frame.empty:
-            return frame
-
-        morning_start = time(9, 30)
-        morning_end = time(12, 0)
-        afternoon_start = time(13, 0)
-        afternoon_end = time(16, 8) if include_closing_auction else time(16, 0)
-
-        filtered = frame.loc[
-            frame.index.map(
-                lambda ts: (morning_start <= ts.time() <= morning_end)
-                or (afternoon_start <= ts.time() <= afternoon_end)
-            )
-        ].copy()
-
-        filtered = filtered.loc[
-            ~(
-                (filtered["Volume"] <= 0)
-                & (filtered["Open"] == filtered["High"])
-                & (filtered["High"] == filtered["Low"])
-                & (filtered["Low"] == filtered["Close"])
-            )
-        ].copy()
-        return filtered
+        """兼容旧入口，内部转发到统一港股日历。"""
+        return HK_CALENDAR.filter_intraday_session(
+            frame,
+            include_closing_auction=include_closing_auction,
+        )
 
     @staticmethod
     def _resample_intraday_frame(frame, period):
-        period_rule_map = {
-            "5min": "5min",
-            "15min": "15min",
-            "30min": "30min",
-            "60min": "60min",
-        }
-        rule = period_rule_map.get(period)
-        if frame is None or frame.empty or rule is None:
-            return frame
-
-        frame = frame.sort_index().copy()
-        if frame.index.tz is not None:
-            frame.index = frame.index.tz_localize(None)
-        frame = HistoryDataFetcher._filter_hk_trading_session(frame, include_closing_auction=False)
-
-        groups = []
-        for _, day_frame in frame.groupby(frame.index.date):
-            if day_frame.empty:
-                continue
-
-            day_resampled = day_frame.resample(rule, label="right", closed="right").agg(
-                {
-                    "Open": "first",
-                    "High": "max",
-                    "Low": "min",
-                    "Close": "last",
-                    "Volume": "sum",
-                }
-            )
-            day_resampled.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
-            groups.append(day_resampled)
-
-        if not groups:
-            return pd.DataFrame(columns=["Open", "Close", "High", "Low", "Volume"])
-
-        result = pd.concat(groups).sort_index()
-        result.index.name = "date"
-        return result
+        """兼容旧入口，内部转发到统一港股日历。"""
+        return HK_CALENDAR.resample_intraday_frame(frame, period, include_closing_auction=False)
 
     def _fetch_tencent_intraday_hist(self, period, start_date=None, end_date=None, num_records=None, adjust=None):
         if period == "1min":
@@ -300,24 +247,17 @@ class HistoryDataFetcher:
         return apply_date_filters(normalized_df, start_date, end_date, num_records)
 
     def _get_next_trading_day(self, date):
-        next_day = date + pd.Timedelta(days=1)
-        if next_day.weekday() == 5:
-            next_day += pd.Timedelta(days=2)
-        elif next_day.weekday() == 6:
-            next_day += pd.Timedelta(days=1)
-        return next_day.strftime("%Y-%m-%d")
+        return HK_CALENDAR.get_next_trading_day(date).strftime("%Y-%m-%d")
 
     def _is_trading_day(self, date):
-        return date.weekday() < 5
+        return HK_CALENDAR.is_trading_day(date)
 
     def _get_last_trading_day(self, date):
-        current = date
-        while not self._is_trading_day(current):
-            current -= pd.Timedelta(days=1)
-        return current
+        return HK_CALENDAR.get_last_trading_day(date)
 
     def fetch(self, start_date=None, end_date=None, num_records=None, adjust=None, period="daily"):
         normalized_period = normalize_period(period)
+        normalized_adjust = normalize_adjust(adjust or self.default_adjust)
         print(f"[INFO] 正在获取 {self.ticker_symbol} 的 {normalized_period} 历史数据...")
 
         if is_intraday_period(normalized_period):
@@ -327,21 +267,36 @@ class HistoryDataFetcher:
                     start_date,
                     end_date,
                     num_records,
-                    adjust,
+                    normalized_adjust,
                 ),
                 "akshare_eastmoney": lambda: self._fetch_akshare_hist_min(
                     normalized_period,
                     start_date,
                     end_date,
                     num_records,
-                    adjust,
+                    normalized_adjust,
                 ),
             }
         else:
             fetchers = {
-                "akshare_sina": lambda: self._fetch_akshare_sina_hist(start_date, end_date, num_records, adjust),
-                "akshare_eastmoney": lambda: self._fetch_akshare_hist(start_date, end_date, num_records, adjust),
-                "tencent": lambda: self._fetch_tencent_hist(start_date, end_date, num_records, adjust),
+                "akshare_sina": lambda: self._fetch_akshare_sina_hist(
+                    start_date,
+                    end_date,
+                    num_records,
+                    normalized_adjust,
+                ),
+                "akshare_eastmoney": lambda: self._fetch_akshare_hist(
+                    start_date,
+                    end_date,
+                    num_records,
+                    normalized_adjust,
+                ),
+                "tencent": lambda: self._fetch_tencent_hist(
+                    start_date,
+                    end_date,
+                    num_records,
+                    normalized_adjust,
+                ),
             }
 
         for source_name in self.source_priority:

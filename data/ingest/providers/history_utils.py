@@ -8,6 +8,8 @@ import time
 import pandas as pd
 import requests
 
+from data.model.adjustments import normalize_adjust
+
 
 PERIOD_ALIASES = {
     None: "daily",
@@ -146,7 +148,8 @@ def fetch_eastmoney_intraday_ohlcv(secid, period, adjust="", start_date=None, en
         "User-Agent": "Mozilla/5.0",
         "Referer": "https://quote.eastmoney.com/",
     }
-    adjust_map = {"": "0", "qfq": "1", "hfq": "2"}
+    normalized_adjust = normalize_adjust(adjust if adjust not in {"", None} else "raw")
+    adjust_map = {"raw": "0", "qfq": "1", "hfq": "2"}
     normalized_period = normalize_period(period)
 
     if normalized_period == "1min":
@@ -175,7 +178,7 @@ def fetch_eastmoney_intraday_ohlcv(secid, period, adjust="", start_date=None, en
             "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
             "ut": "7eea3edcaed734bea9cbfc24409ed989",
             "klt": to_akshare_intraday_period(normalized_period),
-            "fqt": adjust_map[adjust],
+            "fqt": adjust_map[normalized_adjust],
             "secid": secid,
             "beg": "0",
             "end": "20500000",

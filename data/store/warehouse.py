@@ -8,7 +8,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from data.model import CLEAN_OHLCV_COLUMNS, STOCK_INFO_FIELDS
+from data.model import CLEAN_OHLCV_COLUMNS, CORPORATE_ACTION_FIELDS, FEATURE_COLUMNS, STOCK_INFO_FIELDS
 from data.store.parquet_store import ParquetDataStore
 
 
@@ -16,6 +16,10 @@ class MarketDataWarehouse:
     """管理 clean 层市场数据与元数据。"""
 
     OHLCV_DATASET = "ohlcv"
+    CORPORATE_ACTIONS_DATASET = "corporate_actions"
+    FEATURES_DATASET = "features"
+    CORPORATE_ACTIONS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "action_type", "year")
+    FEATURES_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "feature_set", "year")
 
     def __init__(self, layout):
         self.layout = layout
@@ -85,6 +89,129 @@ class MarketDataWarehouse:
             layer="clean",
         )
         return {"rows": len(payload), "dataset_path": str(target)}
+
+    def upsert_corporate_actions(self, frame, dataset_name=CORPORATE_ACTIONS_DATASET):
+        """将标准企业行为数据 upsert 到分区 parquet 数据集。"""
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="clean"))}
+
+        payload = frame[CORPORATE_ACTION_FIELDS].copy()
+        target = self.parquet_store.upsert_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "event_date", "action_type"],
+            layer="clean",
+            sort_by=["market", "stock_code", "event_date", "action_type", "ingest_time"],
+            date_column="event_date",
+            partition_columns=self.CORPORATE_ACTIONS_PARTITION_COLUMNS,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def read_corporate_actions(
+        self,
+        stock_code=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        action_type=None,
+        start_date=None,
+        end_date=None,
+        dataset_name=CORPORATE_ACTIONS_DATASET,
+    ):
+        """按条件读取 clean 层企业行为数据。"""
+        filters = {
+            "stock_code": stock_code,
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "action_type": action_type,
+        }
+        frame = self.parquet_store.read_frame(
+            dataset_name=dataset_name,
+            layer="clean",
+            filters=filters,
+            order_by="market, stock_code, event_date, action_type",
+        )
+        if frame.empty:
+            return frame
+
+        for column in ["event_date", "announcement_date", "ex_date", "record_date", "payment_date"]:
+            if column in frame.columns:
+                frame[column] = pd.to_datetime(frame[column], errors="coerce")
+        if start_date:
+            frame = frame.loc[frame["event_date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            frame = frame.loc[frame["event_date"] <= pd.to_datetime(end_date)]
+        frame.reset_index(drop=True, inplace=True)
+        return frame
+
+    def upsert_features(self, frame, dataset_name=FEATURES_DATASET):
+        """将标准特征数据 upsert 到 feature 层 parquet 数据集。"""
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="feature"))}
+
+        payload = frame[FEATURE_COLUMNS].copy()
+        target = self.parquet_store.upsert_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "trade_date", "frequency", "adjust", "feature_set", "feature_name"],
+            layer="feature",
+            sort_by=[
+                "market",
+                "stock_code",
+                "trade_date",
+                "frequency",
+                "adjust",
+                "feature_set",
+                "feature_name",
+                "ingest_time",
+            ],
+            date_column="trade_date",
+            partition_columns=self.FEATURES_PARTITION_COLUMNS,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def read_features(
+        self,
+        stock_code=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust=None,
+        feature_set=None,
+        feature_name=None,
+        start_date=None,
+        end_date=None,
+        dataset_name=FEATURES_DATASET,
+    ):
+        """按条件读取 feature 层数据。"""
+        filters = {
+            "stock_code": stock_code,
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "frequency": frequency,
+            "adjust": adjust,
+            "feature_set": feature_set,
+            "feature_name": feature_name,
+        }
+        frame = self.parquet_store.read_frame(
+            dataset_name=dataset_name,
+            layer="feature",
+            filters=filters,
+            order_by="market, stock_code, trade_date, feature_set, feature_name",
+        )
+        if frame.empty:
+            return frame
+
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        if start_date:
+            frame = frame.loc[frame["trade_date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            frame = frame.loc[frame["trade_date"] <= pd.to_datetime(end_date)]
+        frame.reset_index(drop=True, inplace=True)
+        return frame
 
     def upsert_stock_info(self, info):
         """保存标准化后的股票信息。"""

@@ -21,6 +21,7 @@ from data.ingest.providers.history_utils import (
     normalize_period,
     to_akshare_intraday_period,
 )
+from data.model import normalize_adjust
 from data.store.database_manager import DatabaseManager
 
 
@@ -31,7 +32,7 @@ class CNHistoryDataFetcher:
         self.stock_code = normalize_cn_stock_code(stock_code)
         self.symbol = normalize_cn_symbol(stock_code)
         self.prefixed_symbol = to_sina_symbol(stock_code)
-        self.default_adjust = adjust
+        self.default_adjust = normalize_adjust(adjust)
         self.source_priority = build_source_priority(data_source, source_priority)
         self.data = None
         self.last_successful_source = None
@@ -165,6 +166,7 @@ class CNHistoryDataFetcher:
 
     def fetch(self, start_date=None, end_date=None, num_records=None, adjust=None, period="daily"):
         normalized_period = normalize_period(period)
+        normalized_adjust = normalize_adjust(adjust or self.default_adjust)
         print(f"[INFO] 正在获取 {self.stock_code} 的 {normalized_period} 历史数据...")
 
         if is_intraday_period(normalized_period):
@@ -174,14 +176,14 @@ class CNHistoryDataFetcher:
                     start_date,
                     end_date,
                     num_records,
-                    adjust,
+                    normalized_adjust,
                 ),
                 "akshare_eastmoney": lambda: self._fetch_akshare_eastmoney_intraday_hist(
                     normalized_period,
                     start_date,
                     end_date,
                     num_records,
-                    adjust,
+                    normalized_adjust,
                 ),
             }
         else:
@@ -190,19 +192,19 @@ class CNHistoryDataFetcher:
                     start_date,
                     end_date,
                     num_records,
-                    adjust,
+                    normalized_adjust,
                 ),
                 "akshare_eastmoney": lambda: self._fetch_akshare_eastmoney_daily_hist(
                     start_date,
                     end_date,
                     num_records,
-                    adjust,
+                    normalized_adjust,
                 ),
                 "tencent": lambda: self._fetch_tencent_daily_hist(
                     start_date,
                     end_date,
                     num_records,
-                    adjust,
+                    normalized_adjust,
                 ),
             }
 

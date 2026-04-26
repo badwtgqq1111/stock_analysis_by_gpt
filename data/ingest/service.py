@@ -11,11 +11,22 @@ import pandas as pd
 
 from data.ingest.cn_stock_loader import CNStockDataLoader
 from data.ingest.hk_stock_loader import HKStockDataLoader
-from data.ingest.providers import HKMarketListFetcher, HistoryDataFetcher
+from data.ingest.providers import HKCorporateActionsFetcher, HKMarketListFetcher, HistoryDataFetcher
 from data.ingest.providers.history_utils import normalize_period
-from data.model import normalize_ohlcv_frame, normalize_stock_code, normalize_stock_info
+from data.model import (
+    get_adjustment_profile,
+    normalize_adjust,
+    normalize_corporate_actions_frame,
+    normalize_feature_frame,
+    normalize_ohlcv_frame,
+    normalize_stock_code,
+    normalize_stock_info,
+    validate_ohlcv_frame,
+)
 from data.store.layout import DataLayout
+from data.store.raw_store import RawDataStore
 from data.store.warehouse import MarketDataWarehouse
+from factor_engine import FactorContext, create_factor_set, list_factor_sets as list_registered_factor_sets
 
 
 class MarketDataService:
@@ -33,6 +44,7 @@ class MarketDataService:
     def __init__(self, base_dir="./assets/data", data_source="akshare"):
         self.layout = DataLayout(base_dir=base_dir)
         self.warehouse = MarketDataWarehouse(self.layout)
+        self.raw_store = RawDataStore(self.layout)
         self.hk_loader = HKStockDataLoader(
             base_dir=base_dir,
             data_source=data_source,
@@ -47,48 +59,52 @@ class MarketDataService:
 
     def sync_hk_stock(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily"):
         """同步单只港股到统一数据层。"""
+        normalized_adjust = normalize_adjust(adjust)
         return self.hk_loader.sync(
             stock_code=stock_code,
             start_date=start_date,
             end_date=end_date,
             num_records=num_records,
-            adjust=adjust,
+            adjust=normalized_adjust,
             period=period,
             include_info=True,
         )
 
     def sync_cn_stock(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily"):
         """同步单只 A 股到统一数据层。"""
+        normalized_adjust = normalize_adjust(adjust)
         return self.cn_loader.sync(
             stock_code=stock_code,
             start_date=start_date,
             end_date=end_date,
             num_records=num_records,
-            adjust=adjust,
+            adjust=normalized_adjust,
             period=period,
             include_info=True,
         )
 
     def get_hk_ohlcv(self, stock_code, start_date=None, end_date=None, frequency="daily", adjust="qfq"):
         """读取统一 clean 层中的港股 OHLCV 数据。"""
+        normalized_adjust = normalize_adjust(adjust)
         return self.warehouse.read_ohlcv(
             stock_code=normalize_stock_code(stock_code, market="HK"),
             market="HK",
             start_date=start_date,
             end_date=end_date,
             frequency=frequency,
-            adjust=adjust,
+            adjust=normalized_adjust,
         )
 
     def get_cn_ohlcv(self, stock_code, start_date=None, end_date=None, frequency="daily", adjust="qfq"):
         """读取统一 clean 层中的 A 股 OHLCV 数据。"""
+        normalized_adjust = normalize_adjust(adjust)
         return self.warehouse.read_ohlcv(
             stock_code=normalize_stock_code(stock_code, market="CN"),
             market="CN",
             start_date=start_date,
             end_date=end_date,
             frequency=frequency,
-            adjust=adjust,
+            adjust=normalized_adjust,
         )
 
     def get_hk_stock_info(self, stock_code):
@@ -96,6 +112,234 @@ class MarketDataService:
         return self.warehouse.get_stock_info(
             normalize_stock_code(stock_code, market="HK"),
             market="HK",
+        )
+
+    def write_feature_frame(
+        self,
+        frame,
+        stock_code,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        feature_set="default",
+        source=None,
+        feature_columns=None,
+    ):
+        """将宽表或长表特征结果写入 feature 层。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+        normalized_frame = normalize_feature_frame(
+            frame,
+            stock_code=stock_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            feature_set=feature_set,
+            source=source,
+            feature_columns=feature_columns,
+        )
+        return self.warehouse.upsert_features(normalized_frame)
+
+    def get_feature_frame(
+        self,
+        stock_code=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust="qfq",
+        feature_set=None,
+        feature_name=None,
+        start_date=None,
+        end_date=None,
+    ):
+        """读取 feature 层特征数据。"""
+        normalized_adjust = normalize_adjust(adjust) if adjust is not None else None
+        normalized_market = (market.upper() if market else None)
+        normalized_code = normalize_stock_code(stock_code, market=normalized_market or "HK") if stock_code else None
+        return self.warehouse.read_features(
+            stock_code=normalized_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            feature_set=feature_set,
+            feature_name=feature_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def list_factor_sets(self):
+        """返回当前已注册的因子集。"""
+        return list_registered_factor_sets()
+
+    def compute_factor_set(
+        self,
+        stock_code,
+        factor_set,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        start_date=None,
+        end_date=None,
+        persist=False,
+        source="factor_engine",
+        config=None,
+    ):
+        """从 clean 层读取 OHLCV，计算指定因子集。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+        normalized_code = normalize_stock_code(stock_code, market=normalized_market)
+        ohlcv = self.warehouse.read_ohlcv(
+            stock_code=normalized_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if ohlcv.empty:
+            return {
+                "rows": 0,
+                "stock_code": normalized_code,
+                "market": normalized_market,
+                "factor_set": factor_set,
+                "feature_frame": pd.DataFrame(),
+                "write_result": None,
+            }
+
+        factor = create_factor_set(factor_set, config=config)
+        context = FactorContext(
+            stock_code=normalized_code,
+            market=normalized_market,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            exchange=exchange,
+            asset_type=asset_type,
+        )
+        feature_frame = factor.transform(ohlcv, context=context)
+        feature_frame = feature_frame.replace([float("inf"), float("-inf")], pd.NA)
+        write_result = None
+        if persist and not feature_frame.empty:
+            write_result = self.write_feature_frame(
+                feature_frame,
+                stock_code=normalized_code,
+                market=normalized_market,
+                exchange=exchange,
+                asset_type=asset_type,
+                frequency=frequency,
+                adjust=normalized_adjust,
+                feature_set=factor_set,
+                source=source,
+                feature_columns=list(feature_frame.columns),
+            )
+
+        return {
+            "rows": len(feature_frame),
+            "stock_code": normalized_code,
+            "market": normalized_market,
+            "factor_set": factor_set,
+            "feature_frame": feature_frame,
+            "write_result": write_result,
+            "metadata": factor.metadata().to_dict(),
+        }
+
+    def sync_factor_set(
+        self,
+        stock_code,
+        factor_set,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        start_date=None,
+        end_date=None,
+        source="factor_engine",
+        config=None,
+    ):
+        """计算并落库指定因子集。"""
+        return self.compute_factor_set(
+            stock_code=stock_code,
+            factor_set=factor_set,
+            market=market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=adjust,
+            start_date=start_date,
+            end_date=end_date,
+            persist=True,
+            source=source,
+            config=config,
+        )
+
+    def sync_hk_corporate_actions(self, stock_code, start_date=None, end_date=None, num_records=None, persist_raw=True):
+        """同步单只港股企业行为到统一数据层。"""
+        normalized_code = normalize_stock_code(stock_code, market="HK")
+        fetcher = HKCorporateActionsFetcher(normalized_code)
+        frame = fetcher.fetch(
+            start_date=start_date,
+            end_date=end_date,
+            num_records=num_records,
+        )
+        result = {
+            "rows": 0,
+            "source": fetcher.last_successful_source,
+            "dataset_path": str(self.layout.dataset_path(self.warehouse.CORPORATE_ACTIONS_DATASET, layer="clean")),
+            "raw_snapshot_path": None,
+        }
+        if frame is None or frame.empty:
+            return result
+
+        normalized_frame = normalize_corporate_actions_frame(
+            frame,
+            stock_code=normalized_code,
+            market="HK",
+            exchange="HKEX",
+            asset_type="equity",
+            source=fetcher.last_successful_source or "unknown",
+        )
+        if normalized_frame.empty:
+            return result
+
+        if persist_raw:
+            raw_snapshot_path = self.raw_store.write_corporate_actions_snapshot(
+                normalized_frame,
+                stock_code=normalized_code,
+                market="HK",
+                exchange="HKEX",
+                asset_type="equity",
+                source=fetcher.last_successful_source or "unknown",
+                request_start_date=start_date,
+                request_end_date=end_date,
+            )
+            result["raw_snapshot_path"] = str(raw_snapshot_path) if raw_snapshot_path is not None else None
+
+        warehouse_result = self.warehouse.upsert_corporate_actions(normalized_frame)
+        result["rows"] = warehouse_result["rows"]
+        result["dataset_path"] = warehouse_result["dataset_path"]
+        return result
+
+    def get_hk_corporate_actions(self, stock_code=None, start_date=None, end_date=None, action_type=None):
+        """读取统一 clean 层中的港股企业行为数据。"""
+        return self.warehouse.read_corporate_actions(
+            stock_code=normalize_stock_code(stock_code, market="HK") if stock_code else None,
+            market="HK",
+            exchange="HKEX",
+            asset_type="equity",
+            action_type=action_type,
+            start_date=start_date,
+            end_date=end_date,
         )
 
     def get_cn_stock_info(self, stock_code):
@@ -126,8 +370,11 @@ class MarketDataService:
         frequencies=("daily",),
         intraday_start_date=None,
         intraday_years=3,
+        persist_raw=True,
     ):
         """高并发抓取港股多周期历史数据并批量落库。"""
+        normalized_adjust = normalize_adjust(adjust)
+        adjust_profile = get_adjustment_profile(normalized_adjust)
         target_end_date = end_date or datetime.now().strftime("%Y-%m-%d")
         effective_data_source = data_source or self.data_source
         max_workers = max_workers or min(24, max(8, (os.cpu_count() or 8) * 2))
@@ -222,7 +469,7 @@ class MarketDataService:
                     exchange="HKEX",
                     asset_type="equity",
                     frequency=frequency,
-                    adjust=adjust,
+                    adjust=normalized_adjust,
                 )
                 is_fresh = _is_frequency_fresh(latest_trade_date, plan["end_date"], frequency)
                 should_fetch = not (skip_existing and is_fresh)
@@ -287,6 +534,19 @@ class MarketDataService:
         missing_by_frequency = {plan["frequency"]: 0 for plan in period_plans}
         partial_count = 0
         partial_details = []
+        raw_snapshots_written = 0
+        quality_issue_stocks = 0
+        quality_issue_count = 0
+        quality_details = []
+        quality_by_frequency = {
+            plan["frequency"]: {
+                "error_stocks": 0,
+                "warning_stocks": 0,
+                "error_issues": 0,
+                "warning_issues": 0,
+            }
+            for plan in period_plans
+        }
 
         def build_basic_stock_info(stock):
             return normalize_stock_info(
@@ -306,17 +566,24 @@ class MarketDataService:
             source_by_frequency = {}
             period_rows = {}
             raw_frame_cache = {}
+            raw_snapshot_paths = []
+            quality_reports = {}
             for request in stock["period_requests"]:
                 frequency = request["frequency"]
                 if not request["should_fetch"]:
                     period_rows[frequency] = 0
                     continue
-                fetcher = HistoryDataFetcher(code, db_dir=None, data_source=effective_data_source, adjust=adjust)
+                fetcher = HistoryDataFetcher(
+                    code,
+                    db_dir=None,
+                    data_source=effective_data_source,
+                    adjust=normalized_adjust,
+                )
                 raw_frame = fetcher.fetch(
                     start_date=request["start_date"],
                     end_date=request["end_date"],
                     period=frequency,
-                    adjust=adjust,
+                    adjust=normalized_adjust,
                 )
                 if frequency == "1min" and raw_frame is not None and not raw_frame.empty:
                     raw_frame_cache["1min"] = raw_frame.copy()
@@ -346,10 +613,30 @@ class MarketDataService:
                     asset_type="equity",
                     frequency=frequency,
                     source=fetcher.last_successful_source or effective_data_source,
-                    adjust=adjust,
+                    adjust=normalized_adjust,
                     currency="HKD",
                 )
                 if normalized_frame is not None and not normalized_frame.empty:
+                    quality_reports[frequency] = validate_ohlcv_frame(
+                        normalized_frame,
+                        market="HK",
+                        frequency=frequency,
+                    )
+                    if persist_raw:
+                        snapshot_path = self.raw_store.write_ohlcv_snapshot(
+                            raw_frame,
+                            stock_code=code,
+                            market="HK",
+                            exchange="HKEX",
+                            asset_type="equity",
+                            frequency=frequency,
+                            source=fetcher.last_successful_source or effective_data_source,
+                            adjust=normalized_adjust,
+                            request_start_date=request["start_date"],
+                            request_end_date=request["end_date"],
+                        )
+                        if snapshot_path is not None:
+                            raw_snapshot_paths.append(str(snapshot_path))
                     normalized_frames.append(normalized_frame)
                     source_by_frequency[frequency] = fetcher.last_successful_source or effective_data_source
                     period_rows[frequency] = len(normalized_frame)
@@ -369,6 +656,8 @@ class MarketDataService:
                 "sources": source_by_frequency,
                 "period_rows": period_rows,
                 "period_requests": stock["period_requests"],
+                "raw_snapshot_paths": raw_snapshot_paths,
+                "quality_reports": quality_reports,
                 "info": info,
             }
 
@@ -422,10 +711,49 @@ class MarketDataService:
                         print(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [SKIP] 无有效历史数据")
                         continue
 
+                    stock_quality_summary = {}
+                    for frequency, report in sorted(result["quality_reports"].items()):
+                        frequency_bucket = quality_by_frequency.setdefault(
+                            frequency,
+                            {
+                                "error_stocks": 0,
+                                "warning_stocks": 0,
+                                "error_issues": 0,
+                                "warning_issues": 0,
+                            },
+                        )
+                        if report["error_count"] > 0:
+                            frequency_bucket["error_stocks"] += 1
+                            frequency_bucket["error_issues"] += int(report["error_count"])
+                        if report["warning_count"] > 0:
+                            frequency_bucket["warning_stocks"] += 1
+                            frequency_bucket["warning_issues"] += int(report["warning_count"])
+                        if report["error_count"] > 0 or report["warning_count"] > 0:
+                            stock_quality_summary[frequency] = {
+                                "error_count": int(report["error_count"]),
+                                "warning_count": int(report["warning_count"]),
+                                "issue_counts": dict(sorted(report["issue_counts"].items())),
+                            }
+
+                    if stock_quality_summary:
+                        quality_issue_stocks += 1
+                        quality_issue_count += sum(
+                            item["error_count"] + item["warning_count"]
+                            for item in stock_quality_summary.values()
+                        )
+                        quality_details.append(
+                            {
+                                "code": code,
+                                "name": name,
+                                "frequencies": stock_quality_summary,
+                            }
+                        )
+
                     history_frames.append(frame)
                     pending_rows += len(frame)
                     pending_stocks += 1
                     success_count += 1
+                    raw_snapshots_written += len(result["raw_snapshot_paths"])
                     status_label = "OK" if not missing_frequencies else "PARTIAL"
                     if missing_frequencies:
                         partial_count += 1
@@ -462,6 +790,12 @@ class MarketDataService:
                     )
                     if missing_frequencies:
                         print(f"                 缺失周期={', '.join(missing_frequencies)}")
+                    if stock_quality_summary:
+                        quality_stats = ", ".join(
+                            f"{frequency}(E{item['error_count']}/W{item['warning_count']})"
+                            for frequency, item in stock_quality_summary.items()
+                        )
+                        print(f"                 质量提示={quality_stats}")
 
                     if pending_stocks >= flush_stock_count or pending_rows >= flush_row_count:
                         flush_batch()
@@ -482,6 +816,13 @@ class MarketDataService:
             "status": "completed",
             "start_date": start_date,
             "end_date": target_end_date,
+            "adjust": normalized_adjust,
+            "adjust_profile": {
+                "adjust": adjust_profile.adjust,
+                "label": adjust_profile.label,
+                "description": adjust_profile.description,
+                "requires_corporate_actions": adjust_profile.requires_corporate_actions,
+            },
             "total_stocks": requested_total_stocks,
             "processed_stocks": len(stocks),
             "skip_existing_count": fully_skipped_stocks,
@@ -489,9 +830,15 @@ class MarketDataService:
             "skipped_count": skipped_count,
             "failed_count": len(failed),
             "rows_written": rows_written,
+            "raw_snapshots_written": raw_snapshots_written,
+            "raw_dataset_path": str(self.layout.dataset_path(self.raw_store.RAW_OHLCV_DATASET, layer="raw")),
             "rows_by_frequency": rows_by_frequency,
             "success_by_frequency": success_by_frequency,
             "missing_by_frequency": missing_by_frequency,
+            "quality_issue_stocks": quality_issue_stocks,
+            "quality_issue_count": quality_issue_count,
+            "quality_by_frequency": quality_by_frequency,
+            "quality_details": quality_details,
             "partial_count": partial_count,
             "partial_details": partial_details,
             "frequencies": frequency_list,
@@ -510,8 +857,12 @@ class MarketDataService:
         print(f"  失败: {summary['failed_count']}")
         print(f"  增量完整跳过: {summary['skip_existing_count']}")
         print(f"  部分成功: {summary['partial_count']}")
+        print(f"  复权口径: {summary['adjust']}")
         print(f"  写入行数: {summary['rows_written']}")
+        print(f"  Raw 快照数: {summary['raw_snapshots_written']}")
         print(f"  分周期写入: {summary['rows_by_frequency']}")
         print(f"  分周期成功股票数: {summary['success_by_frequency']}")
         print(f"  分周期缺失股票数: {summary['missing_by_frequency']}")
+        print(f"  质量问题股票数: {summary['quality_issue_stocks']}")
+        print(f"  质量问题计数: {summary['quality_issue_count']}")
         return summary

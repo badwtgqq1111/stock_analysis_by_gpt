@@ -8,6 +8,8 @@ import re
 
 import pandas as pd
 
+from .adjustments import normalize_adjust
+
 
 CLEAN_OHLCV_COLUMNS = [
     "trade_date",
@@ -24,6 +26,21 @@ CLEAN_OHLCV_COLUMNS = [
     "source",
     "adjust",
     "currency",
+    "ingest_time",
+]
+
+FEATURE_COLUMNS = [
+    "trade_date",
+    "stock_code",
+    "market",
+    "exchange",
+    "asset_type",
+    "frequency",
+    "adjust",
+    "feature_set",
+    "feature_name",
+    "feature_value",
+    "source",
     "ingest_time",
 ]
 
@@ -134,6 +151,7 @@ def normalize_ohlcv_frame(
     normalized_code = normalize_stock_code(stock_code, market=normalized_market)
     normalized_exchange = (exchange or infer_exchange(normalized_code, market=normalized_market)).upper()
     normalized_currency = (currency or DEFAULT_CURRENCY_BY_MARKET.get(normalized_market, normalized_market)).upper()
+    normalized_adjust = normalize_adjust(adjust)
 
     working = frame.copy()
     rename_mapping = {
@@ -179,7 +197,7 @@ def normalize_ohlcv_frame(
     working["asset_type"] = asset_type
     working["frequency"] = frequency
     working["source"] = source or "unknown"
-    working["adjust"] = adjust
+    working["adjust"] = normalized_adjust
     working["currency"] = normalized_currency
     working["ingest_time"] = pd.Timestamp.utcnow()
 
@@ -192,6 +210,104 @@ def normalize_ohlcv_frame(
     )
     working.reset_index(drop=True, inplace=True)
     return working
+
+
+def normalize_feature_frame(
+    frame,
+    stock_code,
+    market="HK",
+    exchange=None,
+    asset_type="equity",
+    frequency="daily",
+    adjust="qfq",
+    feature_set="default",
+    source=None,
+    feature_columns=None,
+):
+    """将宽表或长表特征数据统一为 feature 层长表格式。"""
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=FEATURE_COLUMNS)
+
+    normalized_market = (market or "HK").upper()
+    normalized_code = normalize_stock_code(stock_code, market=normalized_market)
+    normalized_exchange = (exchange or infer_exchange(normalized_code, market=normalized_market)).upper()
+    normalized_adjust = normalize_adjust(adjust)
+
+    working = frame.copy()
+    rename_mapping = {
+        "date": "trade_date",
+        "Date": "trade_date",
+        "datetime": "trade_date",
+        "trade_date": "trade_date",
+        "feature_name": "feature_name",
+        "factor_name": "feature_name",
+        "name": "feature_name",
+        "feature_value": "feature_value",
+        "factor_value": "feature_value",
+        "value": "feature_value",
+    }
+    working.rename(columns=rename_mapping, inplace=True)
+
+    if "trade_date" not in working.columns:
+        if working.index.name in {"date", "trade_date"} or isinstance(working.index, pd.DatetimeIndex):
+            working = working.reset_index().rename(columns={working.index.name or "index": "trade_date"})
+        else:
+            raise ValueError("输入特征数据缺少 trade_date/date 列")
+
+    metadata_columns = {
+        "trade_date",
+        "stock_code",
+        "market",
+        "exchange",
+        "asset_type",
+        "frequency",
+        "adjust",
+        "feature_set",
+        "feature_name",
+        "feature_value",
+        "source",
+        "ingest_time",
+    }
+
+    if {"feature_name", "feature_value"}.issubset(working.columns):
+        long_frame = working[["trade_date", "feature_name", "feature_value"]].copy()
+    else:
+        target_feature_columns = list(feature_columns or [])
+        if not target_feature_columns:
+            target_feature_columns = [column for column in working.columns if column not in metadata_columns]
+        if not target_feature_columns:
+            raise ValueError("未找到可写入 feature 层的特征列")
+        long_frame = working.melt(
+            id_vars=["trade_date"],
+            value_vars=target_feature_columns,
+            var_name="feature_name",
+            value_name="feature_value",
+        )
+
+    long_frame["trade_date"] = pd.to_datetime(long_frame["trade_date"], errors="coerce")
+    long_frame.dropna(subset=["trade_date", "feature_name"], inplace=True)
+    long_frame["feature_value"] = pd.to_numeric(long_frame["feature_value"], errors="coerce")
+    long_frame.dropna(subset=["feature_value"], inplace=True)
+
+    long_frame["stock_code"] = normalized_code
+    long_frame["market"] = normalized_market
+    long_frame["exchange"] = normalized_exchange
+    long_frame["asset_type"] = asset_type
+    long_frame["frequency"] = frequency
+    long_frame["adjust"] = normalized_adjust
+    long_frame["feature_set"] = str(feature_set or "default").strip() or "default"
+    long_frame["source"] = source or "unknown"
+    long_frame["ingest_time"] = pd.Timestamp.utcnow()
+
+    long_frame = long_frame[FEATURE_COLUMNS].copy()
+    long_frame.sort_values(["trade_date", "feature_set", "feature_name"], inplace=True)
+    long_frame.drop_duplicates(
+        subset=["market", "stock_code", "trade_date", "frequency", "adjust", "feature_set", "feature_name"],
+        keep="last",
+        inplace=True,
+    )
+    long_frame.reset_index(drop=True, inplace=True)
+    return long_frame
 
 
 def normalize_stock_info(

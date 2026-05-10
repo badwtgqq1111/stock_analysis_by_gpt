@@ -8,7 +8,14 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from data.model import CLEAN_OHLCV_COLUMNS, CORPORATE_ACTION_FIELDS, FEATURE_COLUMNS, STOCK_INFO_FIELDS
+from data.model import (
+    CLEAN_OHLCV_COLUMNS,
+    CORPORATE_ACTION_FIELDS,
+    FEATURE_COLUMNS,
+    SIGNAL_COLUMNS,
+    STOCK_INFO_FIELDS,
+    TRADE_COLUMNS,
+)
 from data.store.parquet_store import ParquetDataStore
 
 
@@ -18,8 +25,12 @@ class MarketDataWarehouse:
     OHLCV_DATASET = "ohlcv"
     CORPORATE_ACTIONS_DATASET = "corporate_actions"
     FEATURES_DATASET = "features"
+    SIGNALS_DATASET = "signals"
+    TRADES_DATASET = "trades"
     CORPORATE_ACTIONS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "action_type", "year")
     FEATURES_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "feature_set", "year")
+    SIGNALS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "signal_set", "year")
+    TRADES_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "account_id", "year")
 
     def __init__(self, layout):
         self.layout = layout
@@ -201,6 +212,148 @@ class MarketDataWarehouse:
             layer="feature",
             filters=filters,
             order_by="market, stock_code, trade_date, feature_set, feature_name",
+        )
+        if frame.empty:
+            return frame
+
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        if start_date:
+            frame = frame.loc[frame["trade_date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            frame = frame.loc[frame["trade_date"] <= pd.to_datetime(end_date)]
+        frame.reset_index(drop=True, inplace=True)
+        return frame
+
+    def upsert_signals(self, frame, dataset_name=SIGNALS_DATASET):
+        """将标准信号数据 upsert 到 signal 层 parquet 数据集。"""
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="signal"))}
+
+        payload = frame[SIGNAL_COLUMNS].copy()
+        target = self.parquet_store.upsert_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "trade_date", "frequency", "adjust", "signal_set", "signal_type"],
+            layer="signal",
+            sort_by=[
+                "market",
+                "stock_code",
+                "trade_date",
+                "frequency",
+                "adjust",
+                "signal_set",
+                "signal_type",
+                "ingest_time",
+            ],
+            date_column="trade_date",
+            partition_columns=self.SIGNALS_PARTITION_COLUMNS,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def read_signals(
+        self,
+        stock_code=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust=None,
+        signal_set=None,
+        signal_type=None,
+        batch_id=None,
+        strategy_name=None,
+        start_date=None,
+        end_date=None,
+        dataset_name=SIGNALS_DATASET,
+    ):
+        """按条件读取 signal 层数据。"""
+        filters = {
+            "stock_code": stock_code,
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "frequency": frequency,
+            "adjust": adjust,
+            "signal_set": signal_set,
+            "signal_type": signal_type,
+            "batch_id": batch_id,
+            "strategy_name": strategy_name,
+        }
+        frame = self.parquet_store.read_frame(
+            dataset_name=dataset_name,
+            layer="signal",
+            filters=filters,
+            order_by="market, stock_code, trade_date, signal_set, signal_type",
+        )
+        if frame.empty:
+            return frame
+
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        if start_date:
+            frame = frame.loc[frame["trade_date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            frame = frame.loc[frame["trade_date"] <= pd.to_datetime(end_date)]
+        frame.reset_index(drop=True, inplace=True)
+        return frame
+
+    def upsert_trades(self, frame, dataset_name=TRADES_DATASET):
+        """将标准成交数据 upsert 到 trade 层 parquet 数据集。"""
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="trade"))}
+
+        payload = frame[TRADE_COLUMNS].copy()
+        target = self.parquet_store.upsert_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "trade_date", "account_id", "order_id"],
+            layer="trade",
+            sort_by=[
+                "market",
+                "stock_code",
+                "trade_date",
+                "account_id",
+                "order_id",
+                "ingest_time",
+            ],
+            date_column="trade_date",
+            partition_columns=self.TRADES_PARTITION_COLUMNS,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def read_trades(
+        self,
+        stock_code=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust=None,
+        account_id=None,
+        strategy_name=None,
+        order_id=None,
+        trade_type=None,
+        start_date=None,
+        end_date=None,
+        dataset_name=TRADES_DATASET,
+    ):
+        """按条件读取 trade 层数据。"""
+        filters = {
+            "stock_code": stock_code,
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "frequency": frequency,
+            "adjust": adjust,
+            "account_id": account_id,
+            "strategy_name": strategy_name,
+            "order_id": order_id,
+            "trade_type": trade_type,
+        }
+        frame = self.parquet_store.read_frame(
+            dataset_name=dataset_name,
+            layer="trade",
+            filters=filters,
+            order_by="market, stock_code, trade_date, account_id, order_id",
         )
         if frame.empty:
             return frame

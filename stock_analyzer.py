@@ -5,11 +5,15 @@
 """
 
 import argparse
+from copy import deepcopy
+import hashlib
+import json
 from pathlib import Path
 import pandas as pd
 import warnings
 
 from analyzer_core import StockAnalyzer
+from data.ingest.service import MarketDataService
 from reporting import (
     analyze_buy_points,
     analyze_target_date_alignment,
@@ -29,10 +33,304 @@ __all__ = [
     "SellStrategy",
     "CurrentStrategy",
     "main",
+    "main_all_hk",
+    "main_factor_report",
+    "main_review_batch",
     "main_strategy_suite",
     "analyze_single_stock_with_visualization",
     "create_visualization_charts",
+    "run_cli",
 ]
+
+
+def _safe_close_analyzer(analyzer):
+    close_method = getattr(analyzer, "close", None)
+    if callable(close_method):
+        close_method()
+
+
+def _format_factor_reason_lines(item):
+    explanation = (item or {}).get("factor_explanation") or {}
+    component_scores = explanation.get("component_scores") or {}
+    component_weights = explanation.get("component_weights") or {}
+    top_positive = explanation.get("top_positive_factors") or []
+    if not explanation:
+        return []
+
+    lines = []
+    lines.append(
+        "  因子总分: "
+        f"composite={component_scores.get('composite_score', float('nan')):.1f}, "
+        f"trend={component_scores.get('trend_score', float('nan')):.1f}, "
+        f"quality={component_scores.get('quality_score', float('nan')):.1f}, "
+        f"risk={component_scores.get('risk_score', float('nan')):.1f}"
+    )
+    lines.append(
+        "  组件权重: "
+        f"trend={component_weights.get('trend_score', 0):.2f}, "
+        f"quality={component_weights.get('quality_score', 0):.2f}, "
+        f"risk={component_weights.get('risk_score', 0):.2f}"
+    )
+    if top_positive:
+        factor_parts = []
+        for factor in top_positive[:3]:
+            factor_parts.append(
+                f"{factor.get('factor')}("
+                f"w={factor.get('weight', 0):.2f}, "
+                f"score={factor.get('score', float('nan')):.1f}, "
+                f"contrib={factor.get('weighted_contribution', float('nan')):.2f})"
+            )
+        lines.append("  主要因子: " + ", ".join(factor_parts))
+    return lines
+
+
+def _parse_horizons(raw_value):
+    if raw_value is None:
+        return (1, 5, 10, 20)
+    if isinstance(raw_value, (tuple, list)):
+        return tuple(int(item) for item in raw_value)
+    values = []
+    for chunk in str(raw_value).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        values.append(int(chunk))
+    return tuple(values or [1, 5, 10, 20])
+
+
+def _build_current_factor_weight_table(score_config):
+    rows = []
+    config = score_config or {}
+    component_weights = config.get("weights", {})
+    for component_name in ("trend", "quality", "risk"):
+        component_weight = float(component_weights.get(f"{component_name}_score", 0.0))
+        for factor_name, rule in (config.get(component_name, {}) or {}).items():
+            rows.append(
+                {
+                    "component": component_name,
+                    "factor": factor_name,
+                    "configured_factor_weight": float(rule.get("weight", 0.0)),
+                    "configured_component_weight": component_weight,
+                    "direction": "higher_is_better" if bool(rule.get("higher_is_better", True)) else "lower_is_better",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _merge_recommended_factor_weights(score_config, factor_scorecard):
+    base_config = deepcopy(score_config or {})
+    scorecard = factor_scorecard if isinstance(factor_scorecard, pd.DataFrame) else pd.DataFrame()
+    if scorecard.empty or "component" not in scorecard.columns:
+        return base_config
+    factor_name_column = "factor" if "factor" in scorecard.columns else ("feature_name" if "feature_name" in scorecard.columns else None)
+    if factor_name_column is None:
+        return base_config
+    for component_name in ("trend", "quality", "risk"):
+        component_rows = scorecard[scorecard["component"].fillna("") == component_name].copy()
+        if component_rows.empty or "recommended_factor_weight" not in component_rows.columns:
+            continue
+        recommended = pd.to_numeric(component_rows["recommended_factor_weight"], errors="coerce")
+        if recommended.notna().any() and recommended.fillna(0).sum() > 0:
+            for _, row in component_rows.iterrows():
+                factor_name = row.get(factor_name_column)
+                if not factor_name:
+                    continue
+                weight_value = row.get("recommended_factor_weight")
+                if pd.isna(weight_value):
+                    continue
+                base_config.setdefault(component_name, {})
+                if factor_name in base_config[component_name]:
+                    base_config[component_name][factor_name]["weight"] = float(weight_value)
+    return base_config
+
+
+def _build_validation_cache_key(
+    factor_set,
+    validation_days,
+    validation_horizons,
+    validation_quantiles,
+    validation_min_observations,
+    validation_stock_codes,
+    validation_factor_scope="all",
+    validated_feature_names=None,
+):
+    stock_codes = list(validation_stock_codes or [])
+    stock_code_hash = hashlib.sha1("\n".join(stock_codes).encode("utf-8")).hexdigest() if stock_codes else "none"
+    validated_feature_names = [str(item) for item in (validated_feature_names or []) if str(item).strip()]
+    identity = {
+        "factor_set": factor_set,
+        "validation_days": int(validation_days),
+        "validation_horizons": [int(item) for item in validation_horizons],
+        "validation_quantiles": int(validation_quantiles),
+        "validation_min_observations": int(validation_min_observations),
+        "stock_count": len(stock_codes),
+        "stock_code_hash": stock_code_hash,
+        "validation_factor_scope": str(validation_factor_scope),
+        "validated_feature_names": validated_feature_names,
+    }
+    cache_key = hashlib.sha1(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+    return cache_key, identity
+
+
+def _get_validation_cache_dir(analyzer):
+    data_layout = getattr(analyzer, "data_layout", None)
+    layer_path = getattr(data_layout, "layer_path", None)
+    if callable(layer_path):
+        return Path(layer_path("meta")) / "factor_weight_cache"
+    return None
+
+
+def _load_validation_weight_cache(cache_dir, cache_key):
+    if cache_dir is None:
+        return None
+    cache_path = Path(cache_dir) / f"{cache_key}.json"
+    if not cache_path.exists():
+        return None
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    payload["_cache_path"] = str(cache_path)
+    return payload
+
+
+def _write_validation_weight_cache(cache_dir, cache_key, payload):
+    if cache_dir is None:
+        return None
+    cache_path = Path(cache_dir) / f"{cache_key}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return cache_path
+
+
+def _build_factor_scorecard(report):
+    ic_summary = report.get("ic_summary")
+    long_short_summary = report.get("long_short_summary")
+    turnover_summary = report.get("turnover_summary")
+    decay_summary = report.get("decay_summary")
+    ic_summary = ic_summary if isinstance(ic_summary, pd.DataFrame) else pd.DataFrame()
+    long_short_summary = long_short_summary if isinstance(long_short_summary, pd.DataFrame) else pd.DataFrame()
+    turnover_summary = turnover_summary if isinstance(turnover_summary, pd.DataFrame) else pd.DataFrame()
+    decay_summary = decay_summary if isinstance(decay_summary, pd.DataFrame) else pd.DataFrame()
+    configured_weights = _build_current_factor_weight_table(
+        (report.get("metadata") or {}).get("factor_score_config") or {}
+    )
+
+    base = pd.DataFrame(columns=["feature_name"])
+    if not ic_summary.empty:
+        base = (
+            ic_summary.groupby(["feature_name"], dropna=False)
+            .agg(
+                mean_ic=("mean_ic", "mean"),
+                mean_rank_ic=("mean_rank_ic", "mean"),
+                ic_positive_rate=("ic_positive_rate", "mean"),
+                rank_ic_positive_rate=("rank_ic_positive_rate", "mean"),
+                ic_ir=("ic_ir", "mean"),
+                rank_ic_ir=("rank_ic_ir", "mean"),
+                horizons=("horizon", "nunique"),
+            )
+            .reset_index()
+        )
+    if not long_short_summary.empty:
+        spread = (
+            long_short_summary.groupby(["feature_name"], dropna=False)
+            .agg(
+                mean_spread=("mean_spread", "mean"),
+                spread_ir=("spread_ir", "mean"),
+                spread_positive_rate=("positive_rate", "mean"),
+            )
+            .reset_index()
+        )
+        base = spread if base.empty else base.merge(spread, on="feature_name", how="outer")
+    if not turnover_summary.empty:
+        turnover = (
+            turnover_summary.groupby(["feature_name"], dropna=False)
+            .agg(
+                mean_turnover=("mean_turnover", "mean"),
+                max_turnover=("max_turnover", "max"),
+            )
+            .reset_index()
+        )
+        base = turnover if base.empty else base.merge(turnover, on="feature_name", how="outer")
+    if not decay_summary.empty:
+        decay = (
+            decay_summary.groupby(["feature_name"], dropna=False)
+            .agg(
+                ic_decay_ratio=("ic_decay_ratio", "mean"),
+                rank_ic_decay_ratio=("rank_ic_decay_ratio", "mean"),
+                spread_decay_ratio=("spread_decay_ratio", "mean"),
+            )
+            .reset_index()
+        )
+        base = decay if base.empty else base.merge(decay, on="feature_name", how="outer")
+
+    if base.empty:
+        base = pd.DataFrame(columns=["feature_name"])
+    if not configured_weights.empty:
+        base = base.merge(configured_weights, left_on="feature_name", right_on="factor", how="left")
+        if "factor" in base.columns:
+            base.drop(columns=["factor"], inplace=True)
+
+    for column in [
+        "mean_ic",
+        "mean_rank_ic",
+        "ic_positive_rate",
+        "rank_ic_positive_rate",
+        "ic_ir",
+        "rank_ic_ir",
+        "mean_spread",
+        "spread_ir",
+        "spread_positive_rate",
+        "mean_turnover",
+        "ic_decay_ratio",
+        "rank_ic_decay_ratio",
+        "spread_decay_ratio",
+    ]:
+        if column not in base.columns:
+            base[column] = pd.NA
+
+    def _safe_value(value):
+        return float(value) if pd.notna(value) else 0.0
+
+    def _validation_score(row):
+        metric_columns = [
+            "mean_rank_ic",
+            "mean_ic",
+            "mean_spread",
+            "rank_ic_positive_rate",
+            "ic_positive_rate",
+            "mean_turnover",
+        ]
+        if all(pd.isna(row.get(column)) for column in metric_columns):
+            return 0.0
+        turnover_bonus = (
+            max(0.0, 1.0 - float(row["mean_turnover"])) * 5.0
+            if pd.notna(row.get("mean_turnover"))
+            else 0.0
+        )
+        return (
+            abs(_safe_value(row["mean_rank_ic"])) * 35.0
+            + abs(_safe_value(row["mean_ic"])) * 20.0
+            + max(_safe_value(row["mean_spread"]), 0.0) * 100.0 * 20.0
+            + _safe_value(row["rank_ic_positive_rate"]) * 15.0
+            + _safe_value(row["ic_positive_rate"]) * 5.0
+            + turnover_bonus
+        )
+
+    base["validation_score"] = base.apply(_validation_score, axis=1)
+    base.sort_values(["validation_score", "mean_rank_ic", "mean_spread"], ascending=False, inplace=True)
+    base.reset_index(drop=True, inplace=True)
+
+    base["recommended_factor_weight"] = pd.NA
+    for component_name in ("trend", "quality", "risk"):
+        mask = base["component"].fillna("") == component_name
+        if mask.any():
+            total = pd.to_numeric(base.loc[mask, "validation_score"], errors="coerce").clip(lower=0).sum()
+            if total > 0:
+                base.loc[mask, "recommended_factor_weight"] = (
+                    pd.to_numeric(base.loc[mask, "validation_score"], errors="coerce").clip(lower=0) / total
+                )
+            else:
+                base.loc[mask, "recommended_factor_weight"] = pd.NA
+
+    return base
 
 
 def main():
@@ -42,70 +340,446 @@ def main():
     print("=" * 80)
 
     analyzer = StockAnalyzer()
-    print(f"[INFO] 固定分析股票池: {', '.join(TARGET_STOCKS)}")
+    try:
+        print(f"[INFO] 固定分析股票池: {', '.join(TARGET_STOCKS)}")
 
-    portfolio_result = analyzer.backtest_portfolio(TARGET_STOCKS, days=365, top_n=3)
+        portfolio_result = analyzer.backtest_portfolio(TARGET_STOCKS, days=365, top_n=3)
+        if portfolio_result is None:
+            print("[ERROR] 组合分析失败")
+            return
+
+        analysis_results = portfolio_result['analysis_results']
+        strategy = analyzer.generate_trading_strategy(analysis_results)
+
+        print(f"\n[INFO] 成功分析 {len(analysis_results)} 只股票")
+        print(f"[INFO] 组合预计持有 Top {portfolio_result['top_n']} 只股票")
+        print(f"[INFO] 组合估算收益率: {portfolio_result['estimated_portfolio_return']:.1f}%")
+        print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
+        print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")
+
+        if strategy:
+            print("\n" + "=" * 80)
+            print("8股票池三个月收益策略报告")
+            print("=" * 80)
+
+            print("\n当前股票排名:")
+            for i, stock in enumerate(strategy['ranked_stocks'], 1):
+                signal_flag = '强买点' if stock.get('current_signal_active') and stock.get('current_signal_actionable') else ('观察名单' if stock.get('current_signal_active') else '无新信号')
+                signal_score = stock.get('current_signal_score')
+                signal_score_text = f"{signal_score:.1f}" if pd.notna(signal_score) else 'None'
+                print(
+                    f"{i:2d}. {stock['stock_code']} - 排名分: {stock['ranking_score']:.1f}, "
+                    f"当前信号: {signal_flag}, 信号评分: {signal_score_text}, "
+                    f"最新预期3月评分: {stock['expected_3m_score']:.1f}, "
+                    f"矩阵评分: {stock['matrix_score']:.1f}, 趋势评分: {stock['regime_score']:.1f}, "
+                    f"回测收益: {stock['total_return']:.1f}%, 入场类型: {stock['entry_type']}, 信号层级: {stock.get('signal_tier')}"
+                )
+
+            print("\n当前建议持有:")
+            for item in portfolio_result['selected']:
+                signal_flag = '强买点' if item.get('current_signal_active') and item.get('current_signal_actionable') else ('观察名单' if item.get('current_signal_active') else '评分候选')
+                signal_score = item.get('current_signal_score')
+                signal_score_text = f"{signal_score:.1f}" if pd.notna(signal_score) else 'None'
+                print(
+                    f"- {item['stock_code']} - {signal_flag}, 排名分 {item['ranking_score']:.1f}, "
+                    f"信号评分 {signal_score_text}, 建议买点 {item['entry_type']}, 信号层级 {item.get('signal_tier')}, "
+                    f"单股回测收益 {item['backtest_return']:.1f}%"
+                )
+
+            if portfolio_result.get('watchlist'):
+                print("\n观察名单:")
+                for item in portfolio_result['watchlist']:
+                    print(
+                        f"- {item['stock_code']} - 入场类型 {item['entry_type']}, 信号层级 {item.get('signal_tier')}, "
+                        f"预期3月评分 {item.get('expected_3m_score', 0):.1f}, 趋势评分 {item.get('regime_score', 0):.1f}"
+                    )
+
+            print("\n风险管理:")
+            risk = strategy['recommended_strategy']['risk_management']
+            print(f"- 仓位: {risk['max_position_size']}")
+            print(f"- 止损: {risk['stop_loss']}")
+            print(f"- 止盈: {risk['take_profit']}")
+            print(f"- 最大日交易数: {risk['max_daily_trades']}")
+            print(f"- 默认持有周期: {risk['holding_horizon']} 个交易日")
+
+        print("\n" + "=" * 80)
+        print("分析完成！")
+        print("=" * 80)
+    finally:
+        _safe_close_analyzer(analyzer)
+
+
+def main_all_hk(
+    days=365,
+    top_n=10,
+    initial_capital=100000,
+    export_csv=None,
+    persist_signals=False,
+    batch_id=None,
+    max_workers=1,
+    analysis_mode="factor",
+    factor_set="qlib_alpha158",
+    show_progress=False,
+    fast_mode=False,
+    validation_days=None,
+    validation_horizons=(1, 5, 10, 20),
+    validation_quantiles=5,
+    validation_min_observations=5,
+    validation_stock_limit=None,
+    use_recommended_factor_weights=False,
+    refresh_recommended_factor_weights=False,
+    validation_factor_scope="scoring_only",
+):
+    """对本地已同步的全部港股执行 TopN 组合分析。"""
+    print("=" * 80)
+    print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选")
+    print("=" * 80)
+
+    analyzer = StockAnalyzer()
+    try:
+        factor_score_config = None
+        if analysis_mode == "factor" and use_recommended_factor_weights:
+            effective_validation_factor_scope = validation_factor_scope or "scoring_only"
+            validation_stock_codes = analyzer.get_all_stocks()
+            if validation_stock_limit is not None:
+                validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]
+            effective_validation_days = validation_days or days
+            validated_feature_names = None
+            if effective_validation_factor_scope == "scoring_only":
+                validated_feature_names = analyzer.get_score_factor_names()
+            cache_key, cache_identity = _build_validation_cache_key(
+                factor_set=factor_set,
+                validation_days=effective_validation_days,
+                validation_horizons=validation_horizons,
+                validation_quantiles=validation_quantiles,
+                validation_min_observations=validation_min_observations,
+                validation_stock_codes=validation_stock_codes,
+                validation_factor_scope=effective_validation_factor_scope,
+                validated_feature_names=validated_feature_names,
+            )
+            cache_dir = _get_validation_cache_dir(analyzer)
+            cached_payload = None
+            if not refresh_recommended_factor_weights:
+                cached_payload = _load_validation_weight_cache(cache_dir, cache_key)
+
+            if cached_payload is not None:
+                factor_score_config = deepcopy(cached_payload.get("factor_score_config") or {})
+                validation_scorecard = pd.DataFrame(cached_payload.get("factor_scorecard") or [])
+                print(
+                    f"[INFO] 已命中验证权重缓存: key={cache_key}, "
+                    f"path={cached_payload.get('_cache_path')}"
+                )
+            else:
+                if show_progress:
+                    print(
+                        f"[PROGRESS] validation phase=features "
+                        f"stocks={len(validation_stock_codes)} workers={max_workers} factor_set={factor_set} "
+                        f"scope={effective_validation_factor_scope}"
+                    )
+                validation_report = analyzer.build_factor_validation_report(
+                    stock_codes=validation_stock_codes,
+                    days=effective_validation_days,
+                    factor_set=factor_set,
+                    horizons=validation_horizons,
+                    quantiles=validation_quantiles,
+                    min_observations=validation_min_observations,
+                    max_workers=max_workers,
+                    show_progress=show_progress,
+                    validation_factor_scope=effective_validation_factor_scope,
+                    validated_feature_names=validated_feature_names,
+                )
+                if validation_report is None:
+                    print("[ERROR] 验证驱动权重生成失败")
+                    return None
+                validation_scorecard = _build_factor_scorecard(validation_report)
+                factor_score_config = _merge_recommended_factor_weights(
+                    (validation_report.get("metadata") or {}).get("factor_score_config"),
+                    validation_scorecard,
+                )
+                cache_payload = {
+                    "cache_key": cache_key,
+                    "identity": cache_identity,
+                    "factor_score_config": factor_score_config,
+                    "factor_scorecard": validation_scorecard.to_dict(orient="records"),
+                    "created_at": pd.Timestamp.utcnow().isoformat(),
+                }
+                cache_path = _write_validation_weight_cache(cache_dir, cache_key, cache_payload)
+                if cache_path is not None:
+                    print(f"[OK] 已写入验证权重缓存: {cache_path}")
+
+            print("[INFO] 已启用验证驱动权重模式")
+            if not validation_scorecard.empty:
+                preview_columns = [
+                    "feature_name",
+                    "component",
+                    "configured_factor_weight",
+                    "recommended_factor_weight",
+                    "validation_score",
+                ]
+                preview_columns = [column for column in preview_columns if column in validation_scorecard.columns]
+                print(validation_scorecard[preview_columns].head(10).to_string(index=False))
+        portfolio_result = analyzer.backtest_hk_market(
+            days=days,
+            top_n=top_n,
+            initial_capital=initial_capital,
+            max_workers=max_workers,
+            analysis_mode=analysis_mode,
+            factor_set=factor_set,
+            factor_score_config=factor_score_config,
+            show_progress=show_progress,
+            enable_portfolio_replay=not fast_mode,
+        )
+    finally:
+        _safe_close_analyzer(analyzer)
     if portfolio_result is None:
-        print("[ERROR] 组合分析失败")
-        return
+        print("[ERROR] 全港股组合分析失败")
+        return None
 
-    analysis_results = portfolio_result['analysis_results']
-    strategy = analyzer.generate_trading_strategy(analysis_results)
-
+    analysis_results = portfolio_result.get("analysis_results", [])
     print(f"\n[INFO] 成功分析 {len(analysis_results)} 只股票")
     print(f"[INFO] 组合预计持有 Top {portfolio_result['top_n']} 只股票")
     print(f"[INFO] 组合估算收益率: {portfolio_result['estimated_portfolio_return']:.1f}%")
     print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
     print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")
 
-    if strategy:
-        print("\n" + "=" * 80)
-        print("8股票池三个月收益策略报告")
-        print("=" * 80)
+    if export_csv:
+        export_path = Path(export_csv)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        ranking_path = export_path.with_name(f"{export_path.stem}_ranking.csv")
+        selected_path = export_path.with_name(f"{export_path.stem}_selected.csv")
+        watchlist_path = export_path.with_name(f"{export_path.stem}_watchlist.csv")
 
-        print("\n当前股票排名:")
-        for i, stock in enumerate(strategy['ranked_stocks'], 1):
-            signal_flag = '强买点' if stock.get('current_signal_active') and stock.get('current_signal_actionable') else ('观察名单' if stock.get('current_signal_active') else '无新信号')
-            signal_score = stock.get('current_signal_score')
-            signal_score_text = f"{signal_score:.1f}" if pd.notna(signal_score) else 'None'
-            print(
-                f"{i:2d}. {stock['stock_code']} - 排名分: {stock['ranking_score']:.1f}, "
-                f"当前信号: {signal_flag}, 信号评分: {signal_score_text}, "
-                f"最新预期3月评分: {stock['expected_3m_score']:.1f}, "
-                f"矩阵评分: {stock['matrix_score']:.1f}, 趋势评分: {stock['regime_score']:.1f}, "
-                f"回测收益: {stock['total_return']:.1f}%, 入场类型: {stock['entry_type']}, 信号层级: {stock.get('signal_tier')}"
+        pd.DataFrame(portfolio_result.get("ranking", [])).to_csv(ranking_path, index=False, encoding="utf-8-sig")
+        pd.DataFrame(portfolio_result.get("selected", [])).to_csv(selected_path, index=False, encoding="utf-8-sig")
+        pd.DataFrame(portfolio_result.get("watchlist", [])).to_csv(watchlist_path, index=False, encoding="utf-8-sig")
+
+        print(f"[OK] 已导出全市场排名: {ranking_path}")
+        print(f"[OK] 已导出当前持有: {selected_path}")
+        print(f"[OK] 已导出观察名单: {watchlist_path}")
+
+    if persist_signals:
+        service = MarketDataService()
+        try:
+            persist_result = service.persist_portfolio_result(
+                portfolio_result=portfolio_result,
+                market="HK",
+                signal_set="all_hk_topn",
+                strategy_name="all_hk_topn",
+                batch_id=batch_id,
+                source="stock_analyzer_cli",
             )
+        finally:
+            service.close()
+        print(f"[OK] 已写入 signal 层: batch_id={persist_result['batch_id']}, rows={persist_result['signal_rows']}")
 
-        print("\n当前建议持有:")
-        for item in portfolio_result['selected']:
-            signal_flag = '强买点' if item.get('current_signal_active') and item.get('current_signal_actionable') else ('观察名单' if item.get('current_signal_active') else '评分候选')
-            signal_score = item.get('current_signal_score')
-            signal_score_text = f"{signal_score:.1f}" if pd.notna(signal_score) else 'None'
-            print(
-                f"- {item['stock_code']} - {signal_flag}, 排名分 {item['ranking_score']:.1f}, "
-                f"信号评分 {signal_score_text}, 建议买点 {item['entry_type']}, 信号层级 {item.get('signal_tier')}, "
-                f"单股回测收益 {item['backtest_return']:.1f}%"
-            )
-
-        if portfolio_result.get('watchlist'):
-            print("\n观察名单:")
-            for item in portfolio_result['watchlist']:
-                print(
-                    f"- {item['stock_code']} - 入场类型 {item['entry_type']}, 信号层级 {item.get('signal_tier')}, "
-                    f"预期3月评分 {item.get('expected_3m_score', 0):.1f}, 趋势评分 {item.get('regime_score', 0):.1f}"
-                )
-
-        print("\n风险管理:")
-        risk = strategy['recommended_strategy']['risk_management']
-        print(f"- 仓位: {risk['max_position_size']}")
-        print(f"- 止损: {risk['stop_loss']}")
-        print(f"- 止盈: {risk['take_profit']}")
-        print(f"- 最大日交易数: {risk['max_daily_trades']}")
-        print(f"- 默认持有周期: {risk['holding_horizon']} 个交易日")
+    print("\n当前建议持有:")
+    for item in portfolio_result.get("selected", []):
+        print(f"- {item['stock_code']}")
+        for line in _format_factor_reason_lines(item):
+            print(line)
 
     print("\n" + "=" * 80)
-    print("分析完成！")
+    print("全港股 TopN 分析完成！")
     print("=" * 80)
+    return portfolio_result
+
+
+def main_review_batch(batch_id, export_csv=None):
+    """按 batch_id 回看某次全港股扫描结果。"""
+    print("=" * 80)
+    print(f"港股技术分析系统 - 扫描批次复盘 {batch_id}")
+    print("=" * 80)
+
+    service = MarketDataService()
+    try:
+        frame = service.get_signal_frame(
+            market="HK",
+            signal_set="all_hk_topn",
+            batch_id=batch_id,
+        )
+    finally:
+        service.close()
+
+    if frame is None or frame.empty:
+        print(f"[ERROR] 未找到批次 {batch_id} 的扫描结果")
+        return None
+
+    ranking_df = frame[frame["signal_type"] == "ranking"].copy()
+    selected_df = frame[frame["signal_type"] == "selected"].copy()
+    watchlist_df = frame[frame["signal_type"] == "watchlist"].copy()
+    ranking_avg_score = float(ranking_df["score"].mean()) if not ranking_df.empty and "score" in ranking_df.columns else 0.0
+    selected_avg_score = float(selected_df["score"].mean()) if not selected_df.empty and "score" in selected_df.columns else 0.0
+    watchlist_avg_score = float(watchlist_df["score"].mean()) if not watchlist_df.empty and "score" in watchlist_df.columns else 0.0
+    summary_df = pd.DataFrame(
+        [
+            {
+                "batch_id": batch_id,
+                "ranking_count": len(ranking_df),
+                "selected_count": len(selected_df),
+                "watchlist_count": len(watchlist_df),
+                "ranking_avg_score": ranking_avg_score,
+                "selected_avg_score": selected_avg_score,
+                "watchlist_avg_score": watchlist_avg_score,
+            }
+        ]
+    )
+
+    print(f"\n[INFO] 批次号: {batch_id}")
+    print(f"[INFO] ranking 数量: {len(ranking_df)}")
+    print(f"[INFO] selected 数量: {len(selected_df)}")
+    print(f"[INFO] watchlist 数量: {len(watchlist_df)}")
+    print(f"[INFO] 平均评分: ranking={ranking_avg_score:.1f}, selected={selected_avg_score:.1f}, watchlist={watchlist_avg_score:.1f}")
+
+    if export_csv:
+        export_path = Path(export_csv)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path = export_path.with_name(f"{export_path.stem}_summary.csv")
+        ranking_path = export_path.with_name(f"{export_path.stem}_ranking.csv")
+        selected_path = export_path.with_name(f"{export_path.stem}_selected.csv")
+        watchlist_path = export_path.with_name(f"{export_path.stem}_watchlist.csv")
+
+        summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
+        ranking_df.to_csv(ranking_path, index=False, encoding="utf-8-sig")
+        selected_df.to_csv(selected_path, index=False, encoding="utf-8-sig")
+        watchlist_df.to_csv(watchlist_path, index=False, encoding="utf-8-sig")
+
+        print(f"[OK] 已导出批次 summary: {summary_path}")
+        print(f"[OK] 已导出批次 ranking: {ranking_path}")
+        print(f"[OK] 已导出批次 selected: {selected_path}")
+        print(f"[OK] 已导出批次 watchlist: {watchlist_path}")
+
+    print("\n当前持有建议:")
+    for _, row in selected_df.sort_values(["rank_position", "stock_code"]).iterrows():
+        print(f"- {row['stock_code']}")
+
+    print("\n" + "=" * 80)
+    print("批次复盘完成！")
+    print("=" * 80)
+    return {
+        "batch_id": batch_id,
+        "summary": summary_df,
+        "ranking": ranking_df,
+        "selected": selected_df,
+        "watchlist": watchlist_df,
+    }
+
+
+def main_factor_report(
+    days=365,
+    factor_set="qlib_alpha158",
+    export_csv=None,
+    max_workers=1,
+    show_progress=False,
+    horizons=(1, 5, 10, 20),
+    quantiles=5,
+    min_observations=5,
+    stock_limit=None,
+    validation_factor_scope=None,
+):
+    """输出全市场因子验证报告。"""
+    print("=" * 80)
+    print(f"港股技术分析系统 - 因子验证报告 {factor_set}")
+    print("=" * 80)
+
+    analyzer = StockAnalyzer()
+    try:
+        stock_codes = analyzer.get_all_stocks()
+        if stock_limit is not None:
+            stock_codes = stock_codes[: max(int(stock_limit), 0)]
+        effective_validation_factor_scope = validation_factor_scope or "all"
+        report = analyzer.build_factor_validation_report(
+            stock_codes=stock_codes,
+            days=days,
+            factor_set=factor_set,
+            horizons=horizons,
+            quantiles=quantiles,
+            min_observations=min_observations,
+            max_workers=max_workers,
+            show_progress=show_progress,
+            validation_factor_scope=effective_validation_factor_scope,
+            validated_feature_names=(
+                analyzer.get_score_factor_names() if effective_validation_factor_scope == "scoring_only" else None
+            ),
+        )
+    finally:
+        _safe_close_analyzer(analyzer)
+
+    if report is None:
+        print("[ERROR] 因子验证报告生成失败")
+        return None
+    metadata = report.get("metadata", {})
+    factor_scorecard = _build_factor_scorecard(report)
+    factor_score_config = _merge_recommended_factor_weights(
+        metadata.get("factor_score_config"),
+        factor_scorecard,
+    )
+    if isinstance(report.get("metadata"), dict):
+        report["metadata"]["factor_score_config"] = factor_score_config
+    metadata = report.get("metadata", {})
+    stock_summary = report.get("stock_summary", pd.DataFrame())
+
+    print(f"\n[INFO] 因子集: {metadata.get('factor_set')}")
+    print(f"[INFO] 样本股票数: {metadata.get('success_count', 0)} / {metadata.get('stock_count', 0)}")
+    print(f"[INFO] horizons: {metadata.get('horizons')}")
+    print(f"[INFO] quantiles: {metadata.get('quantiles')}, min_observations: {metadata.get('min_observations')}")
+    print(
+        f"[INFO] validation_factor_scope: {metadata.get('validation_factor_scope', 'all')}, "
+        f"validated_feature_count: {len(metadata.get('validated_feature_names') or []) if metadata.get('validated_feature_names') else 'all'}"
+    )
+
+    if not stock_summary.empty:
+        print(
+            "[INFO] 样本内均值: "
+            f"mean_ic={stock_summary['mean_ic'].mean():.4f}, "
+            f"mean_rank_ic={stock_summary['mean_rank_ic'].mean():.4f}, "
+            f"mean_spread={stock_summary['mean_spread'].mean():.4f}, "
+            f"mean_turnover={stock_summary['mean_turnover'].mean():.4f}"
+        )
+
+    if not factor_scorecard.empty:
+        print("\nTop 因子质量:")
+        preview_columns = [
+            "feature_name",
+            "component",
+            "configured_factor_weight",
+            "recommended_factor_weight",
+            "mean_rank_ic",
+            "mean_spread",
+            "mean_turnover",
+            "validation_score",
+        ]
+        preview_columns = [column for column in preview_columns if column in factor_scorecard.columns]
+        print(factor_scorecard[preview_columns].head(15).to_string(index=False))
+
+    if export_csv:
+        export_path = Path(export_csv)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        outputs = {
+            "stock_summary": report.get("stock_summary", pd.DataFrame()),
+            "factor_coverage": report.get("factor_coverage", pd.DataFrame()),
+            "factor_scorecard": factor_scorecard,
+            "ic_summary": report.get("ic_summary", pd.DataFrame()),
+            "quantile_summary": report.get("quantile_summary", pd.DataFrame()),
+            "long_short_summary": report.get("long_short_summary", pd.DataFrame()),
+            "turnover_summary": report.get("turnover_summary", pd.DataFrame()),
+            "decay_summary": report.get("decay_summary", pd.DataFrame()),
+        }
+        for name, frame in outputs.items():
+            output_file = export_path.with_name(f"{export_path.stem}_{name}.csv")
+            frame.to_csv(output_file, index=False, encoding="utf-8-sig")
+            print(f"[OK] 已导出 {name}: {output_file}")
+
+        metadata_file = export_path.with_name(f"{export_path.stem}_metadata.json")
+        metadata_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        print(f"[OK] 已导出 metadata: {metadata_file}")
+
+    print("\n" + "=" * 80)
+    print("因子验证报告完成！")
+    print("=" * 80)
+    return {
+        **report,
+        "factor_scorecard": factor_scorecard,
+    }
 
 
 def main_strategy_suite(days=365, top_n=3, initial_capital=100000, export_csv=None):
@@ -170,64 +844,60 @@ def analyze_single_stock_with_visualization(stock_code="03633", days=365):
     print(f"{'='*80}")
 
     analyzer = StockAnalyzer()
+    try:
+        print(f"\n[INFO] 加载 {stock_code} 股票数据...")
+        warmup_days = max(days + 120, days)
+        full_data = analyzer.load_stock_data(stock_code, days=warmup_days)
 
-    # 加载数据
-    print(f"\n[INFO] 加载 {stock_code} 股票数据...")
-    warmup_days = max(days + 120, days)
-    full_data = analyzer.load_stock_data(stock_code, days=warmup_days)
+        if full_data is None or full_data.empty:
+            print(f"[ERROR] 无法加载 {stock_code} 数据")
+            return None
 
-    if full_data is None or full_data.empty:
-        print(f"[ERROR] 无法加载 {stock_code} 数据")
-        return None
+        print(f"[OK] 成功加载 {len(full_data)} 条数据记录")
 
-    print(f"[OK] 成功加载 {len(full_data)} 条数据记录")
+        print(f"\n[INFO] 使用TA-Lib计算技术指标...")
+        data_with_indicators = analyzer.calculate_technical_indicators(full_data)
 
-    # 计算技术指标
-    print(f"\n[INFO] 使用TA-Lib计算技术指标...")
-    data_with_indicators = analyzer.calculate_technical_indicators(full_data)
+        if data_with_indicators is None:
+            print(f"[ERROR] 技术指标计算失败")
+            return None
 
-    if data_with_indicators is None:
-        print(f"[ERROR] 技术指标计算失败")
-        return None
+        analysis_start_idx = max(len(data_with_indicators) - days, 0)
+        analysis_data = data_with_indicators.iloc[analysis_start_idx:].copy()
+        analysis_start_date = analysis_data.index[0]
 
-    analysis_start_idx = max(len(data_with_indicators) - days, 0)
-    analysis_data = data_with_indicators.iloc[analysis_start_idx:].copy()
-    analysis_start_date = analysis_data.index[0]
+        print(f"[INFO] 识别买卖信号...")
+        buy_signals_full = analyzer.identify_buy_signals(data_with_indicators, stock_code=stock_code)
+        sell_signals_full = analyzer.identify_sell_signals(data_with_indicators)
 
-    # 识别买卖信号
-    print(f"[INFO] 识别买卖信号...")
-    buy_signals_full = analyzer.identify_buy_signals(data_with_indicators, stock_code=stock_code)
-    sell_signals_full = analyzer.identify_sell_signals(data_with_indicators)
+        buy_signals = None
+        if buy_signals_full is not None and not buy_signals_full.empty:
+            buy_signals = buy_signals_full[buy_signals_full['date'] >= analysis_start_date].reset_index(drop=True)
+            buy_signals = analyzer.merge_buy_signal_zones(buy_signals, stock_code=stock_code)
+            if buy_signals is not None and buy_signals.empty:
+                buy_signals = None
 
-    buy_signals = None
-    if buy_signals_full is not None and not buy_signals_full.empty:
-        buy_signals = buy_signals_full[buy_signals_full['date'] >= analysis_start_date].reset_index(drop=True)
-        buy_signals = analyzer.merge_buy_signal_zones(buy_signals, stock_code=stock_code)
-        if buy_signals is not None and buy_signals.empty:
-            buy_signals = None
+        sell_signals = None
+        if sell_signals_full is not None and not sell_signals_full.empty:
+            sell_signals = sell_signals_full[sell_signals_full['date'] >= analysis_start_date].reset_index(drop=True)
+            if sell_signals.empty:
+                sell_signals = None
 
-    sell_signals = None
-    if sell_signals_full is not None and not sell_signals_full.empty:
-        sell_signals = sell_signals_full[sell_signals_full['date'] >= analysis_start_date].reset_index(drop=True)
-        if sell_signals.empty:
-            sell_signals = None
+        print(f"[INFO] 执行策略回测...")
+        backtest_result = analyzer.backtest_strategy(analysis_data, buy_signals, sell_signals)
 
-    # 执行回测
-    print(f"[INFO] 执行策略回测...")
-    backtest_result = analyzer.backtest_strategy(analysis_data, buy_signals, sell_signals)
+        print(f"[INFO] 生成可视化图表...")
+        create_visualization_charts(analysis_data, buy_signals, sell_signals, stock_code)
 
-    # 生成可视化图表
-    print(f"[INFO] 生成可视化图表...")
-    create_visualization_charts(analysis_data, buy_signals, sell_signals, stock_code)
+        buy_point_analysis = analyze_buy_points(analysis_data, buy_signals)
 
-    # 分析买点评分
-    buy_point_analysis = analyze_buy_points(analysis_data, buy_signals)
-
-    target_alignment = analyze_target_date_alignment(
-        analysis_data,
-        buy_signals,
-        ['2026-01-13', '2026-02-13', '2026-03-02']
-    )
+        target_alignment = analyze_target_date_alignment(
+            analysis_data,
+            buy_signals,
+            ['2026-01-13', '2026-02-13', '2026-03-02']
+        )
+    finally:
+        _safe_close_analyzer(analyzer)
 
     # 输出详细分析报告
     print(f"\n{'='*80}")
@@ -307,24 +977,121 @@ def analyze_single_stock_with_visualization(stock_code="03633", days=365):
     }
 
 
-if __name__ == "__main__":
+def run_cli(argv=None):
+    """CLI 入口，便于脚本调用与测试。"""
     parser = argparse.ArgumentParser(
         description="港股技术分析系统 - 支持单股回测、批量分析与多策略比较"
     )
     parser.add_argument('mode', nargs='?', default=None,
-                        help='运行模式：single / suite / 直接股票代码')
+                        help='运行模式：single / suite / all_hk / factor_report / review_batch / 直接股票代码')
     parser.add_argument('value', nargs='?', default=None,
                         help='兼容旧模式：single 时为股票代码')
+    parser.add_argument('--days', dest='days', type=int, default=365,
+                        help='分析天数，默认 365')
+    parser.add_argument('--top-n', dest='top_n', type=int, default=3,
+                        help='组合持有数量，默认 3')
+    parser.add_argument('--initial-capital', dest='initial_capital', type=float, default=100000,
+                        help='初始资金，默认 100000')
     parser.add_argument('--export-csv', dest='export_csv', default=None,
                         help='在 suite 模式下导出表格 CSV 的基础路径，例如 output/strategy_suite')
-
-    args = parser.parse_args()
+    parser.add_argument('--persist-signals', dest='persist_signals', action='store_true',
+                        help='在 all_hk 模式下将 ranking/selected/watchlist 写入 signal 层')
+    parser.add_argument('--batch-id', dest='batch_id', default=None,
+                        help='在 persist-signals 时指定批次号')
+    parser.add_argument('--max-workers', dest='max_workers', type=int, default=1,
+                        help='批量分析并发线程数，默认 1')
+    parser.add_argument('--analysis-mode', dest='analysis_mode', default='factor',
+                        choices=['factor', 'strategy'],
+                        help='全市场分析模式：factor 或 strategy，默认 factor')
+    parser.add_argument('--factor-set', dest='factor_set', default='qlib_alpha158',
+                        help='因子模式下使用的因子集，默认 qlib_alpha158')
+    parser.add_argument('--show-progress', dest='show_progress', action='store_true',
+                        help='显示全市场分析进度')
+    parser.add_argument('--fast-mode', dest='fast_mode', action='store_true',
+                        help='快速模式：跳过组合真实 replay，仅保留研究型结果')
+    parser.add_argument('--horizons', dest='horizons', default='1,5,10,20',
+                        help='因子验证 horizons，逗号分隔，默认 1,5,10,20')
+    parser.add_argument('--quantiles', dest='quantiles', type=int, default=5,
+                        help='因子验证分组数，默认 5')
+    parser.add_argument('--min-observations', dest='min_observations', type=int, default=5,
+                        help='因子验证最小样本数，默认 5')
+    parser.add_argument('--stock-limit', dest='stock_limit', type=int, default=None,
+                        help='限制参与因子验证/扫描的股票数量，默认不限制')
+    parser.add_argument('--use-recommended-factor-weights', dest='use_recommended_factor_weights', action='store_true',
+                        help='在 all_hk factor 模式下先跑因子验证，再使用 recommended_factor_weight 回填打分权重')
+    parser.add_argument('--validation-days', dest='validation_days', type=int, default=None,
+                        help='验证驱动权重模式下使用的验证窗口天数，默认跟 --days 一致')
+    parser.add_argument('--validation-horizons', dest='validation_horizons', default='1,5,10,20',
+                        help='验证驱动权重模式下的 horizons，逗号分隔，默认 1,5,10,20')
+    parser.add_argument('--validation-quantiles', dest='validation_quantiles', type=int, default=5,
+                        help='验证驱动权重模式下的分组数，默认 5')
+    parser.add_argument('--validation-min-observations', dest='validation_min_observations', type=int, default=5,
+                        help='验证驱动权重模式下的最小样本数，默认 5')
+    parser.add_argument('--validation-stock-limit', dest='validation_stock_limit', type=int, default=None,
+                        help='验证驱动权重模式下限制参与验证的股票数量，默认不限制')
+    parser.add_argument('--refresh-recommended-factor-weights', dest='refresh_recommended_factor_weights', action='store_true',
+                        help='强制重算 recommended_factor_weight，不使用本地缓存')
+    parser.add_argument('--validation-factor-scope', dest='validation_factor_scope',
+                        choices=['scoring_only', 'all'], default=None,
+                        help='因子验证范围：all_hk 推荐权重模式默认 scoring_only，factor_report 默认 all')
+    args = parser.parse_args(argv)
+    horizons = _parse_horizons(args.horizons)
+    validation_horizons = _parse_horizons(args.validation_horizons)
 
     if args.mode == "single":
-        analyze_single_stock_with_visualization(args.value or "03633")
+        return analyze_single_stock_with_visualization(args.value or "03633", days=args.days)
     elif args.mode == "suite":
-        main_strategy_suite(export_csv=args.export_csv)
+        return main_strategy_suite(
+            days=args.days,
+            top_n=args.top_n,
+            initial_capital=args.initial_capital,
+            export_csv=args.export_csv,
+        )
+    elif args.mode == "all_hk":
+        return main_all_hk(
+            days=args.days,
+            top_n=args.top_n,
+            initial_capital=args.initial_capital,
+            export_csv=args.export_csv,
+            persist_signals=args.persist_signals,
+            batch_id=args.batch_id,
+            max_workers=args.max_workers,
+            analysis_mode=args.analysis_mode,
+            factor_set=args.factor_set,
+            show_progress=args.show_progress,
+            fast_mode=args.fast_mode,
+            validation_days=args.validation_days,
+            validation_horizons=validation_horizons,
+            validation_quantiles=args.validation_quantiles,
+            validation_min_observations=args.validation_min_observations,
+            validation_stock_limit=args.validation_stock_limit,
+            use_recommended_factor_weights=args.use_recommended_factor_weights,
+            refresh_recommended_factor_weights=args.refresh_recommended_factor_weights,
+            validation_factor_scope=args.validation_factor_scope,
+        )
+    elif args.mode == "factor_report":
+        return main_factor_report(
+            days=args.days,
+            factor_set=args.factor_set,
+            export_csv=args.export_csv,
+            max_workers=args.max_workers,
+            show_progress=args.show_progress,
+            horizons=horizons,
+            quantiles=args.quantiles,
+            min_observations=args.min_observations,
+            stock_limit=args.stock_limit,
+            validation_factor_scope=args.validation_factor_scope,
+        )
+    elif args.mode == "review_batch":
+        return main_review_batch(
+            batch_id=args.value,
+            export_csv=args.export_csv,
+        )
     elif args.mode:
-        analyze_single_stock_with_visualization(args.mode)
+        return analyze_single_stock_with_visualization(args.mode, days=args.days)
     else:
-        main()
+        return main()
+
+
+if __name__ == "__main__":
+    run_cli()

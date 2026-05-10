@@ -6,12 +6,16 @@
 from .schemas import (
     CLEAN_OHLCV_COLUMNS,
     FEATURE_COLUMNS,
+    SIGNAL_COLUMNS,
     STOCK_INFO_FIELDS,
+    TRADE_COLUMNS,
     infer_exchange,
     normalize_feature_frame,
     normalize_ohlcv_frame,
+    normalize_signal_frame,
     normalize_stock_code,
     normalize_stock_info,
+    normalize_trade_frame,
 )
 from .adjustments import (
     CORPORATE_ACTION_FIELDS,
@@ -36,9 +40,11 @@ __all__ = [
     "CORPORATE_ACTION_FIELDS",
     "FEATURE_COLUMNS",
     "HK_MARKET_CALENDAR",
+    "SIGNAL_COLUMNS",
     "AdjustmentProfile",
     "MarketCalendar",
     "STOCK_INFO_FIELDS",
+    "TRADE_COLUMNS",
     "get_adjustment_profile",
     "get_market_calendar",
     "infer_exchange",
@@ -46,7 +52,9 @@ __all__ = [
     "normalize_corporate_actions_frame",
     "normalize_feature_frame",
     "normalize_ohlcv_frame",
+    "normalize_signal_frame",
     "normalize_stock_code",
     "normalize_stock_info",
+    "normalize_trade_frame",
     "validate_ohlcv_frame",
 ]

@@ -19,14 +19,17 @@ from data.model import (
     normalize_corporate_actions_frame,
     normalize_feature_frame,
     normalize_ohlcv_frame,
+    normalize_signal_frame,
     normalize_stock_code,
     normalize_stock_info,
+    normalize_trade_frame,
     validate_ohlcv_frame,
 )
 from data.store.layout import DataLayout
 from data.store.raw_store import RawDataStore
 from data.store.warehouse import MarketDataWarehouse
 from factor_engine import FactorContext, create_factor_set, list_factor_sets as list_registered_factor_sets
+from factor_validation import FactorValidator
 
 
 class MarketDataService:
@@ -174,6 +177,134 @@ class MarketDataService:
             end_date=end_date,
         )
 
+    def write_signal_frame(
+        self,
+        frame,
+        stock_code,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        signal_set="default",
+        strategy_name=None,
+        source=None,
+    ):
+        """将信号结果写入 signal 层。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+        normalized_frame = normalize_signal_frame(
+            frame,
+            stock_code=stock_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            signal_set=signal_set,
+            strategy_name=strategy_name,
+            source=source,
+        )
+        return self.warehouse.upsert_signals(normalized_frame)
+
+    def get_signal_frame(
+        self,
+        stock_code=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust="qfq",
+        signal_set=None,
+        signal_type=None,
+        batch_id=None,
+        strategy_name=None,
+        start_date=None,
+        end_date=None,
+    ):
+        """读取 signal 层信号数据。"""
+        normalized_adjust = normalize_adjust(adjust) if adjust is not None else None
+        normalized_market = (market.upper() if market else None)
+        normalized_code = normalize_stock_code(stock_code, market=normalized_market or "HK") if stock_code else None
+        return self.warehouse.read_signals(
+            stock_code=normalized_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            signal_set=signal_set,
+            signal_type=signal_type,
+            batch_id=batch_id,
+            strategy_name=strategy_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def write_trade_frame(
+        self,
+        frame,
+        stock_code,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        account_id="default",
+        strategy_name=None,
+        source=None,
+    ):
+        """将订单/成交结果写入 trade 层。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+        normalized_frame = normalize_trade_frame(
+            frame,
+            stock_code=stock_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            account_id=account_id,
+            strategy_name=strategy_name,
+            source=source,
+        )
+        return self.warehouse.upsert_trades(normalized_frame)
+
+    def get_trade_frame(
+        self,
+        stock_code=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust="qfq",
+        account_id=None,
+        strategy_name=None,
+        order_id=None,
+        trade_type=None,
+        start_date=None,
+        end_date=None,
+    ):
+        """读取 trade 层订单/成交数据。"""
+        normalized_adjust = normalize_adjust(adjust) if adjust is not None else None
+        normalized_market = (market.upper() if market else None)
+        normalized_code = normalize_stock_code(stock_code, market=normalized_market or "HK") if stock_code else None
+        return self.warehouse.read_trades(
+            stock_code=normalized_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            account_id=account_id,
+            strategy_name=strategy_name,
+            order_id=order_id,
+            trade_type=trade_type,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
     def list_factor_sets(self):
         """返回当前已注册的因子集。"""
         return list_registered_factor_sets()
@@ -282,6 +413,246 @@ class MarketDataService:
             source=source,
             config=config,
         )
+
+    def persist_backtest_result(
+        self,
+        stock_code,
+        backtest_result,
+        buy_signals=None,
+        sell_signals=None,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        signal_set="default",
+        strategy_name=None,
+        account_id="default",
+        source="backtest_engine",
+    ):
+        """将回测信号与成交结果统一落入 signal / trade 层。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+
+        signal_frames = []
+        if buy_signals is not None and not buy_signals.empty:
+            buy_frame = buy_signals.copy()
+            buy_frame["signal_type"] = "buy"
+            if "score" not in buy_frame.columns and "expected_3m_score" in buy_frame.columns:
+                buy_frame["score"] = buy_frame["expected_3m_score"]
+            signal_frames.append(buy_frame)
+
+        if sell_signals is not None and not sell_signals.empty:
+            sell_frame = sell_signals.copy()
+            sell_frame["signal_type"] = "sell"
+            if "signal_strength" not in sell_frame.columns:
+                sell_frame["signal_strength"] = pd.NA
+            if "score" not in sell_frame.columns:
+                sell_frame["score"] = pd.NA
+            if "actionable" not in sell_frame.columns:
+                sell_frame["actionable"] = True
+            signal_frames.append(sell_frame)
+
+        signal_result = {"rows": 0, "dataset_path": str(self.layout.dataset_path("signals", layer="signal"))}
+        if signal_frames:
+            merged_signals = pd.concat(signal_frames, ignore_index=True)
+            signal_result = self.write_signal_frame(
+                merged_signals,
+                stock_code=stock_code,
+                market=normalized_market,
+                exchange=exchange,
+                asset_type=asset_type,
+                frequency=frequency,
+                adjust=normalized_adjust,
+                signal_set=signal_set,
+                strategy_name=strategy_name,
+                source=source,
+            )
+
+        trade_payload = []
+        for trade in (backtest_result or {}).get("trades", []) or []:
+            trade_payload.append(
+                {
+                    "date": trade.get("date"),
+                    "trade_type": trade.get("type"),
+                    "price": trade.get("price"),
+                    "shares": trade.get("shares"),
+                    "amount": trade.get("amount"),
+                    "commission": trade.get("commission"),
+                    "strategy_name": strategy_name,
+                    "order_id": (
+                        f"{trade.get('date')}_{trade.get('type')}_{len(trade_payload) + 1}"
+                        if trade.get("date") is not None and trade.get("type") is not None
+                        else f"trade_{len(trade_payload) + 1}"
+                    ),
+                    "trade_source": source,
+                }
+            )
+
+        trade_result = {"rows": 0, "dataset_path": str(self.layout.dataset_path("trades", layer="trade"))}
+        if trade_payload:
+            trade_result = self.write_trade_frame(
+                pd.DataFrame(trade_payload),
+                stock_code=stock_code,
+                market=normalized_market,
+                exchange=exchange,
+                asset_type=asset_type,
+                frequency=frequency,
+                adjust=normalized_adjust,
+                account_id=account_id,
+                strategy_name=strategy_name,
+                source=source,
+            )
+
+        return {
+            "stock_code": normalize_stock_code(stock_code, market=normalized_market),
+            "market": normalized_market,
+            "signal_rows": int(signal_result.get("rows", 0)),
+            "trade_rows": int(trade_result.get("rows", 0)),
+            "signal_write_result": signal_result,
+            "trade_write_result": trade_result,
+        }
+
+    def persist_portfolio_result(
+        self,
+        portfolio_result,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        signal_set="portfolio_scan",
+        strategy_name=None,
+        batch_id=None,
+        source="portfolio_builder",
+    ):
+        """将组合扫描结果写入 signal 层，便于后续回放与审计。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+        effective_batch_id = batch_id or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
+        trade_date = pd.Timestamp.utcnow().normalize()
+
+        rows = []
+        for signal_type, items in (
+            ("ranking", (portfolio_result or {}).get("ranking", []) or []),
+            ("selected", (portfolio_result or {}).get("selected", []) or []),
+            ("watchlist", (portfolio_result or {}).get("watchlist", []) or []),
+        ):
+            for position, item in enumerate(items, 1):
+                rows.append(
+                    {
+                        "trade_date": trade_date,
+                        "stock_code": item.get("stock_code"),
+                        "signal_type": signal_type,
+                        "signal_strength": item.get("current_signal_score"),
+                        "score": item.get("ranking_score", item.get("current_signal_score")),
+                        "actionable": signal_type == "selected",
+                        "batch_id": effective_batch_id,
+                        "rank_position": position,
+                        "strategy_name": strategy_name,
+                        "signal_source": source,
+                    }
+                )
+
+        if not rows:
+            return {
+                "market": normalized_market,
+                "signal_rows": 0,
+                "batch_id": effective_batch_id,
+                "signal_write_result": {"rows": 0, "dataset_path": str(self.layout.dataset_path("signals", layer="signal"))},
+            }
+
+        grouped_by_stock = {}
+        for row in rows:
+            grouped_by_stock.setdefault(row["stock_code"], []).append(row)
+
+        total_rows = 0
+        write_results = []
+        for stock_code, stock_rows in grouped_by_stock.items():
+            write_result = self.write_signal_frame(
+                pd.DataFrame(stock_rows),
+                stock_code=stock_code,
+                market=normalized_market,
+                exchange=exchange,
+                asset_type=asset_type,
+                frequency=frequency,
+                adjust=normalized_adjust,
+                signal_set=signal_set,
+                strategy_name=strategy_name,
+                source=source,
+            )
+            total_rows += int(write_result.get("rows", 0))
+            write_results.append(write_result)
+
+        return {
+            "market": normalized_market,
+            "signal_rows": total_rows,
+            "batch_id": effective_batch_id,
+            "signal_write_result": write_results,
+        }
+
+    def validate_feature_set(
+        self,
+        feature_set,
+        stock_code=None,
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        feature_name=None,
+        start_date=None,
+        end_date=None,
+        horizons=(1, 5, 10, 20),
+        quantiles=5,
+        min_observations=5,
+    ):
+        """对 feature 层因子做 IC / RankIC / 分组收益验证。"""
+        normalized_market = (market.upper() if market else None)
+        normalized_adjust = normalize_adjust(adjust) if adjust is not None else None
+        normalized_code = normalize_stock_code(stock_code, market=normalized_market or "HK") if stock_code else None
+
+        feature_frame = self.get_feature_frame(
+            stock_code=normalized_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            feature_set=feature_set,
+            feature_name=feature_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        ohlcv_frame = self.warehouse.read_ohlcv(
+            stock_code=normalized_code,
+            market=normalized_market,
+            exchange=exchange,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        validator = FactorValidator(
+            horizons=horizons,
+            quantiles=quantiles,
+            min_observations=min_observations,
+        )
+        result = validator.validate(feature_frame=feature_frame, ohlcv_frame=ohlcv_frame)
+        result["metadata"] = {
+            "feature_set": feature_set,
+            "feature_name": feature_name,
+            "stock_code": normalized_code,
+            "market": normalized_market,
+            "frequency": frequency,
+            "adjust": normalized_adjust,
+            "horizons": tuple(int(item) for item in horizons),
+            "quantiles": int(quantiles),
+            "min_observations": int(min_observations),
+        }
+        return result
 
     def sync_hk_corporate_actions(self, stock_code, start_date=None, end_date=None, num_records=None, persist_raw=True):
         """同步单只港股企业行为到统一数据层。"""

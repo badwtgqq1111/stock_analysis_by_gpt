@@ -44,6 +44,46 @@ FEATURE_COLUMNS = [
     "ingest_time",
 ]
 
+SIGNAL_COLUMNS = [
+    "trade_date",
+    "stock_code",
+    "market",
+    "exchange",
+    "asset_type",
+    "frequency",
+    "adjust",
+    "signal_set",
+    "signal_type",
+    "signal_strength",
+    "score",
+    "actionable",
+    "batch_id",
+    "rank_position",
+    "strategy_name",
+    "source",
+    "ingest_time",
+]
+
+TRADE_COLUMNS = [
+    "trade_date",
+    "stock_code",
+    "market",
+    "exchange",
+    "asset_type",
+    "frequency",
+    "adjust",
+    "account_id",
+    "strategy_name",
+    "order_id",
+    "trade_type",
+    "price",
+    "shares",
+    "amount",
+    "commission",
+    "source",
+    "ingest_time",
+]
+
 STOCK_INFO_FIELDS = [
     "stock_code",
     "market",
@@ -184,6 +224,8 @@ def normalize_ohlcv_frame(
         raise ValueError(f"OHLCV 数据缺少必要列: {', '.join(missing)}")
 
     working["trade_date"] = pd.to_datetime(working["trade_date"], errors="coerce")
+    if getattr(working["trade_date"].dt, "tz", None) is not None:
+        working["trade_date"] = working["trade_date"].dt.tz_localize(None)
     working.dropna(subset=["trade_date"], inplace=True)
 
     for column in ["open", "high", "low", "close", "volume"]:
@@ -308,6 +350,151 @@ def normalize_feature_frame(
     )
     long_frame.reset_index(drop=True, inplace=True)
     return long_frame
+
+
+def normalize_signal_frame(
+    frame,
+    stock_code,
+    market="HK",
+    exchange=None,
+    asset_type="equity",
+    frequency="daily",
+    adjust="qfq",
+    signal_set="default",
+    strategy_name=None,
+    source=None,
+):
+    """将信号数据统一为 signal 层格式。"""
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=SIGNAL_COLUMNS)
+
+    normalized_market = (market or "HK").upper()
+    normalized_code = normalize_stock_code(stock_code, market=normalized_market)
+    normalized_exchange = (exchange or infer_exchange(normalized_code, market=normalized_market)).upper()
+    normalized_adjust = normalize_adjust(adjust)
+
+    working = frame.copy()
+    working.rename(
+        columns={
+            "date": "trade_date",
+            "Date": "trade_date",
+            "datetime": "trade_date",
+            "signal_source": "source",
+        },
+        inplace=True,
+    )
+
+    if "trade_date" not in working.columns:
+        if working.index.name in {"date", "trade_date"} or isinstance(working.index, pd.DatetimeIndex):
+            working = working.reset_index().rename(columns={working.index.name or "index": "trade_date"})
+        else:
+            raise ValueError("输入信号数据缺少 trade_date/date 列")
+
+    working["trade_date"] = pd.to_datetime(working["trade_date"], errors="coerce")
+    if getattr(working["trade_date"].dt, "tz", None) is not None:
+        working["trade_date"] = working["trade_date"].dt.tz_localize(None)
+    working.dropna(subset=["trade_date"], inplace=True)
+
+    working["signal_type"] = working.get("signal_type")
+    working["signal_strength"] = pd.to_numeric(working.get("signal_strength"), errors="coerce")
+    working["score"] = pd.to_numeric(working.get("score"), errors="coerce")
+    if "actionable" in working.columns:
+        working["actionable"] = working["actionable"].fillna(False).astype(bool)
+    else:
+        working["actionable"] = False
+
+    working["stock_code"] = normalized_code
+    working["market"] = normalized_market
+    working["exchange"] = normalized_exchange
+    working["asset_type"] = asset_type
+    working["frequency"] = frequency
+    working["adjust"] = normalized_adjust
+    working["signal_set"] = str(signal_set or "default").strip() or "default"
+    working["batch_id"] = working.get("batch_id")
+    working["rank_position"] = pd.to_numeric(working.get("rank_position"), errors="coerce")
+    working["strategy_name"] = strategy_name or working.get("strategy_name")
+    working["source"] = source or working.get("source") or "unknown"
+    working["ingest_time"] = pd.Timestamp.utcnow()
+
+    working = working[SIGNAL_COLUMNS].copy()
+    working.sort_values(["trade_date", "signal_set", "signal_type"], inplace=True)
+    working.drop_duplicates(
+        subset=["market", "stock_code", "trade_date", "frequency", "adjust", "signal_set", "signal_type"],
+        keep="last",
+        inplace=True,
+    )
+    working.reset_index(drop=True, inplace=True)
+    return working
+
+
+def normalize_trade_frame(
+    frame,
+    stock_code,
+    market="HK",
+    exchange=None,
+    asset_type="equity",
+    frequency="daily",
+    adjust="qfq",
+    account_id="default",
+    strategy_name=None,
+    source=None,
+):
+    """将成交/订单数据统一为 trade 层格式。"""
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=TRADE_COLUMNS)
+
+    normalized_market = (market or "HK").upper()
+    normalized_code = normalize_stock_code(stock_code, market=normalized_market)
+    normalized_exchange = (exchange or infer_exchange(normalized_code, market=normalized_market)).upper()
+    normalized_adjust = normalize_adjust(adjust)
+
+    working = frame.copy()
+    working.rename(
+        columns={
+            "date": "trade_date",
+            "Date": "trade_date",
+            "datetime": "trade_date",
+            "trade_source": "source",
+        },
+        inplace=True,
+    )
+
+    if "trade_date" not in working.columns:
+        if working.index.name in {"date", "trade_date"} or isinstance(working.index, pd.DatetimeIndex):
+            working = working.reset_index().rename(columns={working.index.name or "index": "trade_date"})
+        else:
+            raise ValueError("输入交易数据缺少 trade_date/date 列")
+
+    working["trade_date"] = pd.to_datetime(working["trade_date"], errors="coerce")
+    working.dropna(subset=["trade_date"], inplace=True)
+
+    working["trade_type"] = working.get("trade_type")
+    working["price"] = pd.to_numeric(working.get("price"), errors="coerce")
+    working["shares"] = pd.to_numeric(working.get("shares"), errors="coerce")
+    working["amount"] = pd.to_numeric(working.get("amount"), errors="coerce")
+    working["commission"] = pd.to_numeric(working.get("commission"), errors="coerce").fillna(0.0)
+    working["order_id"] = working.get("order_id")
+
+    working["stock_code"] = normalized_code
+    working["market"] = normalized_market
+    working["exchange"] = normalized_exchange
+    working["asset_type"] = asset_type
+    working["frequency"] = frequency
+    working["adjust"] = normalized_adjust
+    working["account_id"] = str(account_id or "default").strip() or "default"
+    working["strategy_name"] = strategy_name or working.get("strategy_name")
+    working["source"] = source or working.get("source") or "unknown"
+    working["ingest_time"] = pd.Timestamp.utcnow()
+
+    working = working[TRADE_COLUMNS].copy()
+    working.sort_values(["trade_date", "account_id", "order_id"], inplace=True)
+    working.drop_duplicates(
+        subset=["market", "stock_code", "trade_date", "account_id", "order_id"],
+        keep="last",
+        inplace=True,
+    )
+    working.reset_index(drop=True, inplace=True)
+    return working
 
 
 def normalize_stock_info(

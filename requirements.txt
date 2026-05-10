@@ -8,3 +8,7 @@ pyarrow
 baostock
 py-mini-racer
 demjson3
+scipy
+TA-Lib
+matplotlib
+pytest

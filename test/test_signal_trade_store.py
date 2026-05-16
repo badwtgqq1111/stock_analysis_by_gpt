@@ -221,8 +221,50 @@ def test_persist_portfolio_result_writes_batch_signals():
             service.close()
 
 
+def test_persist_portfolio_result_writes_signals_in_one_batch():
+    portfolio_result = {
+        "ranking": [
+            {"stock_code": "00001", "ranking_score": 91.0, "current_signal_score": 77.0},
+            {"stock_code": "00002", "ranking_score": 85.0, "current_signal_score": 72.0},
+            {"stock_code": "00003", "ranking_score": 70.0, "current_signal_score": 55.0},
+        ],
+        "selected": [
+            {"stock_code": "00001", "ranking_score": 91.0, "current_signal_score": 77.0},
+        ],
+        "watchlist": [
+            {"stock_code": "00003", "ranking_score": 70.0, "current_signal_score": 55.0},
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        calls = []
+        original_upsert_signals = service.warehouse.upsert_signals
+
+        def tracking_upsert_signals(frame):
+            calls.append(len(frame))
+            return original_upsert_signals(frame)
+
+        service.warehouse.upsert_signals = tracking_upsert_signals
+        try:
+            persist_result = service.persist_portfolio_result(
+                portfolio_result=portfolio_result,
+                market="HK",
+                signal_set="all_hk_topn",
+                strategy_name="demo_strategy",
+                batch_id="batch_demo_002",
+                source="unit_test",
+            )
+
+            assert persist_result["signal_rows"] == 5
+            assert calls == [5]
+        finally:
+            service.close()
+
+
 if __name__ == "__main__":
     test_signal_and_trade_store_roundtrip()
     test_persist_backtest_result_writes_signals_and_trades()
     test_persist_portfolio_result_writes_batch_signals()
+    test_persist_portfolio_result_writes_signals_in_one_batch()
     print("signal/trade store tests passed")

@@ -699,6 +699,97 @@ class StockAnalyzer:
         memory_cap = max(1, int(available_gb / per_worker_gb))
         return max(1, min(requested, cpu_cap, memory_cap))
 
+    @classmethod
+    def _resolve_factor_analysis_batch_size(cls, total_stocks, max_workers, analysis_mode="factor"):
+        total = max(int(total_stocks or 0), 0)
+        workers = max(int(max_workers or 1), 1)
+        normalized_mode = str(analysis_mode or "factor").strip().lower()
+        if total <= 1 or normalized_mode != "factor":
+            return max(1, total)
+
+        available_bytes = cls._available_memory_bytes()
+        if available_bytes is None:
+            available_gb = None
+        else:
+            available_gb = available_bytes / (1024 ** 3)
+
+        # Keep multiple waves per worker for smoother progress and more balanced completion.
+        target_waves = 3 if total >= workers * 12 else 2
+        baseline = int(np.ceil(total / max(workers * target_waves, 1)))
+
+        if available_gb is None:
+            memory_cap = 96
+        elif available_gb <= 2:
+            memory_cap = 16
+        elif available_gb <= 4:
+            memory_cap = 24
+        elif available_gb <= 8:
+            memory_cap = 48
+        elif available_gb <= 16:
+            memory_cap = 96
+        else:
+            memory_cap = 128
+
+        if total <= workers * 2:
+            return max(1, int(np.ceil(total / workers)))
+
+        lower_bound = 8 if total >= workers * 4 else 4
+        return max(lower_bound, min(memory_cap, baseline, total))
+
+    @staticmethod
+    def _emit_progress_line(
+        *,
+        prefix,
+        completed,
+        total,
+        success_count,
+        started_at,
+        stream=None,
+        extra_fields=None,
+    ):
+        target_stream = stream or sys.stderr
+        total = max(int(total or 0), 1)
+        completed = max(int(completed or 0), 0)
+        success_count = max(int(success_count or 0), 0)
+        elapsed = max(time.time() - started_at, 1e-9)
+        rate = completed / elapsed if completed > 0 else 0.0
+        remaining = max(total - completed, 0)
+        eta = remaining / rate if rate > 0 else 0.0
+        fields = [
+            f"stocks_done={completed}/{total}",
+            f"({completed / total:.1%})",
+            f"success={success_count}",
+        ]
+        if extra_fields:
+            for name, value in extra_fields:
+                fields.append(f"{name}={value}")
+        fields.extend(
+            [
+                f"rate={rate:.1f}/s",
+                f"elapsed={elapsed:.1f}s",
+                f"eta={eta:.1f}s",
+            ]
+        )
+        print(
+            "\r" + prefix + " " + " ".join(fields),
+            end="",
+            flush=True,
+            file=target_stream,
+        )
+
+    @staticmethod
+    def _signal_freshness_score(latest_signal_date, latest_data_date=None):
+        if latest_signal_date is None or pd.isna(latest_signal_date):
+            return 0.0, 999
+        signal_date = pd.Timestamp(latest_signal_date).tz_localize(None).normalize()
+        if latest_data_date is None or pd.isna(latest_data_date):
+            reference_date = pd.Timestamp.now("UTC").tz_localize(None).normalize()
+        else:
+            reference_date = pd.Timestamp(latest_data_date).tz_localize(None).normalize()
+        signal_age_days = max(int((reference_date - signal_date).days), 0)
+        freshness_score = max(0.0, 100.0 - signal_age_days * 4.0)
+        return float(freshness_score), int(signal_age_days)
+
     @staticmethod
     def _trim_validation_feature_frame(feature_long):
         if feature_long is None or feature_long.empty:
@@ -994,19 +1085,17 @@ class StockAnalyzer:
                     rate = completed / elapsed
                     remaining = len(stock_codes) - completed
                     eta = remaining / rate if rate > 0 else 0.0
-                    sys.stderr.write(
+                    print(
                         f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
                         f"({completed / len(stock_codes):.1%}) success={success_count} "
                         f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                    )
-                    sys.stderr.flush()
+                    , end="", flush=True, file=sys.stderr)
                 if len(pending_results) >= batch_size:
                     batch_payload = flush_pending()
                     if batch_payload is not None:
                         yield batch_payload
             if show_progress:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
+                print(file=sys.stderr)
         else:
             with ThreadPoolExecutor(max_workers=min(max_workers, len(stock_codes))) as executor:
                 future_map = {executor.submit(run_analysis, stock_code): stock_code for stock_code in stock_codes}
@@ -1022,12 +1111,11 @@ class StockAnalyzer:
                             rate = completed / elapsed
                             remaining = len(stock_codes) - completed
                             eta = remaining / rate if rate > 0 else 0.0
-                            sys.stderr.write(
+                            print(
                                 f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
                                 f"({completed / len(stock_codes):.1%}) success={success_count} "
                                 f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                            )
-                            sys.stderr.flush()
+                            , end="", flush=True, file=sys.stderr)
                         continue
                     completed += 1
                     if result is not None:
@@ -1038,19 +1126,17 @@ class StockAnalyzer:
                         rate = completed / elapsed
                         remaining = len(stock_codes) - completed
                         eta = remaining / rate if rate > 0 else 0.0
-                        sys.stderr.write(
+                        print(
                             f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
                             f"({completed / len(stock_codes):.1%}) success={success_count} "
                             f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                        )
-                        sys.stderr.flush()
+                        , end="", flush=True, file=sys.stderr)
                     if len(pending_results) >= batch_size:
                         batch_payload = flush_pending()
                         if batch_payload is not None:
                             yield batch_payload
             if show_progress:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
+                print(file=sys.stderr)
 
         batch_payload = flush_pending()
         if batch_payload is not None:
@@ -1064,6 +1150,9 @@ class StockAnalyzer:
         factor_score_config=None,
         persist_features=False,
         ridge_factors=None,
+        progress_callback=None,
+        batch_index=None,
+        total_batches=None,
     ):
         stock_codes = list(stock_codes or [])
         if not stock_codes:
@@ -1076,6 +1165,8 @@ class StockAnalyzer:
         for stock_code in stock_codes:
             full_data = self.load_stock_data(stock_code, warmup_days)
             if full_data is None or full_data.empty or len(full_data) < 60:
+                if callable(progress_callback):
+                    progress_callback(stock_code)
                 continue
 
             ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
@@ -1083,6 +1174,8 @@ class StockAnalyzer:
             context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
             feature_frame = factor.transform(ohlcv_frame, context=context)
             if feature_frame is None or feature_frame.empty:
+                if callable(progress_callback):
+                    progress_callback(stock_code)
                 continue
 
             feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
@@ -1096,6 +1189,8 @@ class StockAnalyzer:
                 }
             )
             feature_frames.append(feature_frame)
+            if callable(progress_callback):
+                progress_callback(stock_code)
 
         if not batch_results:
             return []
@@ -1780,21 +1875,72 @@ class StockAnalyzer:
         )
 
         if normalized_mode == "factor" and supports_batch_factor_analysis and max_workers > 1 and len(stock_codes) > 1:
-            batch_size = max(16, min(128, int(np.ceil(len(stock_codes) / max_workers))))
+            batch_size = self._resolve_factor_analysis_batch_size(
+                total_stocks=len(stock_codes),
+                max_workers=max_workers,
+                analysis_mode=normalized_mode,
+            )
             stock_batches = [
                 stock_codes[index:index + batch_size]
                 for index in range(0, len(stock_codes), batch_size)
             ]
+            worker_count = min(max_workers, len(stock_batches))
+            available_bytes = type(self)._available_memory_bytes()
+            memory_text = (
+                f"{(available_bytes / (1024 ** 3)):.1f}"
+                if available_bytes is not None
+                else "unknown"
+            )
             if show_progress:
                 print(
                     f"[PROGRESS] analysis phase=batch_factor stocks={len(stock_codes)} "
-                    f"batches={len(stock_batches)} batch_size={batch_size} workers={min(max_workers, len(stock_batches))}"
+                    f"batches={len(stock_batches)} batch_size={batch_size} workers={worker_count} "
+                    f"memory_available_gb={memory_text}"
                 )
             started_at = time.time()
             total = len(stock_codes)
             completed = 0
             success_count = 0
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(stock_batches))) as executor:
+            completed_batches = 0
+            active_batches = set()
+            batch_progress_counts = {
+                batch_index + 1: 0
+                for batch_index in range(len(stock_batches))
+            }
+            stock_done_lock = None
+
+            def emit_batch_progress():
+                self._emit_progress_line(
+                    prefix="[PROGRESS] analysis phase=batch_factor",
+                    completed=completed,
+                    total=total,
+                    success_count=success_count,
+                    started_at=started_at,
+                    extra_fields=[
+                        ("batches_done", f"{completed_batches}/{len(stock_batches)}"),
+                        ("active_batches", len(active_batches)),
+                    ],
+                )
+
+            if show_progress:
+                import threading
+
+                stock_done_lock = threading.Lock()
+
+            def make_progress_callback(batch_no):
+                if not show_progress:
+                    return None
+
+                def _progress_callback(_stock_code):
+                    nonlocal completed
+                    with stock_done_lock:
+                        completed += 1
+                        batch_progress_counts[batch_no] = batch_progress_counts.get(batch_no, 0) + 1
+                        emit_batch_progress()
+
+                return _progress_callback
+
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 future_map = {
                     executor.submit(
                         self._analyze_factor_batch,
@@ -1804,47 +1950,44 @@ class StockAnalyzer:
                         factor_score_config=factor_score_config,
                         persist_features=persist_features,
                         ridge_factors=ridge_factors,
-                    ): batch
-                    for batch in stock_batches
+                        progress_callback=make_progress_callback(batch_index + 1),
+                        batch_index=batch_index + 1,
+                        total_batches=len(stock_batches),
+                    ): (batch_index + 1, batch)
+                    for batch_index, batch in enumerate(stock_batches)
                 }
+                if show_progress:
+                    active_batches = {batch_index for batch_index, _batch in future_map.values()}
+
                 for future in as_completed(future_map):
-                    batch = future_map[future]
-                    batch_size_completed = len(batch)
+                    batch_index, batch = future_map[future]
                     try:
                         result_batch = future.result()
                     except Exception as exc:
-                        print(f"\n[ERROR] 批量因子分析失败 batch_size={batch_size_completed}: {exc}")
-                        completed += batch_size_completed
                         if show_progress:
-                            elapsed = max(time.time() - started_at, 1e-9)
-                            rate = completed / elapsed
-                            remaining = total - completed
-                            eta = remaining / rate if rate > 0 else 0.0
-                            sys.stderr.write(
-                                f"\r[PROGRESS] {completed}/{total} "
-                                f"({completed / total:.1%}) success={success_count} "
-                                f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                            )
-                            sys.stderr.flush()
+                            with stock_done_lock:
+                                missing_count = max(len(batch) - batch_progress_counts.get(batch_index, 0), 0)
+                                completed += missing_count
+                                batch_progress_counts[batch_index] = len(batch)
+                                active_batches.discard(batch_index)
+                                completed_batches += 1
+                                emit_batch_progress()
+                        print(f"\n[ERROR] 批量因子分析失败 batch={batch_index}/{len(stock_batches)} batch_size={len(batch)}: {exc}")
                         continue
-                    completed += batch_size_completed
+                    if show_progress:
+                        with stock_done_lock:
+                            missing_count = max(len(batch) - batch_progress_counts.get(batch_index, 0), 0)
+                            completed += missing_count
+                            batch_progress_counts[batch_index] = len(batch)
+                            active_batches.discard(batch_index)
+                            completed_batches += 1
                     if result_batch:
                         pool_results.extend(result_batch)
                         success_count += len(result_batch)
                     if show_progress:
-                        elapsed = max(time.time() - started_at, 1e-9)
-                        rate = completed / elapsed
-                        remaining = total - completed
-                        eta = remaining / rate if rate > 0 else 0.0
-                        sys.stderr.write(
-                            f"\r[PROGRESS] {completed}/{total} "
-                            f"({completed / total:.1%}) success={success_count} "
-                            f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                        )
-                        sys.stderr.flush()
+                        emit_batch_progress()
             if show_progress:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
+                print(file=sys.stderr)
             if not pool_results:
                 return None
             builder = TopNPortfolioBuilder(
@@ -1875,15 +2018,13 @@ class StockAnalyzer:
                     rate = completed / elapsed
                     remaining = total - completed
                     eta = remaining / rate if rate > 0 else 0.0
-                    sys.stderr.write(
+                    print(
                         f"\r[PROGRESS] {completed}/{total} "
                         f"({completed / total:.1%}) success={success_count} "
                         f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                    )
-                    sys.stderr.flush()
+                    , end="", flush=True, file=sys.stderr)
             if show_progress:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
+                print(file=sys.stderr)
         else:
             started_at = time.time()
             total = len(stock_codes)
@@ -1906,12 +2047,11 @@ class StockAnalyzer:
                             rate = completed / elapsed
                             remaining = total - completed
                             eta = remaining / rate if rate > 0 else 0.0
-                            sys.stderr.write(
+                            print(
                                 f"\r[PROGRESS] {completed}/{total} "
                                 f"({completed / total:.1%}) success={success_count} "
                                 f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                            )
-                            sys.stderr.flush()
+                            , end="", flush=True, file=sys.stderr)
                         continue
                     completed += 1
                     if result is not None:
@@ -1922,15 +2062,13 @@ class StockAnalyzer:
                         rate = completed / elapsed
                         remaining = total - completed
                         eta = remaining / rate if rate > 0 else 0.0
-                        sys.stderr.write(
+                        print(
                             f"\r[PROGRESS] {completed}/{total} "
                             f"({completed / total:.1%}) success={success_count} "
                             f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                        )
-                        sys.stderr.flush()
+                        , end="", flush=True, file=sys.stderr)
             if show_progress:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
+                print(file=sys.stderr)
 
         if not pool_results:
             return None

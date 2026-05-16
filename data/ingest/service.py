@@ -562,33 +562,32 @@ class MarketDataService:
                 "signal_write_result": {"rows": 0, "dataset_path": str(self.layout.dataset_path("signals", layer="signal"))},
             }
 
-        grouped_by_stock = {}
-        for row in rows:
-            grouped_by_stock.setdefault(row["stock_code"], []).append(row)
-
-        total_rows = 0
-        write_results = []
-        for stock_code, stock_rows in grouped_by_stock.items():
-            write_result = self.write_signal_frame(
-                pd.DataFrame(stock_rows),
-                stock_code=stock_code,
-                market=normalized_market,
-                exchange=exchange,
-                asset_type=asset_type,
-                frequency=frequency,
-                adjust=normalized_adjust,
-                signal_set=signal_set,
-                strategy_name=strategy_name,
-                source=source,
+        frames = []
+        for stock_code, stock_rows in pd.DataFrame(rows).groupby("stock_code", sort=False):
+            frames.append(
+                normalize_signal_frame(
+                    stock_rows,
+                    stock_code=stock_code,
+                    market=normalized_market,
+                    exchange=exchange,
+                    asset_type=asset_type,
+                    frequency=frequency,
+                    adjust=normalized_adjust,
+                    signal_set=signal_set,
+                    strategy_name=strategy_name,
+                    source=source,
+                )
             )
-            total_rows += int(write_result.get("rows", 0))
-            write_results.append(write_result)
+
+        signal_frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        write_result = self.warehouse.upsert_signals(signal_frame)
+        total_rows = int(write_result.get("rows", 0))
 
         return {
             "market": normalized_market,
             "signal_rows": total_rows,
             "batch_id": effective_batch_id,
-            "signal_write_result": write_results,
+            "signal_write_result": write_result,
         }
 
     def validate_feature_set(

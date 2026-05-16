@@ -423,6 +423,9 @@ def test_backtest_portfolio_factor_mode_uses_batch_analysis():
         factor_score_config=None,
         persist_features=False,
         ridge_factors=None,
+        progress_callback=None,
+        batch_index=None,
+        total_batches=None,
     ):
         batch_calls.append(list(stock_codes))
         results = []
@@ -463,15 +466,16 @@ def test_backtest_portfolio_factor_mode_uses_batch_analysis():
 
     StockAnalyzer._analyze_factor_batch = stub_analyze_factor_batch
     try:
-        analyzer = StockAnalyzer()
-        result = analyzer.backtest_portfolio(
-            stock_codes=["00001", "00002", "00003", "00004", "00005"],
-            days=120,
-            top_n=2,
-            max_workers=2,
-            analysis_mode="factor",
-        )
-        analyzer.close()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            analyzer = StockAnalyzer(db_dir=tmp_dir)
+            result = analyzer.backtest_portfolio(
+                stock_codes=["00001", "00002", "00003", "00004", "00005"],
+                days=120,
+                top_n=2,
+                max_workers=2,
+                analysis_mode="factor",
+            )
+            analyzer.close()
     finally:
         if original_batch_analyzer is not None:
             StockAnalyzer._analyze_factor_batch = original_batch_analyzer
@@ -483,6 +487,128 @@ def test_backtest_portfolio_factor_mode_uses_batch_analysis():
     assert sum(len(batch) for batch in batch_calls) == 5
     assert len(batch_calls) < 5
     assert any(len(batch) > 1 for batch in batch_calls)
+
+
+def test_factor_analysis_batch_size_scales_down_on_low_memory():
+    original_available_memory_bytes = StockAnalyzer._available_memory_bytes
+
+    try:
+        StockAnalyzer._available_memory_bytes = staticmethod(lambda: 1 * 1024 ** 3)
+        low_memory_batch = StockAnalyzer._resolve_factor_analysis_batch_size(
+            total_stocks=2766,
+            max_workers=8,
+            analysis_mode="factor",
+        )
+
+        StockAnalyzer._available_memory_bytes = staticmethod(lambda: 16 * 1024 ** 3)
+        high_memory_batch = StockAnalyzer._resolve_factor_analysis_batch_size(
+            total_stocks=2766,
+            max_workers=8,
+            analysis_mode="factor",
+        )
+    finally:
+        StockAnalyzer._available_memory_bytes = original_available_memory_bytes
+
+    assert low_memory_batch >= 1
+    assert high_memory_batch >= 1
+    assert low_memory_batch < high_memory_batch
+
+
+def test_backtest_portfolio_factor_mode_reports_batch_progress_details():
+    original_batch_analyzer = getattr(StockAnalyzer, "_analyze_factor_batch", None)
+    original_stderr = sys.stderr
+
+    class _Buffer:
+        def __init__(self):
+            self.parts = []
+
+        def write(self, text):
+            self.parts.append(str(text))
+            return len(str(text))
+
+        def flush(self):
+            return None
+
+        def getvalue(self):
+            return "".join(self.parts)
+
+    def stub_analyze_factor_batch(
+        self,
+        stock_codes,
+        days=365,
+        factor_set="qlib_alpha158",
+        factor_score_config=None,
+        persist_features=False,
+        ridge_factors=None,
+        progress_callback=None,
+        batch_index=None,
+        total_batches=None,
+    ):
+        results = []
+        for stock_code in stock_codes:
+            if progress_callback is not None:
+                progress_callback(stock_code)
+            results.append(
+                {
+                    "stock_code": stock_code,
+                    "data": pd.DataFrame(),
+                    "feature_frame": pd.DataFrame(),
+                    "factor_scores": {"composite_score": 80.0},
+                    "factor_explanation": {},
+                    "backtest": {"total_return": 8.0, "win_rate": 60.0, "total_trades": 2},
+                    "latest_price": 1.2,
+                    "price_change_30d": 5.0,
+                    "latest_expected_3m_score": 80.0,
+                    "latest_matrix_score": 72.0,
+                    "latest_regime_score": 68.0,
+                    "latest_entry_type": "factor_rank",
+                    "latest_signal_tier": "strong",
+                    "latest_signal_date": pd.Timestamp("2025-01-10"),
+                    "current_signal_active": True,
+                    "current_signal_actionable": True,
+                    "current_signal_score": 80.0,
+                    "avg_forward_return_60_signal": 6.0,
+                    "avg_forward_return_60_watch": 1.0,
+                    "buy_signals": pd.DataFrame(),
+                    "factor_set": factor_set,
+                    "selection_source": "factor_engine",
+                    "setup_type": "pre_breakout",
+                    "setup_score": 80.0,
+                    "sideways_penalty": 1.0,
+                    "signal_freshness_score": 95.0,
+                    "signal_age_days": 1,
+                }
+            )
+        return results
+
+    StockAnalyzer._analyze_factor_batch = stub_analyze_factor_batch
+    sys.stderr = _Buffer()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            analyzer = StockAnalyzer(db_dir=tmp_dir)
+            result = analyzer.backtest_portfolio(
+                stock_codes=["00001", "00002", "00003", "00004", "00005"],
+                days=120,
+                top_n=2,
+                max_workers=2,
+                analysis_mode="factor",
+                show_progress=True,
+            )
+            output = sys.stderr.getvalue()
+            analyzer.close()
+    finally:
+        sys.stderr = original_stderr
+        if original_batch_analyzer is not None:
+            StockAnalyzer._analyze_factor_batch = original_batch_analyzer
+        else:
+            delattr(StockAnalyzer, "_analyze_factor_batch")
+
+    assert result is not None
+    assert "phase=batch_factor" in output
+    assert "batches_done=" in output
+    assert "active_batches=" in output
+    assert "stocks_done=" in output
+    assert "eta=" in output
 
 
 def test_validation_frame_helpers_trim_columns():
@@ -710,18 +836,34 @@ def test_analyze_factor_batch_handles_duplicate_panel_dates_without_series_truth
     monkeypatch.setattr(StockAnalyzer, "load_stock_data", stub_load_stock_data)
     monkeypatch.setattr(analyzer_module, "create_factor_set", lambda *args, **kwargs: DummyFactor())
     monkeypatch.setattr(StockAnalyzer, "_compute_factor_scores", stub_compute_factor_scores)
-    monkeypatch.setattr(StockAnalyzer, "_signal_freshness_score", staticmethod(lambda signal_date, data_date: (90.0, 1)), raising=False)
 
-    analyzer = StockAnalyzer()
-    results = analyzer._analyze_factor_batch(
-        ["00001", "00002"],
-        days=60,
-        factor_set="qlib_alpha158",
-    )
-    analyzer.close()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        analyzer = StockAnalyzer(db_dir=tmp_dir)
+        results = analyzer._analyze_factor_batch(
+            ["00001", "00002"],
+            days=60,
+            factor_set="qlib_alpha158",
+        )
+        analyzer.close()
 
     assert len(results) == 2
     assert results[0]["factor_explanation"]["top_positive_factors"]
+    assert "signal_freshness_score" in results[0]
+    assert "signal_age_days" in results[0]
+
+
+def test_signal_freshness_score_uses_data_date_reference():
+    score, age_days = StockAnalyzer._signal_freshness_score(
+        pd.Timestamp("2025-01-08"),
+        pd.Timestamp("2025-01-10"),
+    )
+
+    missing_score, missing_age_days = StockAnalyzer._signal_freshness_score(None, pd.Timestamp("2025-01-10"))
+
+    assert age_days == 2
+    assert score == 92.0
+    assert missing_age_days == 999
+    assert missing_score == 0.0
 
 
 if __name__ == "__main__":

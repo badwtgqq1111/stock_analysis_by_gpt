@@ -690,6 +690,278 @@ def main():
         _safe_close_analyzer(analyzer)
 
 
+def main_validate_factors(
+    days=365,
+    factor_set="qlib_alpha158",
+    max_workers=1,
+    show_progress=False,
+    validation_horizons=(1, 5, 10, 20),
+    validation_quantiles=5,
+    validation_min_observations=5,
+    validation_stock_limit=None,
+    validation_factor_scope="scoring_only",
+    refresh_recommended_factor_weights=False,
+    export_csv=None,
+):
+    """独立因子验证：只跑验证流水线，产出权重缓存和因子记分卡，不选股。"""
+    print("=" * 80)
+    print("港股技术分析系统 - 因子验证（独立模式）")
+    print("=" * 80)
+
+    analyzer = StockAnalyzer()
+    try:
+        validation_stock_codes = analyzer.get_all_stocks()
+        if validation_stock_limit is not None:
+            validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]
+        validated_feature_names = None
+        effective_scope = validation_factor_scope or "scoring_only"
+        if effective_scope == "scoring_only":
+            validated_feature_names = analyzer.get_score_factor_names()
+
+        cache_key, cache_identity = _build_validation_cache_key(
+            factor_set=factor_set,
+            validation_days=days,
+            validation_horizons=validation_horizons,
+            validation_quantiles=validation_quantiles,
+            validation_min_observations=validation_min_observations,
+            validation_stock_codes=validation_stock_codes,
+            validation_factor_scope=effective_scope,
+            validated_feature_names=validated_feature_names,
+        )
+        cache_dir = _get_validation_cache_dir(analyzer)
+        cached_payload = None
+        if not refresh_recommended_factor_weights:
+            cached_payload = _load_validation_weight_cache(cache_dir, cache_key)
+
+        if cached_payload is not None:
+            candidate_scorecard = _sanitize_validation_scorecard(
+                pd.DataFrame(cached_payload.get("factor_scorecard") or [])
+            )
+            if _is_usable_validation_scorecard(candidate_scorecard):
+                validation_scorecard = candidate_scorecard
+                print(
+                    f"[INFO] 已命中验证权重缓存: key={cache_key}, "
+                    f"path={cached_payload.get('_cache_path')}"
+                )
+            else:
+                print(
+                    f"[WARN] 验证权重缓存已失效，自动重算: key={cache_key}"
+                )
+                cached_payload = None
+
+        if cached_payload is None:
+            if show_progress:
+                print(
+                    f"[PROGRESS] validation phase=features "
+                    f"stocks={len(validation_stock_codes)} workers={max_workers} factor_set={factor_set} "
+                    f"scope={effective_scope}"
+                )
+            validation_report = analyzer.build_factor_validation_report(
+                stock_codes=validation_stock_codes,
+                days=days,
+                factor_set=factor_set,
+                horizons=validation_horizons,
+                quantiles=validation_quantiles,
+                min_observations=validation_min_observations,
+                max_workers=max_workers,
+                show_progress=show_progress,
+                validation_factor_scope=effective_scope,
+                validated_feature_names=validated_feature_names,
+            )
+            if validation_report is None:
+                print("[ERROR] 因子验证失败")
+                return None
+            validation_scorecard = _build_factor_scorecard_ridge(validation_report)
+            factor_score_config = _merge_recommended_factor_weights(
+                (validation_report.get("metadata") or {}).get("factor_score_config"),
+                validation_scorecard,
+            )
+            cache_payload = {
+                "cache_key": cache_key,
+                "identity": cache_identity,
+                "factor_score_config": factor_score_config,
+                "factor_scorecard": validation_scorecard.to_dict(orient="records"),
+                "created_at": pd.Timestamp.utcnow().isoformat(),
+            }
+            cache_path = _write_validation_weight_cache(cache_dir, cache_key, cache_payload)
+            if cache_path is not None:
+                print(f"[OK] 已写入验证权重缓存: {cache_path}")
+
+        if not validation_scorecard.empty:
+            validation_scorecard = _sanitize_validation_scorecard(validation_scorecard)
+            preview_columns = [
+                "feature_name",
+                "component",
+                "configured_factor_weight",
+                "recommended_factor_weight",
+                "validation_score",
+            ]
+            preview_columns = [c for c in preview_columns if c in validation_scorecard.columns]
+            print(validation_scorecard[preview_columns].head(10).to_string(index=False))
+
+        if export_csv:
+            export_path = Path(export_csv)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            scorecard_path = export_path.with_name(f"{export_path.stem}_scorecard.csv")
+            validation_scorecard.to_csv(scorecard_path, index=False, encoding="utf-8-sig")
+            print(f"[OK] 已导出因子记分卡: {scorecard_path}")
+    finally:
+        _safe_close_analyzer(analyzer)
+
+    print("\n" + "=" * 80)
+    print("因子验证完成！")
+    print("=" * 80)
+    return {"cache_key": cache_key, "scorecard": validation_scorecard}
+
+
+def main_select_stocks(
+    days=365,
+    top_n=10,
+    initial_capital=100000,
+    export_csv=None,
+    persist_signals=False,
+    batch_id=None,
+    max_workers=1,
+    analysis_mode="factor",
+    factor_set="qlib_alpha158",
+    show_progress=False,
+    fast_mode=False,
+    validation_days=None,
+    validation_horizons=(1, 5, 10, 20),
+    validation_quantiles=5,
+    validation_min_observations=5,
+    validation_stock_limit=None,
+    validation_factor_scope="scoring_only",
+):
+    """从验证权重缓存读取推荐权重，执行全港股 TopN 选股+回测，不跑因子验证。"""
+    print("=" * 80)
+    print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选（基于验证权重）")
+    print("=" * 80)
+
+    analyzer = StockAnalyzer()
+    try:
+        effective_scope = validation_factor_scope or "scoring_only"
+        validation_stock_codes = analyzer.get_all_stocks()
+        if validation_stock_limit is not None:
+            validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]
+        validated_feature_names = None
+        if effective_scope == "scoring_only":
+            validated_feature_names = analyzer.get_score_factor_names()
+        effective_validation_days = validation_days or days
+
+        cache_key, _ = _build_validation_cache_key(
+            factor_set=factor_set,
+            validation_days=effective_validation_days,
+            validation_horizons=validation_horizons,
+            validation_quantiles=validation_quantiles,
+            validation_min_observations=validation_min_observations,
+            validation_stock_codes=validation_stock_codes,
+            validation_factor_scope=effective_scope,
+            validated_feature_names=validated_feature_names,
+        )
+        cache_dir = _get_validation_cache_dir(analyzer)
+        cached_payload = _load_validation_weight_cache(cache_dir, cache_key)
+
+        if cached_payload is None:
+            print(
+                f"[ERROR] 未找到验证权重缓存: key={cache_key}\n"
+                f"  请先运行 validate_factors 生成权重缓存，再运行 select_stocks。"
+            )
+            return None
+
+        candidate_scorecard = _sanitize_validation_scorecard(
+            pd.DataFrame(cached_payload.get("factor_scorecard") or [])
+        )
+        if not _is_usable_validation_scorecard(candidate_scorecard):
+            print(f"[ERROR] 验证权重缓存已失效: key={cache_key}\n  请重新运行 validate_factors。")
+            return None
+
+        factor_score_config = deepcopy(cached_payload.get("factor_score_config") or {})
+        if not factor_score_config:
+            print(f"[ERROR] 缓存中缺少有效权重配置: key={cache_key}")
+            return None
+
+        print(f"[INFO] 已读取验证权重缓存: key={cache_key}, path={cached_payload.get('_cache_path')}")
+
+        ridge_factors = None
+        if effective_scope == "all" and not candidate_scorecard.empty:
+            ridge_factors = StockAnalyzer._select_top_ridge_factors(candidate_scorecard, top_k=30)
+            if show_progress and ridge_factors is not None and not ridge_factors.empty:
+                print(
+                    f"[PROGRESS] ridge_factors selected top_k={len(ridge_factors)} "
+                    f"components={ridge_factors['component'].value_counts().to_dict()}"
+                )
+
+        backtest_kwargs = {
+            "days": days,
+            "top_n": top_n,
+            "initial_capital": initial_capital,
+            "max_workers": max_workers,
+            "analysis_mode": analysis_mode,
+            "factor_set": factor_set,
+            "factor_score_config": factor_score_config,
+            "show_progress": show_progress,
+            "enable_portfolio_replay": not fast_mode,
+        }
+        if ridge_factors is not None:
+            backtest_kwargs["ridge_factors"] = ridge_factors
+        portfolio_result = analyzer.backtest_hk_market(**backtest_kwargs)
+    finally:
+        _safe_close_analyzer(analyzer)
+
+    if portfolio_result is None:
+        print("[ERROR] 全港股组合分析失败")
+        return None
+
+    analysis_results = portfolio_result.get("analysis_results", [])
+    print(f"\n[INFO] 成功分析 {len(analysis_results)} 只股票")
+    print(f"[INFO] 组合预计持有 Top {portfolio_result['top_n']} 只股票")
+    print(f"[INFO] 组合估算收益率: {portfolio_result['estimated_portfolio_return']:.1f}%")
+    print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
+    print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")
+
+    if export_csv:
+        export_path = Path(export_csv)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        ranking_path = export_path.with_name(f"{export_path.stem}_ranking.csv")
+        selected_path = export_path.with_name(f"{export_path.stem}_selected.csv")
+        watchlist_path = export_path.with_name(f"{export_path.stem}_watchlist.csv")
+
+        pd.DataFrame(portfolio_result.get("ranking", [])).to_csv(ranking_path, index=False, encoding="utf-8-sig")
+        pd.DataFrame(portfolio_result.get("selected", [])).to_csv(selected_path, index=False, encoding="utf-8-sig")
+        pd.DataFrame(portfolio_result.get("watchlist", [])).to_csv(watchlist_path, index=False, encoding="utf-8-sig")
+
+        print(f"[OK] 已导出全市场排名: {ranking_path}")
+        print(f"[OK] 已导出当前持有: {selected_path}")
+        print(f"[OK] 已导出观察名单: {watchlist_path}")
+
+    if persist_signals:
+        service = MarketDataService()
+        try:
+            persist_result = service.persist_portfolio_result(
+                portfolio_result=portfolio_result,
+                market="HK",
+                signal_set="all_hk_topn",
+                strategy_name="all_hk_topn",
+                batch_id=batch_id,
+                source="stock_analyzer_cli",
+            )
+        finally:
+            service.close()
+        print(f"[OK] 已写入 signal 层: batch_id={persist_result['batch_id']}, rows={persist_result['signal_rows']}")
+
+    print("\n当前建议持有:")
+    for item in portfolio_result.get("selected", []):
+        print(f"- {item['stock_code']}")
+        for line in _format_factor_reason_lines(item):
+            print(line)
+
+    print("\n" + "=" * 80)
+    print("全港股 TopN 分析完成！")
+    print("=" * 80)
+    return portfolio_result
+
+
 def main_all_hk(
     days=365,
     top_n=10,
@@ -711,7 +983,7 @@ def main_all_hk(
     refresh_recommended_factor_weights=False,
     validation_factor_scope="scoring_only",
 ):
-    """对本地已同步的全部港股执行 TopN 组合分析。"""
+    """对本地已同步的全部港股执行 TopN 组合分析（兼容旧接口：验证+选股一次完成）。"""
     print("=" * 80)
     print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选")
     print("=" * 80)
@@ -1292,7 +1564,7 @@ def run_cli(argv=None):
         description="港股技术分析系统 - 支持单股回测、批量分析与多策略比较"
     )
     parser.add_argument('mode', nargs='?', default=None,
-                        help='运行模式：single / suite / all_hk / factor_report / review_batch / 直接股票代码')
+                        help='运行模式：single / suite / all_hk / validate_factors / select_stocks / factor_report / review_batch / 直接股票代码')
     parser.add_argument('value', nargs='?', default=None,
                         help='兼容旧模式：single 时为股票代码')
     parser.add_argument('--days', dest='days', type=int, default=365,
@@ -1355,6 +1627,40 @@ def run_cli(argv=None):
             top_n=args.top_n,
             initial_capital=args.initial_capital,
             export_csv=args.export_csv,
+        )
+    elif args.mode == "validate_factors":
+        return main_validate_factors(
+            days=args.days,
+            factor_set=args.factor_set,
+            max_workers=args.max_workers,
+            show_progress=args.show_progress,
+            validation_horizons=validation_horizons,
+            validation_quantiles=args.quantiles,
+            validation_min_observations=args.min_observations,
+            validation_stock_limit=args.stock_limit,
+            validation_factor_scope=args.validation_factor_scope,
+            refresh_recommended_factor_weights=args.refresh_recommended_factor_weights,
+            export_csv=args.export_csv,
+        )
+    elif args.mode == "select_stocks":
+        return main_select_stocks(
+            days=args.days,
+            top_n=args.top_n,
+            initial_capital=args.initial_capital,
+            export_csv=args.export_csv,
+            persist_signals=args.persist_signals,
+            batch_id=args.batch_id,
+            max_workers=args.max_workers,
+            analysis_mode=args.analysis_mode,
+            factor_set=args.factor_set,
+            show_progress=args.show_progress,
+            fast_mode=args.fast_mode,
+            validation_days=args.validation_days,
+            validation_horizons=validation_horizons,
+            validation_quantiles=args.quantiles,
+            validation_min_observations=args.min_observations,
+            validation_stock_limit=args.stock_limit,
+            validation_factor_scope=args.validation_factor_scope,
         )
     elif args.mode == "all_hk":
         return main_all_hk(

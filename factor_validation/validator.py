@@ -30,6 +30,22 @@ FEATURE_METADATA_COLUMNS = {
 }
 
 
+def _pearson_r(n, sum_x, sum_y, sum_xx, sum_yy, sum_xy, valid_mask):
+    """Numerically stable Pearson r from pre-aggregated sums."""
+    n = n.astype(float)
+    sum_x = sum_x.astype(float)
+    sum_y = sum_y.astype(float)
+    sum_xx = sum_xx.astype(float)
+    sum_yy = sum_yy.astype(float)
+    sum_xy = sum_xy.astype(float)
+    numer = n * sum_xy - sum_x * sum_y
+    denom_sq = (n * sum_xx - sum_x ** 2) * (n * sum_yy - sum_y ** 2)
+    denom_sq = denom_sq.clip(lower=0)
+    denom = np.sqrt(denom_sq)
+    r = np.where(valid_mask & (denom > 0), numer / denom, np.nan)
+    return np.clip(r, -1.0, 1.0)
+
+
 class FactorValidationAccumulator:
     def __init__(self, horizons, quantiles, min_observations, include_validation_frame=False, include_membership=False):
         self.horizons = tuple(int(item) for item in horizons)
@@ -198,7 +214,10 @@ class FactorValidationAccumulator:
                         RANK() OVER w_f AS feature_rank,
                         RANK() OVER w_t AS target_rank
                     FROM validation_batches
-                    WHERE feature_value IS NOT NULL AND {target} IS NOT NULL
+                    WHERE feature_value IS NOT NULL
+                        AND {target} IS NOT NULL
+                        AND ABS(feature_value) BETWEEN 0 AND 1e150
+                        AND ABS({target}) BETWEEN 0 AND 1e150
                     WINDOW
                         w_f AS (PARTITION BY feature_set, feature_name, trade_date ORDER BY feature_value),
                         w_t AS (PARTITION BY feature_set, feature_name, trade_date ORDER BY {target})
@@ -208,7 +227,10 @@ class FactorValidationAccumulator:
                     AND COUNT(DISTINCT feature_value) > 1
                     AND COUNT(DISTINCT {target}) > 1
             """)
-        ic_by_date = conn.execute(" UNION ALL ".join(ic_parts)).fetch_df()
+        try:
+            ic_by_date = conn.execute(" UNION ALL ".join(ic_parts)).fetch_df()
+        except Exception:
+            ic_by_date = self._calculate_ic_fallback(working_horizons, min_obs)
         ic_by_date = FactorValidator._postprocess_ic_frame(ic_by_date)
 
         # =========================================================================
@@ -458,6 +480,73 @@ class FactorValidationAccumulator:
         }
         self.cleanup()
         return result
+
+    def _calculate_ic_fallback(self, working_horizons, min_obs):
+        """Fallback IC computation in Python when DuckDB CORR overflows."""
+        conn = self._ensure_connection()
+        ic_frames = []
+        for h in working_horizons:
+            target = f"forward_return_{h}"
+            raw = conn.execute(f"""
+                SELECT
+                    feature_set, feature_name, trade_date,
+                    feature_value, {target}
+                FROM validation_batches
+                WHERE feature_value IS NOT NULL
+                    AND {target} IS NOT NULL
+                    AND ABS(feature_value) BETWEEN 0 AND 1e150
+                    AND ABS({target}) BETWEEN 0 AND 1e150
+            """).fetch_df()
+            if raw.empty:
+                continue
+            ranks = raw.groupby(
+                ["feature_set", "feature_name", "trade_date"], dropna=False
+            )
+            raw["feature_rank"] = ranks["feature_value"].rank(method="average")
+            raw["target_rank"] = ranks[target].rank(method="average")
+            grouped = raw.groupby(
+                ["feature_set", "feature_name", "trade_date"], dropna=False
+            )
+            agg = grouped.agg(
+                observation_count=("feature_value", "size"),
+                feature_unique=("feature_value", "nunique"),
+                target_unique=(target, "nunique"),
+                sum_f=("feature_value", "sum"),
+                sum_t=(target, "sum"),
+                sum_ff=("feature_value", lambda s: (s.astype(float) ** 2).sum()),
+                sum_tt=(target, lambda s: (s.astype(float) ** 2).sum()),
+                sum_ft=(target, lambda s: (s.astype(float) * raw.loc[s.index, "feature_value"].astype(float)).sum()),
+                sum_fr=("feature_rank", "sum"),
+                sum_tr=("target_rank", "sum"),
+                sum_frfr=("feature_rank", lambda s: (s.astype(float) ** 2).sum()),
+                sum_trtr=("target_rank", lambda s: (s.astype(float) ** 2).sum()),
+                sum_frtr=(target, lambda s: (raw.loc[s.index, "feature_rank"].astype(float) * raw.loc[s.index, "target_rank"].astype(float)).sum()),
+            ).reset_index()
+
+            n = agg["observation_count"]
+            valid = (n >= min_obs) & (agg["feature_unique"] > 1) & (agg["target_unique"] > 1)
+
+            agg["ic"] = _pearson_r(
+                n, agg["sum_f"], agg["sum_t"], agg["sum_ff"], agg["sum_tt"], agg["sum_ft"], valid
+            )
+            agg["rank_ic"] = _pearson_r(
+                n, agg["sum_fr"], agg["sum_tr"], agg["sum_frfr"], agg["sum_trtr"], agg["sum_frtr"], valid
+            )
+
+            ic_frame = agg[[
+                "feature_set", "feature_name", "trade_date",
+                "observation_count", "feature_unique", "target_unique",
+                "ic", "rank_ic",
+            ]].copy()
+            ic_frame["horizon"] = int(h)
+            ic_frames.append(ic_frame)
+        if not ic_frames:
+            return pd.DataFrame(columns=[
+                "feature_set", "feature_name", "trade_date", "horizon",
+                "observation_count", "feature_unique", "target_unique", "ic", "rank_ic",
+            ])
+        ic_by_date = pd.concat(ic_frames, ignore_index=True)
+        return FactorValidator._postprocess_ic_frame(ic_by_date)
 
     def cleanup(self):
         if self._conn is not None:

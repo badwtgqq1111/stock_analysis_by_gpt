@@ -1,4 +1,5 @@
 output/
+assets/
 __pycache__/assets/stock_data.duckdb
 __pycache__/
 strategy/__pycache__/

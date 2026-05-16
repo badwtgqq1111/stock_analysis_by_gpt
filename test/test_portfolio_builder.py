@@ -6,6 +6,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -229,6 +230,116 @@ def test_portfolio_builder_replay_applies_transaction_costs():
     assert cost_replay["trades"][1]["price"] < zero_replay["trades"][1]["price"]
 
 
+def test_ranking_row_prefers_fresh_breakout_over_stale_sideways_candidate():
+    fresh_breakout = {
+        "stock_code": "00901",
+        "backtest": {"total_return": 18.0, "win_rate": 66.0, "total_trades": 6},
+        "latest_expected_3m_score": 84.0,
+        "latest_matrix_score": 78.0,
+        "latest_regime_score": 73.0,
+        "latest_entry_type": "factor_rank",
+        "latest_signal_tier": "strong",
+        "latest_signal_date": pd.Timestamp("2025-01-10"),
+        "current_signal_active": True,
+        "current_signal_actionable": True,
+        "current_signal_score": 86.0,
+        "avg_forward_return_60_signal": 12.0,
+        "avg_forward_return_60_watch": 3.0,
+        "factor_set": "qlib_alpha158",
+        "selection_source": "factor_engine",
+        "setup_type": "pre_breakout",
+        "setup_score": 88.0,
+        "sideways_penalty": 2.0,
+        "signal_freshness_score": 96.0,
+        "signal_age_days": 1,
+        "factor_explanation": {},
+    }
+    stale_sideways = {
+        "stock_code": "00902",
+        "backtest": {"total_return": 4.0, "win_rate": 32.0, "total_trades": 4},
+        "latest_expected_3m_score": 98.0,
+        "latest_matrix_score": 92.0,
+        "latest_regime_score": 90.0,
+        "latest_entry_type": "factor_rank",
+        "latest_signal_tier": "weak",
+        "latest_signal_date": pd.Timestamp("2024-12-10"),
+        "current_signal_active": True,
+        "current_signal_actionable": False,
+        "current_signal_score": 99.0,
+        "avg_forward_return_60_signal": 2.0,
+        "avg_forward_return_60_watch": 1.0,
+        "factor_set": "qlib_alpha158",
+        "selection_source": "factor_engine",
+        "setup_type": "sideways",
+        "setup_score": 18.0,
+        "sideways_penalty": 24.0,
+        "signal_freshness_score": 5.0,
+        "signal_age_days": 22,
+        "factor_explanation": {},
+    }
+
+    fresh_row = TopNPortfolioBuilder._build_ranking_row(fresh_breakout)
+    stale_row = TopNPortfolioBuilder._build_ranking_row(stale_sideways)
+
+    assert fresh_row["ranking_score"] > stale_row["ranking_score"]
+    assert fresh_row["setup_type"] == "pre_breakout"
+    assert stale_row["setup_type"] == "sideways"
+
+
+def test_low_price_setup_snapshot_identifies_breakout_and_bottom_rebound():
+    dates = pd.date_range("2024-01-02", periods=90, freq="B")
+
+    breakout_close = pd.Series(
+        np.concatenate(
+            [
+                np.linspace(1.05, 1.18, 55),
+                np.linspace(1.19, 1.22, 20),
+                np.linspace(1.225, 1.245, 15),
+            ]
+        ),
+        index=dates,
+    )
+    breakout_frame = pd.DataFrame(
+        {
+            "Open": breakout_close * 0.995,
+            "Close": breakout_close,
+            "High": breakout_close * 1.01,
+            "Low": breakout_close * 0.99,
+            "Volume": np.concatenate([np.full(75, 800_000.0), np.linspace(900_000.0, 1_800_000.0, 15)]),
+        },
+        index=dates,
+    )
+
+    rebound_close = pd.Series(
+        np.concatenate(
+            [
+                np.linspace(2.8, 1.05, 60),
+                np.linspace(1.00, 1.18, 15),
+                np.linspace(1.20, 1.34, 15),
+            ]
+        ),
+        index=dates,
+    )
+    rebound_frame = pd.DataFrame(
+        {
+            "Open": rebound_close * 0.99,
+            "Close": rebound_close,
+            "High": rebound_close * 1.02,
+            "Low": rebound_close * 0.97,
+            "Volume": np.concatenate([np.full(60, 650_000.0), np.linspace(900_000.0, 2_100_000.0, 30)]),
+        },
+        index=dates,
+    )
+
+    breakout_snapshot = TopNPortfolioBuilder._summarize_low_price_setup(breakout_frame)
+    rebound_snapshot = TopNPortfolioBuilder._summarize_low_price_setup(rebound_frame)
+
+    assert breakout_snapshot["setup_type"] == "pre_breakout"
+    assert breakout_snapshot["setup_score"] > breakout_snapshot["sideways_penalty"]
+    assert rebound_snapshot["setup_type"] == "bottom_rebound"
+    assert rebound_snapshot["setup_score"] > rebound_snapshot["sideways_penalty"]
+
+
 if __name__ == "__main__":
     test_portfolio_builder_selects_active_actionable_first()
     test_portfolio_builder_generates_cross_sectional_picks_and_watchlist()
@@ -236,4 +347,6 @@ if __name__ == "__main__":
     test_portfolio_builder_compounds_portfolio_equity_curve_over_dates()
     test_portfolio_builder_replay_generates_real_trades()
     test_portfolio_builder_replay_applies_transaction_costs()
+    test_ranking_row_prefers_fresh_breakout_over_stale_sideways_candidate()
+    test_low_price_setup_snapshot_identifies_breakout_and_bottom_rebound()
     print("portfolio builder tests passed")

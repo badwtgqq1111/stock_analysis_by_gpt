@@ -100,6 +100,81 @@ def test_factor_validator_direct_pipeline():
     assert "spread_decay_ratio" in decay_summary.columns
 
 
+def test_factor_validator_streaming_matches_one_shot_small_panel():
+    stock_codes, feature_frames, ohlcv_frame = _build_panel_frames()
+    validator = FactorValidator(horizons=(1,), quantiles=3, min_observations=3)
+
+    long_feature_frames = []
+    for stock_code, feature_frame in zip(stock_codes, feature_frames):
+        current = feature_frame.copy()
+        current["stock_code"] = stock_code
+        current["feature_set"] = "alpha_demo"
+        long_feature_frames.append(current)
+    feature_frame = pd.concat(long_feature_frames, ignore_index=True)
+
+    one_shot = validator.validate(feature_frame=feature_frame, ohlcv_frame=ohlcv_frame)
+
+    batches = []
+    for start in range(0, len(stock_codes), 2):
+        current_codes = set(stock_codes[start:start + 2])
+        batch_feature = feature_frame[feature_frame["stock_code"].isin(current_codes)].copy()
+        batch_ohlcv = ohlcv_frame[ohlcv_frame["stock_code"].isin(current_codes)].copy()
+        batches.append({"feature_frame": batch_feature, "ohlcv_frame": batch_ohlcv})
+
+    streamed = validator.validate_streaming(batches)
+
+    def _assert_frames_close(left, right, float_rtol=1e-10):
+        """Compare DataFrames with tolerance on float columns (DuckDB vs pandas precision)."""
+        pd.testing.assert_index_equal(left.columns, right.columns)
+        pd.testing.assert_frame_equal(
+            left.reset_index(drop=True), right.reset_index(drop=True),
+            check_dtype=False, check_exact=False,
+            rtol=float_rtol, atol=1e-12,
+        )
+
+    _assert_frames_close(one_shot["ic_by_date"], streamed["ic_by_date"])
+    _assert_frames_close(one_shot["ic_summary"], streamed["ic_summary"])
+    _assert_frames_close(one_shot["quantile_returns_by_date"], streamed["quantile_returns_by_date"])
+    _assert_frames_close(one_shot["quantile_summary"], streamed["quantile_summary"])
+    _assert_frames_close(one_shot["long_short_by_date"], streamed["long_short_by_date"])
+    _assert_frames_close(one_shot["long_short_summary"], streamed["long_short_summary"])
+    _assert_frames_close(one_shot["turnover_by_date"], streamed["turnover_by_date"])
+    _assert_frames_close(one_shot["turnover_summary"], streamed["turnover_summary"])
+    _assert_frames_close(one_shot["decay_summary"], streamed["decay_summary"])
+    assert streamed["validation_frame"].empty
+    assert streamed["quantile_membership_by_date"].empty
+
+
+
+def test_factor_validator_streaming_does_not_reload_all_batches(monkeypatch):
+    stock_codes, feature_frames, ohlcv_frame = _build_panel_frames()
+    validator = FactorValidator(horizons=(1,), quantiles=3, min_observations=3)
+
+    long_feature_frames = []
+    for stock_code, feature_frame in zip(stock_codes, feature_frames):
+        current = feature_frame.copy()
+        current["stock_code"] = stock_code
+        current["feature_set"] = "alpha_demo"
+        long_feature_frames.append(current)
+    feature_frame = pd.concat(long_feature_frames, ignore_index=True)
+
+    batches = []
+    for start in range(0, len(stock_codes), 2):
+        current_codes = set(stock_codes[start:start + 2])
+        batch_feature = feature_frame[feature_frame["stock_code"].isin(current_codes)].copy()
+        batch_ohlcv = ohlcv_frame[ohlcv_frame["stock_code"].isin(current_codes)].copy()
+        batches.append({"feature_frame": batch_feature, "ohlcv_frame": batch_ohlcv})
+
+    def _fail_load_all_batches(self):
+        raise AssertionError("streaming finalize should not reload all batches into memory")
+
+    monkeypatch.setattr("factor_validation.validator.FactorValidationAccumulator._load_all_batches", _fail_load_all_batches)
+
+    streamed = validator.validate_streaming(batches)
+    assert not streamed["ic_summary"].empty
+    assert streamed["validation_frame"].empty
+
+
 def test_service_can_validate_feature_set():
     stock_codes, feature_frames, ohlcv_frame = _build_panel_frames()
 

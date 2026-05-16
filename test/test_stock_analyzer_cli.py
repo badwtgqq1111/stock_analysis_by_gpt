@@ -257,7 +257,7 @@ def test_run_cli_supports_all_hk_mode():
         "days": 120,
         "top_n": 2,
         "initial_capital": 200000.0,
-        "max_workers": 1,
+        "max_workers": 0,
         "analysis_mode": "factor",
         "factor_set": "qlib_alpha158",
         "factor_score_config": None,
@@ -309,7 +309,7 @@ def test_run_cli_all_hk_supports_strategy_mode_override():
         "days": 365,
         "top_n": 2,
         "initial_capital": 100000,
-        "max_workers": 1,
+        "max_workers": 0,
         "analysis_mode": "strategy",
         "factor_set": "qlib_alpha158",
         "factor_score_config": None,
@@ -334,7 +334,7 @@ def test_run_cli_all_hk_supports_progress_and_fast_mode():
         "days": 365,
         "top_n": 2,
         "initial_capital": 100000,
-        "max_workers": 1,
+        "max_workers": 0,
         "analysis_mode": "factor",
         "factor_set": "qlib_alpha158",
         "factor_score_config": None,
@@ -589,6 +589,46 @@ def test_build_validation_cache_key_distinguishes_factor_scope():
     assert identity_all["validated_feature_names"] == []
     assert identity_scoring["validation_factor_scope"] == "scoring_only"
     assert identity_scoring["validated_feature_names"] == ["MA20"]
+
+
+def test_validation_scorecard_cache_with_inf_is_rejected():
+    _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    dirty = pd.DataFrame(
+        [
+            {
+                "feature_name": "MA20",
+                "component": pd.NA,
+                "validation_score": float("inf"),
+                "recommended_factor_weight": pd.NA,
+            }
+        ]
+    )
+    assert stock_analyzer._is_usable_validation_scorecard(dirty) is False
+
+
+def test_validation_scorecard_sanitizer_classifies_component_and_cleans_inf():
+    _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    dirty = pd.DataFrame(
+        [
+            {
+                "feature_name": "MA5",
+                "component": pd.NA,
+                "validation_score": float("inf"),
+                "recommended_factor_weight": pd.NA,
+            }
+        ]
+    )
+    cleaned = stock_analyzer._sanitize_validation_scorecard(dirty)
+    assert cleaned.loc[0, "component"] == "trend"
+    assert pd.isna(cleaned.loc[0, "validation_score"])
 
 
 if __name__ == "__main__":

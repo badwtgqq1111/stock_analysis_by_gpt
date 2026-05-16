@@ -5,6 +5,7 @@
 
 import sys
 import tempfile
+import os
 from pathlib import Path
 import types
 import threading
@@ -401,11 +402,326 @@ def test_build_factor_validation_report_uses_cross_sectional_panel():
 
     assert result is not None
     assert result["metadata"]["validation_mode"] == "cross_sectional_panel"
-    assert not result["validation_frame"].empty
+    assert result["validation_frame"].empty
     assert not result["ic_summary"].empty
     assert not result["long_short_summary"].empty
     assert len(result["factor_coverage"]) == 6
     assert result["stock_summary"]["feature_rows"].min() > 0
+    assert result["metadata"]["validation_batch_size"] >= 1
+
+
+def test_backtest_portfolio_factor_mode_uses_batch_analysis():
+    original_batch_analyzer = getattr(StockAnalyzer, "_analyze_factor_batch", None)
+
+    batch_calls = []
+
+    def stub_analyze_factor_batch(
+        self,
+        stock_codes,
+        days=365,
+        factor_set="qlib_alpha158",
+        factor_score_config=None,
+        persist_features=False,
+        ridge_factors=None,
+    ):
+        batch_calls.append(list(stock_codes))
+        results = []
+        for index, stock_code in enumerate(stock_codes, start=1):
+            score = 75.0 + index
+            results.append(
+                {
+                    "stock_code": stock_code,
+                    "data": pd.DataFrame(),
+                    "feature_frame": pd.DataFrame(),
+                    "factor_scores": {"composite_score": score},
+                    "factor_explanation": {},
+                    "backtest": {"total_return": score / 10.0, "win_rate": 60.0, "total_trades": 2},
+                    "latest_price": 1.2,
+                    "price_change_30d": 5.0,
+                    "latest_expected_3m_score": score,
+                    "latest_matrix_score": score - 8.0,
+                    "latest_regime_score": score - 12.0,
+                    "latest_entry_type": "factor_rank",
+                    "latest_signal_tier": "strong",
+                    "latest_signal_date": pd.Timestamp("2025-01-10"),
+                    "current_signal_active": True,
+                    "current_signal_actionable": True,
+                    "current_signal_score": score,
+                    "avg_forward_return_60_signal": 6.0,
+                    "avg_forward_return_60_watch": 1.0,
+                    "buy_signals": pd.DataFrame(),
+                    "factor_set": factor_set,
+                    "selection_source": "factor_engine",
+                    "setup_type": "pre_breakout",
+                    "setup_score": 80.0,
+                    "sideways_penalty": 1.0,
+                    "signal_freshness_score": 95.0,
+                    "signal_age_days": 1,
+                }
+            )
+        return results
+
+    StockAnalyzer._analyze_factor_batch = stub_analyze_factor_batch
+    try:
+        analyzer = StockAnalyzer()
+        result = analyzer.backtest_portfolio(
+            stock_codes=["00001", "00002", "00003", "00004", "00005"],
+            days=120,
+            top_n=2,
+            max_workers=2,
+            analysis_mode="factor",
+        )
+        analyzer.close()
+    finally:
+        if original_batch_analyzer is not None:
+            StockAnalyzer._analyze_factor_batch = original_batch_analyzer
+        else:
+            delattr(StockAnalyzer, "_analyze_factor_batch")
+
+    assert result is not None
+    assert len(result["analysis_results"]) == 5
+    assert sum(len(batch) for batch in batch_calls) == 5
+    assert len(batch_calls) < 5
+    assert any(len(batch) > 1 for batch in batch_calls)
+
+
+def test_validation_frame_helpers_trim_columns():
+    feature_frame = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02"]),
+            "stock_code": ["00001"],
+            "market": ["HK"],
+            "exchange": ["XHKG"],
+            "asset_type": ["equity"],
+            "frequency": ["daily"],
+            "adjust": ["qfq"],
+            "feature_set": ["alpha_demo"],
+            "feature_name": ["MA20"],
+            "feature_value": [1.23],
+            "source": ["unit_test"],
+            "ingest_time": [pd.Timestamp("2024-01-02")],
+        }
+    )
+    ohlcv_frame = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02"]),
+            "stock_code": ["00001"],
+            "market": ["HK"],
+            "exchange": ["XHKG"],
+            "asset_type": ["equity"],
+            "frequency": ["daily"],
+            "adjust": ["qfq"],
+            "close": [12.3],
+            "open": [12.0],
+            "high": [12.5],
+            "low": [11.8],
+            "volume": [1000],
+            "source": ["unit_test"],
+        }
+    )
+
+    trimmed_feature = StockAnalyzer._trim_validation_feature_frame(feature_frame)
+    trimmed_ohlcv = StockAnalyzer._trim_validation_ohlcv_frame(ohlcv_frame)
+
+    assert "source" not in trimmed_feature.columns
+    assert "ingest_time" not in trimmed_feature.columns
+    assert set(trimmed_feature.columns) == {
+        "trade_date", "stock_code", "market", "exchange", "asset_type",
+        "frequency", "adjust", "feature_set", "feature_name", "feature_value",
+    }
+    assert set(trimmed_ohlcv.columns) == {
+        "trade_date", "stock_code", "market", "exchange", "asset_type",
+        "frequency", "adjust", "close",
+    }
+
+
+def test_validation_batch_size_scales_down_without_dropping_stocks():
+    original_available_memory_bytes = StockAnalyzer._available_memory_bytes
+
+    StockAnalyzer._available_memory_bytes = staticmethod(lambda: 1 * 1024 ** 3)
+    try:
+        all_scope_batch = StockAnalyzer._resolve_validation_batch_size("all", requested_workers=8)
+        scoring_scope_batch = StockAnalyzer._resolve_validation_batch_size("scoring_only", requested_workers=8)
+    finally:
+        StockAnalyzer._available_memory_bytes = original_available_memory_bytes
+
+    assert all_scope_batch >= 1
+    assert scoring_scope_batch >= 1
+    assert all_scope_batch < scoring_scope_batch
+
+
+def test_build_factor_validation_report_uses_feature_cache_when_fresh():
+    original_load_stock_data = StockAnalyzer.load_stock_data
+
+    call_count = {"value": 0}
+
+    def stub_load_stock_data(self, stock_code, days=365):
+        call_count["value"] += 1
+        dates = pd.date_range("2024-01-02", periods=40, freq="B")
+        close = np.linspace(10, 20, len(dates))
+        return pd.DataFrame(
+            {
+                "Open": close * 0.99,
+                "Close": close,
+                "High": close * 1.01,
+                "Low": close * 0.98,
+                "Volume": np.linspace(1000, 2000, len(dates)),
+            },
+            index=dates,
+        ).rename_axis("date")
+
+    StockAnalyzer.load_stock_data = stub_load_stock_data
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            analyzer = StockAnalyzer(db_dir=tmp_dir)
+            kwargs = dict(
+                stock_codes=["00001", "00002"],
+                days=30,
+                factor_set="qlib_alpha158",
+                horizons=(5,),
+                quantiles=3,
+                min_observations=3,
+                max_workers=1,
+            )
+            first = analyzer.build_factor_validation_report(**kwargs)
+            first_calls = call_count["value"]
+            second = analyzer.build_factor_validation_report(**kwargs)
+            analyzer.close()
+    finally:
+        StockAnalyzer.load_stock_data = original_load_stock_data
+
+    assert first is not None
+    assert second is not None
+    assert first_calls == 2
+    assert call_count["value"] == first_calls
+    assert not second["ic_summary"].empty
+
+
+def test_build_factor_validation_report_refreshes_stale_feature_cache():
+    original_load_stock_data = StockAnalyzer.load_stock_data
+
+    call_count = {"value": 0}
+
+    def stub_load_stock_data(self, stock_code, days=365):
+        call_count["value"] += 1
+        dates = pd.date_range("2024-01-02", periods=40, freq="B")
+        rank = int(stock_code[-1])
+        close = np.linspace(10 + rank, 20 + rank, len(dates))
+        return pd.DataFrame(
+            {
+                "Open": close * 0.99,
+                "Close": close,
+                "High": close * 1.01,
+                "Low": close * 0.98,
+                "Volume": np.linspace(1000, 2000, len(dates)),
+            },
+            index=dates,
+        ).rename_axis("date")
+
+    StockAnalyzer.load_stock_data = stub_load_stock_data
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            analyzer = StockAnalyzer(db_dir=tmp_dir)
+            kwargs = dict(
+                stock_codes=["00001", "00002"],
+                days=30,
+                factor_set="qlib_alpha158",
+                horizons=(5,),
+                quantiles=3,
+                min_observations=3,
+                max_workers=1,
+            )
+            first = analyzer.build_factor_validation_report(**kwargs)
+            cache_dir = analyzer.get_validation_feature_cache_dir()
+            cache_files = list(cache_dir.glob("*.pkl"))
+            assert cache_files
+            stale_time = time.time() - 8 * 24 * 60 * 60
+            for cache_file in cache_files:
+                os.utime(cache_file, (stale_time, stale_time))
+            before_refresh = call_count["value"]
+            second = analyzer.build_factor_validation_report(**kwargs)
+            analyzer.close()
+    finally:
+        StockAnalyzer.load_stock_data = original_load_stock_data
+
+    assert first is not None
+    assert second is not None
+    assert before_refresh == 2
+    assert call_count["value"] == 4
+
+
+def test_analyze_factor_batch_handles_duplicate_panel_dates_without_series_truth_error(monkeypatch):
+    analyzer_module = sys.modules["analyzer_core"]
+    original_load_stock_data = StockAnalyzer.load_stock_data
+    original_create_factor_set = analyzer_module.create_factor_set
+    original_compute_factor_scores = StockAnalyzer._compute_factor_scores
+
+    class DummyFactor:
+        def transform(self, ohlcv_frame, context=None):
+            trade_dates = pd.to_datetime(ohlcv_frame["trade_date"])
+            return pd.DataFrame(
+                {
+                    "MA5": np.linspace(1.0, 2.0, len(trade_dates)),
+                },
+                index=trade_dates,
+            )
+
+    def stub_load_stock_data(self, stock_code, days=365):
+        dates = pd.date_range("2024-01-02", periods=80, freq="B")
+        base = 10 + int(stock_code[-1])
+        close = np.linspace(base, base + 4, len(dates))
+        return pd.DataFrame(
+            {
+                "Open": close * 0.99,
+                "Close": close,
+                "High": close * 1.01,
+                "Low": close * 0.98,
+                "Volume": np.linspace(1000, 2000, len(dates)),
+            },
+            index=dates,
+        ).rename_axis("date")
+
+    def stub_compute_factor_scores(self, panel_features, factor_set=None, score_config=None, ridge_factors=None):
+        size = len(panel_features)
+        panel_scores = pd.DataFrame(
+            {
+                "trend_score": np.linspace(60.0, 80.0, size),
+                "quality_score": np.linspace(55.0, 75.0, size),
+                "risk_score": np.linspace(40.0, 50.0, size),
+                "composite_score": np.linspace(65.0, 85.0, size),
+            },
+            index=panel_features.index,
+        )
+        factor_details = {
+            "factor_set": factor_set,
+            "component_weights": {"trend_score": 0.4, "quality_score": 0.3, "risk_score": 0.15},
+            "factors": {
+                "MA5": {
+                    "component": "trend",
+                    "weight": 0.14,
+                    "direction": "lower_is_better",
+                    "raw_series": panel_features["MA5"],
+                    "score_series": pd.Series(np.linspace(50.0, 90.0, size), index=panel_features.index),
+                }
+            },
+        }
+        return panel_scores, factor_details
+
+    monkeypatch.setattr(StockAnalyzer, "load_stock_data", stub_load_stock_data)
+    monkeypatch.setattr(analyzer_module, "create_factor_set", lambda *args, **kwargs: DummyFactor())
+    monkeypatch.setattr(StockAnalyzer, "_compute_factor_scores", stub_compute_factor_scores)
+    monkeypatch.setattr(StockAnalyzer, "_signal_freshness_score", staticmethod(lambda signal_date, data_date: (90.0, 1)), raising=False)
+
+    analyzer = StockAnalyzer()
+    results = analyzer._analyze_factor_batch(
+        ["00001", "00002"],
+        days=60,
+        factor_set="qlib_alpha158",
+    )
+    analyzer.close()
+
+    assert len(results) == 2
+    assert results[0]["factor_explanation"]["top_positive_factors"]
 
 
 if __name__ == "__main__":
@@ -416,4 +732,7 @@ if __name__ == "__main__":
     test_backtest_hk_market_factor_mode_does_not_require_strategy_signals()
     test_backtest_portfolio_factor_mode_supports_parallel_analysis()
     test_build_factor_validation_report_uses_cross_sectional_panel()
+    test_backtest_portfolio_factor_mode_uses_batch_analysis()
+    test_validation_frame_helpers_trim_columns()
+    test_validation_batch_size_scales_down_without_dropping_stocks()
     print("hk market topn tests passed")

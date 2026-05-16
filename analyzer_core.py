@@ -1,7 +1,12 @@
 import pandas as pd
 import numpy as np
+import os
+import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+import hashlib
+import json
 from pathlib import Path
 import time
 
@@ -45,12 +50,109 @@ DEFAULT_FACTOR_SCORE_CONFIG = {
         "WVMA20": {"weight": 0.18, "higher_is_better": False},
         "VSTD20": {"weight": 0.18, "higher_is_better": False},
     },
+    "validated": {},
     "weights": {
-        "trend_score": 0.46,
-        "quality_score": 0.34,
-        "risk_score": 0.20,
+        "trend_score": 0.40,
+        "quality_score": 0.30,
+        "risk_score": 0.15,
+        "validated_score": 0.15,
     },
 }
+
+
+# Factor-to-component classification rules based on Alpha158 operator semantics
+FACTOR_CLASSIFICATION_RULES = {
+    "trend": {
+        "operators": {
+            "MA", "ROC", "BETA", "MAX", "MIN", "RSV", "IMAX", "IMIN", "IMXD",
+            "RANK", "QTLU", "QTLD",
+        },
+        "price_fields": {"OPEN", "HIGH", "LOW", "CLOSE", "VWAP"},
+        "description": "Price trend and momentum factors",
+    },
+    "quality": {
+        "operators": {
+            "VMA", "WVMA", "VSUMP", "VSUMN", "VSUMD", "CORR", "CORD",
+            "CNTP", "CNTN", "CNTD", "SUMP", "SUMN", "SUMD", "RSQR", "RESI",
+        },
+        "kbar_operators": {
+            "KMID", "KLEN", "KMID2", "KUP", "KUP2", "KLOW", "KLOW2", "KSFT", "KSFT2",
+        },
+        "volume_prefix": "VOLUME",
+        "description": "Volume-price relationship and quality factors",
+    },
+    "risk": {
+        "operators": {"STD", "VSTD"},
+        "description": "Volatility and risk factors",
+    },
+}
+
+VALIDATION_FEATURE_BASE_COLUMNS = [
+    "trade_date",
+    "stock_code",
+    "market",
+    "exchange",
+    "asset_type",
+    "frequency",
+    "adjust",
+    "feature_set",
+    "feature_name",
+    "feature_value",
+]
+
+VALIDATION_OHLCV_BASE_COLUMNS = [
+    "trade_date",
+    "stock_code",
+    "market",
+    "exchange",
+    "asset_type",
+    "frequency",
+    "adjust",
+    "close",
+]
+
+VALIDATION_FEATURE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+def classify_factor(factor_name):
+    """将 Alpha158 因子名分类到 trend/quality/risk/validated 组件。
+
+    Args:
+        factor_name: e.g. "MA30", "CNTD20", "KMID", "VOLUME5"
+
+    Returns:
+        str: one of "trend", "quality", "risk", "validated"
+    """
+    import re
+
+    name = str(factor_name).strip().upper()
+    if not name:
+        return "validated"
+
+    # Volume raw level columns: VOLUME0, VOLUME5, ...
+    if name.startswith(FACTOR_CLASSIFICATION_RULES["quality"]["volume_prefix"]):
+        return "quality"
+
+    # Kbar factors: KMID, KLEN, KMID2, ...
+    if name in FACTOR_CLASSIFICATION_RULES["quality"]["kbar_operators"]:
+        return "quality"
+
+    # Price level columns: OPEN0, HIGH2, CLOSE5, VWAP3, ...
+    for pf in FACTOR_CLASSIFICATION_RULES["trend"]["price_fields"]:
+        if name.startswith(pf):
+            return "trend"
+
+    # Operator-based factors: parse {OPERATOR}{WINDOW} pattern
+    match = re.match(r"([A-Z]+)(\d+)", name)
+    if match:
+        operator = match.group(1)
+        for component, rules in FACTOR_CLASSIFICATION_RULES.items():
+            if component == "validated":
+                continue
+            if operator in rules.get("operators", set()):
+                return component
+
+    return "validated"
 
 
 class StockAnalyzer:
@@ -148,6 +250,27 @@ class StockAnalyzer:
         return factor_names
 
     @staticmethod
+    def _parse_scoring_factors_to_alpha158_config(validated_feature_names):
+        """从评分因子名列表反推最小化 Alpha158 计算配置，减少约 70% 算子计算。"""
+        needed_operators = set()
+        needed_windows = set()
+        for name in (validated_feature_names or []):
+            match = re.match(r"([A-Z]+)(\d+)", str(name))
+            if match:
+                needed_operators.add(match.group(1))
+                needed_windows.add(int(match.group(2)))
+        if not needed_operators or not needed_windows:
+            return {}
+        return {
+            "price": {"windows": [], "feature": []},
+            "volume": {"windows": []},
+            "rolling": {
+                "windows": sorted(needed_windows),
+                "include": list(needed_operators),
+            },
+        }
+
+    @staticmethod
     def _rolling_score(series, higher_is_better=True, window=120, min_periods=30, scale=12):
         numeric = pd.to_numeric(series, errors="coerce")
         rolling_mean = numeric.rolling(window=window, min_periods=min_periods).mean()
@@ -158,12 +281,17 @@ class StockAnalyzer:
             score = 100 - score
         return score.clip(0, 100)
 
-    def _compute_factor_scores(self, feature_frame, factor_set=DEFAULT_FACTOR_SET, score_config=None):
+    def _compute_factor_scores(self, feature_frame, factor_set=DEFAULT_FACTOR_SET, score_config=None, ridge_factors=None):
         if feature_frame is None or feature_frame.empty:
             return pd.DataFrame(), {}
 
+        # New: Ridge-weighted cross-sectional path
+        if ridge_factors is not None and not ridge_factors.empty:
+            return self._compute_ridge_cross_sectional_scores(feature_frame, factor_set, ridge_factors)
+
         working = feature_frame.copy()
         config = score_config or DEFAULT_FACTOR_SCORE_CONFIG
+        component_names = [k for k in config if k != "weights"]
         factor_details = {
             "factor_set": factor_set,
             "component_weights": dict(config.get("weights", DEFAULT_FACTOR_SCORE_CONFIG["weights"])),
@@ -171,7 +299,7 @@ class StockAnalyzer:
         }
 
         component_frames = {}
-        for component_name in ("trend", "quality", "risk"):
+        for component_name in component_names:
             component_def = config.get(component_name, {})
             component_series = []
             component_weights = []
@@ -198,27 +326,225 @@ class StockAnalyzer:
             else:
                 component_frames[component_name] = pd.Series(np.nan, index=working.index)
 
-        trend_score = component_frames["trend"].clip(0, 100)
-        quality_score = component_frames["quality"].clip(0, 100)
-        risk_score = component_frames["risk"].clip(0, 100)
         composite_weights = config.get("weights", DEFAULT_FACTOR_SCORE_CONFIG["weights"])
-        composite_score = (
-            trend_score * float(composite_weights.get("trend_score", 0.46))
-            + quality_score * float(composite_weights.get("quality_score", 0.34))
-            + risk_score * float(composite_weights.get("risk_score", 0.20))
-        ).clip(0, 100)
+        composite_score = pd.Series(0.0, index=working.index)
+        for comp_name in component_names:
+            comp_score = component_frames[comp_name].clip(0, 100)
+            comp_weight = float(composite_weights.get(f"{comp_name}_score", 0.0))
+            composite_score = composite_score + comp_score * comp_weight
+        composite_score = composite_score.clip(0, 100)
 
-        result = pd.DataFrame(
-            {
-                "trend_score": trend_score,
-                "quality_score": quality_score,
-                "risk_score": risk_score,
-                "composite_score": composite_score,
-            },
-            index=working.index,
-        )
+        result_data = {"composite_score": composite_score}
+        for comp_name in component_names:
+            result_data[f"{comp_name}_score"] = component_frames[comp_name].clip(0, 100)
+        # Ensure backward-compat trend/quality/risk columns exist
+        for default_comp in ("trend", "quality", "risk"):
+            if f"{default_comp}_score" not in result_data:
+                result_data[f"{default_comp}_score"] = np.nan
+
+        result = pd.DataFrame(result_data, index=working.index)
         result["factor_set"] = factor_set
         return result, factor_details
+
+    def _compute_ridge_cross_sectional_scores(self, feature_frame, factor_set, ridge_factors):
+        """用 Ridge 系数做横截面打分 — 替代组件分桶逻辑。
+
+        对每个交易日，对每个 Ridge 选中的因子：
+          1. 全市场横截面 z-score
+          2. 乘以 ridge_coef（方向 + 量级）
+          3. 按组件聚合得 trend/quality/risk/validated 子分数
+          4. 全量求和得 composite_score
+
+        当只有单只股票时回退到滚动时序 z-score + Ridge 权重。
+
+        Returns (result_df, factor_details) matching _compute_factor_scores contract.
+        """
+        import re
+
+        working = feature_frame.copy()
+        factor_columns = [c for c in ridge_factors["feature_name"].tolist() if c in working.columns]
+        if not factor_columns:
+            return pd.DataFrame(), {}
+
+        score_components = ridge_factors.set_index("feature_name")
+        components_present = sorted(set(
+            score_components.loc[score_components.index.isin(factor_columns), "component"].dropna()
+        ))
+        component_weights = {"trend_score": 0.40, "quality_score": 0.30, "risk_score": 0.15, "validated_score": 0.15}
+
+        unique_dates = working.index.unique() if isinstance(working.index, pd.DatetimeIndex) else pd.Index([])
+        is_single_stock = len(unique_dates) == 0 or (
+            "stock_code" not in getattr(working, "columns", pd.Index([]))
+            and len(working) <= len(unique_dates) * 2
+        )
+
+        composite = pd.Series(np.nan, index=working.index, dtype=float)
+        component_scores = {comp: pd.Series(np.nan, index=working.index, dtype=float) for comp in components_present}
+
+        if is_single_stock and len(unique_dates) > 0:
+            # Fallback: per-stock rolling time-series z-score with Ridge weights
+            any_valid_contribution = False
+            for col_name in factor_columns:
+                row = score_components.loc[col_name]
+                coef = row["ridge_coef"]
+                component = row.get("component", "validated")
+                raw = pd.to_numeric(working[col_name], errors="coerce")
+                rolling_mean = raw.rolling(window=120, min_periods=30).mean()
+                rolling_std = raw.rolling(window=120, min_periods=30).std().replace(0, np.nan)
+                zscore = ((raw - rolling_mean) / rolling_std).clip(-3, 3)
+                contribution = zscore * coef
+                valid = contribution.notna()
+                if valid.any():
+                    any_valid_contribution = True
+                    composite = composite.fillna(0) + contribution.fillna(0)
+                    if component in component_scores:
+                        component_scores[component] = component_scores[component].fillna(0) + contribution.fillna(0)
+            if not any_valid_contribution:
+                composite = pd.Series(np.nan, index=working.index, dtype=float)
+                for comp in components_present:
+                    component_scores[comp] = pd.Series(np.nan, index=working.index, dtype=float)
+        else:
+            for trade_date in unique_dates:
+                date_mask = working.index == trade_date
+                row_count = date_mask.sum()
+                if row_count < 2:
+                    continue
+
+                date_composite = 0.0
+                date_components = {comp: 0.0 for comp in components_present}
+
+                for col_name in factor_columns:
+                    row = score_components.loc[col_name]
+                    coef = row["ridge_coef"]
+                    component = row.get("component", "validated")
+                    raw = pd.to_numeric(working.loc[date_mask, col_name], errors="coerce")
+                    valid = raw.notna()
+                    if valid.sum() < 2:
+                        continue
+                    date_mean = raw.mean()
+                    date_std = raw.std(ddof=1)
+                    if date_std == 0 or np.isnan(date_std):
+                        continue
+                    zscore = ((raw - date_mean) / date_std).clip(-3, 3).fillna(0)
+                    contribution = zscore * coef
+                    date_composite += contribution.values
+                    if component in date_components:
+                        date_components[component] = date_components[component] + contribution.values
+
+                composite.loc[date_mask] = date_composite
+                for comp, contrib in date_components.items():
+                    component_scores[comp].loc[date_mask] = contrib
+
+        # Normalize component sub-scores to 0-100 using percentile
+        for comp in components_present:
+            raw = pd.to_numeric(component_scores[comp], errors="coerce")
+            finite = raw[np.isfinite(raw)]
+            if len(finite) >= 2:
+                pct = raw.rank(pct=True) * 100
+                component_scores[comp] = pct.clip(0, 100)
+            else:
+                component_scores[comp] = pd.Series(np.nan, index=raw.index, dtype=float)
+
+        composite_raw = pd.to_numeric(composite, errors="coerce")
+        finite_c = composite_raw[np.isfinite(composite_raw)]
+        if len(finite_c) >= 2:
+            composite_pct = composite_raw.rank(pct=True) * 100
+            composite_pct = composite_pct.clip(0, 100)
+        else:
+            composite_pct = pd.Series(np.nan, index=composite_raw.index, dtype=float)
+
+        result = pd.DataFrame(
+            {"composite_score": composite_pct},
+            index=working.index,
+        )
+        for comp in components_present:
+            result[f"{comp}_score"] = component_scores[comp]
+        # Ensure all four component columns exist for backward compat
+        for default_comp in ("trend", "quality", "risk"):
+            if f"{default_comp}_score" not in result.columns:
+                result[f"{default_comp}_score"] = np.nan
+
+        result["factor_set"] = factor_set
+
+        factor_details = {
+            "factor_set": factor_set,
+            "component_weights": component_weights,
+            "ridge_factors": ridge_factors.to_dict(orient="records"),
+        }
+        return result, factor_details
+
+    @staticmethod
+    def _select_top_ridge_factors(factor_scorecard, top_k=30, min_abs_coef=0.0):
+        """从 Ridge 评分卡中选择 Top-K 因子用于横截面打分。
+
+        Args:
+            factor_scorecard: DataFrame from _build_factor_scorecard_ridge()
+            top_k: max number of factors to select
+            min_abs_coef: minimum |ridge_coef| threshold
+
+        Returns:
+            pd.DataFrame with [feature_name, ridge_coef, abs_ridge_coef, higher_is_better, component]
+        """
+        if factor_scorecard is None or factor_scorecard.empty:
+            return pd.DataFrame(columns=["feature_name", "ridge_coef", "abs_ridge_coef", "higher_is_better", "component"])
+
+        working = factor_scorecard.copy()
+        if "ridge_coef" not in working.columns and "abs_ridge_coef" not in working.columns:
+            return pd.DataFrame(columns=["feature_name", "ridge_coef", "abs_ridge_coef", "higher_is_better", "component"])
+
+        if "abs_ridge_coef" not in working.columns:
+            working["abs_ridge_coef"] = working["ridge_coef"].abs()
+        if "higher_is_better" not in working.columns:
+            working["higher_is_better"] = working["ridge_coef"].fillna(0) > 0
+        if "component" not in working.columns:
+            working["component"] = working["feature_name"].apply(classify_factor)
+
+        working = working[working["abs_ridge_coef"] >= min_abs_coef]
+        working = working.sort_values("abs_ridge_coef", ascending=False)
+        working = working.head(int(top_k))
+
+        keep_cols = ["feature_name", "ridge_coef", "abs_ridge_coef", "higher_is_better", "component"]
+        return working[[c for c in keep_cols if c in working.columns]].reset_index(drop=True)
+
+    @staticmethod
+    def _prune_redundant_factors(factor_scorecard, corr_matrix, threshold=0.80):
+        """移除冗余因子 — 贪婪算法按 |ridge_coef| 排序逐一遍历。
+
+        Args:
+            factor_scorecard: DataFrame with [feature_name, abs_ridge_coef]
+            corr_matrix: factor×factor correlation DataFrame
+            threshold: pairwise correlation above which a factor is pruned
+
+        Returns:
+            list of retained factor names
+        """
+        if factor_scorecard is None or factor_scorecard.empty:
+            return []
+        if corr_matrix is None or corr_matrix.empty:
+            return factor_scorecard["feature_name"].tolist()
+
+        sorted_factors = factor_scorecard.sort_values("abs_ridge_coef", ascending=False)["feature_name"].tolist()
+        corr_factors = [f for f in sorted_factors if f in corr_matrix.index and f in corr_matrix.columns]
+        if len(corr_factors) < 2:
+            return sorted_factors
+
+        retained = []
+        for factor_name in corr_factors:
+            keep = True
+            for accepted in retained:
+                corr_val = abs(corr_matrix.loc[factor_name, accepted])
+                if pd.notna(corr_val) and corr_val > threshold:
+                    keep = False
+                    break
+            if keep:
+                retained.append(factor_name)
+
+        # Append factors not in correlation matrix (no pruning info)
+        for factor_name in sorted_factors:
+            if factor_name not in retained and factor_name not in corr_factors:
+                retained.append(factor_name)
+
+        return retained
 
     @staticmethod
     def _build_factor_explanation(factor_details, factor_scores, score_index):
@@ -266,6 +592,28 @@ class StockAnalyzer:
         }
 
     @staticmethod
+    def _slice_factor_details(factor_details, row_mask):
+        if not factor_details:
+            return factor_details
+
+        mask_series = pd.Series(np.asarray(row_mask, dtype=bool))
+        sliced = {
+            "factor_set": factor_details.get("factor_set"),
+            "component_weights": dict(factor_details.get("component_weights", {})),
+            "factors": {},
+        }
+        for factor_name, meta in (factor_details.get("factors") or {}).items():
+            factor_meta = dict(meta or {})
+            raw_series = factor_meta.get("raw_series")
+            score_series = factor_meta.get("score_series")
+            if isinstance(raw_series, pd.Series) and len(raw_series) == len(mask_series):
+                factor_meta["raw_series"] = raw_series.iloc[mask_series.to_numpy()].copy()
+            if isinstance(score_series, pd.Series) and len(score_series) == len(mask_series):
+                factor_meta["score_series"] = score_series.iloc[mask_series.to_numpy()].copy()
+            sliced["factors"][factor_name] = factor_meta
+        return sliced
+
+    @staticmethod
     def _compute_forward_metrics(data, horizons=(20, 40, 60)):
         if data is None or data.empty:
             return pd.DataFrame(index=pd.Index([], name="date"))
@@ -288,6 +636,637 @@ class StockAnalyzer:
             working[f"forward_max_drawdown_{horizon}"] = drawdowns
         return working
 
+    @staticmethod
+    def _build_low_price_setup_snapshot(data):
+        return TopNPortfolioBuilder._summarize_low_price_setup(data)
+
+    @staticmethod
+    def _available_memory_bytes():
+        try:
+            if Path("/proc/meminfo").exists():
+                for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                    if line.startswith("MemAvailable:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return int(parts[1]) * 1024
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _resolve_safe_validation_workers(cls, requested_workers, validation_factor_scope="all"):
+        requested = int(requested_workers or 0)
+        cpu_count = max(int(os.cpu_count() or 1), 1)
+        if requested <= 0:
+            requested = cpu_count
+        available_bytes = cls._available_memory_bytes()
+        available_gb = (available_bytes / (1024 ** 3)) if available_bytes else None
+        cpu_cap = max(1, cpu_count - 1)
+        if str(validation_factor_scope) == "all":
+            cpu_cap = min(cpu_cap, 8)
+        else:
+            cpu_cap = min(cpu_cap, 16)
+
+        if available_gb is None:
+            return min(requested, cpu_cap)
+
+        per_worker_gb = 1.5 if str(validation_factor_scope) == "all" else 0.75
+        memory_cap = max(1, int(available_gb / per_worker_gb))
+        if str(validation_factor_scope) == "all":
+            memory_cap = min(memory_cap, 8)
+        else:
+            memory_cap = min(memory_cap, 16)
+        return max(1, min(requested, cpu_cap, memory_cap))
+
+    @classmethod
+    def _resolve_safe_analysis_workers(cls, requested_workers, analysis_mode="factor"):
+        requested = int(requested_workers or 0)
+        cpu_count = max(int(os.cpu_count() or 1), 1)
+        if requested <= 0:
+            requested = cpu_count
+        cpu_cap = max(1, cpu_count - 1)
+        if str(analysis_mode) == "factor":
+            cpu_cap = min(cpu_cap, 12)
+        else:
+            cpu_cap = min(cpu_cap, 16)
+
+        available_bytes = cls._available_memory_bytes()
+        if available_bytes is None:
+            return max(1, min(requested, cpu_cap))
+
+        available_gb = available_bytes / (1024 ** 3)
+        per_worker_gb = 1.0 if str(analysis_mode) == "factor" else 0.5
+        memory_cap = max(1, int(available_gb / per_worker_gb))
+        return max(1, min(requested, cpu_cap, memory_cap))
+
+    @staticmethod
+    def _trim_validation_feature_frame(feature_long):
+        if feature_long is None or feature_long.empty:
+            return pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
+
+        keep_columns = [column for column in VALIDATION_FEATURE_BASE_COLUMNS if column in feature_long.columns]
+        trimmed = feature_long[keep_columns].copy()
+        for column in ("stock_code", "market", "exchange", "asset_type", "frequency", "adjust", "feature_set", "feature_name"):
+            if column in trimmed.columns and trimmed[column].dtype == object:
+                trimmed[column] = trimmed[column].astype("category")
+        return trimmed
+
+    @staticmethod
+    def _trim_validation_ohlcv_frame(ohlcv_frame):
+        if ohlcv_frame is None or ohlcv_frame.empty:
+            return pd.DataFrame(columns=VALIDATION_OHLCV_BASE_COLUMNS)
+
+        keep_columns = [column for column in VALIDATION_OHLCV_BASE_COLUMNS if column in ohlcv_frame.columns]
+        trimmed = ohlcv_frame[keep_columns].copy()
+        for column in ("stock_code", "market", "exchange", "asset_type", "frequency", "adjust"):
+            if column in trimmed.columns and trimmed[column].dtype == object:
+                trimmed[column] = trimmed[column].astype("category")
+        return trimmed
+
+    def get_validation_feature_cache_dir(self):
+        return self.data_layout.layer_path("meta") / "validation_feature_cache"
+
+    @staticmethod
+    def _build_validation_feature_cache_key(stock_code, days, factor_set, validation_factor_scope="all", validated_feature_names=None):
+        identity = {
+            "stock_code": str(stock_code),
+            "days": int(days),
+            "factor_set": str(factor_set),
+            "validation_factor_scope": str(validation_factor_scope),
+            "validated_feature_names": [str(item) for item in (validated_feature_names or []) if str(item).strip()],
+        }
+        cache_key = hashlib.sha1(
+            json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:24]
+        return cache_key, identity
+
+    @staticmethod
+    def _is_validation_feature_cache_fresh(cache_path, ttl_seconds=VALIDATION_FEATURE_CACHE_TTL_SECONDS):
+        path = Path(cache_path)
+        if not path.exists():
+            return False
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            return False
+        return (time.time() - modified_at) <= int(ttl_seconds)
+
+    def _load_validation_feature_cache(self, cache_path):
+        path = Path(cache_path)
+        if not path.exists():
+            return None
+        payload = pd.read_pickle(path)
+        if not isinstance(payload, dict):
+            return None
+        feature_frame = self._trim_validation_feature_frame(payload.get("feature_frame"))
+        ohlcv_frame = self._trim_validation_ohlcv_frame(payload.get("ohlcv_frame"))
+        if feature_frame.empty or ohlcv_frame.empty:
+            return None
+        return {
+            "stock_code": payload.get("stock_code"),
+            "feature_frame": feature_frame,
+            "ohlcv_frame": ohlcv_frame,
+            "feature_rows": int(payload.get("feature_rows", len(feature_frame))),
+            "feature_names": int(payload.get("feature_names", feature_frame["feature_name"].nunique() if "feature_name" in feature_frame.columns else 0)),
+            "date_count": int(payload.get("date_count", feature_frame["trade_date"].nunique() if "trade_date" in feature_frame.columns else 0)),
+            "start_date": payload.get("start_date", feature_frame["trade_date"].min() if not feature_frame.empty else pd.NaT),
+            "end_date": payload.get("end_date", feature_frame["trade_date"].max() if not feature_frame.empty else pd.NaT),
+            "cache_hit": True,
+        }
+
+    def _write_validation_feature_cache(self, cache_path, payload):
+        path = Path(cache_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.to_pickle(payload, path)
+        return path
+
+    @classmethod
+    def _estimate_safe_validation_stock_count(cls, pool_results, row_safety_fraction=0.30, bytes_per_row=320):
+        results = list(pool_results or [])
+        if not results:
+            return 0
+
+        available_bytes = cls._available_memory_bytes()
+        if available_bytes is None:
+            return len(results)
+
+        total_rows = sum(max(int(item.get("feature_rows", 0) or 0), 0) for item in results)
+        if total_rows <= 0:
+            return len(results)
+
+        row_budget = max(int((available_bytes * float(row_safety_fraction)) / max(int(bytes_per_row), 1)), 1)
+        if total_rows <= row_budget:
+            return len(results)
+
+        avg_rows_per_stock = max(total_rows / max(len(results), 1), 1)
+        safe_count = max(32, int(row_budget / avg_rows_per_stock))
+        return max(1, min(len(results), safe_count))
+
+    @staticmethod
+    def _downsample_validation_pool_results(pool_results, target_count):
+        results = list(pool_results or [])
+        if target_count is None or target_count <= 0 or len(results) <= target_count:
+            return results
+        if target_count == 1:
+            return [results[0]]
+
+        indices = np.linspace(0, len(results) - 1, num=int(target_count), dtype=int)
+        selected = []
+        seen = set()
+        for index in indices.tolist():
+            if index in seen:
+                continue
+            selected.append(results[index])
+            seen.add(index)
+        return selected
+
+    @classmethod
+    def _resolve_validation_batch_size(cls, validation_factor_scope="all", requested_workers=1):
+        available_bytes = cls._available_memory_bytes()
+        available_gb = (available_bytes / (1024 ** 3)) if available_bytes else None
+        if str(validation_factor_scope) == "all":
+            default_batch = 24
+            if available_gb is None:
+                return default_batch
+            if available_gb <= 4:
+                return 8
+            if available_gb <= 8:
+                return 12
+            if available_gb <= 16:
+                return 16
+            return default_batch
+        default_batch = 96
+        if available_gb is None:
+            return default_batch
+        if available_gb <= 4:
+            return 24
+        if available_gb <= 8:
+            return 48
+        return default_batch
+
+    def _iter_factor_validation_batches(
+        self,
+        stock_codes,
+        days=365,
+        factor_set=DEFAULT_FACTOR_SET,
+        validation_factor_scope="all",
+        validated_feature_names=None,
+        batch_size=None,
+        max_workers=1,
+        show_progress=False,
+    ):
+        stock_codes = list(stock_codes or [])
+        if not stock_codes:
+            return
+
+        validated_feature_names = [str(item) for item in (validated_feature_names or []) if str(item).strip()]
+        validated_feature_name_set = set(validated_feature_names)
+        restricted_config = {}
+        if validated_feature_name_set and factor_set == "qlib_alpha158":
+            restricted_config = self._parse_scoring_factors_to_alpha158_config(validated_feature_name_set)
+            if restricted_config and show_progress:
+                ops = restricted_config.get("rolling", {}).get("include", [])
+                wins = restricted_config.get("rolling", {}).get("windows", [])
+                print(
+                    f"[PROGRESS] validation factor_config restricted "
+                    f"operators={ops} windows={wins}"
+                )
+        factor_set_config = restricted_config
+        cache_dir = self.get_validation_feature_cache_dir()
+
+        def run_analysis(stock_code):
+            try:
+                cache_key, _ = self._build_validation_feature_cache_key(
+                    stock_code=stock_code,
+                    days=days,
+                    factor_set=factor_set,
+                    validation_factor_scope=validation_factor_scope,
+                    validated_feature_names=validated_feature_names,
+                )
+                cache_path = Path(cache_dir) / f"{cache_key}.pkl"
+                if self._is_validation_feature_cache_fresh(cache_path):
+                    cached_result = self._load_validation_feature_cache(cache_path)
+                    if cached_result is not None:
+                        return cached_result
+
+                warmup_days = max(days + 180, days)
+                full_data = self.load_stock_data(stock_code, warmup_days)
+                if full_data is None or full_data.empty:
+                    return None
+
+                ohlcv_frame = normalize_ohlcv_frame(
+                    full_data.reset_index(),
+                    stock_code=stock_code,
+                    market="HK",
+                )
+                factor = create_factor_set(factor_set, config=factor_set_config)
+                context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
+                feature_frame = factor.transform(ohlcv_frame, context=context)
+                if feature_frame is None or feature_frame.empty:
+                    return None
+
+                feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
+                if validated_feature_name_set:
+                    keep_columns = [column for column in feature_frame.columns if column in validated_feature_name_set]
+                    if not keep_columns:
+                        return None
+                    feature_frame = feature_frame[keep_columns].copy()
+                feature_long = normalize_feature_frame(
+                    feature_frame.reset_index().rename(columns={feature_frame.index.name or "index": "trade_date"}),
+                    stock_code=stock_code,
+                    market="HK",
+                    frequency="daily",
+                    adjust="qfq",
+                    feature_set=factor_set,
+                    feature_columns=list(feature_frame.columns),
+                )
+                feature_long = self._trim_validation_feature_frame(feature_long)
+                ohlcv_frame = self._trim_validation_ohlcv_frame(ohlcv_frame)
+                result = {
+                    "stock_code": stock_code,
+                    "feature_frame": feature_long,
+                    "ohlcv_frame": ohlcv_frame,
+                    "feature_rows": len(feature_long),
+                    "feature_names": feature_long["feature_name"].nunique() if not feature_long.empty else 0,
+                    "date_count": feature_long["trade_date"].nunique() if not feature_long.empty else 0,
+                    "start_date": feature_long["trade_date"].min() if not feature_long.empty else pd.NaT,
+                    "end_date": feature_long["trade_date"].max() if not feature_long.empty else pd.NaT,
+                }
+                self._write_validation_feature_cache(
+                    cache_path,
+                    {
+                        "stock_code": stock_code,
+                        "feature_frame": feature_long,
+                        "ohlcv_frame": ohlcv_frame,
+                        "feature_rows": result["feature_rows"],
+                        "feature_names": result["feature_names"],
+                        "date_count": result["date_count"],
+                        "start_date": result["start_date"],
+                        "end_date": result["end_date"],
+                    },
+                )
+                return result
+            except Exception:
+                import traceback
+                print(f"\n[ERROR] 因子验证 {stock_code} 异常:", flush=True)
+                traceback.print_exc()
+                return None
+
+        batch_size = max(int(batch_size or 1), 1)
+        started_at = time.time()
+        completed = 0
+        success_count = 0
+        pending_results = []
+
+        def flush_pending():
+            nonlocal pending_results
+            if not pending_results:
+                return None
+            batch_feature_frames = [item["feature_frame"] for item in pending_results if item.get("feature_frame") is not None and not item["feature_frame"].empty]
+            batch_ohlcv_frames = [item["ohlcv_frame"] for item in pending_results if item.get("ohlcv_frame") is not None and not item["ohlcv_frame"].empty]
+            batch_payload = {
+                "feature_frame": pd.concat(batch_feature_frames, ignore_index=True) if batch_feature_frames else pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS),
+                "ohlcv_frame": pd.concat(batch_ohlcv_frames, ignore_index=True) if batch_ohlcv_frames else pd.DataFrame(columns=VALIDATION_OHLCV_BASE_COLUMNS),
+                "stock_results": [
+                    {
+                        "stock_code": item.get("stock_code"),
+                        "feature_rows": int(item.get("feature_rows", 0)),
+                        "feature_names": int(item.get("feature_names", 0)),
+                        "date_count": int(item.get("date_count", 0)),
+                        "start_date": item.get("start_date"),
+                        "end_date": item.get("end_date"),
+                    }
+                    for item in pending_results
+                ],
+            }
+            pending_results = []
+            return batch_payload
+
+        if max_workers == 1 or len(stock_codes) <= 1:
+            for stock_code in stock_codes:
+                result = run_analysis(stock_code)
+                completed += 1
+                if result is not None:
+                    pending_results.append(result)
+                    success_count += 1
+                if show_progress:
+                    elapsed = max(time.time() - started_at, 1e-9)
+                    rate = completed / elapsed
+                    remaining = len(stock_codes) - completed
+                    eta = remaining / rate if rate > 0 else 0.0
+                    sys.stderr.write(
+                        f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
+                        f"({completed / len(stock_codes):.1%}) success={success_count} "
+                        f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
+                    )
+                    sys.stderr.flush()
+                if len(pending_results) >= batch_size:
+                    batch_payload = flush_pending()
+                    if batch_payload is not None:
+                        yield batch_payload
+            if show_progress:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+        else:
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(stock_codes))) as executor:
+                future_map = {executor.submit(run_analysis, stock_code): stock_code for stock_code in stock_codes}
+                for future in as_completed(future_map):
+                    stock_code = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        print(f"\n[ERROR] 因子验证 {stock_code} 失败: {exc}")
+                        completed += 1
+                        if show_progress:
+                            elapsed = max(time.time() - started_at, 1e-9)
+                            rate = completed / elapsed
+                            remaining = len(stock_codes) - completed
+                            eta = remaining / rate if rate > 0 else 0.0
+                            sys.stderr.write(
+                                f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
+                                f"({completed / len(stock_codes):.1%}) success={success_count} "
+                                f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
+                            )
+                            sys.stderr.flush()
+                        continue
+                    completed += 1
+                    if result is not None:
+                        pending_results.append(result)
+                        success_count += 1
+                    if show_progress:
+                        elapsed = max(time.time() - started_at, 1e-9)
+                        rate = completed / elapsed
+                        remaining = len(stock_codes) - completed
+                        eta = remaining / rate if rate > 0 else 0.0
+                        sys.stderr.write(
+                            f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
+                            f"({completed / len(stock_codes):.1%}) success={success_count} "
+                            f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
+                        )
+                        sys.stderr.flush()
+                    if len(pending_results) >= batch_size:
+                        batch_payload = flush_pending()
+                        if batch_payload is not None:
+                            yield batch_payload
+            if show_progress:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+
+        batch_payload = flush_pending()
+        if batch_payload is not None:
+            yield batch_payload
+
+    def _analyze_factor_batch(
+        self,
+        stock_codes,
+        days=365,
+        factor_set=DEFAULT_FACTOR_SET,
+        factor_score_config=None,
+        persist_features=False,
+        ridge_factors=None,
+    ):
+        stock_codes = list(stock_codes or [])
+        if not stock_codes:
+            return []
+
+        warmup_days = max(days + 180, days)
+        batch_results = []
+        feature_frames = []
+
+        for stock_code in stock_codes:
+            full_data = self.load_stock_data(stock_code, warmup_days)
+            if full_data is None or full_data.empty or len(full_data) < 60:
+                continue
+
+            ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
+            factor = create_factor_set(factor_set)
+            context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
+            feature_frame = factor.transform(ohlcv_frame, context=context)
+            if feature_frame is None or feature_frame.empty:
+                continue
+
+            feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
+            feature_frame = feature_frame.copy()
+            feature_frame["stock_code"] = stock_code
+            batch_results.append(
+                {
+                    "stock_code": stock_code,
+                    "full_data": full_data,
+                    "feature_frame": feature_frame,
+                }
+            )
+            feature_frames.append(feature_frame)
+
+        if not batch_results:
+            return []
+
+        panel_features = pd.concat(feature_frames, axis=0, sort=False)
+        panel_scores, factor_details = self._compute_factor_scores(
+            panel_features,
+            factor_set=factor_set,
+            score_config=factor_score_config,
+            ridge_factors=ridge_factors,
+        )
+        if panel_scores is None or panel_scores.empty:
+            return []
+
+        panel_scores = panel_scores.copy()
+        panel_scores["stock_code"] = panel_features["stock_code"].values
+
+        results = []
+        for item in batch_results:
+            stock_code = item["stock_code"]
+            full_data = item["full_data"]
+            feature_frame = item["feature_frame"].drop(columns=["stock_code"], errors="ignore")
+            stock_mask = panel_features["stock_code"].eq(stock_code).to_numpy()
+            stock_panel_scores = panel_scores[panel_scores["stock_code"] == stock_code].drop(columns=["stock_code"], errors="ignore")
+            score_analysis = stock_panel_scores
+            if score_analysis.empty:
+                continue
+            score_analysis = score_analysis.sort_index()
+            analysis_start_idx = max(len(feature_frame) - days, 0)
+            analysis_start_date = feature_frame.index[analysis_start_idx]
+
+            analysis_data = full_data.loc[full_data.index >= analysis_start_date].copy()
+            feature_analysis = feature_frame.loc[feature_frame.index >= analysis_start_date].copy()
+            score_analysis = score_analysis.loc[score_analysis.index >= analysis_start_date].copy()
+            merged_scores = feature_analysis.join(score_analysis[["trend_score", "quality_score", "risk_score", "composite_score"]], how="left")
+            forward_metrics = self._compute_forward_metrics(full_data)
+            forward_metrics = forward_metrics.loc[forward_metrics.index >= analysis_start_date]
+
+            composite_threshold = score_analysis["composite_score"].rolling(window=60, min_periods=20).quantile(0.80)
+            quality_threshold = score_analysis["quality_score"].rolling(window=60, min_periods=20).quantile(0.65)
+            risk_threshold = score_analysis["risk_score"].rolling(window=60, min_periods=20).quantile(0.45)
+            signals = score_analysis.join(forward_metrics, how="left")
+            signals["date"] = signals.index
+            signals["signal_strength"] = signals["composite_score"]
+            signals["expected_3m_score"] = signals["composite_score"]
+            signals["matrix_score"] = signals["trend_score"]
+            signals["regime_score"] = signals["quality_score"]
+            signals["risk_score"] = (100 - signals["risk_score"]).clip(0, 100) / 25.0
+            signals["entry_type"] = "factor_rank"
+            signals["holding_horizon"] = 60
+            signals["actionable"] = (
+                signals["composite_score"] >= composite_threshold.fillna(70)
+            ) & (
+                signals["quality_score"] >= quality_threshold.fillna(55)
+            ) & (
+                signals["risk_score"].notna()
+            ) & (
+                signals["risk_score"] <= ((100 - risk_threshold.fillna(55)).clip(0, 100) / 25.0)
+            )
+            signals["signal_tier"] = np.where(
+                signals["composite_score"] >= 75,
+                "strong",
+                np.where(signals["composite_score"] >= 60, "medium", "weak"),
+            )
+            buy_signals = signals[
+                [
+                    "date",
+                    "signal_strength",
+                    "expected_3m_score",
+                    "matrix_score",
+                    "regime_score",
+                    "risk_score",
+                    "signal_tier",
+                    "actionable",
+                    "forward_return_20",
+                    "forward_return_40",
+                    "forward_return_60",
+                    "forward_max_drawdown_60",
+                    "entry_type",
+                    "holding_horizon",
+                ]
+            ].copy()
+            buy_signals.dropna(subset=["expected_3m_score"], inplace=True)
+            buy_signals.reset_index(drop=True, inplace=True)
+
+            actionable_signals = buy_signals[buy_signals["actionable"]].copy()
+            watch_signals = buy_signals[~buy_signals["actionable"]].copy()
+            latest_signal = buy_signals.iloc[-1] if not buy_signals.empty else None
+            latest_score_row = score_analysis.iloc[-1] if not score_analysis.empty else None
+            latest_score_index = score_analysis.index[-1] if not score_analysis.empty else None
+            stock_factor_details = self._slice_factor_details(factor_details, stock_mask)
+            factor_explanation = (
+                self._build_factor_explanation(stock_factor_details, stock_panel_scores, latest_score_index)
+                if latest_score_index is not None
+                else {}
+            )
+            setup_snapshot = self._build_low_price_setup_snapshot(analysis_data)
+            latest_signal_date = latest_signal["date"] if latest_signal is not None else None
+            latest_data_date = analysis_data.index[-1] if not analysis_data.empty else latest_signal_date
+            freshness_score, signal_age_days = self._signal_freshness_score(latest_signal_date, latest_data_date)
+
+            avg_forward_return_60_signal = (
+                actionable_signals["forward_return_60"].dropna().mean() * 100
+                if not actionable_signals.empty and not actionable_signals["forward_return_60"].dropna().empty
+                else 0
+            )
+            avg_forward_return_60_watch = (
+                watch_signals["forward_return_60"].dropna().mean() * 100
+                if not watch_signals.empty and not watch_signals["forward_return_60"].dropna().empty
+                else 0
+            )
+            if not actionable_signals.empty:
+                forward_series = actionable_signals["forward_return_60"].dropna()
+                backtest_result = {
+                    "total_return": float(forward_series.mean() * 100) if not forward_series.empty else 0.0,
+                    "win_rate": float((forward_series > 0).mean() * 100) if not forward_series.empty else 0.0,
+                    "total_trades": int(len(forward_series)),
+                }
+            else:
+                backtest_result = {"total_return": 0.0, "win_rate": 0.0, "total_trades": 0}
+
+            current_signal_score = latest_signal["expected_3m_score"] if latest_signal is not None else np.nan
+            current_signal_actionable = bool(latest_signal["actionable"]) if latest_signal is not None else False
+            current_signal_active = latest_signal is not None
+
+            results.append(
+                {
+                    "stock_code": stock_code,
+                    "data": analysis_data,
+                    "feature_frame": merged_scores,
+                    "buy_signals": buy_signals,
+                    "sell_signals": None,
+                    "backtest": backtest_result,
+                    "latest_price": analysis_data["Close"].iloc[-1],
+                    "price_change_30d": (analysis_data["Close"].iloc[-1] - analysis_data["Close"].iloc[-30]) / analysis_data["Close"].iloc[-30] * 100 if len(analysis_data) >= 30 else 0,
+                    "latest_expected_3m_score": float(latest_score_row["composite_score"]) if latest_score_row is not None and pd.notna(latest_score_row["composite_score"]) else np.nan,
+                    "latest_matrix_score": float(latest_score_row["trend_score"]) if latest_score_row is not None and pd.notna(latest_score_row["trend_score"]) else np.nan,
+                    "latest_regime_score": float(latest_score_row["quality_score"]) if latest_score_row is not None and pd.notna(latest_score_row["quality_score"]) else np.nan,
+                    "latest_entry_type": "factor_rank",
+                    "latest_signal_tier": latest_signal["signal_tier"] if latest_signal is not None else None,
+                    "latest_signal_date": latest_signal_date,
+                    "current_signal_active": current_signal_active,
+                    "current_signal_actionable": current_signal_actionable,
+                    "current_signal_score": current_signal_score,
+                    "avg_forward_return_60_signal": avg_forward_return_60_signal,
+                    "avg_forward_return_60_watch": avg_forward_return_60_watch,
+                    "factor_set": factor_set,
+                    "selection_source": "factor_engine",
+                    "factor_scores": (
+                        {
+                            "trend_score": float(latest_score_row["trend_score"]),
+                            "quality_score": float(latest_score_row["quality_score"]),
+                            "risk_score": float(latest_score_row["risk_score"]),
+                            "composite_score": float(latest_score_row["composite_score"]),
+                        }
+                        if latest_score_row is not None
+                        else {}
+                    ),
+                    "factor_explanation": factor_explanation,
+                    "setup_type": setup_snapshot["setup_type"],
+                    "setup_score": setup_snapshot["setup_score"],
+                    "sideways_penalty": setup_snapshot["sideways_penalty"],
+                    "low_price_candidate": setup_snapshot["low_price_candidate"],
+                    "liquidity_ok": setup_snapshot["liquidity_ok"],
+                    "signal_freshness_score": freshness_score,
+                    "signal_age_days": signal_age_days,
+                }
+            )
+
+        return results
+
     def analyze_stock_factors(
         self,
         stock_code,
@@ -297,10 +1276,15 @@ class StockAnalyzer:
         persist_features=False,
         show_progress=False,
         enable_portfolio_replay=True,
+        ridge_factors=None,
     ):
         warmup_days = max(days + 180, days)
         full_data = self.load_stock_data(stock_code, warmup_days)
         if full_data is None or full_data.empty:
+            return None
+
+        MIN_TRADING_DAYS = 60
+        if len(full_data) < MIN_TRADING_DAYS:
             return None
 
         ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
@@ -311,7 +1295,7 @@ class StockAnalyzer:
             return None
 
         feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
-        factor_scores, factor_details = self._compute_factor_scores(feature_frame, factor_set=factor_set, score_config=factor_score_config)
+        factor_scores, factor_details = self._compute_factor_scores(feature_frame, factor_set=factor_set, score_config=factor_score_config, ridge_factors=ridge_factors)
         analysis_start_idx = max(len(feature_frame) - days, 0)
         analysis_start_date = feature_frame.index[analysis_start_idx]
 
@@ -342,7 +1326,7 @@ class StockAnalyzer:
         ) & (
             signals["quality_score"] >= quality_threshold.fillna(55)
         ) & (
-            signals["risk_score"] <= ((100 - risk_threshold.fillna(55)).clip(0, 100) / 25.0)
+            signals["risk_score"].isna() | (signals["risk_score"] <= ((100 - risk_threshold.fillna(55)).clip(0, 100) / 25.0))
         )
         signals["signal_tier"] = np.where(
             signals["composite_score"] >= 75,
@@ -404,6 +1388,10 @@ class StockAnalyzer:
         current_signal_score = latest_signal["expected_3m_score"] if latest_signal is not None else np.nan
         current_signal_actionable = bool(latest_signal["actionable"]) if latest_signal is not None else False
         current_signal_active = latest_signal is not None
+        setup_snapshot = self._build_low_price_setup_snapshot(analysis_data)
+        latest_signal_date = latest_signal["date"] if latest_signal is not None else None
+        latest_data_date = analysis_data.index[-1] if not analysis_data.empty else latest_signal_date
+        freshness_score, signal_age_days = self._signal_freshness_score(latest_signal_date, latest_data_date)
 
         return {
             "stock_code": stock_code,
@@ -419,7 +1407,7 @@ class StockAnalyzer:
             "latest_regime_score": float(latest_score_row["quality_score"]) if latest_score_row is not None and pd.notna(latest_score_row["quality_score"]) else np.nan,
             "latest_entry_type": "factor_rank",
             "latest_signal_tier": latest_signal["signal_tier"] if latest_signal is not None else None,
-            "latest_signal_date": latest_signal["date"] if latest_signal is not None else None,
+            "latest_signal_date": latest_signal_date,
             "current_signal_active": current_signal_active,
             "current_signal_actionable": current_signal_actionable,
             "current_signal_score": current_signal_score,
@@ -438,6 +1426,13 @@ class StockAnalyzer:
                 else {}
             ),
             "factor_explanation": factor_explanation,
+            "setup_type": setup_snapshot["setup_type"],
+            "setup_score": setup_snapshot["setup_score"],
+            "sideways_penalty": setup_snapshot["sideways_penalty"],
+            "low_price_candidate": setup_snapshot["low_price_candidate"],
+            "liquidity_ok": setup_snapshot["liquidity_ok"],
+            "signal_freshness_score": freshness_score,
+            "signal_age_days": signal_age_days,
         }
 
     def build_factor_validation_report(
@@ -454,7 +1449,7 @@ class StockAnalyzer:
         validation_factor_scope="all",
         validated_feature_names=None,
     ):
-        """构建因子验证报告：先并行产出全市场 feature，再做统一横截面验证。"""
+        """构建因子验证报告：按股票批次流式产出 feature，再统一做横截面验证。"""
         if stock_codes is None:
             stock_codes = self.get_all_stocks()
         stock_codes = list(stock_codes or [])
@@ -466,150 +1461,94 @@ class StockAnalyzer:
         validated_feature_names = [
             str(item) for item in (validated_feature_names or []) if str(item).strip()
         ]
-        validated_feature_name_set = set(validated_feature_names)
 
         validator = FactorValidator(horizons=horizons, quantiles=quantiles, min_observations=min_observations)
-        max_workers = max(int(max_workers or 1), 1)
-
-        def run_analysis(stock_code):
-            warmup_days = max(days + 180, days)
-            full_data = self.load_stock_data(stock_code, warmup_days)
-            if full_data is None or full_data.empty:
-                return None
-
-            ohlcv_frame = normalize_ohlcv_frame(
-                full_data.reset_index(),
-                stock_code=stock_code,
-                market="HK",
+        requested_workers = max(int(max_workers or 1), 1)
+        max_workers = self._resolve_safe_validation_workers(
+            requested_workers,
+            validation_factor_scope=validation_factor_scope,
+        )
+        if show_progress and max_workers != requested_workers:
+            print(
+                f"[INFO] validation workers auto-clamped from {requested_workers} to {max_workers} "
+                f"for scope={validation_factor_scope}"
             )
-            factor = create_factor_set(factor_set)
-            context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
-            feature_frame = factor.transform(ohlcv_frame, context=context)
-            if feature_frame is None or feature_frame.empty:
-                return None
 
-            feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
-            if validated_feature_name_set:
-                keep_columns = [column for column in feature_frame.columns if column in validated_feature_name_set]
-                if not keep_columns:
-                    return None
-                feature_frame = feature_frame[keep_columns].copy()
-            feature_long = normalize_feature_frame(
-                feature_frame.reset_index().rename(columns={feature_frame.index.name or "index": "trade_date"}),
-                stock_code=stock_code,
-                market="HK",
-                frequency="daily",
-                adjust="qfq",
-                feature_set=factor_set,
-                feature_columns=list(feature_frame.columns),
-            )
-            return {
-                "stock_code": stock_code,
-                "feature_frame": feature_long,
-                "ohlcv_frame": ohlcv_frame,
-                "feature_rows": len(feature_long),
-                "feature_names": feature_long["feature_name"].nunique() if not feature_long.empty else 0,
-                "date_count": feature_long["trade_date"].nunique() if not feature_long.empty else 0,
-                "start_date": feature_long["trade_date"].min() if not feature_long.empty else pd.NaT,
-                "end_date": feature_long["trade_date"].max() if not feature_long.empty else pd.NaT,
-            }
-
-        pool_results = []
-        started_at = time.time()
-        completed = 0
-        success_count = 0
-
-        if max_workers == 1 or len(stock_codes) <= 1:
-            for stock_code in stock_codes:
-                result = run_analysis(stock_code)
-                completed += 1
-                if result is not None:
-                    pool_results.append(result)
-                    success_count += 1
-                if show_progress:
-                    elapsed = max(time.time() - started_at, 1e-9)
-                    rate = completed / elapsed
-                    remaining = len(stock_codes) - completed
-                    eta = remaining / rate if rate > 0 else 0.0
-                    print(
-                        f"[PROGRESS] validation {completed}/{len(stock_codes)} "
-                        f"({completed / len(stock_codes):.1%}) success={success_count} "
-                        f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                    )
-        else:
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(stock_codes))) as executor:
-                future_map = {executor.submit(run_analysis, stock_code): stock_code for stock_code in stock_codes}
-                for future in as_completed(future_map):
-                    stock_code = future_map[future]
-                    try:
-                        result = future.result()
-                    except Exception as exc:
-                        print(f"[ERROR] 因子验证 {stock_code} 失败: {exc}")
-                        completed += 1
-                        if show_progress:
-                            elapsed = max(time.time() - started_at, 1e-9)
-                            rate = completed / elapsed
-                            remaining = len(stock_codes) - completed
-                            eta = remaining / rate if rate > 0 else 0.0
-                            print(
-                                f"[PROGRESS] validation {completed}/{len(stock_codes)} "
-                                f"({completed / len(stock_codes):.1%}) success={success_count} "
-                                f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                            )
-                        continue
-                    completed += 1
-                    if result is not None:
-                        pool_results.append(result)
-                        success_count += 1
-                    if show_progress:
-                        elapsed = max(time.time() - started_at, 1e-9)
-                        rate = completed / elapsed
-                        remaining = len(stock_codes) - completed
-                        eta = remaining / rate if rate > 0 else 0.0
-                        print(
-                            f"[PROGRESS] validation {completed}/{len(stock_codes)} "
-                            f"({completed / len(stock_codes):.1%}) success={success_count} "
-                            f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                        )
-
-        if not pool_results:
-            return None
-
+        batch_size = self._resolve_validation_batch_size(
+            validation_factor_scope=validation_factor_scope,
+            requested_workers=max_workers,
+        )
         if show_progress:
             print(
-                f"[PROGRESS] validation cross_section start "
-                f"stocks={success_count} feature_rows={sum(item['feature_rows'] for item in pool_results)} "
-                f"scope={validation_factor_scope} "
-                f"features={len(validated_feature_names) if validated_feature_names else 'all'}"
+                f"[PROGRESS] validation batches start stocks={len(stock_codes)} batch_size={batch_size} "
+                f"workers={max_workers} scope={validation_factor_scope}"
             )
 
-        all_feature_frame = pd.concat(
-            [item["feature_frame"] for item in pool_results if item.get("feature_frame") is not None and not item["feature_frame"].empty],
-            ignore_index=True,
-        ) if pool_results else pd.DataFrame()
-        all_ohlcv_frame = pd.concat(
-            [item["ohlcv_frame"] for item in pool_results if item.get("ohlcv_frame") is not None and not item["ohlcv_frame"].empty],
-            ignore_index=True,
-        ) if pool_results else pd.DataFrame()
+        batch_iter = self._iter_factor_validation_batches(
+            stock_codes=stock_codes,
+            days=days,
+            factor_set=factor_set,
+            validation_factor_scope=validation_factor_scope,
+            validated_feature_names=validated_feature_names,
+            batch_size=batch_size,
+            max_workers=max_workers,
+            show_progress=show_progress,
+        )
 
-        if validated_feature_name_set and not all_feature_frame.empty and "feature_name" in all_feature_frame.columns:
-            all_feature_frame = all_feature_frame[
-                all_feature_frame["feature_name"].isin(validated_feature_name_set)
-            ].copy()
+        factor_coverage_rows = []
+        stock_summary_rows = []
+        success_count = 0
+        seen_batch = False
+
+        def _stream_batches():
+            nonlocal success_count, seen_batch
+            for batch_index, batch_payload in enumerate(batch_iter, start=1):
+                stock_results = list(batch_payload.get("stock_results") or [])
+                success_count += len(stock_results)
+                for item in stock_results:
+                    factor_coverage_rows.append(
+                        {
+                            "stock_code": item.get("stock_code"),
+                            "feature_rows": int(item.get("feature_rows", 0)),
+                            "feature_names": int(item.get("feature_names", 0)),
+                            "date_count": int(item.get("date_count", 0)),
+                        }
+                    )
+                    stock_summary_rows.append(
+                        {
+                            "stock_code": item.get("stock_code"),
+                            "feature_set": factor_set,
+                            "feature_rows": int(item.get("feature_rows", 0)),
+                            "feature_names": int(item.get("feature_names", 0)),
+                            "date_count": int(item.get("date_count", 0)),
+                            "start_date": item.get("start_date"),
+                            "end_date": item.get("end_date"),
+                        }
+                    )
+                if show_progress:
+                    print(
+                        f"[PROGRESS] validation batch_ready index={batch_index} "
+                        f"stocks={len(stock_results)} feature_rows={len(batch_payload.get('feature_frame', pd.DataFrame()))}"
+                    )
+                seen_batch = True
+                yield {
+                    "feature_frame": batch_payload.get("feature_frame"),
+                    "ohlcv_frame": batch_payload.get("ohlcv_frame"),
+                }
 
         def _validation_progress(stage):
             if not show_progress:
                 return
-            print(
-                f"[PROGRESS] validation cross_section {stage} "
-                f"stocks={success_count} feature_rows={len(all_feature_frame)}"
-            )
+            print(f"[PROGRESS] validation stream {stage} stocks={success_count}")
 
-        validation_result = validator.validate(
-            all_feature_frame,
-            all_ohlcv_frame,
+        validation_result = validator.validate_streaming(
+            _stream_batches(),
             progress_callback=_validation_progress,
+            include_validation_frame=False,
+            include_membership=False,
         )
+        if not seen_batch:
+            return None
         ic_summary = validation_result.get("ic_summary", pd.DataFrame())
         long_short_summary = validation_result.get("long_short_summary", pd.DataFrame())
         turnover_summary = validation_result.get("turnover_summary", pd.DataFrame())
@@ -629,39 +1568,11 @@ class StockAnalyzer:
             else np.nan
         )
 
-        feature_rows = []
-        stock_summary_rows = []
-        for item in pool_results:
-            feature_rows.append(
-                {
-                    "stock_code": item.get("stock_code"),
-                    "feature_rows": int(item.get("feature_rows", 0)),
-                    "feature_names": int(item.get("feature_names", 0)),
-                    "date_count": int(item.get("date_count", 0)),
-                }
-            )
-            stock_summary_rows.append(
-                {
-                    "stock_code": item.get("stock_code"),
-                    "feature_set": factor_set,
-                    "feature_rows": int(item.get("feature_rows", 0)),
-                    "feature_names": int(item.get("feature_names", 0)),
-                    "date_count": int(item.get("date_count", 0)),
-                    "start_date": item.get("start_date"),
-                    "end_date": item.get("end_date"),
-                    "mean_ic": global_mean_ic,
-                    "mean_rank_ic": global_mean_rank_ic,
-                    "mean_spread": global_mean_spread,
-                    "mean_turnover": global_mean_turnover,
-                }
-            )
-
-        if show_progress:
-            validation_frame = validation_result.get("validation_frame", pd.DataFrame())
-            print(
-                f"[PROGRESS] validation cross_section done "
-                f"rows={len(validation_frame)} features={validation_frame['feature_name'].nunique() if not validation_frame.empty and 'feature_name' in validation_frame.columns else 0}"
-            )
+        for row in stock_summary_rows:
+            row["mean_ic"] = global_mean_ic
+            row["mean_rank_ic"] = global_mean_rank_ic
+            row["mean_spread"] = global_mean_spread
+            row["mean_turnover"] = global_mean_turnover
 
         report = {
             "metadata": {
@@ -676,9 +1587,12 @@ class StockAnalyzer:
                 "validation_mode": "cross_sectional_panel",
                 "validation_factor_scope": validation_factor_scope,
                 "validated_feature_names": list(validated_feature_names),
+                "validation_frame_included": False,
+                "quantile_membership_included": False,
+                "validation_batch_size": int(batch_size),
             },
             "stock_summary": pd.DataFrame(stock_summary_rows),
-            "factor_coverage": pd.DataFrame(feature_rows),
+            "factor_coverage": pd.DataFrame(factor_coverage_rows),
             "validation_frame": validation_result.get("validation_frame", pd.DataFrame()),
             "ic_by_date": validation_result.get("ic_by_date", pd.DataFrame()),
             "ic_summary": ic_summary,
@@ -689,7 +1603,7 @@ class StockAnalyzer:
             "turnover_by_date": validation_result.get("turnover_by_date", pd.DataFrame()),
             "turnover_summary": turnover_summary,
             "decay_summary": validation_result.get("decay_summary", pd.DataFrame()),
-            "analysis_results": pool_results,
+            "analysis_results": [],
         }
         return report
 
@@ -825,6 +1739,7 @@ class StockAnalyzer:
         persist_features=False,
         show_progress=False,
         enable_portfolio_replay=True,
+        ridge_factors=None,
     ):
         """固定股票池组合回测：按日期横向比较评分，只持有当日最优的 Top N 信号。"""
         if stock_codes is None:
@@ -834,21 +1749,115 @@ class StockAnalyzer:
             return None
 
         pool_results = []
-        max_workers = max(int(max_workers or 1), 1)
+        requested_workers = int(max_workers or 0)
+        max_workers = self._resolve_safe_analysis_workers(requested_workers, analysis_mode=analysis_mode)
         normalized_mode = str(analysis_mode or "strategy").strip().lower()
         if normalized_mode not in {"strategy", "factor"}:
             raise ValueError(f"unsupported analysis_mode: {analysis_mode}")
+        if show_progress and requested_workers > 0 and max_workers != requested_workers:
+            print(
+                f"[INFO] analysis workers auto-clamped from {requested_workers} to {max_workers} "
+                f"for mode={normalized_mode}"
+            )
 
         def run_analysis(stock_code):
             if normalized_mode == "factor":
-                return self.analyze_stock_factors(
-                    stock_code,
-                    days=days,
-                    factor_set=factor_set,
-                    factor_score_config=factor_score_config,
-                    persist_features=persist_features,
-                )
+                factor_kwargs = {
+                    "days": days,
+                    "factor_set": factor_set,
+                    "factor_score_config": factor_score_config,
+                    "persist_features": persist_features,
+                }
+                if ridge_factors is not None:
+                    factor_kwargs["ridge_factors"] = ridge_factors
+                return self.analyze_stock_factors(stock_code, **factor_kwargs)
             return self.analyze_stock(stock_code, days=days)
+
+        default_analyze_stock_factors = getattr(StockAnalyzer, "_default_analyze_stock_factors", None)
+        supports_batch_factor_analysis = (
+            default_analyze_stock_factors is not None
+            and type(self).__dict__.get("analyze_stock_factors") is default_analyze_stock_factors
+        )
+
+        if normalized_mode == "factor" and supports_batch_factor_analysis and max_workers > 1 and len(stock_codes) > 1:
+            batch_size = max(16, min(128, int(np.ceil(len(stock_codes) / max_workers))))
+            stock_batches = [
+                stock_codes[index:index + batch_size]
+                for index in range(0, len(stock_codes), batch_size)
+            ]
+            if show_progress:
+                print(
+                    f"[PROGRESS] analysis phase=batch_factor stocks={len(stock_codes)} "
+                    f"batches={len(stock_batches)} batch_size={batch_size} workers={min(max_workers, len(stock_batches))}"
+                )
+            started_at = time.time()
+            total = len(stock_codes)
+            completed = 0
+            success_count = 0
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(stock_batches))) as executor:
+                future_map = {
+                    executor.submit(
+                        self._analyze_factor_batch,
+                        batch,
+                        days=days,
+                        factor_set=factor_set,
+                        factor_score_config=factor_score_config,
+                        persist_features=persist_features,
+                        ridge_factors=ridge_factors,
+                    ): batch
+                    for batch in stock_batches
+                }
+                for future in as_completed(future_map):
+                    batch = future_map[future]
+                    batch_size_completed = len(batch)
+                    try:
+                        result_batch = future.result()
+                    except Exception as exc:
+                        print(f"\n[ERROR] 批量因子分析失败 batch_size={batch_size_completed}: {exc}")
+                        completed += batch_size_completed
+                        if show_progress:
+                            elapsed = max(time.time() - started_at, 1e-9)
+                            rate = completed / elapsed
+                            remaining = total - completed
+                            eta = remaining / rate if rate > 0 else 0.0
+                            sys.stderr.write(
+                                f"\r[PROGRESS] {completed}/{total} "
+                                f"({completed / total:.1%}) success={success_count} "
+                                f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
+                            )
+                            sys.stderr.flush()
+                        continue
+                    completed += batch_size_completed
+                    if result_batch:
+                        pool_results.extend(result_batch)
+                        success_count += len(result_batch)
+                    if show_progress:
+                        elapsed = max(time.time() - started_at, 1e-9)
+                        rate = completed / elapsed
+                        remaining = total - completed
+                        eta = remaining / rate if rate > 0 else 0.0
+                        sys.stderr.write(
+                            f"\r[PROGRESS] {completed}/{total} "
+                            f"({completed / total:.1%}) success={success_count} "
+                            f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
+                        )
+                        sys.stderr.flush()
+            if show_progress:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+            if not pool_results:
+                return None
+            builder = TopNPortfolioBuilder(
+                top_n=top_n,
+                initial_capital=initial_capital,
+                weighting_mode=weighting_mode,
+                buy_commission_rate=buy_commission_rate,
+                sell_commission_rate=sell_commission_rate,
+                slippage_rate=slippage_rate,
+                min_commission=min_commission,
+                enable_portfolio_replay=enable_portfolio_replay,
+            )
+            return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
         if max_workers == 1 or len(stock_codes) <= 1:
             started_at = time.time()
@@ -866,11 +1875,15 @@ class StockAnalyzer:
                     rate = completed / elapsed
                     remaining = total - completed
                     eta = remaining / rate if rate > 0 else 0.0
-                    print(
-                        f"[PROGRESS] {completed}/{total} "
+                    sys.stderr.write(
+                        f"\r[PROGRESS] {completed}/{total} "
                         f"({completed / total:.1%}) success={success_count} "
                         f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
                     )
+                    sys.stderr.flush()
+            if show_progress:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
         else:
             started_at = time.time()
             total = len(stock_codes)
@@ -886,18 +1899,19 @@ class StockAnalyzer:
                     try:
                         result = future.result()
                     except Exception as exc:
-                        print(f"[ERROR] 并行分析股票 {stock_code} 失败: {exc}")
+                        print(f"\n[ERROR] 并行分析股票 {stock_code} 失败: {exc}")
                         completed += 1
                         if show_progress:
                             elapsed = max(time.time() - started_at, 1e-9)
                             rate = completed / elapsed
                             remaining = total - completed
                             eta = remaining / rate if rate > 0 else 0.0
-                            print(
-                                f"[PROGRESS] {completed}/{total} "
+                            sys.stderr.write(
+                                f"\r[PROGRESS] {completed}/{total} "
                                 f"({completed / total:.1%}) success={success_count} "
                                 f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
                             )
+                            sys.stderr.flush()
                         continue
                     completed += 1
                     if result is not None:
@@ -908,11 +1922,15 @@ class StockAnalyzer:
                         rate = completed / elapsed
                         remaining = total - completed
                         eta = remaining / rate if rate > 0 else 0.0
-                        print(
-                            f"[PROGRESS] {completed}/{total} "
+                        sys.stderr.write(
+                            f"\r[PROGRESS] {completed}/{total} "
                             f"({completed / total:.1%}) success={success_count} "
                             f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
                         )
+                        sys.stderr.flush()
+            if show_progress:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
 
         if not pool_results:
             return None
@@ -946,6 +1964,7 @@ class StockAnalyzer:
         stock_codes=None,
         show_progress=False,
         enable_portfolio_replay=True,
+        ridge_factors=None,
     ):
         """对本地已同步的全部港股执行 TopN 组合回测。"""
         return self.backtest_portfolio(
@@ -965,6 +1984,7 @@ class StockAnalyzer:
             persist_features=persist_features,
             show_progress=show_progress,
             enable_portfolio_replay=enable_portfolio_replay,
+            ridge_factors=ridge_factors,
         )
 
     def generate_trading_strategy(self, analysis_results):
@@ -1040,3 +2060,6 @@ class StockAnalyzer:
             'strategies': suite_results,
             'report': generate_strategy_comparison_report(suite_results, stock_codes)
         }
+
+
+StockAnalyzer._default_analyze_stock_factors = StockAnalyzer.analyze_stock_factors

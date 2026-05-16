@@ -9,6 +9,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import numpy as np
 import pandas as pd
 import warnings
 
@@ -125,7 +126,17 @@ def _merge_recommended_factor_weights(score_config, factor_scorecard):
     factor_name_column = "factor" if "factor" in scorecard.columns else ("feature_name" if "feature_name" in scorecard.columns else None)
     if factor_name_column is None:
         return base_config
-    for component_name in ("trend", "quality", "risk"):
+
+    # Track existing factor → component mapping from config
+    existing_factor_component = {}  # factor_name → component_name
+    for comp_name in base_config:
+        if comp_name == "weights":
+            continue
+        for factor_name in (base_config.get(comp_name) or {}):
+            existing_factor_component[factor_name] = comp_name
+
+    component_names = sorted(set(scorecard["component"].dropna()))
+    for component_name in component_names:
         component_rows = scorecard[scorecard["component"].fillna("") == component_name].copy()
         if component_rows.empty or "recommended_factor_weight" not in component_rows.columns:
             continue
@@ -138,9 +149,27 @@ def _merge_recommended_factor_weights(score_config, factor_scorecard):
                 weight_value = row.get("recommended_factor_weight")
                 if pd.isna(weight_value):
                     continue
-                base_config.setdefault(component_name, {})
-                if factor_name in base_config[component_name]:
-                    base_config[component_name][factor_name]["weight"] = float(weight_value)
+                higher_is_better = bool(row.get("higher_is_better", True))
+
+                if factor_name in existing_factor_component:
+                    # Factor already exists in config — update it in its ORIGINAL component
+                    orig_component = existing_factor_component[factor_name]
+                    base_config.setdefault(orig_component, {})
+                    base_config[orig_component][factor_name]["weight"] = float(weight_value)
+                else:
+                    # Add new factor that Ridge identified as predictive
+                    base_config.setdefault(component_name, {})
+                    base_config[component_name][factor_name] = {
+                        "weight": float(weight_value),
+                        "higher_is_better": higher_is_better,
+                    }
+                    existing_factor_component[factor_name] = component_name
+
+    # Ensure validated component has a weight entry
+    if "validated" in base_config and base_config["validated"]:
+        base_config.setdefault("weights", {})
+        base_config["weights"].setdefault("validated_score", 0.15)
+
     return base_config
 
 
@@ -198,6 +227,54 @@ def _write_validation_weight_cache(cache_dir, cache_key, payload):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return cache_path
+
+
+def _fallback_classify_factor_name(name):
+    text = str(name or "").strip().upper()
+    if not text:
+        return "validated"
+    trend_prefixes = ("MA", "ROC", "MAX", "MIN", "RSV", "IMAX", "IMIN", "IMXD", "QTLU", "QTLD", "OPEN", "HIGH", "LOW", "CLOSE", "VWAP")
+    quality_prefixes = ("VMA", "WVMA", "VSUMP", "VSUMN", "VSUMD", "CORR", "CORD", "CNTP", "CNTN", "CNTD", "SUMP", "SUMN", "SUMD", "RSQR", "RESI", "VOLUME", "KMID", "KLEN", "KUP", "KLOW", "KSFT")
+    risk_prefixes = ("STD", "VSTD")
+    if text.startswith(risk_prefixes):
+        return "risk"
+    if text.startswith(quality_prefixes):
+        return "quality"
+    if text.startswith(trend_prefixes):
+        return "trend"
+    return "validated"
+
+
+def _sanitize_validation_scorecard(scorecard):
+    working = scorecard.copy() if isinstance(scorecard, pd.DataFrame) else pd.DataFrame()
+    if working.empty:
+        return working
+
+    for column in ("validation_score", "recommended_factor_weight", "configured_factor_weight", "ridge_coef", "abs_ridge_coef"):
+        if column in working.columns:
+            working[column] = pd.to_numeric(working[column], errors="coerce")
+            working[column] = working[column].replace([np.inf, -np.inf], np.nan)
+
+    if "component" in working.columns:
+        try:
+            from analyzer_core import classify_factor
+        except ImportError:
+            classify_factor = _fallback_classify_factor_name
+        missing_mask = working["component"].isna() | (working["component"].astype(str).str.strip() == "")
+        if missing_mask.any() and "feature_name" in working.columns:
+            working.loc[missing_mask, "component"] = working.loc[missing_mask, "feature_name"].apply(classify_factor)
+    return working
+
+
+def _is_usable_validation_scorecard(scorecard):
+    working = _sanitize_validation_scorecard(scorecard)
+    if working.empty or "validation_score" not in working.columns:
+        return False
+    validation_score = pd.to_numeric(working["validation_score"], errors="coerce")
+    finite = validation_score[np.isfinite(validation_score)]
+    if finite.empty:
+        return False
+    return bool((finite > 0).any())
 
 
 def _build_factor_scorecard(report):
@@ -315,11 +392,20 @@ def _build_factor_scorecard(report):
         )
 
     base["validation_score"] = base.apply(_validation_score, axis=1)
+
+    # Auto-classify factors if component missing
+    if "component" not in base.columns or base["component"].isna().all():
+        from analyzer_core import classify_factor
+        base["component"] = base["feature_name"].apply(classify_factor)
+
     base.sort_values(["validation_score", "mean_rank_ic", "mean_spread"], ascending=False, inplace=True)
     base.reset_index(drop=True, inplace=True)
 
     base["recommended_factor_weight"] = pd.NA
-    for component_name in ("trend", "quality", "risk"):
+    component_names = sorted(set(base["component"].dropna())) if "component" in base.columns else []
+    if not component_names:
+        component_names = ["trend", "quality", "risk"]
+    for component_name in component_names:
         mask = base["component"].fillna("") == component_name
         if mask.any():
             total = pd.to_numeric(base.loc[mask, "validation_score"], errors="coerce").clip(lower=0).sum()
@@ -331,6 +417,201 @@ def _build_factor_scorecard(report):
                 base.loc[mask, "recommended_factor_weight"] = pd.NA
 
     return base
+
+
+def _build_factor_scorecard_ridge(report, ridge_alpha=1.0, target_horizon=5):
+    """用 Ridge 回归估计因子权重，替代硬编码线性打分。
+
+    小因子集 (p <= n/2): 逐日做横截面回归，系数时序均值作为 validation_score。
+    大因子集 (p > n/2): 堆叠面板回归，一次性拟合，速度更快且 p>n 时更稳定。
+    validation_frame 不可用时回退到原公式。
+    """
+    try:
+        from sklearn.linear_model import Ridge
+    except ImportError:
+        return _build_factor_scorecard(report)
+
+    validation_frame = report.get("validation_frame")
+    if validation_frame is None or validation_frame.empty:
+        return _build_factor_scorecard(report)
+
+    target_col = f"forward_return_{int(target_horizon)}"
+    if target_col not in validation_frame.columns:
+        return _build_factor_scorecard(report)
+
+    pivot = validation_frame.pivot_table(
+        index=["trade_date", "stock_code"],
+        columns="feature_name",
+        values="feature_value",
+        aggfunc="last",
+    )
+    returns = validation_frame.groupby(["trade_date", "stock_code"])[target_col].last()
+    common_idx = pivot.index.intersection(returns.index)
+    if len(common_idx) == 0:
+        return _build_factor_scorecard(report)
+    pivot = pivot.loc[common_idx]
+    returns = returns.loc[common_idx]
+
+    feature_names = list(pivot.columns)
+    K = len(feature_names)
+    if K < 2:
+        return _build_factor_scorecard(report)
+
+    dates = list(pivot.index.get_level_values("trade_date").unique())
+    avg_stocks = len(common_idx) // max(len(dates), 1)
+
+    # --- 堆叠面板回归：逐日去均值 + 全量一次性 Ridge，适合 p > n/2 ---
+    stacked_rows = []
+    for trade_date in dates:
+        X = pivot.xs(trade_date, level="trade_date").dropna()
+        y = returns.xs(trade_date, level="trade_date").loc[X.index]
+        common = X.index.intersection(y.dropna().index)
+        if len(common) < max(5, 2):
+            continue
+        X = X.loc[common]
+        y = y.loc[common].astype(float)
+        X_mean = X.mean()
+        X_std = X.std().replace(0, 1)
+        y_mean = y.mean()
+        X_scaled = (X - X_mean) / X_std
+        y_centered = y - y_mean
+        stacked_rows.append((X_scaled, y_centered))
+
+    if not stacked_rows:
+        return _build_factor_scorecard(report)
+
+    X_all = pd.concat([r[0] for r in stacked_rows], axis=0)
+    y_all = pd.concat([r[1] for r in stacked_rows], axis=0)
+
+    model = Ridge(alpha=ridge_alpha, fit_intercept=False)
+    model.fit(X_all.values.astype(np.float64), y_all.values.astype(np.float64))
+    coefs = model.coef_
+
+    rows = []
+    for name, coef in zip(feature_names, coefs):
+        rows.append({
+            "feature_name": name,
+            "ridge_coef": float(coef),
+            "ridge_panel": True,
+        })
+
+    scorecard = pd.DataFrame(rows)
+    scorecard["abs_ridge_coef"] = scorecard["ridge_coef"].abs()
+    scorecard["higher_is_better"] = scorecard["ridge_coef"].fillna(0) > 0
+    scorecard.sort_values("abs_ridge_coef", ascending=False, inplace=True)
+    scorecard.reset_index(drop=True, inplace=True)
+
+    # Auto-classify all factors so every factor gets a component assignment
+    from analyzer_core import classify_factor
+    scorecard["component"] = scorecard["feature_name"].apply(classify_factor)
+
+    configured_weights = _build_current_factor_weight_table(
+        (report.get("metadata") or {}).get("factor_score_config") or {}
+    )
+    if not configured_weights.empty:
+        # Preserve original component from config if it exists (override auto-classify)
+        original_component_map = {}
+        for _, cw_row in configured_weights.iterrows():
+            fn = cw_row.get("factor")
+            comp = cw_row.get("component")
+            if fn and comp:
+                original_component_map[fn] = comp
+        if original_component_map:
+            scorecard["component"] = scorecard.apply(
+                lambda r: original_component_map.get(r["feature_name"], r["component"]), axis=1
+            )
+
+        # Drop overlapping columns from configured_weights to avoid _x/_y suffix
+        overlap = [c for c in configured_weights.columns if c in scorecard.columns and c not in ("factor", "feature_name")]
+        if overlap:
+            configured_weights = configured_weights.drop(columns=overlap)
+        scorecard = scorecard.merge(configured_weights, left_on="feature_name", right_on="factor", how="left")
+        if "factor" in scorecard.columns:
+            scorecard.drop(columns=["factor"], inplace=True)
+
+    # --- Multi-dimensional validation_score ---
+    # Default: abs Ridge coefficient
+    scorecard["validation_score"] = scorecard["abs_ridge_coef"]
+    scorecard["validation_score_components"] = "ridge_only"
+
+    # Try to incorporate IC, Fama-MacBeth, monotonicity if available
+    ic_summary = report.get("ic_summary")
+    fm_result = report.get("fm_result")
+    monotonicity = report.get("monotonicity")
+
+    if ic_summary is not None and not ic_summary.empty:
+        # Merge |mean_rank_ic| from ic_summary (shortest horizon per factor)
+        ic_rank = ic_summary.copy()
+        if "horizon" in ic_rank.columns:
+            ic_rank = ic_rank.sort_values("horizon").groupby("feature_name").first().reset_index()
+        if "mean_rank_ic" in ic_rank.columns:
+            scorecard = scorecard.merge(
+                ic_rank[["feature_name", "mean_rank_ic"]].rename(columns={"mean_rank_ic": "_mean_rank_ic"}),
+                on="feature_name", how="left",
+            )
+
+    if fm_result is not None and not fm_result.empty and "fm_tstat" in fm_result.columns:
+        scorecard = scorecard.merge(
+            fm_result[["feature_name", "fm_tstat", "fm_pvalue"]].rename(
+                columns={"fm_tstat": "_fm_tstat", "fm_pvalue": "_fm_pvalue"}
+            ),
+            on="feature_name", how="left",
+        )
+
+    if monotonicity is not None and not monotonicity.empty and "monotonicity_score" in monotonicity.columns:
+        scorecard = scorecard.merge(
+            monotonicity[["feature_name", "monotonicity_score"]].rename(
+                columns={"monotonicity_score": "_monotonicity_score"}
+            ),
+            on="feature_name", how="left",
+        )
+
+    # Build composite if auxiliary metrics are available
+    aux_cols_present = [c for c in ["_mean_rank_ic", "_fm_tstat", "_monotonicity_score"] if c in scorecard.columns]
+    if len(aux_cols_present) >= 2:
+        def _minmax_norm(s):
+            clean = pd.to_numeric(s, errors="coerce")
+            mn, mx = clean.min(), clean.max()
+            if pd.isna(mn) or pd.isna(mx) or mx == mn:
+                return pd.Series(0.5, index=s.index)
+            return (clean - mn) / (mx - mn)
+
+        score_components = {"_ridge_norm": _minmax_norm(scorecard["abs_ridge_coef"]) * 0.40}
+
+        if "_mean_rank_ic" in scorecard.columns:
+            score_components["_ic_norm"] = _minmax_norm(scorecard["_mean_rank_ic"].abs()) * 0.15
+        else:
+            score_components["_ridge_norm"] += 0.15
+
+        if "_fm_tstat" in scorecard.columns:
+            score_components["_fm_norm"] = _minmax_norm(scorecard["_fm_tstat"].abs().clip(upper=5)) * 0.20
+        else:
+            score_components["_ridge_norm"] += 0.20
+
+        if "_monotonicity_score" in scorecard.columns:
+            score_components["_mono_norm"] = _minmax_norm(scorecard["_monotonicity_score"]) * 0.15
+        else:
+            score_components["_ridge_norm"] += 0.15
+
+        # rank_autocorr placeholder (0.10 redistributed to Ridge if not available)
+        score_components["_ridge_norm"] += 0.10
+
+        composite = sum(score_components.values())
+        scorecard["validation_score"] = composite.clip(lower=0)
+        scorecard["validation_score_components"] = "+".join(score_components.keys())
+
+    scorecard["recommended_factor_weight"] = pd.NA
+    component_names = sorted(set(scorecard["component"].dropna()))
+    for component_name in component_names:
+        mask = scorecard["component"].fillna("") == component_name
+        if mask.any():
+            total = pd.to_numeric(scorecard.loc[mask, "validation_score"], errors="coerce").clip(lower=0).sum()
+            if total > 0:
+                scorecard.loc[mask, "recommended_factor_weight"] = (
+                    pd.to_numeric(scorecard.loc[mask, "validation_score"], errors="coerce").clip(lower=0) / total
+                )
+
+    return scorecard
 
 
 def main():
@@ -463,13 +744,24 @@ def main_all_hk(
                 cached_payload = _load_validation_weight_cache(cache_dir, cache_key)
 
             if cached_payload is not None:
-                factor_score_config = deepcopy(cached_payload.get("factor_score_config") or {})
-                validation_scorecard = pd.DataFrame(cached_payload.get("factor_scorecard") or [])
-                print(
-                    f"[INFO] 已命中验证权重缓存: key={cache_key}, "
-                    f"path={cached_payload.get('_cache_path')}"
+                candidate_scorecard = _sanitize_validation_scorecard(
+                    pd.DataFrame(cached_payload.get("factor_scorecard") or [])
                 )
-            else:
+                if _is_usable_validation_scorecard(candidate_scorecard):
+                    factor_score_config = deepcopy(cached_payload.get("factor_score_config") or {})
+                    validation_scorecard = candidate_scorecard
+                    print(
+                        f"[INFO] 已命中验证权重缓存: key={cache_key}, "
+                        f"path={cached_payload.get('_cache_path')}"
+                    )
+                else:
+                    print(
+                        f"[WARN] 验证权重缓存已失效，自动重算: key={cache_key}, "
+                        f"path={cached_payload.get('_cache_path')}"
+                    )
+                    cached_payload = None
+
+            if cached_payload is None:
                 if show_progress:
                     print(
                         f"[PROGRESS] validation phase=features "
@@ -491,7 +783,7 @@ def main_all_hk(
                 if validation_report is None:
                     print("[ERROR] 验证驱动权重生成失败")
                     return None
-                validation_scorecard = _build_factor_scorecard(validation_report)
+                validation_scorecard = _build_factor_scorecard_ridge(validation_report)
                 factor_score_config = _merge_recommended_factor_weights(
                     (validation_report.get("metadata") or {}).get("factor_score_config"),
                     validation_scorecard,
@@ -509,6 +801,7 @@ def main_all_hk(
 
             print("[INFO] 已启用验证驱动权重模式")
             if not validation_scorecard.empty:
+                validation_scorecard = _sanitize_validation_scorecard(validation_scorecard)
                 preview_columns = [
                     "feature_name",
                     "component",
@@ -518,17 +811,33 @@ def main_all_hk(
                 ]
                 preview_columns = [column for column in preview_columns if column in validation_scorecard.columns]
                 print(validation_scorecard[preview_columns].head(10).to_string(index=False))
-        portfolio_result = analyzer.backtest_hk_market(
-            days=days,
-            top_n=top_n,
-            initial_capital=initial_capital,
-            max_workers=max_workers,
-            analysis_mode=analysis_mode,
-            factor_set=factor_set,
-            factor_score_config=factor_score_config,
-            show_progress=show_progress,
-            enable_portfolio_replay=not fast_mode,
-        )
+
+            # Build ridge_factors for cross-sectional scoring when scope is "all"
+            ridge_factors = None
+            if effective_validation_factor_scope == "all" and not validation_scorecard.empty:
+                ridge_factors = StockAnalyzer._select_top_ridge_factors(validation_scorecard, top_k=30)
+                if show_progress and ridge_factors is not None and not ridge_factors.empty:
+                    print(
+                        f"[PROGRESS] ridge_factors selected top_k={len(ridge_factors)} "
+                        f"components={ridge_factors['component'].value_counts().to_dict()}"
+                    )
+        else:
+            ridge_factors = None
+
+        backtest_kwargs = {
+            "days": days,
+            "top_n": top_n,
+            "initial_capital": initial_capital,
+            "max_workers": max_workers,
+            "analysis_mode": analysis_mode,
+            "factor_set": factor_set,
+            "factor_score_config": factor_score_config,
+            "show_progress": show_progress,
+            "enable_portfolio_replay": not fast_mode,
+        }
+        if ridge_factors is not None:
+            backtest_kwargs["ridge_factors"] = ridge_factors
+        portfolio_result = analyzer.backtest_hk_market(**backtest_kwargs)
     finally:
         _safe_close_analyzer(analyzer)
     if portfolio_result is None:
@@ -708,7 +1017,7 @@ def main_factor_report(
         print("[ERROR] 因子验证报告生成失败")
         return None
     metadata = report.get("metadata", {})
-    factor_scorecard = _build_factor_scorecard(report)
+    factor_scorecard = _build_factor_scorecard_ridge(report)
     factor_score_config = _merge_recommended_factor_weights(
         metadata.get("factor_score_config"),
         factor_scorecard,
@@ -998,8 +1307,8 @@ def run_cli(argv=None):
                         help='在 all_hk 模式下将 ranking/selected/watchlist 写入 signal 层')
     parser.add_argument('--batch-id', dest='batch_id', default=None,
                         help='在 persist-signals 时指定批次号')
-    parser.add_argument('--max-workers', dest='max_workers', type=int, default=1,
-                        help='批量分析并发线程数，默认 1')
+    parser.add_argument('--max-workers', dest='max_workers', type=int, default=0,
+                        help='批量分析并发线程数，默认 0（自动根据系统资源决定）')
     parser.add_argument('--analysis-mode', dest='analysis_mode', default='factor',
                         choices=['factor', 'strategy'],
                         help='全市场分析模式：factor 或 strategy，默认 factor')

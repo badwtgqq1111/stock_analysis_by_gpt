@@ -12,3 +12,4 @@ scipy
 TA-Lib
 matplotlib
 pytest
+scikit-learn

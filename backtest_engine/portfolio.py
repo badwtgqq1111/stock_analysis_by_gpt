@@ -66,12 +66,25 @@ class TopNPortfolioBuilder:
         if signal_rows:
             signal_df = pd.DataFrame(signal_rows)
             signal_df = signal_df[signal_df["actionable"]].copy()
+            if "signal_freshness_score" in signal_df.columns:
+                signal_df = signal_df[signal_df["signal_freshness_score"].fillna(0) >= 35].copy()
+            if "low_price_candidate" in signal_df.columns:
+                signal_df = signal_df[signal_df["low_price_candidate"].fillna(True)].copy()
+            if "setup_type" in signal_df.columns:
+                signal_df = signal_df[signal_df["setup_type"].fillna("neutral") != "sideways"].copy()
+
+            setup_bonus = signal_df.get("setup_score", 0).fillna(0) * 0.18 if "setup_score" in signal_df.columns else 0.0
+            freshness_bonus = signal_df.get("signal_freshness_score", 0).fillna(0) * 0.10 if "signal_freshness_score" in signal_df.columns else 0.0
+            sideways_penalty = signal_df.get("sideways_penalty", 0).fillna(0) * 1.10 if "sideways_penalty" in signal_df.columns else 0.0
             signal_df["selection_score"] = (
                 signal_df["expected_3m_score"] * 0.50
                 + signal_df["matrix_score"] * 0.22
                 + signal_df["regime_score"] * 0.12
                 + signal_df["signal_strength"] * 3.0
+                + setup_bonus
+                + freshness_bonus
                 - signal_df["risk_score"] * 4.0
+                - sideways_penalty
                 - signal_df["forward_max_drawdown_60"].abs() * 100 * 0.35
             )
 
@@ -102,10 +115,43 @@ class TopNPortfolioBuilder:
         estimated_portfolio_return = portfolio_return_sum / portfolio_return_count if portfolio_return_count > 0 else 0
         estimated_portfolio_win_rate = portfolio_win_count / portfolio_return_count * 100 if portfolio_return_count > 0 else 0
 
-        active_actionable = [item for item in ranking if item.get("current_signal_active") and item.get("current_signal_actionable")]
-        fallback_candidates = [item for item in ranking if item.get("signal_tier") != "weak"]
-        watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak"][: self.top_n]
-        selected = active_actionable[: self.top_n] if active_actionable else (fallback_candidates[: self.top_n] if fallback_candidates else ranking[: self.top_n])
+        preferred_actionable = [
+            item for item in ranking
+            if item.get("current_signal_active")
+            and item.get("current_signal_actionable")
+            and item.get("low_price_candidate", True)
+            and item.get("signal_freshness_score", 100) >= 40
+            and item.get("setup_type") in {"pre_breakout", "bottom_rebound"}
+        ]
+        active_actionable = [
+            item for item in ranking
+            if item.get("current_signal_active")
+            and item.get("current_signal_actionable")
+            and item.get("signal_freshness_score", 100) >= 35
+            and item.get("setup_type") != "sideways"
+        ]
+        fallback_candidates = [
+            item for item in ranking
+            if item.get("signal_tier") != "weak"
+            and item.get("signal_freshness_score", 100) >= 30
+            and item.get("setup_type") != "sideways"
+        ]
+        watchlist = [
+            dict(item) for item in ranking
+            if item.get("setup_type") in {"pre_breakout", "bottom_rebound"} and item.get("signal_tier") == "weak"
+        ][: self.top_n]
+        if not watchlist:
+            watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak"][: self.top_n]
+
+        selected = (
+            preferred_actionable[: self.top_n]
+            if preferred_actionable
+            else (
+                active_actionable[: self.top_n]
+                if active_actionable
+                else (fallback_candidates[: self.top_n] if fallback_candidates else ranking[: self.top_n])
+            )
+        )
         selected = [dict(item) for item in selected]
         self._apply_weights(selected)
 
@@ -472,13 +518,39 @@ class TopNPortfolioBuilder:
         backtest = result.get("backtest") or {}
         avg_forward_return_60_signal = np.nan_to_num(result.get("avg_forward_return_60_signal", 0), nan=0)
         avg_forward_return_60_watch = np.nan_to_num(result.get("avg_forward_return_60_watch", 0), nan=0)
+        setup_type = result.get("setup_type", "neutral")
+        setup_score = float(result.get("setup_score", 0.0) or 0.0)
+        sideways_penalty = float(result.get("sideways_penalty", 0.0) or 0.0)
+        low_price_candidate = bool(result.get("low_price_candidate", setup_type != "sideways"))
+        signal_age_days = int(
+            result.get("signal_age_days", TopNPortfolioBuilder._compute_signal_age_days(result.get("latest_signal_date"))) or 0
+        )
+        signal_freshness_score = float(
+            result.get(
+                "signal_freshness_score",
+                max(0.0, 100.0 - max(signal_age_days, 0) * 8.0),
+            )
+            or 0.0
+        )
         active_bonus = 100 if result.get("current_signal_active") and result.get("current_signal_actionable") else 0
+        setup_type_bonus = {
+            "pre_breakout": 18.0,
+            "bottom_rebound": 20.0,
+            "neutral": 0.0,
+            "sideways": -16.0,
+        }.get(setup_type, 0.0)
+        low_price_bonus = 8.0 if low_price_candidate else -22.0
         ranking_score = (
             active_bonus
             + np.nan_to_num(result.get("current_signal_score", np.nan), nan=0) * 0.50
             + np.nan_to_num(result.get("latest_expected_3m_score", np.nan), nan=0) * 0.20
             + np.nan_to_num(result.get("latest_matrix_score", np.nan), nan=0) * 0.15
             + np.nan_to_num(result.get("latest_regime_score", np.nan), nan=0) * 0.15
+            + setup_type_bonus
+            + setup_score * 0.18
+            + signal_freshness_score * 0.10
+            + low_price_bonus
+            - sideways_penalty * 0.90
         )
         return {
             "stock_code": stock_code,
@@ -499,8 +571,169 @@ class TopNPortfolioBuilder:
             "trade_count": backtest.get("total_trades", 0),
             "factor_set": result.get("factor_set"),
             "selection_source": result.get("selection_source"),
+            "setup_type": setup_type,
+            "setup_score": setup_score,
+            "sideways_penalty": sideways_penalty,
+            "low_price_candidate": low_price_candidate,
+            "signal_freshness_score": signal_freshness_score,
+            "signal_age_days": signal_age_days,
             "factor_explanation": result.get("factor_explanation", {}),
         }
+
+    @staticmethod
+    def _compute_signal_age_days(latest_signal_date):
+        if latest_signal_date is None or pd.isna(latest_signal_date):
+            return 999
+        signal_date = pd.Timestamp(latest_signal_date)
+        reference_date = pd.Timestamp.now("UTC").tz_localize(None).normalize()
+        return max(int((reference_date - signal_date.normalize()).days), 0)
+
+    @staticmethod
+    def _summarize_low_price_setup(data):
+        snapshot = {
+            "setup_type": "neutral",
+            "setup_score": 0.0,
+            "sideways_penalty": 0.0,
+            "low_price_candidate": False,
+            "liquidity_ok": False,
+            "latest_turnover": np.nan,
+            "median_turnover_20": np.nan,
+            "distance_to_20d_high": np.nan,
+            "distance_from_60d_low": np.nan,
+            "volume_ratio_20": np.nan,
+            "compression_ratio": np.nan,
+            "return_5d": np.nan,
+            "return_20d": np.nan,
+            "return_60d": np.nan,
+        }
+        if data is None or data.empty:
+            return snapshot
+
+        working = data.copy().sort_index()
+        if "Close" not in working.columns or "Volume" not in working.columns:
+            return snapshot
+
+        close = pd.to_numeric(working["Close"], errors="coerce")
+        volume = pd.to_numeric(working["Volume"], errors="coerce").fillna(0)
+        if close.dropna().empty:
+            return snapshot
+
+        latest_close = float(close.iloc[-1])
+        latest_volume = float(volume.iloc[-1])
+        latest_turnover = latest_close * latest_volume
+        turnover_series = close * volume
+        median_turnover_20 = float(turnover_series.tail(20).median()) if not turnover_series.tail(20).dropna().empty else np.nan
+
+        returns = close.pct_change()
+        return_5d = float(close.iloc[-1] / close.iloc[-6] - 1.0) if len(close) >= 6 and close.iloc[-6] else np.nan
+        return_20d = float(close.iloc[-1] / close.iloc[-21] - 1.0) if len(close) >= 21 and close.iloc[-21] else np.nan
+        return_60d = float(close.iloc[-1] / close.iloc[-61] - 1.0) if len(close) >= 61 and close.iloc[-61] else np.nan
+
+        high20 = float(close.tail(20).max()) if not close.tail(20).dropna().empty else np.nan
+        low20 = float(close.tail(20).min()) if not close.tail(20).dropna().empty else np.nan
+        high60 = float(close.tail(60).max()) if not close.tail(60).dropna().empty else np.nan
+        low60 = float(close.tail(60).min()) if not close.tail(60).dropna().empty else np.nan
+        ma10 = float(close.tail(10).mean()) if not close.tail(10).dropna().empty else np.nan
+        ma20 = float(close.tail(20).mean()) if not close.tail(20).dropna().empty else np.nan
+        ma60 = float(close.tail(60).mean()) if not close.tail(60).dropna().empty else np.nan
+        volume_ma20 = float(volume.tail(20).mean()) if not volume.tail(20).dropna().empty else np.nan
+
+        distance_to_20d_high = latest_close / high20 - 1.0 if pd.notna(high20) and high20 else np.nan
+        distance_from_60d_low = latest_close / low60 - 1.0 if pd.notna(low60) and low60 else np.nan
+        volume_ratio_20 = latest_volume / volume_ma20 if pd.notna(volume_ma20) and volume_ma20 else np.nan
+
+        volatility_20 = float(returns.tail(20).std(ddof=1)) if returns.tail(20).dropna().shape[0] >= 5 else np.nan
+        volatility_60 = float(returns.tail(60).std(ddof=1)) if returns.tail(60).dropna().shape[0] >= 10 else np.nan
+        compression_ratio = volatility_20 / volatility_60 if pd.notna(volatility_20) and pd.notna(volatility_60) and volatility_60 > 0 else np.nan
+
+        range20 = (high20 - low20) / latest_close if pd.notna(high20) and pd.notna(low20) and latest_close > 0 else np.nan
+        range60 = (high60 - low60) / latest_close if pd.notna(high60) and pd.notna(low60) and latest_close > 0 else np.nan
+
+        low_price_candidate = 0.20 <= latest_close <= 8.0
+        liquidity_ok = pd.notna(median_turnover_20) and median_turnover_20 >= 1_000_000.0
+
+        pre_breakout_score = 0.0
+        if low_price_candidate:
+            pre_breakout_score += 16.0
+        if liquidity_ok:
+            pre_breakout_score += 14.0
+        if pd.notna(distance_to_20d_high) and distance_to_20d_high >= -0.035:
+            pre_breakout_score += 18.0
+        if pd.notna(compression_ratio) and compression_ratio <= 0.85:
+            pre_breakout_score += 16.0
+        elif pd.notna(range20) and pd.notna(range60) and range20 <= range60 * 0.72:
+            pre_breakout_score += 12.0
+        if pd.notna(volume_ratio_20) and volume_ratio_20 >= 1.12:
+            pre_breakout_score += 16.0
+        if pd.notna(return_20d) and return_20d >= 0.04:
+            pre_breakout_score += 10.0
+        if pd.notna(ma20) and latest_close >= ma20:
+            pre_breakout_score += 8.0
+
+        bottom_rebound_score = 0.0
+        if low_price_candidate:
+            bottom_rebound_score += 16.0
+        if liquidity_ok:
+            bottom_rebound_score += 12.0
+        if pd.notna(return_60d) and return_60d <= -0.18:
+            bottom_rebound_score += 18.0
+        if pd.notna(distance_from_60d_low) and 0.06 <= distance_from_60d_low <= 0.35:
+            bottom_rebound_score += 16.0
+        if pd.notna(volume_ratio_20) and volume_ratio_20 >= 1.15:
+            bottom_rebound_score += 14.0
+        if pd.notna(return_5d) and return_5d >= 0.04:
+            bottom_rebound_score += 12.0
+        if pd.notna(ma10) and latest_close >= ma10:
+            bottom_rebound_score += 10.0
+        if pd.notna(ma20) and latest_close >= ma20 * 0.97:
+            bottom_rebound_score += 8.0
+
+        sideways_penalty = 0.0
+        if pd.notna(return_20d) and abs(return_20d) <= 0.06:
+            sideways_penalty += 10.0
+        if pd.notna(range20) and range20 <= 0.14:
+            sideways_penalty += 8.0
+        if pd.notna(volume_ratio_20) and volume_ratio_20 < 1.05:
+            sideways_penalty += 8.0
+        if pd.notna(distance_to_20d_high) and distance_to_20d_high < -0.05 and (pd.isna(distance_from_60d_low) or distance_from_60d_low < 0.08):
+            sideways_penalty += 6.0
+
+        rebound_context = pd.notna(return_60d) and return_60d <= -0.18
+        if rebound_context and bottom_rebound_score >= max(52.0, pre_breakout_score - 4.0, sideways_penalty + 6.0):
+            setup_type = "bottom_rebound"
+            setup_score = bottom_rebound_score
+        elif pre_breakout_score >= bottom_rebound_score and pre_breakout_score >= max(55.0, sideways_penalty + 8.0):
+            setup_type = "pre_breakout"
+            setup_score = pre_breakout_score
+        elif bottom_rebound_score > pre_breakout_score and bottom_rebound_score >= max(55.0, sideways_penalty + 8.0):
+            setup_type = "bottom_rebound"
+            setup_score = bottom_rebound_score
+        elif sideways_penalty >= 18.0:
+            setup_type = "sideways"
+            setup_score = max(pre_breakout_score, bottom_rebound_score)
+        else:
+            setup_type = "neutral"
+            setup_score = max(pre_breakout_score, bottom_rebound_score)
+
+        snapshot.update(
+            {
+                "setup_type": setup_type,
+                "setup_score": float(setup_score),
+                "sideways_penalty": float(sideways_penalty),
+                "low_price_candidate": bool(low_price_candidate and liquidity_ok),
+                "liquidity_ok": bool(liquidity_ok),
+                "latest_turnover": latest_turnover,
+                "median_turnover_20": median_turnover_20,
+                "distance_to_20d_high": distance_to_20d_high,
+                "distance_from_60d_low": distance_from_60d_low,
+                "volume_ratio_20": volume_ratio_20,
+                "compression_ratio": compression_ratio,
+                "return_5d": return_5d,
+                "return_20d": return_20d,
+                "return_60d": return_60d,
+            }
+        )
+        return snapshot
 
     @staticmethod
     def _collect_signal_rows(result):
@@ -524,6 +757,12 @@ class TopNPortfolioBuilder:
                     "risk_score": float(signal.get("risk_score", 0)),
                     "signal_tier": signal.get("signal_tier", "strong"),
                     "actionable": bool(signal.get("actionable", True)),
+                    "setup_type": result.get("setup_type", "neutral"),
+                    "setup_score": float(result.get("setup_score", 0.0) or 0.0),
+                    "sideways_penalty": float(result.get("sideways_penalty", 0.0) or 0.0),
+                    "low_price_candidate": bool(result.get("low_price_candidate", True)),
+                    "signal_freshness_score": float(result.get("signal_freshness_score", 100.0) or 0.0),
+                    "signal_age_days": int(result.get("signal_age_days", 0) or 0),
                     "forward_return_20": float(signal.get("forward_return_20", 0) or 0),
                     "forward_return_40": float(signal.get("forward_return_40", 0) or 0),
                     "forward_return_60": float(signal.get("forward_return_60", 0) or 0),

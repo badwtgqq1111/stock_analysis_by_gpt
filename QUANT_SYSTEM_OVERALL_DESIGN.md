@@ -2,9 +2,9 @@
 
 ## 1. 文档目标
 
-本文档用于定义 `stock_analysis_by_gpt` 的中长期演进蓝图，将当前以港股数据获取与分析为主的原型工程，逐步扩展为一套可支持研究、回测、信号生产与交易执行的工业级量化交易系统。
+本文档定义 `stock_analysis_by_gpt` 的中长期演进蓝图，将当前以港股数据获取与分析为主的原型工程，逐步扩展为一套可支持研究、回测、信号生产与交易执行的工业级量化交易系统。
 
-本文档重点回答四个问题：
+本文档回答四个问题：
 
 1. 系统应该分成哪些层。
 2. 每一层的核心职责与技术选型是什么。
@@ -13,55 +13,122 @@
 
 ## 2. 设计原则
 
-- 分层解耦：数据、投研、执行、监控分层建设，接口清晰。
-- 存算分离：原始数据、特征数据、模型产物、交易状态分层存储。
-- 流批一体：历史回测与盘中计算尽量复用同一套表达与口径。
-- 可回放：任何信号、持仓、订单和风控决策都应可追踪、可复现。
-- 可扩展：先支持单机，再平滑扩展到分布式。
-- 工程化优先：从一开始就考虑测试、监控、发布和风险控制。
+- **分层解耦**：数据、投研、执行、监控分层建设，接口清晰。
+- **存算分离**：原始数据、特征数据、模型产物、交易状态分层存储。
+- **流批一体**：历史回测与盘中计算尽量复用同一套表达与口径。
+- **可回放**：任何信号、持仓、订单和风控决策都应可追踪、可复现。
+- **可扩展**：先支持单机，再平滑扩展到分布式。
+- **工程化优先**：从一开始就考虑测试、监控、发布和风险控制。
 
 ## 3. 总体架构
 
-可编辑的 draw.io 源文件见 [QUANT_SYSTEM_OVERALL_DESIGN.drawio](/home/ccs/code/stock_analysis_by_gpt/QUANT_SYSTEM_OVERALL_DESIGN.drawio)。
+可编辑的 draw.io 源文件见 [QUANT_SYSTEM_OVERALL_DESIGN.drawio](./QUANT_SYSTEM_OVERALL_DESIGN.drawio)。
 
-SVG 版本如下：
+SVG 版本：
 
 ![工业级量化交易系统总体架构](./QUANT_SYSTEM_OVERALL_DESIGN.svg)
+
+核心数据流：
+
+```mermaid
+flowchart LR
+    Data[数据源<br/>行情/企业行为/财务/公告] --> Ingest[data/ingest<br/>抓取与同步]
+    Ingest --> Model[data/model<br/>标准化/交易日历/质量校验]
+    Model --> Store[data/store<br/>raw/clean/meta]
+    Store --> Feature[feature 层<br/>Alpha158/Alpha360/自定义因子]
+    Feature --> Validation[factor_validation<br/>IC/RankIC/分组/衰减]
+    Feature --> Signals[factor_engine/signals<br/>条件与信号配方]
+    Signals --> Strategy[strategy_signals<br/>形态信号]
+    Feature --> ML[factor_engine/ml<br/>LightGBM Ranker]
+    ML --> Portfolio[backtest_engine<br/>TopN/组合回放]
+    Strategy --> Portfolio
+    Validation --> Portfolio
+    Portfolio --> SignalStore[signal 层<br/>批次信号/复盘]
+    Portfolio --> TradeStore[trade 层<br/>成交/持仓/净值]
+    SignalStore --> Web[web_app<br/>研究看板]
+    TradeStore --> Web
+    Portfolio --> Execution[execution/risk<br/>模拟交易/风控/实盘]
+```
 
 ## 4. 分层设计
 
 ### 4.1 数据与计算基础设施层
 
-职责：
+**职责：**
 
 - 接入历史行情、实时行情、财务数据、公告和另类数据。
 - 统一做清洗、对齐、去重、复权和交易日历处理。
 - 提供统一的数据访问接口，供研究、回测、实盘共用。
 
-推荐技术栈：
+**推荐技术栈：**
 
-- 单机/小团队：`Parquet + DuckDB`
-- 缓存/实时信号总线：`Redis`
-- 分布式时序计算：`DolphinDB` 或 `ClickHouse`
-- 数据湖演进：`Parquet + Iceberg`，对象存储可接 `MinIO`
+| 场景 | 技术 |
+|---|---|
+| 单机/小团队主力存储 | `Parquet + DuckDB` |
+| 缓存/实时信号总线 | `Redis` |
+| 分布式时序计算 | `DolphinDB` 或 `ClickHouse` |
+| 数据湖演进 | `Parquet + Iceberg`，对象存储可接 `MinIO` |
 
-落地建议：
+**分层数据集**（从单表逐步演进）：
 
-- 当前仓库已经有 `DuckDB` 基础，可继续作为第一阶段主存储。
-- 历史数据建议从单表存储逐步演进到分层数据集：
-  - `raw`：原始抓取结果
-  - `clean`：清洗后标准 OHLCV
-  - `feature`：因子和特征
-  - `signal`：策略信号
-  - `trade`：订单、成交、持仓
+- `raw`：原始抓取结果
+- `clean`：清洗后标准 OHLCV
+- `feature`：因子和特征
+- `signal`：策略信号
+- `trade`：订单、成交、持仓
 
-#### 4.1.1 当前数据层架构整理
+**模块设计图：**
 
-结合当前仓库的实际实现，数据层已经不是纯规划状态，而是已经形成了可运行的单机版本。更贴近现状的结构如下：
+```mermaid
+flowchart TB
+    subgraph Source[数据源]
+        AK[AKShare<br/>Sina/Eastmoney]
+        TC[Tencent]
+        FUT[未来: 财报/公告/另类数据]
+    end
+
+    subgraph Ingest[data/ingest]
+        Providers[providers<br/>多源抓取]
+        Service[service.py<br/>批量同步/增量补数/重采样]
+    end
+
+    subgraph Model[data/model]
+        Schema[schemas.py<br/>统一 schema]
+        Calendar[calendar.py<br/>交易日历]
+        Quality[quality.py<br/>质量巡检]
+        Adjust[adjustments.py<br/>复权口径]
+    end
+
+    subgraph Store[data/store]
+        Layout[layout.py<br/>分层目录]
+        Parquet[parquet_store.py<br/>Parquet IO]
+        Warehouse[warehouse.py<br/>查询与 upsert]
+        Meta[meta/market_data.duckdb]
+    end
+
+    Source --> Providers --> Service
+    Service --> Schema
+    Service --> Calendar
+    Service --> Quality
+    Service --> Adjust
+    Model --> Layout
+    Layout --> Parquet
+    Parquet --> Warehouse
+    Warehouse --> Meta
+    Warehouse --> Raw[raw 层]
+    Warehouse --> Clean[clean 层]
+    Warehouse --> Feature[feature 层]
+    Warehouse --> Signal[signal 层]
+    Warehouse --> Trade[trade 层]
+```
+
+#### 4.1.1 当前数据层架构
+
+当前数据层已形成可运行的单机版本，架构如下：
 
 ```text
 数据源
-├── AKShare(Sina / Eastmoney)
+├── AKShare (Sina / Eastmoney)
 ├── Tencent
 └── 未来待接入: 财报 / 公告 / 另类数据
             |
@@ -69,7 +136,7 @@ SVG 版本如下：
 data/ingest/providers
 ├── hk_universe.py          # 港股股票池获取与过滤
 ├── hk_history.py           # 港股日线/分钟线多源抓取
-├── hk_corporate_actions.py # 港股企业行为（分红/送股/供股）抓取
+├── hk_corporate_actions.py # 港股企业行为（分红/送股/供股）
 ├── hk_info.py              # 港股基础信息
 ├── cn_history.py           # A股历史行情
 ├── cn_info.py              # A股基础信息
@@ -77,9 +144,7 @@ data/ingest/providers
             |
             v
 data/ingest/service.py
-├── 批量同步
-├── 多周期调度
-├── 增量补数
+├── 批量同步 / 多周期调度 / 增量补数
 ├── 1min -> 5min/60min 派生
 ├── 港股企业行为同步/回读
 └── 缺口报表 / 运行摘要 / 质量摘要
@@ -100,114 +165,220 @@ data/store
             |
             v
 当前已落地存储
-├── raw/ohlcv_snapshots     # 行情原始抓取快照
-├── raw/corporate_actions_snapshots # 企业行为原始抓取快照
-├── clean/ohlcv             # 主行情数据集，Parquet 分区存储
-├── clean/corporate_actions # 企业行为数据集
-├── feature/features        # 特征层长表数据集（IO 初版）
-├── meta/market_data.duckdb # 元数据、stock_info_registry
-└── assets/reports/*.json   # 批量同步缺口报表
+├── raw/ohlcv_snapshots          # 行情原始抓取快照
+├── raw/corporate_actions_snapshots  # 企业行为原始抓取快照
+├── clean/ohlcv                  # 主行情数据集，Parquet 分区存储
+├── clean/corporate_actions      # 企业行为数据集
+├── feature/features             # 特征层长表数据集
+├── meta/market_data.duckdb      # 元数据、stock_info_registry
+└── assets/reports/*.json        # 批量同步缺口报表
 
-规划中但尚未大规模落地
-├── feature/*               # 已有 IO 初版，已接入首批 Qlib 风格因子，仍缺版本管理与缓存
-├── signal/*                # 策略信号与评分
-└── trade/*                 # 订单、成交、持仓
+规划中尚未落地
+├── feature/*       # 版本管理与缓存
+├── signal/*        # 策略信号与评分持久化
+└── trade/*         # 订单、成交、持仓
 ```
 
-#### 4.1.2 数据部分当前已完成项
+#### 4.1.2 数据部分已完成项
 
-- ~~统一 `data/` 目录承接数据接入、标准化与存储逻辑~~
-- ~~建立 `Parquet + DuckDB` 的单机数据层组合~~
-- ~~建立 `raw/clean/feature/signal/trade/meta` 目录布局~~
-- ~~建立统一 OHLCV / stock info schema 与代码标准化能力~~
-- ~~支持港股与 A 股历史行情接入~~
-- ~~支持日线与分钟级 (`1min/5min/60min`) 多周期数据同步~~
-- ~~支持多源回退抓取（AKShare Sina / Eastmoney / Tencent）~~
-- ~~支持批量并发同步、增量补数、缺口报表输出~~
-- ~~支持 `1min` 数据派生 `5min/60min`~~
-- ~~支持 `raw` 层原始抓取快照持久化~~
-- ~~交易日历已独立抽象为统一服务，并接入港股分钟线过滤与重采样~~
-- ~~基础 OHLCV 数据质量巡检已接入批量同步摘要与报表~~
-- ~~统一复权口径标准化与企业行为基础 schema 已落地~~
-- ~~港股企业行为免费数据源初版已接入（东方财富结构化源）~~
-- ~~`feature` 层读写接口初版已落地（长表 schema + Parquet IO）~~
-- ~~`factor_engine/` 最小骨架已落地，可计算并落库首批 Qlib 风格 `Alpha158/Alpha360` 因子~~
+- 统一 `data/` 目录承接数据接入、标准化与存储逻辑
+- `Parquet + DuckDB` 单机数据层组合
+- `raw/clean/feature/signal/trade/meta` 目录布局
+- 统一 OHLCV / stock info schema 与代码标准化
+- 港股与 A 股历史行情接入
+- 日线与分钟级 (`1min/5min/60min`) 多周期数据同步
+- 多源回退抓取（AKShare Sina / Eastmoney / Tencent）
+- 批量并发同步、增量补数、缺口报表输出
+- `1min` 数据派生 `5min/60min`
+- `raw` 层原始抓取快照持久化
+- 统一交易日历，已接入港股分钟线过滤与重采样
+- 基础 OHLCV 数据质量巡检
+- 统一复权口径标准化与企业行为基础 schema
+- 港股企业行为免费数据源初版（东方财富结构化源）
+- `feature` 层读写接口初版（长表 schema + Parquet IO）
+- `factor_engine/` 最小骨架，可计算并落库首批 Qlib 风格 `Alpha158/Alpha360` 因子
 
 #### 4.1.3 数据部分当前缺失项
 
-- 企业行为层已接入港股免费结构化源，但 A 股企业行为、港股官方披露爬虫校验和本地复权回放仍未完成。
-- 财务数据、公告数据、另类数据尚未接入。
-- `feature` 层已具备基础 schema、读写接口和首批 Qlib 风格因子产出能力，且 `factor_validation/` 已落地最小验证流水线；但仍缺少版本管理、缓存、横截面批处理和统一研究调度。
-- `signal/trade` 层已经具备基础 schema、Parquet 读写接口、回测结果落库桥接，以及全港股 TopN 扫描结果的批次化持久化、批次复盘和 summary 导出入口；但仍缺订单状态机、持仓快照数据集和更完整的 OMS 语义。
-- 指数、ETF、杠反产品虽然在股票池过滤层有保留规则，但还没有独立的数据模型与资产分类体系。
-- 数据质量校验已有基础巡检，但仍缺少停牌识别、节假日缺口识别、复权一致性校验和自动修复流水线。
-- legacy `assets/stock_data.duckdb` 已从分析主链路移除，但遗留兼容库的迁移说明、清理脚本和运维收口仍未系统化。
+- **企业行为**：A 股企业行为、港股官方披露爬虫校验和本地复权回放仍未完成。
+- **财务/公告/另类数据**：尚未接入。
+- **feature 层**：缺少版本管理、缓存、横截面批处理和统一研究调度。
+- **signal/trade 层**：已有基础 schema 和 Parquet 读写接口，仍缺订单状态机、持仓快照和完整 OMS 语义。
+- **资产分类**：指数、ETF、杠反产品尚无独立数据模型。
+- **数据质量**：已有基础巡检，仍缺停牌识别、节假日缺口识别、复权一致性校验和自动修复流水线。
+- **legacy 清理**：`assets/stock_data.duckdb` 已从主链路移除，但迁移说明和清理脚本未系统化。
 
 ### 4.2 投研与因子工厂层
 
-职责：
+**职责：**
 
 - 统一特征工程和因子表达。
 - 提供批量因子计算、IC 检验、分层回测、稳定性分析。
+- 将基础因子组合成可解释的形态信号、可训练的排序模型和可落地的组合输入。
 - 支持传统因子与 AI/深度学习因子共存。
 
-推荐技术栈：
+**模块设计图：**
 
-- 因子研究：`Qlib`
-- 传统因子分析：可参考 `RQFactor` 的工作流设计
-- 强化学习实验：`FinRL-X`
-- 高性能表达式编译：`KunQuant`
-- 树模型因子挖掘：`LightGBM`
-- 深度时序建模：时序 `Transformer`
-- 符号因子发现：`gplearn`
+```mermaid
+flowchart TB
+    Clean[clean OHLCV<br/>标准行情] --> Expr[factor_engine/expressions<br/>Alpha158/Alpha360/表达式因子]
+    Clean --> Signals[factor_engine/signals<br/>条件框架]
+    Expr --> FeatureStore[feature 层<br/>长表因子]
+    Signals --> Recipes[strategy_signals<br/>底部反弹/横盘突破/箱体回踩]
+    FeatureStore --> Valid[factor_validation<br/>IC/RankIC/分组收益/换手率]
+    FeatureStore --> ML[factor_engine/ml<br/>LightGBM Ranker]
+    FeatureStore --> Deep[factor_engine/deep<br/>Transformer]
+    FeatureStore --> Symbolic[factor_engine/symbolic<br/>GP/gplearn]
+    Recipes --> SignalScore[pattern_scores<br/>可解释形态分]
+    ML --> ModelScore[model_score<br/>排序分数]
+    Deep --> SeqScore[sequence_score<br/>时序分数]
+    Symbolic --> Candidate[候选公式因子]
+    Candidate --> Valid
+    SignalScore --> Post[postprocess<br/>标准化/中性化/合成]
+    ModelScore --> Post
+    SeqScore --> Post
+    Valid --> Post
+    Post --> PortfolioInput[组合输入<br/>ranking_score]
+```
 
-落地建议：
+#### 4.2.1 因子、条件、信号配方、策略与组合的边界
 
-- 在仓库内先建立因子表达与计算接口，再考虑完整引入 Qlib。
-- 因子层至少要支持：
-  - 横截面因子
-  - 时序因子
-  - 多周期重采样
-  - 行业/市值中性化
-  - IC / RankIC / 分组收益 / 因子衰减分析
+量化系统需要明确区分五个层次：
 
-建议把因子挖掘拆成三条并行路线：
+```text
+因子 Factor
+  -> 条件 Condition
+  -> 信号配方 Signal Recipe
+  -> 策略 Strategy
+  -> 组合 Portfolio
+```
 
-- 规则与表达式路线：
-  - 基于量价、基本面、事件数据构建可解释因子
-  - 适合做研究基线、稳定复现和人工筛选
-- 机器学习路线：
-  - 用 `LightGBM` 做截面收益预测、特征重要性排序和非线性组合
-  - 适合处理中等规模结构化特征，训练效率高，解释性也相对较好
-- 深度时序路线：
-  - 用时序 `Transformer` 处理多资产、多步长、多特征的序列建模
-  - 适合捕捉长依赖、状态切换和复杂时序结构
-- 符号回归路线：
-  - 用 `gplearn` 做表达式搜索和自动特征构造
-  - 适合从底层算子中自动挖掘可解释的因子公式
+| 层次 | 定义 | 示例 |
+|---|---|---|
+| 因子 Factor | 单一可计算数值 | `MA20`, `STD20`, `RSV20`, `VMA20` |
+| 条件 Condition | 因子的阈值/排序判断 | "20日波动率处于低位", "收盘价突破20日高点" |
+| 信号配方 Signal Recipe | 多个条件的组合，输出一个可评分信号 | "底部反弹", "横盘突破", "箱体回踩" |
+| 策略 Strategy | 信号之上定义持仓、止损止盈、调仓频率、交易成本和风控 | "顺势回踩策略（含 MA25 止损 + 移动止盈）" |
+| 组合 Portfolio | 多只股票、多个策略之间的资金分配 | "TopN 等权 / 评分加权 / 风险预算" |
 
-建议的模型定位：
+信号配方本质是人工可解释的"因子组合器"。每个配方使用基础因子+条件逻辑，输出一个评分，进入统一的 `signal` 层和 `factor_validation` / `backtest_engine` 检验。
 
-| 路线 | 推荐工具 | 适用场景 | 优点 | 风险 |
-| :--- | :--- | :--- | :--- | :--- |
-| 传统因子 | 表达式引擎 / Qlib | 基础 alpha 库、研究基线 | 可解释、稳定 | 非线性能力有限 |
-| GBDT | LightGBM | 截面选股、特征筛选、收益预测 | 训练快、对表格数据友好 | 时序建模能力有限 |
-| 深度时序 | Time Series Transformer | 多步预测、序列信号挖掘 | 能建模复杂时序关系 | 训练成本高、调参复杂 |
-| 符号回归 | gplearn | 自动表达式搜索、可解释因子发现 | 因子公式直观 | 容易过拟合、搜索成本高 |
+**层次关系图：**
 
-建议的工程落地方式：
+```mermaid
+flowchart LR
+    Factor[因子<br/>MA20/STD20/MAX20/VMA20] --> Condition[条件<br/>低波动/突破/放量/回踩]
+    Condition --> Recipe[信号配方<br/>底部反弹/横盘突破/箱体回踩]
+    Recipe --> Strategy[策略<br/>仓位/止损/止盈/调仓]
+    Strategy --> Portfolio[组合<br/>TopN/等权/评分加权/风险预算]
+    Portfolio --> SignalLayer[signal 层<br/>批次记录/复盘]
+    Portfolio --> TradeLayer[trade 层<br/>成交/持仓/净值]
+```
 
-- `LightGBM`：
-  - 用于横截面标签学习和特征重要性分析
-  - 输出可作为因子打分器或组合层输入
-- 时序 `Transformer`：
-  - 用于分钟级或日频序列预测
-  - 输出可作为未来收益预测、 regime 信号或辅助因子
-- `gplearn`：
-  - 用于自动生成候选公式
-  - 生成的表达式需要进入统一验证流水线做 IC、稳定性、换手率和样本外检验
+**因子到信号的表达示例：**
 
-建议的 `factor_engine` 子架构：
+| 形态 | 因子零件 | 条件组合 | 输出 |
+|---|---|---|---|
+| 底部反弹 | `ROC20 / RSV20 / VMA20 / VOLUME` | 中期超跌 + 当日反转 + 放量确认 | `bottom_rebound_score` |
+| 横盘突破 | `STD20 / MAX20 / MIN20 / CLOSE / VMA20` | 低波动压缩 + 突破区间高点 + 放量 | `range_breakout_score` |
+| 箱体回踩 | `MAX60 / MIN60 / CLOSE / VOLUME / WVMA20` | 曾经突破 + 回踩不破 + 缩量 | `box_pullback_score` |
+
+#### 4.2.2 信号配方层设计（`strategy_signals/`）
+
+信号配方的框架基类放在 `factor_engine/signals/`，具体的命名形态配方形成独立目录 `strategy_signals/`。两者的关系是：**框架定义"怎样写一个信号配方"，目录存放"有哪些信号配方"**。
+
+**模块设计图：**
+
+```mermaid
+flowchart TB
+    Factors[基础因子<br/>ROC/STD/MAX/MIN/VMA] --> Conditions[factor_engine/signals/conditions.py]
+    Conditions --> Comb[factor_engine/signals/combinators.py<br/>AND/OR/加权/打分]
+    Base[factor_engine/signals/base.py<br/>SignalRecipe] --> Recipes[strategy_signals/]
+    Comb --> Recipes
+    Recipes --> BR[bottom_rebound_score]
+    Recipes --> RB[range_breakout_score]
+    Recipes --> BP[box_pullback_score]
+    BR --> SignalFrame[标准 signal frame]
+    RB --> SignalFrame
+    BP --> SignalFrame
+    SignalFrame --> Validation[factor_validation]
+    SignalFrame --> Backtest[backtest_engine]
+```
+
+```text
+factor_engine/signals/          # 框架层
+├── base.py                     # SignalRecipe 基类、输入输出 schema
+├── conditions.py               # 通用条件: oversold, breakout, compression, pullback...
+└── combinators.py              # 条件组合器 (AND/OR/加权)
+
+strategy_signals/               # 配方目录（可扩展的形态库）
+├── bottom_rebound.py           # 底部反弹
+├── range_breakout.py           # 横盘突破
+├── box_pullback.py             # 箱体回踩
+├── trend_pullback_rebound.py   # 顺势回踩反弹
+├── bottom_volume_reversal.py   # 底部倍量反转
+└── ...                         # 后续扩展
+```
+
+> **当前状态**：`strategy/` 目录下有遗留的策略实现代码，结构与目标 `strategy_signals/` 设计有偏差（耦合了止损止盈逻辑、未继承统一 SignalRecipe 基类、无独立条件层）。后续需按目标架构重构迁移。
+
+#### 4.2.3 机器学习因子组合路线
+
+除手工信号配方外，系统规划四条 ML 路线学习因子间的非线性组合关系。每条路线有明确优先级和适用场景：
+
+| 优先级 | 路线 | 推荐工具 | 适用场景 | 优点 | 风险 |
+|---|---|---|---|---|---|
+| **P1** | GBDT / Ranker | LightGBM | 截面选股、特征筛选、排序学习 | 训练快、对表格数据友好、适合 TopN | 时序建模能力有限，需防标签泄露 |
+| **P2** | 深度时序 | Time Series Transformer | 多步预测、序列信号挖掘 | 能建模复杂时序关系 | 训练成本高、调参复杂 |
+| **P2** | 符号回归 / GP | gplearn / GA | 自动表达式搜索、可解释因子发现 | 因子公式直观，可发现非线性关系 | 容易过拟合、搜索成本高 |
+| **P3** | LLM 辅助研究 | LLM + 实验配置 | 候选假设生成、公式解释、实验编排 | 提高探索效率 | 不能替代验证，易生成看似合理但无效的假设 |
+
+数据流：
+
+```text
+Alpha158 / Alpha360 / 手工信号配方
+  -> feature matrix
+  -> label matrix
+  -> LightGBM / Ranker / Transformer / GP
+  -> expected_return_score / ranking_score
+  -> factor_validation (IC / RankIC / 分组收益 / 换手率)
+  -> TopN portfolio
+```
+
+**P1（LightGBM Ranker）优先实现**，原因是当前系统的主要使用场景是全市场 TopN 选股，目标更接近"横截面排序"而不是"精确预测收益率"。
+
+**ML / GP 研究流程图：**
+
+```mermaid
+flowchart LR
+    Feature[feature matrix<br/>Alpha158/信号配方/自定义因子] --> Label[labels.py<br/>forward_return/分位标签]
+    Feature --> Split[walk-forward split]
+    Label --> Split
+    Split --> LGBM[LightGBM Ranker<br/>LambdaRank/rank_xendcg]
+    Split --> GP[GP/gplearn<br/>表达式搜索]
+    GP --> Candidate[候选公式因子]
+    Candidate --> Complexity[复杂度/相关性/换手率过滤]
+    LGBM --> ModelScore[model_score]
+    Complexity --> NewFactor[注册候选因子]
+    ModelScore --> Validation[factor_validation]
+    NewFactor --> Validation
+    Validation --> Select[select_stocks<br/>TopN 排序]
+    Select --> Portfolio[组合回测与 signal 落库]
+```
+
+标签设计：
+
+- 回归标签：`forward_return_20`, `forward_return_60`, 风险调整后未来收益
+- 排序标签：同一交易日内未来收益分位数, Top 20% / Bottom 20% 分组标签
+
+训练规范（所有 ML 路线通用）：
+
+- 时间切分优先，不使用随机切分。
+- 区分训练集、验证集、测试集、样本外区间。
+- 记录：数据版本、特征版本、标签定义、训练时间区间、参数配置、模型产物路径。
+- 所有候选因子/模型分数统一经过：IC / RankIC、分组收益、换手率、稳定性、样本外表现、交易成本敏感性。
+
+#### 4.2.4 `factor_engine` 子架构
 
 ```text
 factor_engine/
@@ -218,19 +389,24 @@ factor_engine/
 │   ├── operators.py           # 算子库: ts_mean, rank, delay, corr...
 │   ├── alpha_factors.py       # 经典 alpha 因子
 │   └── parser.py              # 表达式解析与执行
-├── ml/
-│   ├── features.py            # 机器学习特征拼装
+├── signals/                   # 信号配方框架
+│   ├── base.py                # SignalRecipe 基类
+│   ├── conditions.py          # 通用条件
+│   └── combinators.py         # 条件组合器
+├── ml/                        # [P1] LightGBM 路线
+│   ├── features.py            # 特征拼装
 │   ├── labels.py              # 收益标签、分类标签
-│   ├── lightgbm_pipeline.py   # LightGBM 训练和推理
+│   ├── lightgbm_ranker.py     # LambdaRank / rank_xendcg 排序学习
 │   └── feature_selection.py   # 特征筛选与重要性分析
-├── deep/
+├── deep/                      # [P2] Transformer 路线
 │   ├── datasets.py            # 时序样本构造
 │   ├── transformer.py         # 时序 Transformer 模型
 │   ├── trainer.py             # 训练、验证、早停
 │   └── inference.py           # 批量推理与因子输出
-├── symbolic/
+├── symbolic/                  # [P2] 符号回归路线
 │   ├── function_set.py        # gplearn 函数集
 │   ├── search.py              # 表达式搜索
+│   ├── fitness.py             # IC/RankIC/复杂度/换手率多目标适应度
 │   └── export.py              # 候选公式导出
 ├── postprocess/
 │   ├── neutralize.py          # 行业/市值中性化
@@ -240,230 +416,181 @@ factor_engine/
     └── storage.py             # 中间结果缓存
 ```
 
-统一接口建议：
+> **注意**：`ml/`、`deep/`、`symbolic/` 三个子目录在当前阶段（Phase 1-2）仅为代码组织占位，实际实现按 4.2.3 节优先级逐步填充，不追求一次性建完。
 
-- `fit(train_frame, valid_frame=None, config=None)`：
-  - 用于 `LightGBM`、`Transformer`、`gplearn` 这类需要训练的因子生成器
-- `transform(frame, context=None)`：
-  - 将输入数据转成单因子或多因子输出
-- `fit_transform(train_frame, valid_frame=None, config=None)`：
-  - 训练并输出训练期因子结果
-- `predict(frame, context=None)`：
-  - 输出样本外打分、未来收益预测或组合排序分数
-- `metadata()`：
-  - 返回因子名、依赖字段、参数、训练窗口、版本号
+#### 4.2.5 统一接口
 
-数据流建议：
+所有因子生成器（表达式、ML 模型、GP 搜索、信号配方）实现以下接口：
 
-1. `data_store` 提供标准化行情和特征底表。
-2. `factor_engine.expressions` 计算基础规则因子。
-3. `factor_engine.ml` 将基础因子和原始特征拼成训练集，供 `LightGBM` 学习。
-4. `factor_engine.deep` 将多资产时序窗口拼成序列样本，供 `Transformer` 学习。
-5. `factor_engine.symbolic` 从基础算子和原始特征出发，用 `gplearn` 搜索新表达式。
-6. 所有产出统一进入 `postprocess` 做标准化、中性化、合成。
-7. 最终因子送入 `factor_validation` 和 `backtest_engine`。
+| 方法 | 用途 | 适用对象 |
+|---|---|---|
+| `fit(train_frame, valid_frame=None, config=None)` | 训练/估计 | LightGBM, Transformer, gplearn |
+| `transform(frame, context=None)` | 因子计算 | 所有因子生成器 |
+| `fit_transform(train_frame, valid_frame=None, config=None)` | 训练并输出训练期结果 | LightGBM, Transformer, gplearn |
+| `predict(frame, context=None)` | 样本外打分/预测 | LightGBM, Transformer |
+| `metadata()` | 返回因子名、依赖字段、参数、版本号 | 所有因子生成器 |
 
-训练与验证规范建议：
+数据流：
 
-- 时间切分优先，不使用随机切分。
-- 至少区分训练集、验证集、测试集、样本外区间。
-- 所有模型都记录：
-  - 数据版本
-  - 特征版本
-  - 标签定义
-  - 训练时间区间
-  - 参数配置
-  - 模型产物路径
-- 所有候选因子都经过统一验证：
-  - IC / RankIC
-  - 分组收益
-  - 换手率
-  - 稳定性
-  - 样本外表现
-  - 交易成本敏感性
-
-各路线的职责边界建议：
-
-- 表达式因子：
-  - 负责可解释、低成本、稳定的基线因子库
-- `LightGBM`：
-  - 负责结构化特征融合、非线性打分和特征重要性分析
-- 时序 `Transformer`：
-  - 负责处理长序列、多特征、多步预测和时序状态抽取
-- `gplearn`：
-  - 负责自动发现新表达式，但不能绕过统一验证和样本外检验
-
-Web 展示层对接建议：
-
-- K 线页读取 `data_store` 的标准 OHLCV 数据。
-- 因子页读取 `factor_engine` 输出的单因子和多因子结果。
-- 回测页读取 `backtest_engine` 的净值、回撤、持仓和成交结果。
-- 模型页展示：
-  - `LightGBM` 特征重要性
-  - `Transformer` 训练曲线和预测结果
-  - `gplearn` 候选表达式及评分
+1. `data/store` 提供标准化行情和特征底表
+2. `factor_engine/expressions` 计算基础规则因子
+3. `factor_engine/signals` 提供条件组合框架，`strategy_signals/` 存放具体形态配方
+4. `factor_engine/ml` 将基础因子和原始特征拼成训练集，供 LightGBM 学习
+5. `factor_engine/deep` 将多资产时序窗口拼成序列样本，供 Transformer 学习
+6. `factor_engine/symbolic` 从基础算子和原始特征出发，用 gplearn 搜索新表达式
+7. 所有产出统一进入 `postprocess` 做标准化、中性化、合成
+8. 最终因子送入 `factor_validation` 和 `backtest_engine`
 
 ### 4.3 策略执行与交易层
 
-职责：
+**职责：**
 
 - 将研究信号转化为组合权重和真实订单。
 - 提供回测撮合、模拟盘、实盘接入三种运行模式。
 - 对接券商柜台和交易所 API，并内置风控。
 
-推荐技术栈：
+**推荐技术栈：**
 
 - 事件驱动策略框架：`VeighNa`
-- 高性能回测/执行内核：可参考 `nanoback` 思路
+- 高性能回测/执行内核：参考 `nanoback` 思路
 - 国内接口方向：`CTP / XTP / 易盛`
 
-落地建议：
+**落地建议**：先做事件驱动回测，再做纸面交易，再接模拟盘，最后接实盘。OMS/OEMS 至少记录：订单状态、持仓快照、资金曲线、风控拦截日志。
 
-- 先做事件驱动回测，再做纸面交易，再接模拟盘，最后接实盘。
-- OMS/OEMS 需要至少记录：
-  - 订单状态
-  - 持仓快照
-  - 资金曲线
-  - 风控拦截日志
+**模块设计图：**
+
+```mermaid
+flowchart LR
+    Signal[signal 层<br/>策略信号/模型分数] --> Portfolio[组合层<br/>权重/再平衡/约束]
+    Portfolio --> OrderIntent[目标订单<br/>target position/order intent]
+    OrderIntent --> Risk[risk<br/>限仓/黑名单/熔断/成本检查]
+    Risk --> Backtest[backtest_engine<br/>事件驱动撮合]
+    Risk --> Paper[模拟交易<br/>paper account]
+    Risk --> Broker[execution<br/>VeighNa/CTP/XTP]
+    Backtest --> Trade[trade 层<br/>成交/持仓/净值]
+    Paper --> Trade
+    Broker --> Trade
+    Trade --> Review[复盘与归因]
+```
 
 ### 4.4 监控与 DevOps 层
 
-职责：
+**职责：**
 
 - 监控数据延迟、任务失败率、策略收益波动、订单异常。
 - 提供自动测试、自动发布、自动回滚。
 - 建立模型与策略变更的审计链路。
 
-推荐建设内容：
+**推荐建设内容：** 单元测试、集成测试、回测基准测试；任务编排与告警；运行日志与关键指标可视化；模型版本、参数版本、数据版本绑定。
 
-- 单元测试、集成测试、回测基准测试
-- 任务编排与告警
-- 运行日志与关键指标可视化
-- 模型版本、参数版本、数据版本绑定
+**模块设计图：**
+
+```mermaid
+flowchart TB
+    CI[CI<br/>单元/集成/回测基准] --> Release[发布与版本记录]
+    DataJob[数据任务] --> Metrics[运行指标<br/>延迟/失败率/缺口]
+    ResearchJob[研究任务] --> Metrics
+    BacktestJob[回测任务] --> Metrics
+    TradingJob[交易/模拟任务] --> Metrics
+    Metrics --> Alert[告警<br/>任务失败/收益异常/订单异常]
+    Release --> Audit[审计链路<br/>代码版本/数据版本/模型版本/参数版本]
+    Alert --> Ops[运维处理]
+    Audit --> Replay[可回放复现]
+```
 
 ### 4.5 Web 展示与交互层
 
-职责：
+**职责：**
 
 - 提供统一的浏览器端研究工作台，承接 K 线、因子、组合和回测结果展示。
-- 支持研究人员通过交互控件动态切换股票、时间区间、因子、调仓频率和回测参数。
-- 将数据层、因子层、回测层的结果转成可视化页面，降低分析和复盘成本。
+- 支持研究人员动态切换股票、时间区间、因子、调仓频率和回测参数。
 
-推荐技术栈：
+**推荐技术栈**：`Dash + Plotly`（主推荐），`Streamlit`（快速原型备选）。
 
-- 主推荐：`Dash + Plotly`
-- 快速原型备选：`Streamlit`
+**模块设计图：**
 
-推荐理由：
+```mermaid
+flowchart LR
+    Store[data/store<br/>OHLCV/feature/signal/trade] --> API[后端查询接口]
+    Factor[factor_validation<br/>因子报告] --> API
+    Backtest[backtest_engine<br/>回测结果] --> API
+    API --> Dash[Dash Web App]
+    Dash --> Kline[K 线总览页]
+    Dash --> FactorPage[因子分析页]
+    Dash --> PortfolioPage[组合回测页]
+    Dash --> StrategyPage[策略诊断页]
+    Dash --> ModelPage[模型页]
+```
 
-- `Dash` 官方文档将其定位为用于构建分析型应用的 Python 框架，适合做多页面、带状态和回调的内部量化工作台。
-- `Dash` 的回调机制适合做动态筛选、参数联动和回测结果重算。
-- `Plotly` 官方提供原生 `Candlestick` 图形，适合直接承接 OHLCV 数据绘制交互式 K 线。
-- `Streamlit` 上手更快，适合临时验证想法，但在复杂页面编排、回调关系和长期工程化方面通常不如 `Dash` 稳定。
+**建议展示能力：**
 
-建议展示能力：
-
-- K 线总览页：
-  - 代码切换
-  - 时间区间切换
-  - 均线、成交量、技术指标叠加
-- 因子分析页：
-  - 单因子时序
-  - 横截面分布
-  - IC / RankIC 曲线
-  - 分组收益和衰减分析
-- 组合回测页：
-  - 收益曲线
-  - 回撤曲线
-  - 超额收益
-  - 调仓记录
-  - 持仓分布
-- 策略诊断页：
-  - 参数面板
-  - 回测日志
-  - 风险暴露
-  - 绩效归因
-
-建议实现方式：
-
-- 用 `Plotly` 绘制 K 线、净值曲线、回撤曲线、分层收益图和热力图。
-- 用 `Dash` 组织页面、筛选控件、回调逻辑和状态同步。
-- 回测与因子计算仍放在 Python 后端，不把业务逻辑塞进前端。
-- 先做内部研究看板，再逐步补权限、缓存、异步任务和报告导出。
+| 页面 | 内容 |
+|---|---|
+| K 线总览页 | 代码切换、时间区间切换、均线/成交量/技术指标叠加 |
+| 因子分析页 | 单因子时序、横截面分布、IC/RankIC 曲线、分组收益和衰减分析 |
+| 组合回测页 | 收益曲线、回撤曲线、超额收益、调仓记录、持仓分布 |
+| 策略诊断页 | 参数面板、回测日志、风险暴露、绩效归因 |
+| 模型页 | LightGBM 特征重要性、Transformer 训练曲线、gplearn 候选表达式及评分 |
 
 ## 5. 参考行业实践
 
 ### 5.1 头部私募经验
 
-- 鸣石、多核平台思路：强调因子工厂化、模块化、多策略协同。
-- 海浦等万级因子库思路：强调统一表达式体系、自动筛选、批量验证。
-- 国内高频/低延迟团队：强调流批一体、柜台速度、硬件网络优化。
+- **鸣石、多核平台思路**：因子工厂化、模块化、多策略协同。
+- **海浦等万级因子库思路**：统一表达式体系、自动筛选、批量验证。
+- **国内高频/低延迟团队**：流批一体、柜台速度、硬件网络优化。
 
-### 5.2 开源框架经验
+### 5.2 开源框架对标
 
-- `Qlib`：适合搭建 AI 驱动的研究流水线。
-- `DolphinDB`：适合统一历史计算与实时流计算。
-- `FinRL-X`：适合做 AI 原生的策略实验框架。
-- `VeighNa`：适合把研究结果接到事件驱动执行与交易接口。
-- `Dash + Plotly`：适合把 K 线、因子研究与回测结果做成交互式浏览器工作台。
-- `LightGBM`：适合做结构化因子的非线性建模和特征重要性排序。
-- 时序 `Transformer`：适合做多特征时间序列预测与复杂序列表示学习。
-- `gplearn`：适合做符号回归和可解释公式挖掘。
+| 框架 | 定位 |
+|---|---|
+| `Qlib` | AI 驱动的研究流水线 |
+| `DolphinDB` | 统一历史计算与实时流计算 |
+| `FinRL-X` | AI 原生的策略实验框架 |
+| `VeighNa` | 事件驱动执行与交易接口 |
+| `Dash + Plotly` | 交互式浏览器研究看板 |
+| `LightGBM` | 结构化因子的非线性建模和特征重要性排序 |
+| `Time Series Transformer` | 多特征时间序列预测与复杂序列表示学习 |
+| `gplearn` | 符号回归和可解释公式挖掘 |
 
 ## 6. 当前仓库现状映射
 
-结合当前 `stock_analysis_by_gpt` 仓库，已有能力大致如下：
+| 模块 | 路径 | 状态 |
+|---|---|---|
+| 数据抓取 | `data/ingest/providers/` | 已支持港股/A 股多源回退、批量同步、多周期抓取与分钟级派生 |
+| 数据存储 | `data/store/` | `Parquet + DuckDB` 组合，layout/parquet_store/warehouse 已落地 |
+| 数据标准化 | `data/model/` | 统一 OHLCV / stock info schema、交易日历、复权口径、质量巡检 |
+| 因子引擎 | `factor_engine/` | 最小骨架可用：registry + base + expressions/operators + Alpha158/Alpha360 |
+| 因子验证 | `factor_validation/` | 最小验证流水线可用，CLI 双模式分离（validate_factors / select_stocks） |
+| 信号配方 | `strategy/` (legacy) | 有遗留实现，需按 `strategy_signals/` 目标架构重构 |
+| 回测引擎 | `backtest_engine/` | 事件驱动撮合、费用/滑点、TopN 组合构建、全港股扫描 |
+| 分析入口 | `analyzer_core.py` | 主分析链路已切到新数据架构，编排因子计算→验证→选股→回测 |
+| 指标计算 | `indicators.py` | 技术指标库 |
+| 报告展示 | `reporting.py`, `chart_plotter.py` | 基础报告与图表 |
 
-- 数据抓取：
-  - `data/ingest/providers/`
-  - 已支持港股 / A 股历史数据多源回退
-  - 已支持港股股票池过滤、批量同步、多周期抓取与分钟级派生
-- 数据存储：
-  - `data/store/layout.py`
-  - `data/store/parquet_store.py`
-  - `data/store/warehouse.py`
-  - 已形成 `Parquet + DuckDB` 组合
-- 数据标准化：
-  - `data/model/schemas.py`
-  - 已统一 OHLCV / stock info schema 与代码标准
-- 指标/分析：
-  - `indicators.py`
-  - `stock_analyzer.py`
-  - `analyzer_core.py`
-- 回测与策略雏形：
-  - `backtest.py`
-  - `strategy/`
-  - `backtest_engine/`
-  - 已支持单标的事件驱动撮合、费用/滑点、组合 TopN 构建、组合真实价格回放
-  - 已支持全港股 TopN CLI 扫描、并行分析、CSV 导出、`signal` 层批次化写入、批次复盘与 summary 导出
-  - `stock_analyzer.py` 主分析链路已切到 `assets/data` 新架构，不再依赖 legacy `assets/stock_data.duckdb`
-- 报告与展示：
-  - `reporting.py`
-  - `chart_plotter.py`
+**距离工业级系统仍缺少的关键能力：**
 
-这说明仓库已经具备“数据原型 + 分析原型 + 策略雏形”的基础，但距离工业级系统仍缺少以下关键能力：
-
-- `feature` 层之上的版本管理、缓存机制与批量研究编排
-- 企业行为官方校验源与本地复权回放
-- 统一因子工厂接口
-- 批量研究任务编排
+- `feature` 层版本管理、缓存机制与批量研究编排
+- A 股企业行为、港股官方校验源与本地复权回放
+- 信号配方框架层（`factor_engine/signals/`）和配方目录（`strategy_signals/`）
+- LightGBM 排序学习流水线
+- 批量研究任务编排与实验记录
 - 订单管理与执行状态机
-- 持仓 / 订单 / 风控日志的统一数据闭环
-- 面向投研的 Web 展示工作台
+- 持仓/订单/风控日志的统一数据闭环
+- Web 展示工作台
 - 风控体系
 - 监控与 CI/CD
 
 ## 7. 目标系统模块拆分
 
-建议后续按下面的逻辑拆模块：
-
-| 层级 | 建议模块 | 说明 |
-| :--- | :--- | :--- |
-| 数据层 | ~~`data/ingest/`~~ | ~~行情接入、多源抓取、批量同步、增量补数~~ |
-| 数据层 | ~~`data/model/`~~ | ~~标准 schema、代码标准化~~ |
-| 数据层 | ~~`data/store/`~~ | ~~DuckDB/Parquet 抽象与 clean/meta 读写~~ |
-| 因子层 | `factor_engine/` | 表达式引擎、因子注册、依赖计算 |
+| 层级 | 模块 | 说明 |
+|---|---|---|
+| 数据层 | `data/ingest/` | 行情接入、多源抓取、批量同步、增量补数 |
+| 数据层 | `data/model/` | 标准 schema、代码标准化、交易日历、复权 |
+| 数据层 | `data/store/` | DuckDB/Parquet 抽象与分层读写 |
+| 因子层 | `factor_engine/` | 表达式引擎、因子注册、ML/深度/符号路线、信号框架、后处理 |
 | 因子层 | `factor_validation/` | IC、分组、回撤、稳定性分析 |
+| 信号层 | `strategy_signals/` | 命名形态配方目录 |
 | 研究层 | `research/` | Notebook、实验、模型训练任务 |
 | 展示层 | `web_app/` | Dash 页面、Plotly 图表、交互回调 |
 | 回测层 | `backtest_engine/` | 事件驱动撮合、费用、滑点、持仓管理 |
@@ -471,224 +598,128 @@ Web 展示层对接建议：
 | 风控层 | `risk/` | 仓位、行业、单票、成交、熔断规则 |
 | 运维层 | `ops/` | 监控、调度、发布、审计 |
 
+**目标模块关系图：**
+
+```mermaid
+flowchart TB
+    Data[data/] --> Factor[factor_engine/]
+    Data --> Validation[factor_validation/]
+    Factor --> Signals[strategy_signals/]
+    Factor --> Validation
+    Signals --> Backtest[backtest_engine/]
+    Validation --> Backtest
+    Backtest --> Research[research/]
+    Backtest --> Web[web_app/]
+    Backtest --> Execution[execution/]
+    Execution --> Risk[risk/]
+    Risk --> Data
+    Ops[ops/] --> Data
+    Ops --> Factor
+    Ops --> Backtest
+    Ops --> Execution
+```
+
 ## 8. 分阶段实施路线
+
+**阶段路线图：**
+
+```mermaid
+flowchart LR
+    P1[Phase 1<br/>单机数据与研究底座] --> P2[Phase 2<br/>因子工厂与回测平台]
+    P2 --> P3[Phase 3<br/>模拟交易闭环]
+    P3 --> P4[Phase 4<br/>实时与实盘]
+
+    P1 --> P1a[数据治理<br/>feature 缓存<br/>信号配方框架]
+    P2 --> P2a[策略信号目录<br/>LightGBM Ranker<br/>组合优化]
+    P3 --> P3a[订单状态机<br/>风控拦截<br/>持仓快照]
+    P4 --> P4a[流式行情<br/>盘中因子<br/>券商网关]
+```
 
 ### Phase 1：夯实单机数据与研究底座
 
-目标：把当前项目打造成稳定的单机研究平台。
+**目标**：把当前项目打造成稳定的单机研究平台。
 
-关键结果：
+**关键结果**：
 
-- 统一数据 schema
-- 支持日频/分钟频数据入湖
-- 提供标准因子计算接口
-- 能跑基础单因子回测
-- 能展示基础 K 线和策略结果页面原型
+- 统一数据 schema —— 已完成
+- 支持日频/分钟频数据入湖 —— 已完成
+- 补齐数据治理闭环（A 股企业行为、复权回放、停牌/节假日识别、自动修复流水线）
+- `feature` 层版本管理与缓存
+- 提供标准因子计算接口 —— 已完成
+- 能跑基础单因子回测 —— 已完成
+- 信号配方框架层落地（`factor_engine/signals/`）
+- 遗留 `strategy/` 迁移至 `strategy_signals/`
 
 ### Phase 2：建立因子工厂与回测平台
 
-目标：支持多因子批量验证和组合回测。
+**目标**：支持多因子批量验证和组合回测。
 
-关键结果：
+**关键结果**：
 
-- 因子注册表
-- 因子批计算流水线
+- 因子注册表 —— 已完成
+- 因子批计算流水线 —— 已完成
+- 信号配方目录初版（`strategy_signals/` 核心形态配方）
+- LightGBM 排序学习基线（P1）
 - IC/分组回测/组合优化
-- 事件驱动回测内核
-- 可交互的 K 线、因子与组合回测工作台
+- 事件驱动回测内核 —— 已完成
+- 组合层（等权/评分加权/风险预算）
+- 实验记录与模型版本管理
+- 可交互的 K 线、因子、模型与组合回测工作台（`web_app/`）
+- 符号回归/GP 实验线（P2，视 P1 效果决定投入）
+- 深度时序 Transformer 实验线（P2，视 P1 效果决定投入）
 
 ### Phase 3：建立模拟交易闭环
 
-目标：把研究信号推进到仿真执行。
+**目标**：把研究信号推进到仿真执行。
 
-关键结果：
+**关键结果**：
 
 - 信号转订单
-- 订单生命周期管理
+- 订单生命周期管理（订单状态机）
 - 模拟撮合
 - 风控规则与异常拦截
+- 持仓快照/订单状态/风控日志持久化
 
 ### Phase 4：接入实时与实盘
 
-目标：接入实时行情、模拟柜台和真实交易接口。
+**目标**：接入实时行情、模拟柜台和真实交易接口。
 
-关键结果：
+**关键结果**：
 
 - 流式行情接入
 - 盘中增量因子计算
-- 券商 API 网关
+- 券商 API 网关（VeighNa / CTP / XTP）
 - 全链路监控与审计
+- Redis 缓存与实时信号总线
 
-## 9. TODO 与优先级
+### 8.1 下一步推进（Now / Next / Later）
 
-优先级说明：
+#### Now：补数据治理闭环 + 信号配方框架
 
-- `P0`：必须先做，没有它后面容易返工。
-- `P1`：核心能力，完成后系统才真正可用。
-- `P2`：增强能力，提升效率和规模化水平。
-- `P3`：生产优化项，偏高阶能力。
-- 状态说明：`已完成` / `进行中` / `待开始`
+数据层基础版已成型，优先把数据治理的剩余缺口补上，同时建立信号配方的框架层，为后续因子研究提供稳定的基础设施。
 
-| 优先级 | 状态 | TODO | 目标产出 |
-| :--- | :--- | :--- | :--- |
-| `P0` | `已完成` | ~~定义统一市场数据 schema（OHLCV、代码标准、基础 stock info）~~ | ~~`data/model/schemas.py` 初版已落地~~ |
-| `P0` | `已完成` | ~~将历史数据存储从单表扩展到 `Parquet + DuckDB` 分层落盘~~ | ~~`clean + meta` 数据层已落地~~ |
-| `P0` | `进行中` | ~~建立统一交易日历、复权基础抽象与港股企业行为层初版~~，继续补齐 A 股企业行为、港股官方校验源与本地复权回放 | 市场口径基础设施进入可用状态 |
-| `P0` | `进行中` | ~~补齐 `raw` 层原始数据持久化~~，继续补回放读取接口与原始响应审计能力 | 原始抓取结果可追溯、可回放 |
-| `P0` | `已完成` | ~~建立 `feature` 层基础 schema 与读写接口~~ | ~~`feature/features` 长表数据集与 `warehouse/service` 读写已落地~~ |
-| `P0` | `进行中` | 将数据接入抽象层扩展到指数 / ETF / 杠反 / 基本面 / 公告 | 更完整的 `DataSource` / `DataLoader` 抽象 |
-| `P0` | `进行中` | 为现有抓取和数据库模块补齐更完整的单元测试与集成测试 | 可回归验证的数据基础设施 |
-| `P1` | `进行中` | 搭建因子引擎接口，支持注册、计算、缓存和依赖解析 | 已完成注册与计算初版，仍缺缓存和依赖图 |
-| `P1` | `进行中` | 实现基础因子库：动量、反转、波动率、量价、估值 | 已接入 Qlib 风格 `Alpha158/Alpha360` 首版，仍缺基本面/估值因子 |
-| `P1` | `进行中` | ~~建立因子验证流水线：IC、RankIC、分组收益、换手率、衰减分析~~，~~CLI 独立验证入口 (`validate_factors`) 与验证→选股管道拆分 (`select_stocks`) 已落地~~，仍缺样本外编排与自动调权闭环 | `factor_validation/` 已验证流水线可用，CLI 双模式分离 |
-| `P1` | `待开始` | 建立机器学习因子挖掘流水线 | 支持 `LightGBM` 训练、验证和特征重要性输出 |
-| `P1` | `待开始` | 建立符号回归因子挖掘流水线 | 支持 `gplearn` 自动生成候选表达式 |
-| `P1` | `进行中` | 重构回测模块为事件驱动引擎 | `backtest_engine/` 已支持单标的事件驱动撮合、费用/滑点与净值曲线，仍缺多资产订单生命周期 |
-| `P1` | `进行中` | 建立组合层：等权、风险预算、简单约束优化 | 已支持 TopN、等权/评分加权、组合回放、全港股扫描并行分析、进度输出、结果导出与批次复盘，仍缺风险预算与约束优化 |
-| `P1` | `待开始` | 定义策略运行配置、实验记录与版本标识 | 可追踪实验系统 |
-| `P1` | `待开始` | 建立 `Dash + Plotly` Web 工作台 | 浏览器内动态查看 K 线、因子和回测结果 |
-| `P1` | `待开始` | 实现 K 线页、因子分析页、组合回测页 | 统一研究展示入口 |
-| `P2` | `进行中` | 引入分钟级/实时数据接入与增量更新 | 盘中研究能力 |
-| `P2` | `待开始` | 建立时序 `Transformer` 训练与推理流水线 | 支持多步收益预测和时序信号学习 |
-| `P2` | `待开始` | 接入 Redis 做缓存与实时信号总线 | 更低延迟的数据与信号分发 |
-| `P2` | `待开始` | 增加行业、市值、风格因子中性化与风险暴露分析 | 更贴近机构投研流程 |
-| `P2` | `待开始` | 评估引入 Qlib 作为研究工作流组件 | 加速 AI 因子研究 |
-| `P2` | `待开始` | 建立批量实验调度能力 | 多策略、多参数并行试验 |
-| `P2` | `待开始` | 为 Web 看板补缓存、异步任务和导出能力 | 提升交互性能与可运维性 |
-| `P3` | `待开始` | 建立模拟交易与订单状态机 | 从回测过渡到纸面交易 |
-| `P3` | `待开始` | 接入 VeighNa 或券商 API 网关 | 实盘执行基础 |
-| `P3` | `待开始` | 补齐风控中心：限仓、限撤、黑名单、异常熔断 | 交易安全边界 |
-| `P3` | `待开始` | 建立监控、告警、审计与 CI/CD | 生产级运维能力 |
+- 企业行为层补齐（A 股企业行为、港股官方校验源、本地复权回放）
+- 数据质量自动修复流水线（停牌识别、节假日缺口、复权一致性）
+- `factor_engine/signals/` 框架（`base.py` / `conditions.py` / `combinators.py`）
+- 遗留 `strategy/` 代码审计，规划迁移路径
 
-## 10. 推荐的近期落地顺序
+#### Next：信号配方目录 + LightGBM 排序学习
 
-如果从当前仓库直接往前推进，建议按这个顺序做：
+把数据层正式接到研究层，形成"可批量计算、可验证"的因子工作流。
 
-1. ~~统一数据模型与目录结构。~~
-2. ~~把 `DuckDB` 和 `Parquet` 组合起来，做好分层存储。~~
-3. ~~抽象 `DataLoader`，让回测和研究不直接依赖抓取细节。~~
-4. ~~补上 `raw` 层、交易日历、企业行为基础层和基础数据质量巡检。~~
-5. ~~建立 `factor_engine`，先跑一批基础因子。~~
-6. ~~把 `backtest.py` 升级成事件驱动回测引擎。~~
-7. 继续补组合优化、实验记录、回测结果持久化与报告生成。
-8. 建立 `Dash + Plotly` Web 工作台，先打通 K 线和回测结果展示。
-9. 再考虑实时数据、模拟交易和实盘接入。
+- `strategy_signals/` 核心形态配方（底部反弹、横盘突破、箱体回踩等）
+- LightGBM 排序学习基线：
+  - 因子矩阵构建 → 未来收益/横截面分位标签 → walk-forward 训练和验证 → 模型分数写回 feature/signal 层
+- `factor_validation/` 批量化入口、IC/RankIC/分组收益报告汇总
 
-### 10.1 建议的下一步推进模块
+#### Later：扩展回测、展示与自动化因子挖掘
 
-基于当前仓库状态，数据层治理基础版已经基本成型，下一步不建议继续横向扩展更多数据源，而是优先把数据层正式接到 `feature` 和因子研究层。原因很简单：当前已经具备较强的数据同步与治理能力，但还缺少把数据稳定转化为研究资产的中间层。
+- `backtest_engine/` 多资产订单生命周期、组合约束与再平衡
+- `web_app/` K 线页、因子页、回测页、模型页
+- 符号回归/GP 自动因子挖掘实验线
+- 深度时序 Transformer 实验线
 
-建议按 `Now / Next / Later` 三段推进：
-
-#### Now：先补数据治理闭环
-
-目标：把现有数据同步能力升级成可追溯、可审计、可复核的数据基础设施。
-
-建议优先落地：
-
-- ~~`raw` 层原始抓取结果落盘：~~
-  - ~~已保存行情 / 企业行为快照、抓取时间、来源、请求参数~~
-  - 继续补问题回放接口和更细粒度审计字段
-- ~~统一交易日历：~~
-  - ~~港股盘中会话、分钟线过滤和重采样已统一~~
-  - 继续补 A 股更完整节假日/停牌口径
-- ~~企业行为与复权层：~~
-  - ~~复权口径统一管理，港股企业行为免费源初版已接入~~
-  - 继续补 A 股企业行为、港股官方披露爬虫校验和本地复权回放
-- ~~数据质量巡检基础版：~~
-  - ~~重复、乱序、OHLC 异常、零成交伪 bar 已覆盖~~
-  - 继续补缺口检查、停牌识别、节假日缺口和自动修复
-- ~~`feature` 层落盘接口：~~
-  - ~~已经具备长表 schema、Parquet 存储和按条件读取能力~~
-  - 继续补特征版本管理、缓存和批量产出流水线
-
-为什么剩余这一步仍然优先：
-
-- 当前 `clean/raw`、交易日历、质量巡检、港股企业行为基础层和 `feature` 层 IO 已经可用，但还缺真正的因子计算与验证中间层，研究链路还没完全闭环。
-- 因子和回测一旦开始大量依赖数据，如果底层治理没补上，后面返工会更痛。
-
-#### Next：建立因子工厂最小可用版
-
-目标：把数据层正式接到研究层，形成“可批量计算、可验证”的因子工作流。
-
-建议优先落地：
-
-- `factor_engine/` 目录和统一接口
-- 因子注册表
-- 基础算子库：
-  - `delay`
-  - `ts_mean`
-  - `ts_std`
-  - `rank`
-  - `corr`
-- 第一批基础因子：
-  - 动量
-  - 反转
-  - 波动率
-  - 量价
-- 因子结果写入 `feature` 层
-
-为什么这一步排在这里：
-
-- 你现在最缺的不是“更多数据”，而是“把数据变成标准化研究对象”的能力。
-- 因子层一旦起来，后面的验证、回测、组合层才有稳定输入。
-
-#### Next：继续补因子验证与组合闭环
-
-目标：让因子和组合结果不只是“算出来”，而是“能被系统性验证并持久化”。
-
-建议优先落地：
-
-- `factor_validation/` 的批量化入口
-- IC / RankIC / 分组收益报告汇总
-- 因子衰减与换手率批量评估
-- 样本内 / 样本外切分
-- 组合回测结果落库与导出
-
-为什么这一步紧跟因子引擎：
-
-- 没有验证层，因子研究很容易停留在“看起来有道理”。
-- 这一步是从数据平台走向研究平台的真正分水岭。
-
-#### Later：继续扩展回测与展示层
-
-目标：形成从因子到策略到结果展示的完整研究闭环。
-
-建议顺序：
-
-- `backtest_engine/`
-  - 多资产订单生命周期
-  - 持仓快照 / 订单状态 / 风控日志
-  - 更细的组合约束与再平衡语义
-- `web_app/`
-  - K 线页
-  - 因子页
-  - 回测页
-- 组合优化与实验记录
-
-为什么不先做：
-
-- 现在直接做 UI 或高级回测，会把未稳定的数据层和因子层问题提前暴露到更复杂的界面里。
-- 先把底层研究资产和验证能力做扎实，展示层和回测层会更顺。
-
-### 10.2 建议的实际落地顺序
-
-如果按最务实的方式推进，建议下一阶段按这个顺序执行：
-
-1. ~~`data/raw` 原始响应持久化~~
-2. ~~统一交易日历~~
-3. ~~企业行为 / 复权层基础版~~
-4. ~~数据质量巡检基础版~~
-5. ~~`feature` 层读写接口~~
-6. ~~`factor_engine/` 最小骨架~~
-7. ~~第一批基础因子（Qlib 风格 `Alpha158/Alpha360` 首版）~~
-8. ~~`factor_validation/` 最小可用版~~
-9. ~~`backtest_engine/` 最小可用版~~
-10. ~~验证→选股管道拆分：`validate_factors` + `select_stocks` 独立 CLI 模式~~
-11. `backtest_engine/` / `signal` 层结果持久化、组合约束和实验记录
-12. `web_app/`
-
-## 11. 建议的目录演进
+## 9. 建议的目录演进
 
 ```text
 stock_analysis_by_gpt/
@@ -697,6 +728,14 @@ stock_analysis_by_gpt/
 │   ├── model/
 │   └── store/
 ├── factor_engine/
+│   ├── expressions/
+│   ├── signals/          # 信号配方框架
+│   ├── ml/               # [P1] LightGBM
+│   ├── deep/             # [P2] Transformer
+│   ├── symbolic/         # [P2] gplearn/GP
+│   ├── postprocess/
+│   └── cache/
+├── strategy_signals/     # 命名形态配方目录
 ├── factor_validation/
 ├── research/
 ├── web_app/
@@ -704,13 +743,18 @@ stock_analysis_by_gpt/
 ├── execution/
 ├── risk/
 ├── ops/
-├── strategy/
 ├── reports/
 └── assets/
 ```
 
-## 12. 总结
+## 10. 总结
 
-这套系统的核心，不是简单把“抓数据、算指标、回测、下单”拼在一起，而是要建立一条统一、可复现、可扩展的研究到执行流水线。
+这套系统的核心，不是简单把"抓数据、算指标、回测、下单"拼在一起，而是要建立一条统一、可复现、可扩展的研究到执行流水线。
 
 对当前项目而言，最现实的演进路径不是一口气冲向分布式和低延迟，而是先把单机版的数据层、因子层和回测层做扎实。等这三层稳定后，再引入实时计算、订单管理、风控和交易接口，系统自然就会从分析工具长成真正的量化平台。
+
+三层核心判断标准：
+
+1. **数据层扎实**：任何因子计算、回测和信号生成，都不需要关心数据从哪来、有没有复权、交易日历对不对。
+2. **因子层稳定**：批量计算、系统验证、可复现结果。手工因子和 ML 因子通过同一条验证流水线进入组合层。
+3. **回测层可信**：撮合逻辑、费用、滑点真实反映交易成本，结果可落库可复盘。

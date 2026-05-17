@@ -6,3 +6,4 @@ strategy/__pycache__/
 assets/stock_data.duckdb
 assets/data/meta/validation_feature_cache/
 .venv
+uv.lock

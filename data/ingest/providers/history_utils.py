@@ -142,7 +142,7 @@ def call_with_retries(func, attempts=3, sleep_seconds=1.0):
     raise last_error
 
 
-def fetch_eastmoney_intraday_ohlcv(secid, period, adjust="", start_date=None, end_date=None):
+def fetch_eastmoney_intraday_ohlcv(secid, period, adjust="", start_date=None, end_date=None, attempts=1, timeout=8):
     """直接调用东方财富分时接口，返回标准化前的原始 DataFrame。"""
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -162,9 +162,9 @@ def fetch_eastmoney_intraday_ohlcv(secid, period, adjust="", start_date=None, en
             "secid": secid,
         }
         data_json = call_with_retries(
-            lambda: requests.get(url, params=params, headers=headers, timeout=15).json(),
-            attempts=3,
-            sleep_seconds=1.0,
+            lambda: requests.get(url, params=params, headers=headers, timeout=timeout).json(),
+            attempts=attempts,
+            sleep_seconds=0.2,
         )
         trends = ((data_json or {}).get("data") or {}).get("trends") or []
         if not trends:
@@ -184,9 +184,9 @@ def fetch_eastmoney_intraday_ohlcv(secid, period, adjust="", start_date=None, en
             "end": "20500000",
         }
         data_json = call_with_retries(
-            lambda: requests.get(url, params=params, headers=headers, timeout=15).json(),
-            attempts=3,
-            sleep_seconds=1.0,
+            lambda: requests.get(url, params=params, headers=headers, timeout=timeout).json(),
+            attempts=attempts,
+            sleep_seconds=0.2,
         )
         klines = ((data_json or {}).get("data") or {}).get("klines") or []
         if not klines:

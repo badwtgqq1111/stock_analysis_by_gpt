@@ -1,0 +1,33 @@
+[project]
+name = "stock-analysis-by-gpt"
+version = "0.1.0"
+description = "Local quant research and backtesting toolkit for HK/CN stocks based on Parquet and DuckDB."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "akshare",
+    "baostock",
+    "demjson3",
+    "duckdb",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "py-mini-racer",
+    "pyarrow",
+    "requests",
+    "scikit-learn",
+    "scipy",
+    "TA-Lib",
+    "urllib3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+akshare = { path = "../akshare", editable = true }

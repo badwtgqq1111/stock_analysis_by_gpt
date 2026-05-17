@@ -40,7 +40,7 @@ d:\stock\
 ├── data_saver.py        # 数据保存 (JSON 序列化)
 ├── chart_plotter.py     # 图表绘制 (K线蜡烛图)
 ├── utils.py             # 工具函数
-├── requirements.txt     # 依赖包列表
+├── pyproject.toml       # uv 项目配置与依赖列表
 ├── README.md            # 项目文档
 ├── output/              # 输出目录
 │   ├── hk_stock_03633_*.json

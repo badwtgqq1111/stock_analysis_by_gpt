@@ -9,7 +9,9 @@ except ImportError:  # pragma: no cover
     ak = None
 
 
-DEFAULT_SOURCE_PRIORITY = ["akshare_sina", "tencent", "akshare_eastmoney"]
+# 默认优先使用不依赖 MiniRacer 的东方财富源，避免高并发同步时触发
+# py-mini-racer / V8 初始化崩溃；新浪源保留为最终回退。
+DEFAULT_SOURCE_PRIORITY = ["akshare_eastmoney", "tencent", "akshare_sina"]
 
 
 def normalize_hk_stock_code(stock_code):
@@ -39,10 +41,10 @@ def build_source_priority(data_source=None, source_priority=None):
     if normalized == "akshare":
         return list(DEFAULT_SOURCE_PRIORITY)
     if normalized in {"sina", "akshare_sina"}:
-        return ["akshare_sina", "tencent", "akshare_eastmoney"]
+        return ["akshare_sina", "akshare_eastmoney", "tencent"]
     if normalized in {"eastmoney", "akshare_eastmoney", "em"}:
         return ["akshare_eastmoney", "tencent", "akshare_sina"]
     if normalized == "tencent":
-        return ["tencent", "akshare_sina", "akshare_eastmoney"]
+        return ["tencent", "akshare_eastmoney", "akshare_sina"]
 
     return list(DEFAULT_SOURCE_PRIORITY)

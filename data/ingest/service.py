@@ -6,12 +6,17 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import os
+import platform
+import sys
+import threading
+import time
 
 import pandas as pd
 
 from data.ingest.cn_stock_loader import CNStockDataLoader
 from data.ingest.hk_stock_loader import HKStockDataLoader
 from data.ingest.providers import HKCorporateActionsFetcher, HKMarketListFetcher, HistoryDataFetcher
+from data.ingest.providers.hk_history import set_akshare_sina_history_concurrency
 from data.ingest.providers.history_utils import normalize_period
 from data.model import (
     get_adjustment_profile,
@@ -43,6 +48,58 @@ class MarketDataService:
         "30min": 10,
         "60min": 15,
     }
+
+    @staticmethod
+    def _emit_sync_progress_line(
+        *,
+        completed_tasks,
+        total_tasks,
+        completed_stocks,
+        total_stocks,
+        started_at,
+        frequency_list,
+        requested_by_frequency,
+        completed_by_frequency,
+        stream=None,
+    ):
+        target_stream = stream or sys.stderr
+        total_tasks = max(int(total_tasks or 0), 1)
+        completed_tasks = max(int(completed_tasks or 0), 0)
+        elapsed = max(time.time() - started_at, 1e-9)
+        rate = completed_tasks / elapsed if completed_tasks > 0 else 0.0
+        remaining = max(total_tasks - completed_tasks, 0)
+        eta = remaining / rate if rate > 0 else 0.0
+        fields = [
+            f"stocks_done={completed_stocks}/{total_stocks}",
+            f"tasks_done={completed_tasks}/{total_tasks}",
+            f"({completed_tasks / total_tasks:.1%})",
+        ]
+        for frequency in frequency_list:
+            fields.append(f"{frequency}={completed_by_frequency.get(frequency, 0)}/{requested_by_frequency.get(frequency, 0)}")
+        fields.extend(
+            [
+                f"rate={rate:.1f}/s",
+                f"elapsed={elapsed:.1f}s",
+                f"eta={eta:.1f}s",
+            ]
+        )
+        print(
+            "\r[PROGRESS] sync phase=ohlcv " + " ".join(fields),
+            end="",
+            flush=True,
+            file=target_stream,
+        )
+
+    @staticmethod
+    def _resolve_sina_history_concurrency(requested_limit, max_workers):
+        requested_limit = int(requested_limit or 0)
+        if requested_limit > 0:
+            return min(requested_limit, max(int(max_workers or 1), 1))
+
+        # 0 means no outer limiter.  The local AKShare Sina decoder uses a
+        # warmed MiniRacer context pool, which preserves macOS throughput while
+        # avoiding concurrent context initialization crashes.
+        return 0
 
     def __init__(self, base_dir="./assets/data", data_source="akshare"):
         self.layout = DataLayout(base_dir=base_dir)
@@ -741,6 +798,10 @@ class MarketDataService:
         intraday_start_date=None,
         intraday_years=3,
         persist_raw=True,
+        sina_max_concurrency=0,
+        show_progress=False,
+        derive_intraday_from_1min=True,
+        min_daily_rows_for_intraday=3,
     ):
         """高并发抓取港股多周期历史数据并批量落库。"""
         normalized_adjust = normalize_adjust(adjust)
@@ -748,6 +809,8 @@ class MarketDataService:
         target_end_date = end_date or datetime.now().strftime("%Y-%m-%d")
         effective_data_source = data_source or self.data_source
         max_workers = max_workers or min(24, max(8, (os.cpu_count() or 8) * 2))
+        sina_max_concurrency = self._resolve_sina_history_concurrency(sina_max_concurrency, max_workers)
+        set_akshare_sina_history_concurrency(sina_max_concurrency)
         frequency_order = {"daily": 0, "1min": 1, "5min": 2, "15min": 3, "30min": 4, "60min": 5}
         frequency_list = []
         for frequency in frequencies or ("daily",):
@@ -890,6 +953,14 @@ class MarketDataService:
         print(f"[INFO] 港股批量下载开始：{len(stocks)} 只，截止日期 {target_end_date}")
         print(f"[INFO] 同步周期：{frequency_display}")
         print(f"[INFO] 并发抓取线程数：{max_workers}，批量落库阈值：{flush_stock_count} 只 / {flush_row_count} 行")
+        if str(effective_data_source).strip().lower() in {"sina", "akshare_sina"}:
+            if sina_max_concurrency > 0:
+                print(
+                    f"[INFO] 新浪日线外层限流：{sina_max_concurrency} "
+                    f"(其余数据源仍可按 workers={max_workers} 并发)"
+                )
+            else:
+                print("[INFO] 新浪日线使用 AKShare 解码池复用 MiniRacer context，不启用外层限流")
 
         history_frames = []
         stock_info_payloads = []
@@ -917,6 +988,33 @@ class MarketDataService:
             }
             for plan in period_plans
         }
+        requested_by_frequency = {
+            frequency: sum(
+                1
+                for stock in stocks
+                for request in stock["period_requests"]
+                if request["frequency"] == frequency and request["should_fetch"]
+            )
+            for frequency in frequency_list
+        }
+        completed_by_frequency = {frequency: 0 for frequency in frequency_list}
+        progress_started_at = time.time()
+        frequency_stats_lock = threading.Lock()
+        progress_lock = threading.Lock() if show_progress else None
+        completed_stocks_progress = 0
+        completed_tasks_progress = 0
+
+        def emit_sync_progress():
+            self._emit_sync_progress_line(
+                completed_tasks=completed_tasks_progress,
+                total_tasks=sum(requested_by_frequency.values()),
+                completed_stocks=completed_stocks_progress,
+                total_stocks=len(stocks),
+                started_at=progress_started_at,
+                frequency_list=frequency_list,
+                requested_by_frequency=requested_by_frequency,
+                completed_by_frequency=completed_by_frequency,
+            )
 
         def build_basic_stock_info(stock):
             return normalize_stock_info(
@@ -931,6 +1029,7 @@ class MarketDataService:
             )
 
         def fetch_single_stock(stock):
+            nonlocal completed_tasks_progress
             code = stock["code"]
             normalized_frames = []
             source_by_frequency = {}
@@ -938,27 +1037,72 @@ class MarketDataService:
             raw_frame_cache = {}
             raw_snapshot_paths = []
             quality_reports = {}
-            for request in stock["period_requests"]:
+            period_requests = list(stock["period_requests"])
+            if str(effective_data_source).strip().lower() in {"sina", "akshare_sina"}:
+                period_requests.sort(key=lambda item: item["frequency"] != "daily")
+            elif derive_intraday_from_1min and any(request["frequency"] == "1min" for request in period_requests):
+                intraday_order = {"1min": 0, "5min": 1, "15min": 2, "30min": 3, "60min": 4}
+                period_requests.sort(
+                    key=lambda item: (
+                        0 if item["frequency"] in intraday_order else 1,
+                        intraday_order.get(item["frequency"], 99),
+                    )
+                )
+            for request in period_requests:
                 frequency = request["frequency"]
                 if not request["should_fetch"]:
                     period_rows[frequency] = 0
                     continue
+                if (
+                    frequency != "daily"
+                    and min_daily_rows_for_intraday
+                    and "daily" in period_rows
+                    and period_rows.get("daily", 0) < int(min_daily_rows_for_intraday)
+                ):
+                    period_rows[frequency] = 0
+                    with frequency_stats_lock:
+                        missing_by_frequency[frequency] = missing_by_frequency.get(frequency, 0) + 1
+                    if show_progress:
+                        with progress_lock:
+                            completed_by_frequency[frequency] = completed_by_frequency.get(frequency, 0) + 1
+                            completed_tasks_progress += 1
+                            emit_sync_progress()
+                    continue
+                raw_frame = None
+                derived_from_1min = False
+                if (
+                    derive_intraday_from_1min
+                    and frequency in {"5min", "15min", "30min", "60min"}
+                    and "1min" in raw_frame_cache
+                ):
+                    raw_frame = HistoryDataFetcher._resample_intraday_frame(raw_frame_cache["1min"], frequency)
+                    if raw_frame is not None and not raw_frame.empty:
+                        start_ts = pd.to_datetime(request["start_date"])
+                        end_ts = pd.to_datetime(request["end_date"]) + pd.Timedelta(days=1)
+                        raw_frame = raw_frame.loc[
+                            (raw_frame.index >= start_ts) & (raw_frame.index < end_ts)
+                        ].copy()
+                        derived_from_1min = raw_frame is not None and not raw_frame.empty
                 fetcher = HistoryDataFetcher(
                     code,
                     db_dir=None,
                     data_source=effective_data_source,
                     adjust=normalized_adjust,
+                    verbose=not show_progress,
                 )
-                raw_frame = fetcher.fetch(
-                    start_date=request["start_date"],
-                    end_date=request["end_date"],
-                    period=frequency,
-                    adjust=normalized_adjust,
-                )
+                if not derived_from_1min:
+                    raw_frame = fetcher.fetch(
+                        start_date=request["start_date"],
+                        end_date=request["end_date"],
+                        period=frequency,
+                        adjust=normalized_adjust,
+                    )
                 if frequency == "1min" and raw_frame is not None and not raw_frame.empty:
                     raw_frame_cache["1min"] = raw_frame.copy()
 
                 if (
+                    not derive_intraday_from_1min
+                    and
                     (raw_frame is None or raw_frame.empty)
                     and frequency in {"5min", "60min"}
                     and "1min" in raw_frame_cache
@@ -974,6 +1118,9 @@ class MarketDataService:
                             raw_frame = derived_frame
                             base_source = source_by_frequency.get("1min", effective_data_source)
                             fetcher.last_successful_source = f"{base_source}_derived"
+                elif derived_from_1min:
+                    base_source = source_by_frequency.get("1min", effective_data_source)
+                    fetcher.last_successful_source = f"{base_source}_derived"
 
                 normalized_frame = normalize_ohlcv_frame(
                     raw_frame,
@@ -1012,6 +1159,16 @@ class MarketDataService:
                     period_rows[frequency] = len(normalized_frame)
                 else:
                     period_rows[frequency] = 0
+                with frequency_stats_lock:
+                    if period_rows[frequency] > 0:
+                        success_by_frequency[frequency] = success_by_frequency.get(frequency, 0) + 1
+                    else:
+                        missing_by_frequency[frequency] = missing_by_frequency.get(frequency, 0) + 1
+                if show_progress:
+                    with progress_lock:
+                        completed_by_frequency[frequency] = completed_by_frequency.get(frequency, 0) + 1
+                        completed_tasks_progress += 1
+                        emit_sync_progress()
 
             merged_frame = (
                 pd.concat(normalized_frames, ignore_index=True)
@@ -1067,18 +1224,16 @@ class MarketDataService:
                         for frequency in frequency_list
                         if requested_frequencies.get(frequency) and period_rows.get(frequency, 0) <= 0
                     ]
-                    for frequency in frequency_list:
-                        if not requested_frequencies.get(frequency):
-                            continue
-                        if period_rows.get(frequency, 0) > 0:
-                            success_by_frequency[frequency] = success_by_frequency.get(frequency, 0) + 1
-                        else:
-                            missing_by_frequency[frequency] = missing_by_frequency.get(frequency, 0) + 1
+                    if show_progress:
+                        with progress_lock:
+                            completed_stocks_progress += 1
+                            emit_sync_progress()
 
                     frame = result["frame"]
                     if frame is None or frame.empty:
                         skipped_count += 1
-                        print(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [SKIP] 无有效历史数据")
+                        if not show_progress:
+                            print(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [SKIP] 无有效历史数据")
                         continue
 
                     stock_quality_summary = {}
@@ -1153,28 +1308,36 @@ class MarketDataService:
                         f"{frequency}={source}"
                         for frequency, source in sorted(result["sources"].items())
                     ) or effective_data_source
-                    print(
-                        f"[{idx:04d}/{total:04d}] {code} - {name:<20} [{status_label}] "
-                        f"{len(frame)} 行 ({min_date} -> {max_date}) "
-                        f"周期={frequency_stats} 源={source_stats}"
-                    )
-                    if missing_frequencies:
-                        print(f"                 缺失周期={', '.join(missing_frequencies)}")
-                    if stock_quality_summary:
-                        quality_stats = ", ".join(
-                            f"{frequency}(E{item['error_count']}/W{item['warning_count']})"
-                            for frequency, item in stock_quality_summary.items()
+                    if not show_progress or missing_frequencies or stock_quality_summary:
+                        print(
+                            f"[{idx:04d}/{total:04d}] {code} - {name:<20} [{status_label}] "
+                            f"{len(frame)} 行 ({min_date} -> {max_date}) "
+                            f"周期={frequency_stats} 源={source_stats}"
                         )
-                        print(f"                 质量提示={quality_stats}")
+                        if missing_frequencies:
+                            print(f"                 缺失周期={', '.join(missing_frequencies)}")
+                        if stock_quality_summary:
+                            quality_stats = ", ".join(
+                                f"{frequency}(E{item['error_count']}/W{item['warning_count']})"
+                                for frequency, item in stock_quality_summary.items()
+                            )
+                            print(f"                 质量提示={quality_stats}")
 
                     if pending_stocks >= flush_stock_count or pending_rows >= flush_row_count:
                         flush_batch()
-                        print(f"[FLUSH] 已批量写入，累计 {rows_written} 行")
+                        if not show_progress:
+                            print(f"[FLUSH] 已批量写入，累计 {rows_written} 行")
                 except Exception as exc:
                     failed.append({"code": code, "name": name, "error": str(exc)})
+                    if show_progress:
+                        with progress_lock:
+                            completed_stocks_progress += 1
+                            emit_sync_progress()
                     print(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [FAIL] {str(exc)[:120]}")
 
         flush_batch()
+        if show_progress:
+            print(file=sys.stderr)
 
         compact_result = None
         if compact_after:

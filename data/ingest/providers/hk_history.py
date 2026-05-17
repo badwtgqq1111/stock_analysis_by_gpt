@@ -3,6 +3,8 @@
 
 """港股历史数据抓取。"""
 
+import threading
+
 import pandas as pd
 import requests
 
@@ -21,12 +23,35 @@ from data.store.database_manager import DatabaseManager
 
 
 HK_CALENDAR = get_market_calendar("HK")
+_AKSHARE_SINA_HISTORY_CONCURRENCY = 1
+_AKSHARE_SINA_HISTORY_SEMAPHORE = threading.BoundedSemaphore(_AKSHARE_SINA_HISTORY_CONCURRENCY)
+
+
+def set_akshare_sina_history_concurrency(limit):
+    """配置新浪港股日线调用的最大并发数。"""
+    global _AKSHARE_SINA_HISTORY_CONCURRENCY, _AKSHARE_SINA_HISTORY_SEMAPHORE
+
+    if limit is None:
+        return _AKSHARE_SINA_HISTORY_CONCURRENCY
+
+    normalized_limit = int(limit)
+    if normalized_limit <= 0:
+        _AKSHARE_SINA_HISTORY_CONCURRENCY = 0
+        _AKSHARE_SINA_HISTORY_SEMAPHORE = None
+        return 0
+
+    if normalized_limit == _AKSHARE_SINA_HISTORY_CONCURRENCY:
+        return normalized_limit
+
+    _AKSHARE_SINA_HISTORY_CONCURRENCY = normalized_limit
+    _AKSHARE_SINA_HISTORY_SEMAPHORE = threading.BoundedSemaphore(normalized_limit)
+    return normalized_limit
 
 
 class HistoryDataFetcher:
     """获取港股历史数据，支持多源回退与增量更新。"""
 
-    def __init__(self, stock_code, db_dir="./assets", data_source=None, adjust="qfq", source_priority=None):
+    def __init__(self, stock_code, db_dir="./assets", data_source=None, adjust="qfq", source_priority=None, verbose=True):
         self.stock_code = normalize_hk_stock_code(stock_code)
         self.ticker_symbol = f"hk{self.stock_code}"
         self.default_adjust = normalize_adjust(adjust)
@@ -34,16 +59,28 @@ class HistoryDataFetcher:
         self.data = None
         self.last_successful_source = None
         self.db_manager = DatabaseManager(db_dir) if db_dir is not None else None
+        self.verbose = bool(verbose)
 
     def _fetch_akshare_sina_hist(self, start_date=None, end_date=None, num_records=None, adjust=None):
         if ak is None:
             raise ImportError("akshare 未安装")
 
-        df = call_with_retries(
-            lambda: ak.stock_hk_daily(symbol=self.stock_code, adjust=adjust or self.default_adjust),
-            attempts=2,
-            sleep_seconds=0.5,
-        )
+        if _AKSHARE_SINA_HISTORY_SEMAPHORE is None:
+            df = call_with_retries(
+                lambda: ak.stock_hk_daily(symbol=self.stock_code, adjust=adjust or self.default_adjust),
+                attempts=2,
+                sleep_seconds=0.5,
+            )
+        else:
+            # Older AKShare versions construct MiniRacer on every call, which can
+            # crash under high concurrency on macOS.  Newer local builds use a
+            # warmed decoder pool, so callers can disable this outer limiter.
+            with _AKSHARE_SINA_HISTORY_SEMAPHORE:
+                df = call_with_retries(
+                    lambda: ak.stock_hk_daily(symbol=self.stock_code, adjust=adjust or self.default_adjust),
+                    attempts=2,
+                    sleep_seconds=0.5,
+                )
         normalized_df = normalize_history_dataframe(
             df,
             {"date": "date", "open": "open", "close": "close", "high": "high", "low": "low", "volume": "volume"},
@@ -93,8 +130,8 @@ class HistoryDataFetcher:
                     start_date=start_date or "1979-09-01 09:32:00",
                     end_date=end_date or "2222-01-01 09:32:00",
                 ),
-                attempts=3,
-                sleep_seconds=1.0,
+                attempts=1,
+                sleep_seconds=0.2,
             )
             normalized_df = normalize_history_dataframe(
                 df,
@@ -113,7 +150,7 @@ class HistoryDataFetcher:
 
     def _fetch_tencent_1min_hist(self, start_date=None, end_date=None, num_records=None, adjust=None):
         url = f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={self.ticker_symbol}"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
 
@@ -179,7 +216,7 @@ class HistoryDataFetcher:
         period_digits = to_akshare_intraday_period(period)
         try:
             url = f"https://ifzq.gtimg.cn/appstock/app/kline/mkline?param={self.ticker_symbol},m{period_digits},,1000"
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=5)
             response.raise_for_status()
             data = response.json()
 
@@ -258,7 +295,8 @@ class HistoryDataFetcher:
     def fetch(self, start_date=None, end_date=None, num_records=None, adjust=None, period="daily"):
         normalized_period = normalize_period(period)
         normalized_adjust = normalize_adjust(adjust or self.default_adjust)
-        print(f"[INFO] 正在获取 {self.ticker_symbol} 的 {normalized_period} 历史数据...")
+        if self.verbose:
+            print(f"[INFO] 正在获取 {self.ticker_symbol} 的 {normalized_period} 历史数据...")
 
         if is_intraday_period(normalized_period):
             fetchers = {
@@ -306,20 +344,24 @@ class HistoryDataFetcher:
             try:
                 df = fetcher()
                 if df is None or df.empty:
-                    print(f"[WARNING] {source_name} 未返回有效历史数据")
+                    if self.verbose:
+                        print(f"[WARNING] {source_name} 未返回有效历史数据")
                     continue
 
                 self.data = df
                 self.last_successful_source = source_name
-                print()
-                print(f"[OK] 成功获取 {len(df)} 条记录，来源：{source_name}")
-                print(f"     周期：{normalized_period}")
-                print(f"     时间范围：{df.index[0].strftime('%Y-%m-%d %H:%M:%S')} 至 {df.index[-1].strftime('%Y-%m-%d %H:%M:%S')}")
+                if self.verbose:
+                    print()
+                    print(f"[OK] 成功获取 {len(df)} 条记录，来源：{source_name}")
+                    print(f"     周期：{normalized_period}")
+                    print(f"     时间范围：{df.index[0].strftime('%Y-%m-%d %H:%M:%S')} 至 {df.index[-1].strftime('%Y-%m-%d %H:%M:%S')}")
                 return df
             except Exception as exc:
-                print(f"[WARNING] {source_name} 获取历史数据失败：{exc}")
+                if self.verbose:
+                    print(f"[WARNING] {source_name} 获取历史数据失败：{exc}")
 
-        print(f"[ERROR] 未能获取 {self.ticker_symbol} 的 {normalized_period} 历史数据")
+        if self.verbose:
+            print(f"[ERROR] 未能获取 {self.ticker_symbol} 的 {normalized_period} 历史数据")
         return None
 
     def get_data(self):

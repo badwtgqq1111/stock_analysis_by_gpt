@@ -36,6 +36,24 @@ def build_parser():
     )
     parser.add_argument("--adjust", default="qfq", help="复权方式: raw/qfq/hfq，默认 qfq")
     parser.add_argument("--workers", type=int, default=None, help="抓取线程数，默认自动计算")
+    parser.add_argument(
+        "--sina-max-concurrency",
+        type=int,
+        default=0,
+        help="当优先使用 sina 源时，限制 akshare 新浪日线接口的最大并发数；0 表示自动按平台选择",
+    )
+    parser.add_argument("--show-progress", action="store_true", help="显示按周期聚合的实时进度")
+    parser.add_argument(
+        "--no-derive-intraday",
+        action="store_true",
+        help="不从 1min 本地派生 5min/15min/30min/60min，改为分别请求原始周期",
+    )
+    parser.add_argument(
+        "--min-daily-rows-for-intraday",
+        type=int,
+        default=3,
+        help="日线有效行数低于该值时跳过分钟线抓取，默认 3；设为 0 可关闭",
+    )
     parser.add_argument("--flush-stocks", type=int, default=64, help="每累计多少只股票触发一次批量写入")
     parser.add_argument("--flush-rows", type=int, default=250000, help="每累计多少行触发一次批量写入")
     parser.add_argument("--limit", type=int, default=None, help="仅同步前 N 只股票，用于小范围验证")
@@ -60,6 +78,10 @@ def build_report_payload(args, summary):
             "intraday_years": args.intraday_years,
             "adjust": args.adjust,
             "workers": args.workers,
+            "sina_max_concurrency": args.sina_max_concurrency,
+            "show_progress": args.show_progress,
+            "derive_intraday_from_1min": not args.no_derive_intraday,
+            "min_daily_rows_for_intraday": args.min_daily_rows_for_intraday,
             "flush_stocks": args.flush_stocks,
             "flush_rows": args.flush_rows,
             "limit": args.limit,
@@ -122,6 +144,10 @@ def main():
             end_date=args.end_date,
             adjust=args.adjust,
             max_workers=args.workers,
+            sina_max_concurrency=args.sina_max_concurrency,
+            show_progress=args.show_progress,
+            derive_intraday_from_1min=not args.no_derive_intraday,
+            min_daily_rows_for_intraday=args.min_daily_rows_for_intraday,
             flush_stock_count=args.flush_stocks,
             flush_row_count=args.flush_rows,
             limit=args.limit,

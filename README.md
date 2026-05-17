@@ -4,27 +4,97 @@
 
 ## 环境部署
 
+Linux 环境推荐直接使用 `uv` 管理工具链和虚拟环境。下面示例使用 Python `3.12.3`。
+
+### 1. 安装 uv
+
 ```bash
-cd /home/ccs/code/stock_analysis_by_gpt
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-所有命令使用 `.venv/bin/python`，数据目录默认 `./assets`。
+安装完成后重新打开终端，或让当前 shell 重新加载环境变量，再确认：
+
+```bash
+uv --version
+```
+
+### 2. 安装并固定 Python 3.12.3
+
+```bash
+uv python install 3.12.3
+uv python pin 3.12.3
+```
+
+确认当前项目使用的是 `3.12.3`：
+
+```bash
+uv run python --version
+```
+
+### 3. 安装项目依赖
+
+本项目要求 Python `3.10+`，推荐直接使用 `3.12.3`。在项目根目录执行：
+
+```bash
+cd /path/to/stock_analysis_by_gpt
+uv sync --dev
+```
+
+`uv` 会自动创建并管理 `.venv`。所有命令统一使用 `uv run python`，数据目录默认 `./assets`。
+
+项目通过 `pyproject.toml` 中的 `[tool.uv.sources]` 将 `akshare` 指向同级目录 `../akshare` 并以可编辑模式安装；如果你的本地目录结构不同，先调整这一路径再执行 `uv sync`。
+
+港股历史同步默认优先使用 `akshare_eastmoney`。如果显式指定 `--data-source sina`，本地 `akshare` 会通过解码池复用预热后的 MiniRacer context，macOS 上也不需要默认降低整体并发；`--sina-max-concurrency` 仅作为兼容旧实现或异常环境的手动兜底。
 
 ## 数据同步
 
 全港股日线+分钟级增量同步（2014 年起）：
 
 ```bash
-.venv/bin/python sync_hk_market.py --db-dir ./assets --start-date 2014-01-01 --workers 24
+uv run python sync_hk_market.py --db-dir ./assets --start-date 2014-01-01 --workers 24
+```
+
+如果希望实时看到按 `daily/1min/5min/60min` 聚合的进度：
+
+```bash
+uv run python sync_hk_market.py --db-dir ./assets --start-date 2014-01-01 --workers 24 --show-progress
 ```
 
 仅日线、跳过已入库：
 
 ```bash
-.venv/bin/python sync_hk_market.py --db-dir ./assets --start-date 2014-01-01 --workers 24 --frequencies daily --skip-existing
+uv run python sync_hk_market.py --db-dir ./assets --start-date 2014-01-01 --workers 24 --frequencies daily --skip-existing
 ```
+
+如果你要强制优先走 sina：
+
+```bash
+uv run python sync_hk_market.py --db-dir ./assets --start-date 2014-01-01 --workers 24 --data-source sina --show-progress
+```
+
+如果你在 macOS 上遇到 `libmini_racer.dylib` / `partition_address_space` 崩溃，再显式收紧到：
+
+```bash
+uv run python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --workers 24 \
+  --data-source sina \
+  --show-progress \
+  --min-daily-rows-for-intraday 5
+```
+
+开启 `--show-progress` 后，会在 stderr 持续刷新类似：
+
+- `stocks_done=120/5400`：已完成整只股票抓取的数量
+- `tasks_done=360/21600`：已完成的周期任务数
+- `daily=120/5400`、`1min=80/5400`：各周期自己的完成进度
+- `rate` / `eta`：整体任务吞吐和预计剩余时间
+
+分钟线同步默认做两项加速：
+
+- 先抓 `1min`，再从本地重采样派生 `5min/15min/30min/60min`，减少重复请求；如需强制请求原始周期，加 `--no-derive-intraday`
+- 日线有效行数低于 `--min-daily-rows-for-intraday` 时跳过分钟线，默认阈值为 `3`；如需所有股票都尝试分钟线，可设为 `0`
 
 数据落盘后结构：
 
@@ -40,7 +110,7 @@ python -m venv .venv
 先跑验证，产出权重缓存和因子记分卡：
 
 ```bash
-.venv/bin/python stock_analyzer.py validate_factors \
+uv run python stock_analyzer.py validate_factors \
   --days 365 \
   --factor-set qlib_alpha158 \
   --max-workers 8 \
@@ -71,7 +141,7 @@ python -m venv .venv
 读取验证缓存，执行全市场 TopN 选股+回测：
 
 ```bash
-.venv/bin/python stock_analyzer.py select_stocks \
+uv run python stock_analyzer.py select_stocks \
   --top-n 10 \
   --days 365 \
   --initial-capital 100000 \
@@ -85,7 +155,7 @@ python -m venv .venv
 写信号层+批次号：
 
 ```bash
-.venv/bin/python stock_analyzer.py select_stocks \
+uv run python stock_analyzer.py select_stocks \
   --top-n 10 --days 365 \
   --max-workers 8 --show-progress \
   --persist-signals --batch-id hk_top10_20260516
@@ -133,25 +203,25 @@ python -m venv .venv
 
 ```bash
 # 默认：低价股预突破/底部反弹
-.venv/bin/python stock_analyzer.py select_stocks \
+uv run python stock_analyzer.py select_stocks \
   --top-n 10 --days 365 --max-workers 8 \
   --factor-set qlib_alpha158 \
   --signal-recipes low_price_setup
 
 # 进攻型：默认形态 + 放量突破
-.venv/bin/python stock_analyzer.py select_stocks \
+uv run python stock_analyzer.py select_stocks \
   --top-n 10 --days 365 --max-workers 8 \
   --factor-set qlib_alpha158 \
   --signal-recipes low_price_setup,range_breakout
 
 # 确认型：突破后等待回踩不破
-.venv/bin/python stock_analyzer.py select_stocks \
+uv run python stock_analyzer.py select_stocks \
   --top-n 10 --days 365 --max-workers 8 \
   --factor-set qlib_alpha158 \
   --signal-recipes low_price_setup,box_pullback
 
 # 全部形态一起参与排序
-.venv/bin/python stock_analyzer.py select_stocks \
+uv run python stock_analyzer.py select_stocks \
   --top-n 10 --days 365 --max-workers 8 \
   --factor-set qlib_alpha158 \
   --signal-recipes low_price_setup,range_breakout,box_pullback
@@ -162,7 +232,7 @@ python -m venv .venv
 `signal_report` 用于验证 recipe 触发后的未来收益表现，回答"哪个形态更有效"。它会逐日扫描指定股票池，统计每个 recipe / setup_type 的触发次数、未来收益、胜率和最大回撤。
 
 ```bash
-.venv/bin/python stock_analyzer.py signal_report \
+uv run python stock_analyzer.py signal_report \
   --days 365 \
   --signal-recipes low_price_setup,range_breakout,box_pullback \
   --horizons 20,40,60 \
@@ -205,7 +275,7 @@ python -m venv .venv
 系统评估因子质量，导出完整研究报表：
 
 ```bash
-.venv/bin/python stock_analyzer.py factor_report \
+uv run python stock_analyzer.py factor_report \
   --days 365 \
   --factor-set qlib_alpha158 \
   --max-workers 8 \
@@ -219,7 +289,7 @@ python -m venv .venv
 ### 兼容旧模式（验证+选股一体）
 
 ```bash
-.venv/bin/python stock_analyzer.py all_hk \
+uv run python stock_analyzer.py all_hk \
   --top-n 10 --days 365 \
   --use-recommended-factor-weights \
   --max-workers 8 --show-progress
@@ -228,19 +298,19 @@ python -m venv .venv
 ### 单股分析
 
 ```bash
-.venv/bin/python stock_analyzer.py single 00700 --days 365
+uv run python stock_analyzer.py single 00700 --days 365
 ```
 
 ### 固定股票池多策略对比
 
 ```bash
-.venv/bin/python stock_analyzer.py suite --days 365 --top-n 3
+uv run python stock_analyzer.py suite --days 365 --top-n 3
 ```
 
 ### 批次复盘
 
 ```bash
-.venv/bin/python stock_analyzer.py review_batch hk_top10_20260516 --export-csv output/review
+uv run python stock_analyzer.py review_batch hk_top10_20260516 --export-csv output/review
 ```
 
 ### Python API
@@ -272,17 +342,19 @@ result = analyzer.backtest_hk_market(
 
 ```bash
 # 第一步：因子验证（内存密集，单独跑）
-.venv/bin/python stock_analyzer.py validate_factors \
+uv run python stock_analyzer.py validate_factors \
   --days 365 --factor-set qlib_alpha158 \
   --max-workers 8 --show-progress
 
 # 第二步：选股+回测（读缓存，轻量）
-.venv/bin/python stock_analyzer.py select_stocks \
+uv run python stock_analyzer.py select_stocks \
   --top-n 10 --days 365 --max-workers 8 --show-progress \
   --export-csv output/top10 --persist-signals --batch-id hk_top10_latest
 ```
 
 ## 依赖
+
+依赖统一由 `pyproject.toml` 管理，安装与更新请使用 `uv sync` / `uv lock`。
 
 - requests >= 2.31.0
 - pandas >= 2.0.0

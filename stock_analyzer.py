@@ -99,6 +99,19 @@ def _parse_horizons(raw_value):
     return tuple(values or [1, 5, 10, 20])
 
 
+def _parse_signal_recipes(raw_value):
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, (tuple, list)):
+        return tuple(str(item).strip() for item in raw_value if str(item).strip())
+    values = []
+    for chunk in str(raw_value).split(","):
+        chunk = chunk.strip()
+        if chunk:
+            values.append(chunk)
+    return tuple(values) if values else None
+
+
 def _build_current_factor_weight_table(score_config):
     rows = []
     config = score_config or {}
@@ -832,6 +845,7 @@ def main_select_stocks(
     validation_min_observations=5,
     validation_stock_limit=None,
     validation_factor_scope="scoring_only",
+    signal_recipes=None,
 ):
     """从验证权重缓存读取推荐权重，执行全港股 TopN 选股+回测，不跑因子验证。"""
     print("=" * 80)
@@ -903,6 +917,8 @@ def main_select_stocks(
             "show_progress": show_progress,
             "enable_portfolio_replay": not fast_mode,
         }
+        if signal_recipes is not None:
+            backtest_kwargs["signal_recipes"] = signal_recipes
         if ridge_factors is not None:
             backtest_kwargs["ridge_factors"] = ridge_factors
         portfolio_result = analyzer.backtest_hk_market(**backtest_kwargs)
@@ -982,6 +998,7 @@ def main_all_hk(
     use_recommended_factor_weights=False,
     refresh_recommended_factor_weights=False,
     validation_factor_scope="scoring_only",
+    signal_recipes=None,
 ):
     """对本地已同步的全部港股执行 TopN 组合分析（兼容旧接口：验证+选股一次完成）。"""
     print("=" * 80)
@@ -1107,6 +1124,8 @@ def main_all_hk(
             "show_progress": show_progress,
             "enable_portfolio_replay": not fast_mode,
         }
+        if signal_recipes is not None:
+            backtest_kwargs["signal_recipes"] = signal_recipes
         if ridge_factors is not None:
             backtest_kwargs["ridge_factors"] = ridge_factors
         portfolio_result = analyzer.backtest_hk_market(**backtest_kwargs)
@@ -1363,6 +1382,84 @@ def main_factor_report(
     }
 
 
+def main_signal_report(
+    days=365,
+    export_csv=None,
+    max_workers=1,
+    show_progress=False,
+    horizons=(20, 40, 60),
+    stock_limit=None,
+    signal_recipes=None,
+    signal_cooldown_days=20,
+    signal_event_policy="first",
+):
+    """输出全市场信号 recipe 验证报告。"""
+    print("=" * 80)
+    print("港股技术分析系统 - 信号配方验证报告")
+    print("=" * 80)
+
+    analyzer = StockAnalyzer(signal_recipes=signal_recipes)
+    try:
+        stock_codes = analyzer.get_all_stocks()
+        if stock_limit is not None:
+            stock_codes = stock_codes[: max(int(stock_limit), 0)]
+        report = analyzer.build_signal_recipe_report(
+            stock_codes=stock_codes,
+            days=days,
+            signal_recipes=signal_recipes,
+            horizons=horizons,
+            max_workers=max_workers,
+            show_progress=show_progress,
+            signal_cooldown_days=signal_cooldown_days,
+            signal_event_policy=signal_event_policy,
+        )
+    finally:
+        _safe_close_analyzer(analyzer)
+
+    if report is None:
+        print("[ERROR] 信号配方验证报告生成失败")
+        return None
+
+    metadata = report.get("metadata", {})
+    summary = report.get("summary", pd.DataFrame())
+    events = report.get("events", pd.DataFrame())
+    events_raw = report.get("events_raw", pd.DataFrame())
+
+    print(f"\n[INFO] 样本股票数: {metadata.get('stock_count', 0)}")
+    print(f"[INFO] 原始触发事件数: {metadata.get('raw_event_count', metadata.get('event_count', 0))}")
+    print(f"[INFO] 合并后事件数: {metadata.get('event_count', 0)}")
+    print(f"[INFO] signal_recipes: {metadata.get('signal_recipes')}")
+    print(f"[INFO] horizons: {metadata.get('horizons')}")
+    print(f"[INFO] signal_cooldown_days: {metadata.get('signal_cooldown_days')}, signal_event_policy: {metadata.get('signal_event_policy')}")
+
+    if not summary.empty:
+        print("\n信号表现摘要:")
+        print(summary.head(20).to_string(index=False))
+    else:
+        print("[WARN] 未发现有效信号事件")
+
+    if export_csv:
+        export_path = Path(export_csv)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path = export_path.with_name(f"{export_path.stem}_signal_summary.csv")
+        events_path = export_path.with_name(f"{export_path.stem}_signal_events.csv")
+        raw_events_path = export_path.with_name(f"{export_path.stem}_signal_events_raw.csv")
+        metadata_path = export_path.with_name(f"{export_path.stem}_metadata.json")
+        summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
+        events.to_csv(events_path, index=False, encoding="utf-8-sig")
+        events_raw.to_csv(raw_events_path, index=False, encoding="utf-8-sig")
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        print(f"[OK] 已导出信号摘要: {summary_path}")
+        print(f"[OK] 已导出合并信号事件: {events_path}")
+        print(f"[OK] 已导出原始信号事件: {raw_events_path}")
+        print(f"[OK] 已导出元数据: {metadata_path}")
+
+    print("\n" + "=" * 80)
+    print("信号配方验证报告完成！")
+    print("=" * 80)
+    return report
+
+
 def main_strategy_suite(days=365, top_n=3, initial_capital=100000, export_csv=None):
     """运行多策略对固定股票池的一年收益率比较。"""
     print("=" * 80)
@@ -1586,6 +1683,13 @@ def run_cli(argv=None):
                         help='全市场分析模式：factor 或 strategy，默认 factor')
     parser.add_argument('--factor-set', dest='factor_set', default='qlib_alpha158',
                         help='因子模式下使用的因子集，默认 qlib_alpha158')
+    parser.add_argument('--signal-recipes', dest='signal_recipes', default=None,
+                        help='信号 recipe 名称，逗号分隔；默认 low_price_setup')
+    parser.add_argument('--signal-cooldown-days', dest='signal_cooldown_days', type=int, default=20,
+                        help='signal_report 中同股票同 recipe/setup 的信号合并窗口，默认 20 个自然日')
+    parser.add_argument('--signal-event-policy', dest='signal_event_policy',
+                        choices=['first', 'latest', 'best_score'], default='first',
+                        help='signal_report 合并窗口内选择事件的方式，默认 first')
     parser.add_argument('--show-progress', dest='show_progress', action='store_true',
                         help='显示全市场分析进度')
     parser.add_argument('--fast-mode', dest='fast_mode', action='store_true',
@@ -1618,6 +1722,7 @@ def run_cli(argv=None):
     args = parser.parse_args(argv)
     horizons = _parse_horizons(args.horizons)
     validation_horizons = _parse_horizons(args.validation_horizons)
+    signal_recipes = _parse_signal_recipes(args.signal_recipes)
 
     if args.mode == "single":
         return analyze_single_stock_with_visualization(args.value or "03633", days=args.days)
@@ -1661,6 +1766,7 @@ def run_cli(argv=None):
             validation_min_observations=args.min_observations,
             validation_stock_limit=args.stock_limit,
             validation_factor_scope=args.validation_factor_scope,
+            signal_recipes=signal_recipes,
         )
     elif args.mode == "all_hk":
         return main_all_hk(
@@ -1683,6 +1789,7 @@ def run_cli(argv=None):
             use_recommended_factor_weights=args.use_recommended_factor_weights,
             refresh_recommended_factor_weights=args.refresh_recommended_factor_weights,
             validation_factor_scope=args.validation_factor_scope,
+            signal_recipes=signal_recipes,
         )
     elif args.mode == "factor_report":
         return main_factor_report(
@@ -1696,6 +1803,18 @@ def run_cli(argv=None):
             min_observations=args.min_observations,
             stock_limit=args.stock_limit,
             validation_factor_scope=args.validation_factor_scope,
+        )
+    elif args.mode == "signal_report":
+        return main_signal_report(
+            days=args.days,
+            export_csv=args.export_csv,
+            max_workers=args.max_workers,
+            show_progress=args.show_progress,
+            horizons=horizons,
+            stock_limit=args.stock_limit,
+            signal_recipes=signal_recipes,
+            signal_cooldown_days=args.signal_cooldown_days,
+            signal_event_policy=args.signal_event_policy,
         )
     elif args.mode == "review_batch":
         return main_review_batch(

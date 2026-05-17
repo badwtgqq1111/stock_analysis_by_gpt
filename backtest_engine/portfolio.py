@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from backtest_engine.models import EquityPoint, PortfolioBuildResult, PortfolioReplayResult, TradeRecord
+from factor_engine.signals import summarize_low_price_setup
 
 
 class TopNPortfolioBuilder:
@@ -590,150 +591,7 @@ class TopNPortfolioBuilder:
 
     @staticmethod
     def _summarize_low_price_setup(data):
-        snapshot = {
-            "setup_type": "neutral",
-            "setup_score": 0.0,
-            "sideways_penalty": 0.0,
-            "low_price_candidate": False,
-            "liquidity_ok": False,
-            "latest_turnover": np.nan,
-            "median_turnover_20": np.nan,
-            "distance_to_20d_high": np.nan,
-            "distance_from_60d_low": np.nan,
-            "volume_ratio_20": np.nan,
-            "compression_ratio": np.nan,
-            "return_5d": np.nan,
-            "return_20d": np.nan,
-            "return_60d": np.nan,
-        }
-        if data is None or data.empty:
-            return snapshot
-
-        working = data.copy().sort_index()
-        if "Close" not in working.columns or "Volume" not in working.columns:
-            return snapshot
-
-        close = pd.to_numeric(working["Close"], errors="coerce")
-        volume = pd.to_numeric(working["Volume"], errors="coerce").fillna(0)
-        if close.dropna().empty:
-            return snapshot
-
-        latest_close = float(close.iloc[-1])
-        latest_volume = float(volume.iloc[-1])
-        latest_turnover = latest_close * latest_volume
-        turnover_series = close * volume
-        median_turnover_20 = float(turnover_series.tail(20).median()) if not turnover_series.tail(20).dropna().empty else np.nan
-
-        returns = close.pct_change()
-        return_5d = float(close.iloc[-1] / close.iloc[-6] - 1.0) if len(close) >= 6 and close.iloc[-6] else np.nan
-        return_20d = float(close.iloc[-1] / close.iloc[-21] - 1.0) if len(close) >= 21 and close.iloc[-21] else np.nan
-        return_60d = float(close.iloc[-1] / close.iloc[-61] - 1.0) if len(close) >= 61 and close.iloc[-61] else np.nan
-
-        high20 = float(close.tail(20).max()) if not close.tail(20).dropna().empty else np.nan
-        low20 = float(close.tail(20).min()) if not close.tail(20).dropna().empty else np.nan
-        high60 = float(close.tail(60).max()) if not close.tail(60).dropna().empty else np.nan
-        low60 = float(close.tail(60).min()) if not close.tail(60).dropna().empty else np.nan
-        ma10 = float(close.tail(10).mean()) if not close.tail(10).dropna().empty else np.nan
-        ma20 = float(close.tail(20).mean()) if not close.tail(20).dropna().empty else np.nan
-        ma60 = float(close.tail(60).mean()) if not close.tail(60).dropna().empty else np.nan
-        volume_ma20 = float(volume.tail(20).mean()) if not volume.tail(20).dropna().empty else np.nan
-
-        distance_to_20d_high = latest_close / high20 - 1.0 if pd.notna(high20) and high20 else np.nan
-        distance_from_60d_low = latest_close / low60 - 1.0 if pd.notna(low60) and low60 else np.nan
-        volume_ratio_20 = latest_volume / volume_ma20 if pd.notna(volume_ma20) and volume_ma20 else np.nan
-
-        volatility_20 = float(returns.tail(20).std(ddof=1)) if returns.tail(20).dropna().shape[0] >= 5 else np.nan
-        volatility_60 = float(returns.tail(60).std(ddof=1)) if returns.tail(60).dropna().shape[0] >= 10 else np.nan
-        compression_ratio = volatility_20 / volatility_60 if pd.notna(volatility_20) and pd.notna(volatility_60) and volatility_60 > 0 else np.nan
-
-        range20 = (high20 - low20) / latest_close if pd.notna(high20) and pd.notna(low20) and latest_close > 0 else np.nan
-        range60 = (high60 - low60) / latest_close if pd.notna(high60) and pd.notna(low60) and latest_close > 0 else np.nan
-
-        low_price_candidate = 0.20 <= latest_close <= 8.0
-        liquidity_ok = pd.notna(median_turnover_20) and median_turnover_20 >= 1_000_000.0
-
-        pre_breakout_score = 0.0
-        if low_price_candidate:
-            pre_breakout_score += 16.0
-        if liquidity_ok:
-            pre_breakout_score += 14.0
-        if pd.notna(distance_to_20d_high) and distance_to_20d_high >= -0.035:
-            pre_breakout_score += 18.0
-        if pd.notna(compression_ratio) and compression_ratio <= 0.85:
-            pre_breakout_score += 16.0
-        elif pd.notna(range20) and pd.notna(range60) and range20 <= range60 * 0.72:
-            pre_breakout_score += 12.0
-        if pd.notna(volume_ratio_20) and volume_ratio_20 >= 1.12:
-            pre_breakout_score += 16.0
-        if pd.notna(return_20d) and return_20d >= 0.04:
-            pre_breakout_score += 10.0
-        if pd.notna(ma20) and latest_close >= ma20:
-            pre_breakout_score += 8.0
-
-        bottom_rebound_score = 0.0
-        if low_price_candidate:
-            bottom_rebound_score += 16.0
-        if liquidity_ok:
-            bottom_rebound_score += 12.0
-        if pd.notna(return_60d) and return_60d <= -0.18:
-            bottom_rebound_score += 18.0
-        if pd.notna(distance_from_60d_low) and 0.06 <= distance_from_60d_low <= 0.35:
-            bottom_rebound_score += 16.0
-        if pd.notna(volume_ratio_20) and volume_ratio_20 >= 1.15:
-            bottom_rebound_score += 14.0
-        if pd.notna(return_5d) and return_5d >= 0.04:
-            bottom_rebound_score += 12.0
-        if pd.notna(ma10) and latest_close >= ma10:
-            bottom_rebound_score += 10.0
-        if pd.notna(ma20) and latest_close >= ma20 * 0.97:
-            bottom_rebound_score += 8.0
-
-        sideways_penalty = 0.0
-        if pd.notna(return_20d) and abs(return_20d) <= 0.06:
-            sideways_penalty += 10.0
-        if pd.notna(range20) and range20 <= 0.14:
-            sideways_penalty += 8.0
-        if pd.notna(volume_ratio_20) and volume_ratio_20 < 1.05:
-            sideways_penalty += 8.0
-        if pd.notna(distance_to_20d_high) and distance_to_20d_high < -0.05 and (pd.isna(distance_from_60d_low) or distance_from_60d_low < 0.08):
-            sideways_penalty += 6.0
-
-        rebound_context = pd.notna(return_60d) and return_60d <= -0.18
-        if rebound_context and bottom_rebound_score >= max(52.0, pre_breakout_score - 4.0, sideways_penalty + 6.0):
-            setup_type = "bottom_rebound"
-            setup_score = bottom_rebound_score
-        elif pre_breakout_score >= bottom_rebound_score and pre_breakout_score >= max(55.0, sideways_penalty + 8.0):
-            setup_type = "pre_breakout"
-            setup_score = pre_breakout_score
-        elif bottom_rebound_score > pre_breakout_score and bottom_rebound_score >= max(55.0, sideways_penalty + 8.0):
-            setup_type = "bottom_rebound"
-            setup_score = bottom_rebound_score
-        elif sideways_penalty >= 18.0:
-            setup_type = "sideways"
-            setup_score = max(pre_breakout_score, bottom_rebound_score)
-        else:
-            setup_type = "neutral"
-            setup_score = max(pre_breakout_score, bottom_rebound_score)
-
-        snapshot.update(
-            {
-                "setup_type": setup_type,
-                "setup_score": float(setup_score),
-                "sideways_penalty": float(sideways_penalty),
-                "low_price_candidate": bool(low_price_candidate and liquidity_ok),
-                "liquidity_ok": bool(liquidity_ok),
-                "latest_turnover": latest_turnover,
-                "median_turnover_20": median_turnover_20,
-                "distance_to_20d_high": distance_to_20d_high,
-                "distance_from_60d_low": distance_from_60d_low,
-                "volume_ratio_20": volume_ratio_20,
-                "compression_ratio": compression_ratio,
-                "return_5d": return_5d,
-                "return_20d": return_20d,
-                "return_60d": return_60d,
-            }
-        )
-        return snapshot
+        return summarize_low_price_setup(data)
 
     @staticmethod
     def _collect_signal_rows(result):

@@ -44,6 +44,7 @@ def _install_stubs():
             factor_score_config=None,
             show_progress=False,
             enable_portfolio_replay=True,
+            signal_recipes=None,
         ):
             type(self).last_call = {
                 "days": days,
@@ -55,6 +56,7 @@ def _install_stubs():
                 "factor_score_config": factor_score_config,
                 "show_progress": show_progress,
                 "enable_portfolio_replay": enable_portfolio_replay,
+                "signal_recipes": signal_recipes,
             }
             return {
                 "stock_pool": ["00001", "00002", "00003"],
@@ -149,6 +151,87 @@ def _install_stubs():
                 "decay_summary": pd.DataFrame([
                     {"feature_name": "MA20", "horizon": 5, "ic_decay_ratio": 0.9, "rank_ic_decay_ratio": 0.95, "spread_decay_ratio": 0.92}
                 ]),
+            }
+
+        def build_signal_recipe_report(
+            self,
+            stock_codes=None,
+            days=365,
+            signal_recipes=None,
+            horizons=(20, 40, 60),
+            max_workers=1,
+            show_progress=False,
+            min_history_days=60,
+            signal_cooldown_days=20,
+            signal_event_policy="first",
+        ):
+            type(self).last_call = {
+                "stock_codes": list(stock_codes or []),
+                "days": days,
+                "signal_recipes": tuple(signal_recipes or ()),
+                "horizons": tuple(horizons),
+                "max_workers": max_workers,
+                "show_progress": show_progress,
+                "min_history_days": min_history_days,
+                "signal_cooldown_days": signal_cooldown_days,
+                "signal_event_policy": signal_event_policy,
+            }
+            return {
+                "metadata": {
+                    "stock_count": len(stock_codes or []),
+                    "raw_event_count": 2,
+                    "event_count": 1,
+                    "days": days,
+                    "signal_recipes": tuple(signal_recipes or ()),
+                    "horizons": tuple(horizons),
+                    "signal_cooldown_days": signal_cooldown_days,
+                    "signal_event_policy": signal_event_policy,
+                },
+                "summary": pd.DataFrame(
+                    [
+                        {
+                            "recipe_name": "range_breakout",
+                            "setup_type": "range_breakout",
+                            "event_count": 1,
+                            "avg_setup_score": 80.0,
+                            "avg_forward_return_5": 0.05,
+                            "win_rate_5": 1.0,
+                            "avg_forward_max_drawdown_5": -0.02,
+                        }
+                    ]
+                ),
+                "events": pd.DataFrame(
+                    [
+                        {
+                            "stock_code": "00001",
+                            "date": pd.Timestamp("2025-01-10"),
+                            "recipe_name": "range_breakout",
+                            "setup_type": "range_breakout",
+                            "setup_score": 80.0,
+                            "forward_return_5": 0.05,
+                        }
+                    ]
+                ),
+                "events_raw": pd.DataFrame(
+                    [
+                        {
+                            "stock_code": "00001",
+                            "date": pd.Timestamp("2025-01-10"),
+                            "recipe_name": "range_breakout",
+                            "setup_type": "range_breakout",
+                            "setup_score": 80.0,
+                            "forward_return_5": 0.05,
+                        },
+                        {
+                            "stock_code": "00001",
+                            "date": pd.Timestamp("2025-01-11"),
+                            "recipe_name": "range_breakout",
+                            "setup_type": "range_breakout",
+                            "setup_score": 81.0,
+                            "forward_return_5": 0.04,
+                        },
+                    ]
+                ),
             }
 
     analyzer_core_stub.StockAnalyzer = StockAnalyzer
@@ -263,6 +346,7 @@ def test_run_cli_supports_all_hk_mode():
         "factor_score_config": None,
         "show_progress": False,
         "enable_portfolio_replay": True,
+        "signal_recipes": None,
     }
     assert "全港股 Top 2" in output
     assert "成功分析 2 只股票" in output
@@ -290,6 +374,7 @@ def test_run_cli_all_hk_supports_max_workers():
         "factor_score_config": None,
         "show_progress": False,
         "enable_portfolio_replay": True,
+        "signal_recipes": None,
     }
 
 
@@ -315,6 +400,7 @@ def test_run_cli_all_hk_supports_strategy_mode_override():
         "factor_score_config": None,
         "show_progress": False,
         "enable_portfolio_replay": True,
+        "signal_recipes": None,
     }
 
 
@@ -340,7 +426,67 @@ def test_run_cli_all_hk_supports_progress_and_fast_mode():
         "factor_score_config": None,
         "show_progress": True,
         "enable_portfolio_replay": False,
+        "signal_recipes": None,
     }
+
+
+def test_run_cli_select_stocks_supports_signal_recipes():
+    stock_analyzer_cls, _ = _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        analyzer = stock_analyzer.StockAnalyzer()
+        cache_dir = Path(tmp_dir) / "factor_weight_cache"
+        validation_stock_codes = analyzer.get_all_stocks()
+        cache_key, _ = stock_analyzer._build_validation_cache_key(
+            factor_set="qlib_alpha158",
+            validation_days=365,
+            validation_horizons=(1, 5, 10, 20),
+            validation_quantiles=5,
+            validation_min_observations=5,
+            validation_stock_codes=validation_stock_codes,
+            validation_factor_scope="scoring_only",
+            validated_feature_names=analyzer.get_score_factor_names(),
+        )
+        cache_payload = {
+            "factor_score_config": {
+                "trend": {"MA20": {"weight": 1.0, "higher_is_better": False}},
+                "weights": {"trend_score": 1.0, "quality_score": 0.0, "risk_score": 0.0},
+            },
+            "factor_scorecard": [
+                {
+                    "feature_name": "MA20",
+                    "component": "trend",
+                    "validation_score": 1.0,
+                    "recommended_factor_weight": 1.0,
+                }
+                ],
+            }
+
+        cache_path = Path(cache_dir) / f"{cache_key}.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(stock_analyzer.json.dumps(cache_payload), encoding="utf-8")
+
+        original_cache_dir = stock_analyzer._get_validation_cache_dir
+        stock_analyzer._get_validation_cache_dir = lambda _analyzer: cache_dir
+        buffer = io.StringIO()
+        try:
+            with redirect_stdout(buffer):
+                stock_analyzer.run_cli(
+                    [
+                        "select_stocks",
+                        "--signal-recipes",
+                        "low_price_setup,range_breakout",
+                        "--export-csv",
+                        str(Path(tmp_dir) / "selected"),
+                    ]
+                )
+        finally:
+            stock_analyzer._get_validation_cache_dir = original_cache_dir
+
+    assert stock_analyzer_cls.last_call["signal_recipes"] == ("low_price_setup", "range_breakout")
 
 
 def test_run_cli_all_hk_supports_export_csv():
@@ -470,6 +616,10 @@ def test_run_cli_supports_factor_report_mode():
                     "6",
                     "--stock-limit",
                     "2",
+                    "--signal-cooldown-days",
+                    "15",
+                    "--signal-event-policy",
+                    "best_score",
                     "--export-csv",
                     str(export_base),
                 ]
@@ -491,6 +641,58 @@ def test_run_cli_supports_factor_report_mode():
         }
         assert "因子验证报告" in output
         assert export_base.with_name(f"{export_base.stem}_factor_scorecard.csv").exists()
+        assert export_base.with_name(f"{export_base.stem}_metadata.json").exists()
+
+
+def test_run_cli_supports_signal_report_mode():
+    stock_analyzer_cls, _ = _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        export_base = Path(tmp_dir) / "signal_report"
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            stock_analyzer.run_cli(
+                [
+                    "signal_report",
+                    "--days",
+                    "180",
+                    "--signal-recipes",
+                    "range_breakout,box_pullback",
+                    "--horizons",
+                    "5,20",
+                    "--max-workers",
+                    "4",
+                    "--show-progress",
+                    "--stock-limit",
+                    "2",
+                    "--signal-cooldown-days",
+                    "15",
+                    "--signal-event-policy",
+                    "best_score",
+                    "--export-csv",
+                    str(export_base),
+                ]
+            )
+
+        output = buffer.getvalue()
+        assert stock_analyzer_cls.last_call == {
+            "stock_codes": ["00001", "00002"],
+            "days": 180,
+            "signal_recipes": ("range_breakout", "box_pullback"),
+            "horizons": (5, 20),
+            "max_workers": 4,
+            "show_progress": True,
+            "min_history_days": 60,
+            "signal_cooldown_days": 15,
+            "signal_event_policy": "best_score",
+        }
+        assert "信号配方验证报告" in output
+        assert export_base.with_name(f"{export_base.stem}_signal_summary.csv").exists()
+        assert export_base.with_name(f"{export_base.stem}_signal_events.csv").exists()
+        assert export_base.with_name(f"{export_base.stem}_signal_events_raw.csv").exists()
         assert export_base.with_name(f"{export_base.stem}_metadata.json").exists()
 
 

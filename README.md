@@ -78,6 +78,7 @@ python -m venv .venv
   --max-workers 8 \
   --show-progress \
   --factor-set qlib_alpha158 \
+  --signal-recipes low_price_setup,range_breakout,box_pullback \
   --export-csv output/selected_top10
 ```
 
@@ -102,6 +103,7 @@ python -m venv .venv
 | `--fast-mode` | 跳过组合净值回放 | 关 |
 | `--analysis-mode` | `factor` 或 `strategy` | `factor` |
 | `--factor-set` | 因子集名称 | `qlib_alpha158` |
+| `--signal-recipes` | 信号 recipe，逗号分隔；可用 `low_price_setup`,`range_breakout`,`box_pullback` | `low_price_setup` |
 | `--export-csv` | 导出结果路径 | 不导出 |
 | `--persist-signals` | 写入 signal 层 | 关 |
 | `--batch-id` | 批次号 | 自动生成 |
@@ -116,6 +118,87 @@ python -m venv .venv
 低内存环境会主动缩小批次，避免单批过大导致长时间无输出或内存压力过高。
 
 导出文件：`{base}_ranking.csv`、`{base}_selected.csv`、`{base}_watchlist.csv`。
+
+#### 信号 recipe 说明
+
+`--signal-recipes` 用于选择形态信号组合。因子层负责给股票打分，recipe 层负责把价量形态翻译成可排序的 `setup_type/setup_score`。
+
+| recipe | 识别形态 | 主要条件 | 适合用途 |
+|---|---|---|---|
+| `low_price_setup` | 低价股突破前、底部反弹、横盘惩罚 | 低价区间、成交额、接近 20 日高点、60 日低位反弹、量比 | 默认稳健筛选 |
+| `range_breakout` | 横盘压缩后的放量突破 | 突破前 20 日高点、波动/区间压缩、量比放大 | 捕捉启动日 |
+| `box_pullback` | 箱体突破后的缩量回踩 | 前期箱体、已突破箱体上沿、回踩不破、缩量 | 等待二次确认买点 |
+
+常用组合：
+
+```bash
+# 默认：低价股预突破/底部反弹
+.venv/bin/python stock_analyzer.py select_stocks \
+  --top-n 10 --days 365 --max-workers 8 \
+  --factor-set qlib_alpha158 \
+  --signal-recipes low_price_setup
+
+# 进攻型：默认形态 + 放量突破
+.venv/bin/python stock_analyzer.py select_stocks \
+  --top-n 10 --days 365 --max-workers 8 \
+  --factor-set qlib_alpha158 \
+  --signal-recipes low_price_setup,range_breakout
+
+# 确认型：突破后等待回踩不破
+.venv/bin/python stock_analyzer.py select_stocks \
+  --top-n 10 --days 365 --max-workers 8 \
+  --factor-set qlib_alpha158 \
+  --signal-recipes low_price_setup,box_pullback
+
+# 全部形态一起参与排序
+.venv/bin/python stock_analyzer.py select_stocks \
+  --top-n 10 --days 365 --max-workers 8 \
+  --factor-set qlib_alpha158 \
+  --signal-recipes low_price_setup,range_breakout,box_pullback
+```
+
+#### 信号 recipe 验证报告
+
+`signal_report` 用于验证 recipe 触发后的未来收益表现，回答"哪个形态更有效"。它会逐日扫描指定股票池，统计每个 recipe / setup_type 的触发次数、未来收益、胜率和最大回撤。
+
+```bash
+.venv/bin/python stock_analyzer.py signal_report \
+  --days 365 \
+  --signal-recipes low_price_setup,range_breakout,box_pullback \
+  --horizons 20,40,60 \
+  --signal-cooldown-days 20 \
+  --signal-event-policy first \
+  --max-workers 8 \
+  --show-progress \
+  --export-csv output/signal_report
+```
+
+`--signal-cooldown-days` 会把同一只股票、同一个 `recipe_name/setup_type` 在指定天数内的连续触发合并成一个信号区间，避免每日重复触发高估样本量。`--signal-event-policy` 控制区间内用哪一天作为入场事件：
+
+| policy | 说明 |
+|---|---|
+| `first` | 使用区间第一次触发，默认，更接近真实首次入场 |
+| `latest` | 使用区间最后一次触发 |
+| `best_score` | 使用区间内 `setup_score` 最高的一次 |
+
+导出文件：
+
+- `output/signal_report_signal_summary.csv`：按 `recipe_name/setup_type` 汇总触发次数、平均收益、胜率、平均最大回撤
+- `output/signal_report_signal_events.csv`：合并后的可交易信号事件，包含 `signal_zone_id`、区间起止日期、合并次数、setup 分、未来收益和回撤
+- `output/signal_report_signal_events_raw.csv`：未合并的逐日原始触发事件
+- `output/signal_report_metadata.json`：样本股票数、触发事件数、horizon 和 recipe 参数
+
+`signal_summary.csv` 还会包含稳定性诊断字段：
+
+| 字段 | 说明 |
+|---|---|
+| `unique_stock_count` | 触发该 setup 的股票数 |
+| `top5_stock_event_share` | 触发次数最多的 5 只股票占比，用于判断样本是否过度集中 |
+| `median_forward_return_*` | 未来收益中位数 |
+| `p25_forward_return_*` / `p75_forward_return_*` | 未来收益四分位数 |
+| `p95_forward_drawdown_*` | 较差 5% 情况下的最大回撤分位 |
+| `return_drawdown_ratio_*` | 平均未来收益 / 平均最大回撤绝对值 |
+| `avg_win_*` / `avg_loss_*` | 盈利样本平均收益 / 亏损样本平均收益 |
 
 ### 因子研究报告（CSV 导出）
 

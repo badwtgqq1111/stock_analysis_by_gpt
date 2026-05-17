@@ -14,6 +14,7 @@ from backtest import backtest_strategy
 from backtest_engine import TopNPortfolioBuilder
 from data.store import DataLayout, MarketDataWarehouse
 from factor_engine import FactorContext, create_factor_set
+from factor_engine.signals import DEFAULT_SIGNAL_RECIPES, SignalRecipeRunner
 from indicators import calculate_technical_indicators
 from reporting import generate_strategy_comparison_report, generate_trading_strategy
 from data.model import normalize_feature_frame, normalize_ohlcv_frame
@@ -158,7 +159,7 @@ def classify_factor(factor_name):
 class StockAnalyzer:
     """股票技术分析器"""
 
-    def __init__(self, db_dir="./assets", buy_strategy=None, sell_strategy=None):
+    def __init__(self, db_dir="./assets", buy_strategy=None, sell_strategy=None, signal_recipes=None):
         """
         初始化分析器
 
@@ -166,6 +167,7 @@ class StockAnalyzer:
             db_dir (str): 数据库目录
             buy_strategy: 买入策略实例
             sell_strategy: 卖出策略实例
+            signal_recipes: 信号 recipe 名称列表
         """
         self.db_dir = Path(db_dir)
         self.data_layout = DataLayout(base_dir=str(self.db_dir / "data"))
@@ -177,6 +179,8 @@ class StockAnalyzer:
         else:
             self.buy_strategy = buy_strategy or (sell_strategy if isinstance(sell_strategy, BuyStrategy) else CurrentStrategy())
             self.sell_strategy = sell_strategy or (self.buy_strategy if isinstance(self.buy_strategy, SellStrategy) else CurrentStrategy())
+        self.signal_recipes = tuple(signal_recipes or DEFAULT_SIGNAL_RECIPES)
+        self.signal_recipe_runner = SignalRecipeRunner(self.signal_recipes)
 
     def get_all_stocks(self):
         """
@@ -638,7 +642,10 @@ class StockAnalyzer:
 
     @staticmethod
     def _build_low_price_setup_snapshot(data):
-        return TopNPortfolioBuilder._summarize_low_price_setup(data)
+        return SignalRecipeRunner(DEFAULT_SIGNAL_RECIPES).evaluate(data)
+
+    def _build_signal_setup_snapshot(self, data, context=None):
+        return self.signal_recipe_runner.evaluate(data, context=context)
 
     @staticmethod
     def _available_memory_bytes():
@@ -1150,6 +1157,7 @@ class StockAnalyzer:
         factor_score_config=None,
         persist_features=False,
         ridge_factors=None,
+        signal_recipes=None,
         progress_callback=None,
         batch_index=None,
         total_batches=None,
@@ -1287,7 +1295,15 @@ class StockAnalyzer:
                 if latest_score_index is not None
                 else {}
             )
-            setup_snapshot = self._build_low_price_setup_snapshot(analysis_data)
+            setup_runner = self.signal_recipe_runner if signal_recipes is None else SignalRecipeRunner(signal_recipes)
+            setup_snapshot = setup_runner.evaluate(
+                analysis_data,
+                context={
+                    "stock_code": stock_code,
+                    "analysis_mode": "factor",
+                    "factor_set": factor_set,
+                },
+            )
             latest_signal_date = latest_signal["date"] if latest_signal is not None else None
             latest_data_date = analysis_data.index[-1] if not analysis_data.empty else latest_signal_date
             freshness_score, signal_age_days = self._signal_freshness_score(latest_signal_date, latest_data_date)
@@ -1355,6 +1371,7 @@ class StockAnalyzer:
                     "sideways_penalty": setup_snapshot["sideways_penalty"],
                     "low_price_candidate": setup_snapshot["low_price_candidate"],
                     "liquidity_ok": setup_snapshot["liquidity_ok"],
+                    "signal_recipe_names": setup_snapshot.get("signal_recipe_names", list(self.signal_recipes)),
                     "signal_freshness_score": freshness_score,
                     "signal_age_days": signal_age_days,
                 }
@@ -1372,6 +1389,7 @@ class StockAnalyzer:
         show_progress=False,
         enable_portfolio_replay=True,
         ridge_factors=None,
+        signal_recipes=None,
     ):
         warmup_days = max(days + 180, days)
         full_data = self.load_stock_data(stock_code, warmup_days)
@@ -1483,7 +1501,15 @@ class StockAnalyzer:
         current_signal_score = latest_signal["expected_3m_score"] if latest_signal is not None else np.nan
         current_signal_actionable = bool(latest_signal["actionable"]) if latest_signal is not None else False
         current_signal_active = latest_signal is not None
-        setup_snapshot = self._build_low_price_setup_snapshot(analysis_data)
+        setup_runner = self.signal_recipe_runner if signal_recipes is None else SignalRecipeRunner(signal_recipes)
+        setup_snapshot = setup_runner.evaluate(
+            analysis_data,
+            context={
+                "stock_code": stock_code,
+                "analysis_mode": "factor",
+                "factor_set": factor_set,
+            },
+        )
         latest_signal_date = latest_signal["date"] if latest_signal is not None else None
         latest_data_date = analysis_data.index[-1] if not analysis_data.empty else latest_signal_date
         freshness_score, signal_age_days = self._signal_freshness_score(latest_signal_date, latest_data_date)
@@ -1526,9 +1552,264 @@ class StockAnalyzer:
             "sideways_penalty": setup_snapshot["sideways_penalty"],
             "low_price_candidate": setup_snapshot["low_price_candidate"],
             "liquidity_ok": setup_snapshot["liquidity_ok"],
+            "signal_recipe_names": setup_snapshot.get("signal_recipe_names", list(self.signal_recipes)),
             "signal_freshness_score": freshness_score,
             "signal_age_days": signal_age_days,
         }
+
+    def build_signal_recipe_report(
+        self,
+        stock_codes=None,
+        days=365,
+        signal_recipes=None,
+        horizons=(20, 40, 60),
+        max_workers=1,
+        show_progress=False,
+        min_history_days=60,
+        signal_cooldown_days=20,
+        signal_event_policy="first",
+    ):
+        """评估信号 recipe 触发后的 forward return 表现。"""
+        if stock_codes is None:
+            stock_codes = self.get_all_stocks()
+        stock_codes = list(stock_codes or [])
+        if not stock_codes:
+            return None
+
+        horizons = tuple(int(horizon) for horizon in horizons)
+        warmup_days = max(days + int(max(horizons or (0,))) + int(min_history_days), days)
+        recipe_names = tuple(signal_recipes or self.signal_recipes)
+        rows = []
+
+        def evaluate_stock(stock_code):
+            data = self.load_stock_data(stock_code, warmup_days)
+            if data is None or data.empty or len(data) < min_history_days:
+                return []
+            data = data.copy().sort_index()
+            start_idx = max(len(data) - days, min_history_days)
+            stock_rows = []
+            for index in range(start_idx, len(data)):
+                history = data.iloc[: index + 1]
+                if len(history) < min_history_days:
+                    continue
+                for recipe_name in recipe_names:
+                    snapshot = SignalRecipeRunner((recipe_name,)).evaluate(
+                        history,
+                        context={"stock_code": stock_code, "analysis_mode": "signal_report"},
+                    )
+                    setup_type = snapshot.get("setup_type", "neutral")
+                    if setup_type in {"neutral", "sideways"}:
+                        continue
+                    event = {
+                        "stock_code": stock_code,
+                        "date": history.index[-1],
+                        "recipe_name": recipe_name,
+                        "setup_type": setup_type,
+                        "setup_score": float(snapshot.get("setup_score", 0.0) or 0.0),
+                        "sideways_penalty": float(snapshot.get("sideways_penalty", 0.0) or 0.0),
+                        "close": float(history["Close"].iloc[-1]),
+                    }
+                    event.update(self._compute_signal_forward_metrics(data, index, horizons))
+                    stock_rows.append(event)
+            return stock_rows
+
+        started_at = time.time()
+        completed = 0
+        if max_workers and int(max_workers) > 1 and len(stock_codes) > 1:
+            with ThreadPoolExecutor(max_workers=min(int(max_workers), len(stock_codes))) as executor:
+                future_map = {executor.submit(evaluate_stock, stock_code): stock_code for stock_code in stock_codes}
+                for future in as_completed(future_map):
+                    stock_code = future_map[future]
+                    try:
+                        rows.extend(future.result())
+                    except Exception as exc:
+                        print(f"\n[ERROR] 信号评估 {stock_code} 失败: {exc}")
+                    completed += 1
+                    if show_progress:
+                        self._emit_progress_line(
+                            prefix="[PROGRESS] signal_report",
+                            completed=completed,
+                            total=len(stock_codes),
+                            success_count=len(rows),
+                            started_at=started_at,
+                        )
+        else:
+            for stock_code in stock_codes:
+                rows.extend(evaluate_stock(stock_code))
+                completed += 1
+                if show_progress:
+                    self._emit_progress_line(
+                        prefix="[PROGRESS] signal_report",
+                        completed=completed,
+                        total=len(stock_codes),
+                        success_count=len(rows),
+                        started_at=started_at,
+                    )
+        if show_progress:
+            print(file=sys.stderr)
+
+        events_raw = pd.DataFrame(rows)
+        events = self._merge_signal_recipe_events(
+            events_raw,
+            cooldown_days=signal_cooldown_days,
+            event_policy=signal_event_policy,
+        )
+        summary = self._summarize_signal_recipe_events(events, horizons)
+        return {
+            "metadata": {
+                "stock_count": len(stock_codes),
+                "raw_event_count": len(events_raw),
+                "event_count": len(events),
+                "days": days,
+                "signal_recipes": recipe_names,
+                "horizons": horizons,
+                "signal_cooldown_days": int(signal_cooldown_days),
+                "signal_event_policy": str(signal_event_policy),
+            },
+            "summary": summary,
+            "events": events,
+            "events_raw": events_raw,
+        }
+
+    @staticmethod
+    def _compute_signal_forward_metrics(data, event_index, horizons):
+        close = pd.to_numeric(data["Close"], errors="coerce")
+        low = pd.to_numeric(data["Low"], errors="coerce") if "Low" in data.columns else close
+        entry_close = float(close.iloc[event_index])
+        metrics = {}
+        for horizon in horizons:
+            horizon = int(horizon)
+            end_index = min(event_index + horizon, len(data) - 1)
+            if end_index <= event_index or not np.isfinite(entry_close) or entry_close == 0:
+                metrics[f"forward_return_{horizon}"] = np.nan
+                metrics[f"forward_max_drawdown_{horizon}"] = np.nan
+                continue
+            future_close = float(close.iloc[end_index])
+            future_low = low.iloc[event_index + 1 : end_index + 1]
+            future_min_low = float(future_low.min()) if not future_low.dropna().empty else np.nan
+            metrics[f"forward_return_{horizon}"] = future_close / entry_close - 1.0 if np.isfinite(future_close) else np.nan
+            metrics[f"forward_max_drawdown_{horizon}"] = future_min_low / entry_close - 1.0 if np.isfinite(future_min_low) else np.nan
+        return metrics
+
+    @staticmethod
+    def _merge_signal_recipe_events(events, cooldown_days=20, event_policy="first"):
+        if events is None or events.empty:
+            return pd.DataFrame() if events is None else events.copy()
+
+        cooldown_days = max(int(cooldown_days or 0), 0)
+        event_policy = str(event_policy or "first").strip().lower()
+        if event_policy not in {"first", "latest", "best_score"}:
+            raise ValueError(f"unsupported signal_event_policy: {event_policy}")
+
+        working = events.copy()
+        working["date"] = pd.to_datetime(working["date"])
+        working.sort_values(["stock_code", "recipe_name", "setup_type", "date"], inplace=True)
+
+        merged_rows = []
+        zone_counter = 0
+        group_columns = ["stock_code", "recipe_name", "setup_type"]
+        for (stock_code, recipe_name, setup_type), group in working.groupby(group_columns, dropna=False):
+            current_zone_rows = []
+            last_date = None
+
+            def flush_zone():
+                nonlocal zone_counter
+                if not current_zone_rows:
+                    return
+                zone = pd.DataFrame(current_zone_rows)
+                if event_policy == "latest":
+                    selected = zone.sort_values("date").iloc[-1].copy()
+                elif event_policy == "best_score":
+                    selected = zone.sort_values(["setup_score", "date"], ascending=[False, True]).iloc[0].copy()
+                else:
+                    selected = zone.sort_values("date").iloc[0].copy()
+                zone_counter += 1
+                selected["signal_zone_id"] = f"{stock_code}:{recipe_name}:{setup_type}:{zone_counter}"
+                selected["zone_start_date"] = zone["date"].min()
+                selected["zone_end_date"] = zone["date"].max()
+                selected["merged_signal_count"] = int(len(zone))
+                selected["max_setup_score"] = float(zone["setup_score"].max()) if "setup_score" in zone else np.nan
+                merged_rows.append(selected.to_dict())
+
+            for _, row in group.iterrows():
+                row_date = row["date"]
+                if last_date is not None and cooldown_days > 0 and (row_date - last_date).days > cooldown_days:
+                    flush_zone()
+                    current_zone_rows = []
+                elif last_date is not None and cooldown_days == 0:
+                    flush_zone()
+                    current_zone_rows = []
+                current_zone_rows.append(row.to_dict())
+                last_date = row_date
+            flush_zone()
+
+        merged = pd.DataFrame(merged_rows)
+        if not merged.empty:
+            merged.sort_values(["date", "stock_code", "recipe_name", "setup_type"], inplace=True)
+            merged.reset_index(drop=True, inplace=True)
+        return merged
+
+    @staticmethod
+    def _summarize_signal_recipe_events(events, horizons):
+        if events is None or events.empty:
+            columns = [
+                "recipe_name",
+                "setup_type",
+                "event_count",
+                "unique_stock_count",
+                "top5_stock_event_share",
+                "avg_setup_score",
+            ]
+            for horizon in horizons:
+                columns.extend(
+                    [
+                        f"avg_forward_return_{horizon}",
+                        f"median_forward_return_{horizon}",
+                        f"p25_forward_return_{horizon}",
+                        f"p75_forward_return_{horizon}",
+                        f"win_rate_{horizon}",
+                        f"avg_forward_max_drawdown_{horizon}",
+                        f"p95_forward_drawdown_{horizon}",
+                        f"return_drawdown_ratio_{horizon}",
+                        f"avg_win_{horizon}",
+                        f"avg_loss_{horizon}",
+                    ]
+                )
+            return pd.DataFrame(columns=columns)
+
+        rows = []
+        grouped = events.groupby(["recipe_name", "setup_type"], dropna=False)
+        for (recipe_name, setup_type), group in grouped:
+            stock_counts = group["stock_code"].value_counts() if "stock_code" in group else pd.Series(dtype=float)
+            row = {
+                "recipe_name": recipe_name,
+                "setup_type": setup_type,
+                "event_count": int(len(group)),
+                "unique_stock_count": int(group["stock_code"].nunique()) if "stock_code" in group else 0,
+                "top5_stock_event_share": float(stock_counts.head(5).sum() / len(group)) if len(group) else np.nan,
+                "avg_setup_score": float(group["setup_score"].mean()) if "setup_score" in group else np.nan,
+            }
+            for horizon in horizons:
+                return_col = f"forward_return_{int(horizon)}"
+                drawdown_col = f"forward_max_drawdown_{int(horizon)}"
+                returns = group[return_col].dropna() if return_col in group else pd.Series(dtype=float)
+                drawdowns = group[drawdown_col].dropna() if drawdown_col in group else pd.Series(dtype=float)
+                wins = returns[returns > 0]
+                losses = returns[returns <= 0]
+                avg_return = float(returns.mean()) if not returns.empty else np.nan
+                avg_drawdown = float(drawdowns.mean()) if not drawdowns.empty else np.nan
+                row[f"avg_forward_return_{int(horizon)}"] = float(returns.mean()) if not returns.empty else np.nan
+                row[f"median_forward_return_{int(horizon)}"] = float(returns.median()) if not returns.empty else np.nan
+                row[f"p25_forward_return_{int(horizon)}"] = float(returns.quantile(0.25)) if not returns.empty else np.nan
+                row[f"p75_forward_return_{int(horizon)}"] = float(returns.quantile(0.75)) if not returns.empty else np.nan
+                row[f"win_rate_{int(horizon)}"] = float((returns > 0).mean()) if not returns.empty else np.nan
+                row[f"avg_forward_max_drawdown_{int(horizon)}"] = avg_drawdown
+                row[f"p95_forward_drawdown_{int(horizon)}"] = float(drawdowns.quantile(0.05)) if not drawdowns.empty else np.nan
+                row[f"return_drawdown_ratio_{int(horizon)}"] = avg_return / abs(avg_drawdown) if pd.notna(avg_return) and pd.notna(avg_drawdown) and avg_drawdown != 0 else np.nan
+                row[f"avg_win_{int(horizon)}"] = float(wins.mean()) if not wins.empty else np.nan
+                row[f"avg_loss_{int(horizon)}"] = float(losses.mean()) if not losses.empty else np.nan
+            rows.append(row)
+        return pd.DataFrame(rows).sort_values(["recipe_name", "setup_type"]).reset_index(drop=True)
 
     def build_factor_validation_report(
         self,
@@ -1835,6 +2116,7 @@ class StockAnalyzer:
         show_progress=False,
         enable_portfolio_replay=True,
         ridge_factors=None,
+        signal_recipes=None,
     ):
         """固定股票池组合回测：按日期横向比较评分，只持有当日最优的 Top N 信号。"""
         if stock_codes is None:
@@ -1865,6 +2147,8 @@ class StockAnalyzer:
                 }
                 if ridge_factors is not None:
                     factor_kwargs["ridge_factors"] = ridge_factors
+                if signal_recipes is not None:
+                    factor_kwargs["signal_recipes"] = signal_recipes
                 return self.analyze_stock_factors(stock_code, **factor_kwargs)
             return self.analyze_stock(stock_code, days=days)
 
@@ -1941,21 +2225,27 @@ class StockAnalyzer:
                 return _progress_callback
 
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_map = {
-                    executor.submit(
-                        self._analyze_factor_batch,
-                        batch,
-                        days=days,
-                        factor_set=factor_set,
-                        factor_score_config=factor_score_config,
-                        persist_features=persist_features,
-                        ridge_factors=ridge_factors,
-                        progress_callback=make_progress_callback(batch_index + 1),
-                        batch_index=batch_index + 1,
-                        total_batches=len(stock_batches),
-                    ): (batch_index + 1, batch)
-                    for batch_index, batch in enumerate(stock_batches)
-                }
+                future_map = {}
+                for batch_index, batch in enumerate(stock_batches):
+                    batch_kwargs = {
+                        "days": days,
+                        "factor_set": factor_set,
+                        "factor_score_config": factor_score_config,
+                        "persist_features": persist_features,
+                        "ridge_factors": ridge_factors,
+                        "progress_callback": make_progress_callback(batch_index + 1),
+                        "batch_index": batch_index + 1,
+                        "total_batches": len(stock_batches),
+                    }
+                    if signal_recipes is not None:
+                        batch_kwargs["signal_recipes"] = signal_recipes
+                    future_map[
+                        executor.submit(
+                            self._analyze_factor_batch,
+                            batch,
+                            **batch_kwargs,
+                        )
+                    ] = (batch_index + 1, batch)
                 if show_progress:
                     active_batches = {batch_index for batch_index, _batch in future_map.values()}
 
@@ -2103,6 +2393,7 @@ class StockAnalyzer:
         show_progress=False,
         enable_portfolio_replay=True,
         ridge_factors=None,
+        signal_recipes=None,
     ):
         """对本地已同步的全部港股执行 TopN 组合回测。"""
         return self.backtest_portfolio(
@@ -2123,6 +2414,7 @@ class StockAnalyzer:
             show_progress=show_progress,
             enable_portfolio_replay=enable_portfolio_replay,
             ridge_factors=ridge_factors,
+            signal_recipes=signal_recipes,
         )
 
     def generate_trading_strategy(self, analysis_results):

@@ -4,7 +4,7 @@ urllib3
 pandas
 numpy
 pyarrow
--e /home/ccs/code/akshare
+-e /Users/ccs/code/quant/akshare
 baostock
 py-mini-racer
 demjson3

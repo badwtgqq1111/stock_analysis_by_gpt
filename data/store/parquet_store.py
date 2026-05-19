@@ -24,7 +24,7 @@ class ParquetDataStore:
         target = self.layout.dataset_path(dataset_name, layer=layer)
         return target.exists() and any(target.rglob("*.parquet"))
 
-    def read_frame(self, dataset_name, layer="clean", filters=None, columns=None, order_by=None):
+    def read_frame(self, dataset_name, layer="clean", filters=None, columns=None, order_by=None, range_filters=None):
         """按条件读取 parquet 数据集。"""
         if not self.dataset_exists(dataset_name, layer=layer):
             return pd.DataFrame()
@@ -36,6 +36,7 @@ class ParquetDataStore:
             select_sql=select_sql,
             filters=filters,
             order_by=order_by,
+            range_filters=range_filters,
         )
         conn = duckdb.connect(database=":memory:")
         try:
@@ -47,7 +48,7 @@ class ParquetDataStore:
             frame.drop(columns=["year"], inplace=True)
         return frame
 
-    def scalar_query(self, dataset_name, expression, layer="clean", filters=None):
+    def scalar_query(self, dataset_name, expression, layer="clean", filters=None, range_filters=None):
         """执行单值聚合查询。"""
         if not self.dataset_exists(dataset_name, layer=layer):
             return None
@@ -57,6 +58,7 @@ class ParquetDataStore:
             layer=layer,
             select_sql=f"{expression} AS value",
             filters=filters,
+            range_filters=range_filters,
         )
         conn = duckdb.connect(database=":memory:")
         try:
@@ -65,7 +67,7 @@ class ParquetDataStore:
             conn.close()
         return result[0] if result else None
 
-    def values_query(self, dataset_name, column, layer="clean", filters=None, distinct=False, order_by=None):
+    def values_query(self, dataset_name, column, layer="clean", filters=None, distinct=False, order_by=None, range_filters=None):
         """执行单列值查询。"""
         if not self.dataset_exists(dataset_name, layer=layer):
             return []
@@ -77,6 +79,7 @@ class ParquetDataStore:
             select_sql=f"{prefix}{column} AS value",
             filters=filters,
             order_by=order_by,
+            range_filters=range_filters,
         )
         conn = duckdb.connect(database=":memory:")
         try:
@@ -194,7 +197,7 @@ class ParquetDataStore:
             shutil.rmtree(backup_dir)
         return dataset_path
 
-    def _build_query(self, dataset_name, layer, select_sql, filters=None, order_by=None):
+    def _build_query(self, dataset_name, layer, select_sql, filters=None, order_by=None, range_filters=None):
         dataset_glob = self.layout.dataset_glob(dataset_name, layer=layer)
         clauses = []
         params = [dataset_glob]
@@ -212,6 +215,18 @@ class ParquetDataStore:
             else:
                 clauses.append(f"{column} = ?")
                 params.append(value)
+
+        for column, bounds in (range_filters or {}).items():
+            if not bounds:
+                continue
+            lower = bounds.get("gte")
+            if lower is not None:
+                clauses.append(f"{column} >= ?")
+                params.append(lower)
+            upper = bounds.get("lte")
+            if upper is not None:
+                clauses.append(f"{column} <= ?")
+                params.append(upper)
 
         query = f"SELECT {select_sql} FROM read_parquet(?, hive_partitioning = true)"
         if clauses:

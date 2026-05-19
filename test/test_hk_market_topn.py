@@ -221,6 +221,43 @@ def test_stock_analyzer_reads_from_new_data_architecture_without_legacy_db():
     assert str(data.index[-1].date()) == "2025-01-06"
 
 
+def test_load_stock_data_batch_returns_per_stock_frames():
+    raw_frame = pd.DataFrame(
+        {
+            "date": ["2025-01-02", "2025-01-03", "2025-01-02", "2025-01-03"],
+            "Open": [100.0, 101.0, 200.0, 201.0],
+            "High": [101.0, 102.0, 201.0, 202.0],
+            "Low": [99.0, 100.0, 199.0, 200.0],
+            "Close": [100.5, 101.5, 200.5, 201.5],
+            "Volume": [1000.0, 1100.0, 2000.0, 2100.0],
+        }
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        layout = DataLayout(base_dir=str(Path(tmp_dir) / "data"))
+        warehouse = MarketDataWarehouse(layout)
+        try:
+            warehouse.upsert_ohlcv(
+                normalize_ohlcv_frame(raw_frame.iloc[:2], stock_code="00700", source="unit_test")
+            )
+            warehouse.upsert_ohlcv(
+                normalize_ohlcv_frame(raw_frame.iloc[2:], stock_code="00005", source="unit_test")
+            )
+        finally:
+            warehouse.close()
+
+        analyzer = StockAnalyzer(db_dir=tmp_dir)
+        try:
+            batch_map = analyzer.load_stock_data_batch(["00700", "00005"], days=800)
+        finally:
+            analyzer.close()
+
+    assert set(batch_map.keys()) == {"00700", "00005"}
+    assert list(batch_map["00700"].columns) == ["Open", "Close", "High", "Low", "Volume"]
+    assert len(batch_map["00700"]) == 2
+    assert len(batch_map["00005"]) == 2
+
+
 def test_backtest_hk_market_factor_mode_does_not_require_strategy_signals():
     original_analyze_stock = StockAnalyzer.analyze_stock
     original_analyze_stock_factors = getattr(StockAnalyzer, "analyze_stock_factors", None)

@@ -481,6 +481,23 @@ class MarketDataWarehouse:
         dataset_name=OHLCV_DATASET,
     ):
         """按条件读取 clean 层 OHLCV 数据。"""
+        year_filter = None
+        range_filters = {}
+        start_ts = pd.to_datetime(start_date) if start_date else None
+        end_ts = pd.to_datetime(end_date) if end_date else None
+        if start_ts is not None or end_ts is not None:
+            start_year = int(start_ts.year) if start_ts is not None else None
+            end_year = int(end_ts.year) if end_ts is not None else None
+            if start_year is not None and end_year is not None and end_year >= start_year:
+                year_filter = list(range(start_year, end_year + 1))
+            elif start_year is not None:
+                year_filter = [start_year]
+            elif end_year is not None:
+                year_filter = [end_year]
+            range_filters["trade_date"] = {
+                "gte": start_ts.strftime("%Y-%m-%d") if start_ts is not None else None,
+                "lte": end_ts.strftime("%Y-%m-%d") if end_ts is not None else None,
+            }
         filters = {
             "stock_code": stock_code,
             "market": market,
@@ -488,21 +505,23 @@ class MarketDataWarehouse:
             "asset_type": asset_type,
             "frequency": frequency,
             "adjust": adjust,
+            "year": year_filter,
         }
         frame = self.parquet_store.read_frame(
             dataset_name=dataset_name,
             layer="clean",
             filters=filters,
             order_by="market, stock_code, trade_date",
+            range_filters=range_filters,
         )
         if frame.empty:
             return frame
 
         frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-        if start_date:
-            frame = frame.loc[frame["trade_date"] >= pd.to_datetime(start_date)]
-        if end_date:
-            frame = frame.loc[frame["trade_date"] <= pd.to_datetime(end_date)]
+        if start_ts is not None:
+            frame = frame.loc[frame["trade_date"] >= start_ts]
+        if end_ts is not None:
+            frame = frame.loc[frame["trade_date"] <= end_ts]
         frame.reset_index(drop=True, inplace=True)
         return frame
 

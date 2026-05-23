@@ -11,6 +11,7 @@ dependencies = [
     "dash-bootstrap-components>=1.6.0",
     "demjson3",
     "duckdb",
+    "fastapi>=0.136.1",
     "lightgbm",
     "matplotlib",
     "numpy",
@@ -24,6 +25,7 @@ dependencies = [
     "shap>=0.49.1",
     "TA-Lib",
     "urllib3",
+    "uvicorn>=0.47.0",
 ]
 
 [dependency-groups]

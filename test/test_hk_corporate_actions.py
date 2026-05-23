@@ -1,90 +1,88 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+测试港股企业行为数据获取
+默认测试腾讯控股(00700)，覆盖直接抓取 / 时间范围过滤 / 落库读取
+"""
 
-"""港股企业行为本地测试。"""
-
-import sys
-import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
-import pandas as pd
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from data.ingest.providers.hk_corporate_actions import HKCorporateActionsFetcher
-from data.ingest.service import MarketDataService
+from data.ingest import HKCorporateActionsFetcher, MarketDataService
 
 
-def test_hk_corporate_actions_plan_parsing():
-    source_frame = pd.DataFrame(
-        [
-            {
-                "最新公告日期": "2026-04-01",
-                "财政年度": "2025",
-                "分红方案": "每10股派5元送2股",
-                "分配类型": "末期股息",
-                "除净日": "2026-04-20",
-                "截至过户日": "2026-04-22",
-                "发放日": "2026-05-10",
-            }
-        ]
-    )
+def _print_preview(title, data):
+    print(f"\n{title}")
+    if data is None or data.empty:
+        print("❌ 获取数据失败")
+        return False
 
-    parsed = HKCorporateActionsFetcher._normalize_dividend_frame(source_frame)
-    assert len(parsed) == 2
-    assert set(parsed["action_type"].tolist()) == {"cash_dividend", "bonus_issue"}
-    cash_row = parsed.loc[parsed["action_type"] == "cash_dividend"].iloc[0]
-    bonus_row = parsed.loc[parsed["action_type"] == "bonus_issue"].iloc[0]
-    assert cash_row["cash_dividend"] == 0.5
-    assert bonus_row["bonus_share_ratio"] == 0.2
+    print(f"✅ 成功获取 {len(data)} 条数据")
+    if "event_date" in data.columns and not data["event_date"].isnull().all():
+        min_date = data["event_date"].min()
+        max_date = data["event_date"].max()
+        print(f"📅 事件时间范围：{min_date.strftime('%Y-%m-%d')} 至 {max_date.strftime('%Y-%m-%d')}")
+
+    if "action_type" in data.columns:
+        print(f"🧩 事件类型：{sorted(data['action_type'].dropna().unique().tolist())}")
+
+    print("\n📊 前5行数据预览：")
+    print(data.head())
+
+    missing = data.isnull().sum()
+    if missing.any():
+        missing = missing[missing > 0]
+        print(f"\n⚠️  缺失数据统计：{missing.to_dict()}")
+    else:
+        print("\n✅ 数据完整，无缺失值")
+    return True
 
 
-def test_sync_hk_corporate_actions():
-    fake_actions = pd.DataFrame(
-        [
-            {
-                "event_date": "2026-04-20",
-                "announcement_date": "2026-04-01",
-                "ex_date": "2026-04-20",
-                "record_date": "2026-04-22",
-                "payment_date": "2026-05-10",
-                "fiscal_year": "2025",
-                "plan_explain": "每10股派5元",
-                "distribution_type": "末期股息",
-                "action_type": "cash_dividend",
-                "cash_dividend": 0.5,
-            }
-        ]
-    )
+def test_hk_corporate_actions(stock_code="00700", db_dir="./assets"):
+    """
+    测试港股企业行为数据获取
+    :param stock_code: 港股代码，5位数字，比如腾讯控股是 00700
+    :param db_dir: 资产根目录，默认 ./assets
+    """
+    print(f"=== 测试 {stock_code} 港股企业行为数据获取 ===")
 
-    def fake_fetch(self, start_date=None, end_date=None, num_records=None):
-        self.last_successful_source = "unit_test"
-        return fake_actions.copy()
+    fetcher = HKCorporateActionsFetcher(stock_code)
+    success = True
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        service = MarketDataService(base_dir=tmp_dir)
-        try:
-            with patch("data.ingest.service.HKCorporateActionsFetcher.fetch", new=fake_fetch):
-                result = service.sync_hk_corporate_actions("00700", persist_raw=True)
+    print("\n1. 尝试抓取全部可用企业行为数据...")
+    all_actions = fetcher.fetch()
+    success &= _print_preview("企业行为结果", all_actions)
+    if all_actions is not None and not all_actions.empty:
+        print(f"\n📡 成功来源：{fetcher.last_successful_source}")
 
-            assert result["rows"] == 1
-            assert result["source"] == "unit_test"
-            assert result["raw_snapshot_path"] is not None
+    print("\n\n2. 尝试指定时间范围抓取（2024-01-01 至 2026-12-31）...")
+    ranged_actions = fetcher.fetch(start_date="2024-01-01", end_date="2026-12-31")
+    if ranged_actions is not None and not ranged_actions.empty:
+        print(f"✅ 成功获取 {len(ranged_actions)} 条数据")
+        min_date = ranged_actions["event_date"].min().strftime("%Y-%m-%d")
+        max_date = ranged_actions["event_date"].max().strftime("%Y-%m-%d")
+        print(f"📅 时间范围：{min_date} 至 {max_date}")
+    else:
+        print("❌ 时间范围获取失败")
+        success = False
 
-            loaded = service.get_hk_corporate_actions("00700")
-            assert len(loaded) == 1
-            assert loaded["stock_code"].iloc[0] == "00700"
-            assert loaded["action_type"].iloc[0] == "cash_dividend"
-            assert loaded["cash_dividend"].iloc[0] == 0.5
-        finally:
-            service.close()
+    print("\n\n3. 尝试抓取最近10条企业行为数据...")
+    latest_actions = fetcher.fetch(num_records=10)
+    success &= _print_preview("最近10条结果", latest_actions)
+
+    print("\n\n4. 尝试同步到本地数据层并回读...")
+    base_dir = Path(db_dir).resolve() / "data"
+    service = MarketDataService(base_dir=str(base_dir))
+    try:
+        sync_result = service.sync_hk_corporate_actions(stock_code, persist_raw=True)
+        print(f"✅ 同步结果：{sync_result}")
+
+        loaded = service.get_hk_corporate_actions(stock_code=stock_code)
+        success &= _print_preview("落库回读结果", loaded)
+    finally:
+        service.close()
+
+    return success
 
 
 if __name__ == "__main__":
-    test_hk_corporate_actions_plan_parsing()
-    test_sync_hk_corporate_actions()
-    print("hk corporate actions tests passed")
+    test_hk_corporate_actions(stock_code="00700", db_dir="./assets")

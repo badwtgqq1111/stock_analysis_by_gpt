@@ -40,30 +40,34 @@ def get_analyzer():
 # ─── 选股结果数据 ───────────────────────────────────────────────────────────────
 
 
-def load_ranking_data() -> pd.DataFrame | None:
-    """加载选股排名数据 (lightgbm_top10_ranking.csv)."""
-    path = OUTPUT_DIR / "lightgbm_top10_ranking.csv"
-    if not path.exists():
-        return None
-    try:
-        df = pd.read_csv(path, encoding="utf-8-sig")
-        return df
-    except Exception as e:
-        print(f"[WARN] 加载排名数据失败: {e}")
-        return None
+def load_ranking_data(factor_set: str = "") -> pd.DataFrame | None:
+    """Load ranking data. Tries {base}_{factor_set}_ranking.csv first, then {base}_ranking.csv."""
+    for path in [
+        OUTPUT_DIR / f"lightgbm_top10_{factor_set}_ranking.csv" if factor_set else None,
+        OUTPUT_DIR / "lightgbm_top10_ranking.csv",
+    ]:
+        if path is None or not path.exists():
+            continue
+        try:
+            return pd.read_csv(path, encoding="utf-8-sig")
+        except Exception as e:
+            print(f"[WARN] 加载排名数据失败 ({path.name}): {e}")
+    return None
 
 
-def load_selected_data() -> pd.DataFrame | None:
-    """加载入选股票数据 (lightgbm_top10_selected.csv)."""
-    path = OUTPUT_DIR / "lightgbm_top10_selected.csv"
-    if not path.exists():
-        return None
-    try:
-        df = pd.read_csv(path, encoding="utf-8-sig")
-        return df
-    except Exception as e:
-        print(f"[WARN] 加载入选数据失败: {e}")
-        return None
+def load_selected_data(factor_set: str = "") -> pd.DataFrame | None:
+    """Load selected stocks. Tries {base}_{factor_set}_selected.csv first, then {base}_selected.csv."""
+    for path in [
+        OUTPUT_DIR / f"lightgbm_top10_{factor_set}_selected.csv" if factor_set else None,
+        OUTPUT_DIR / "lightgbm_top10_selected.csv",
+    ]:
+        if path is None or not path.exists():
+            continue
+        try:
+            return pd.read_csv(path, encoding="utf-8-sig")
+        except Exception as e:
+            print(f"[WARN] 加载入选数据失败 ({path.name}): {e}")
+    return None
 
 
 def parse_shap_values(factor_explanation_str: str) -> dict | None:
@@ -310,14 +314,19 @@ def load_portfolio_backtest() -> dict | None:
     """
     import numpy as np
 
-    # 尝试从 ranking CSV 构建真实回测数据
-    ranking_path = OUTPUT_DIR / "lightgbm_top10_ranking.csv"
-    selected_path = OUTPUT_DIR / "lightgbm_top10_selected.csv"
+    # 尝试从 ranking CSV 构建真实回测数据 (尝试带 factor_set 后缀的文件优先)
+    def _first_valid(loader, *args):
+        for a in args:
+            df = loader(a)
+            if df is not None and not df.empty:
+                return df
+        return loader()
 
-    if ranking_path.exists() and selected_path.exists():
+    ranking_df = _first_valid(load_ranking_data, "qlib_alpha158", "qlib_alpha360")
+    selected_df = _first_valid(load_selected_data, "qlib_alpha158", "qlib_alpha360")
+
+    if ranking_df is not None and selected_df is not None and not ranking_df.empty and not selected_df.empty:
         try:
-            ranking_df = pd.read_csv(ranking_path, encoding="utf-8-sig")
-            selected_df = pd.read_csv(selected_path, encoding="utf-8-sig")
 
             # 从 ranking 数据提取回测指标
             metrics = {}

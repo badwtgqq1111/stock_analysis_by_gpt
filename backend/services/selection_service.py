@@ -14,10 +14,10 @@ from backend.services.data_service import (
 
 
 class SelectionService:
-    def get_selection(self) -> dict:
-        df = load_selected_data()
+    def get_selection(self, factor_set: str = "") -> dict:
+        df = load_selected_data(factor_set)
         if df is None or df.empty:
-            df = load_ranking_data()
+            df = load_ranking_data(factor_set)
 
         if df is None or df.empty:
             return {"rows": [], "columns": [], "empty": True}
@@ -54,8 +54,8 @@ class SelectionService:
 
         return {"rows": rows, "columns": columns, "empty": False}
 
-    def get_shap(self, stock_code: str) -> dict:
-        df = load_selected_data()
+    def get_shap(self, stock_code: str, factor_set: str = "") -> dict:
+        df = load_selected_data(factor_set)
         if df is None or df.empty:
             return {"features": []}
 

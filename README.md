@@ -172,6 +172,7 @@ uv run python stock_analyzer.py select_stocks \
 brew install libomp   # macOS 需要先安装一次
 uv sync
 
+# 使用 Alpha158（默认）
 uv run python stock_analyzer.py select_stocks \
   --analysis-mode lightgbm \
   --top-n 10 \
@@ -180,7 +181,19 @@ uv run python stock_analyzer.py select_stocks \
   --factor-set qlib_alpha158 \
   --signal-recipes low_price_setup,range_breakout,box_pullback \
   --export-csv output/lightgbm_top10
+
+# 使用 Alpha360（因子更多，覆盖更广）
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --initial-capital 100000 \
+  --factor-set qlib_alpha360 \
+  --signal-recipes low_price_setup,range_breakout,box_pullback \
+  --export-csv output/lightgbm_top10
 ```
+
+> Alpha158 和 Alpha360 **不建议合并使用**。Alpha360 已包含 Alpha158 的大部分因子，两者高度重叠，直接拼在一起会产生多重共线性。建议分别训练后对比 ICIR 和选股结果，选表现更好的一组。如果两组各有优势，可以在预测分数层面做加权集成，而不是在特征层合并。
 
 写信号层+批次号：
 
@@ -394,3 +407,50 @@ uv run python stock_analyzer.py select_stocks \
 - duckdb
 - pyarrow
 - numpy
+
+## Web 界面
+
+项目提供了基于 **Vue 3 + lightweight-charts + FastAPI** 的 Web 看板，替代原来的 Plotly Dash 页面。包含四个功能页：选股结果、因子 IC 分析、K 线图表、组合回测。
+
+### 启动方式
+
+**1. 启动后端 (FastAPI, port 8000)**
+
+```bash
+cd stock_analysis_by_gpt
+uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+首次启动时会自动生成因子 IC 缓存（约 30 秒），后续请求直接读缓存。
+
+**2. 启动前端 (Vite, port 5173)**
+
+需要 [Bun](https://bun.sh)（或 Node.js）：
+
+```bash
+cd stock_analysis_by_gpt/frontend
+bun install
+bun run dev
+```
+
+前端开发服务器会自动将 `/api` 请求代理到 `localhost:8000`。浏览器打开 `http://localhost:5173`。
+
+### 生产部署
+
+```bash
+cd stock_analysis_by_gpt/frontend
+bun install && bun run build
+```
+
+构建产物在 `frontend/dist/`，FastAPI 会自动托管静态文件。直接访问 `http://localhost:8000` 即可，无需单独启动前端。
+
+### 页面说明
+
+| 页面 | 路由 | 功能 |
+|------|------|------|
+| 选股结果 | `/` | LightGBM Top10 排序表、评分柱状图、SHAP 特征解释 |
+| 因子 IC 分析 | `/factor-ic` | IC/RankIC 时序图、Top10 因子柱状图、汇总表，支持切换 Alpha158/Alpha360 和回看周期 |
+| K 线图表 | `/kline` | Canvas K 线 + MA 均线 + 成交量 + 信号标记 + 筹码分布，支持十字光标和滚轮缩放 |
+| 组合回测 | `/portfolio` | 净值曲线、回撤曲线、收益指标卡、当前持仓表 |
+
+K 线页面支持叠加显示开关：LightGBM 买卖信号（箭头标记）、筹码分布（右侧面板）。颜色遵循 A 股惯例：**红涨绿跌**。

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 
 from backend.schemas.responses import SelectionResponse, ShapResponse
 from backend.services.selection_service import SelectionService
@@ -8,8 +8,8 @@ _service = SelectionService()
 
 
 @router.get("/selection", response_model=SelectionResponse)
-def get_selection():
-    return _service.get_selection()
+def get_selection(factor_set: str = ""):
+    return _service.get_selection(factor_set)
 
 
 @router.get("/selection/{code}/shap", response_model=ShapResponse)

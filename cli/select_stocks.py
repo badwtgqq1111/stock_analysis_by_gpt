@@ -137,9 +137,10 @@ def main_select_stocks(
     if export_csv:
         export_path = Path(export_csv)
         export_path.parent.mkdir(parents=True, exist_ok=True)
-        ranking_path = export_path.with_name(f"{export_path.stem}_ranking.csv")
-        selected_path = export_path.with_name(f"{export_path.stem}_selected.csv")
-        watchlist_path = export_path.with_name(f"{export_path.stem}_watchlist.csv")
+        suffix = f"_{factor_set}" if factor_set else ""
+        ranking_path = export_path.with_name(f"{export_path.stem}{suffix}_ranking.csv")
+        selected_path = export_path.with_name(f"{export_path.stem}{suffix}_selected.csv")
+        watchlist_path = export_path.with_name(f"{export_path.stem}{suffix}_watchlist.csv")
 
         pd.DataFrame(portfolio_result.get("ranking", [])).to_csv(ranking_path, index=False, encoding="utf-8-sig")
         pd.DataFrame(portfolio_result.get("selected", [])).to_csv(selected_path, index=False, encoding="utf-8-sig")

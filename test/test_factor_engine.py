@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from data.ingest.service import MarketDataService
 from data.model import normalize_ohlcv_frame
 from factor_engine import create_factor_set, list_factor_sets
-from factor_engine.ml.lightgbm_ranker import LightGBMRankerPipeline, _load_lightgbm_ranker_class
+from factor_engine.ml.lightgbm_ranker import LightGBMRankerPipeline, _load_lightgbm_regressor_class
 
 
 def _make_ohlcv_frame(rows=90):
@@ -111,53 +111,42 @@ def test_lightgbm_ranker_loader_reports_missing_libomp_on_macos():
     with patch("platform.system", return_value="Darwin"):
         with patch("builtins.__import__", side_effect=fake_import):
             try:
-                _load_lightgbm_ranker_class()
+                _load_lightgbm_regressor_class()
                 raised = None
             except ImportError as exc:
                 raised = exc
 
     assert raised is not None
     assert "brew install libomp" in str(raised)
-    assert "uv sync" in str(raised)
 
 
-def test_lightgbm_ranker_builds_risk_adjusted_target():
-    pipeline = LightGBMRankerPipeline(label_horizon=20, drawdown_horizon=60, drawdown_penalty_weight=1.0)
-    merged = pd.DataFrame(
-        {
-            "trade_date": pd.to_datetime(["2025-01-02", "2025-01-02"]),
-            "stock_code": ["00001", "00002"],
-            "target_return": [0.12, 0.10],
-            "target_drawdown": [-0.08, -0.01],
-            "target_max_return": [0.36, 0.11],
-        }
-    )
+def test_lightgbm_ranker_cs_rank_norm_label():
+    """Test that CSRankNorm produces correct cross-sectional normalized labels."""
+    from factor_engine.ml.lightgbm_ranker import _cs_rank_norm
 
-    scored = pipeline._build_training_target_frame(merged)
+    # 5 stocks with different returns
+    series = pd.Series([0.01, 0.05, 0.10, 0.15, 0.20])
+    result = _cs_rank_norm(series)
 
-    assert "target_score" in scored.columns
-    assert np.isclose(scored.loc[0, "target_score"], 0.061)
-    assert np.isclose(scored.loc[1, "target_score"], 0.09)
-    assert scored.loc[1, "target_score"] > scored.loc[0, "target_score"]
+    # Should be approximately centered around 0
+    assert result.notna().all()
+    # Rank order preserved
+    assert result.iloc[0] < result.iloc[1] < result.iloc[2] < result.iloc[3] < result.iloc[4]
+    # Values should be in reasonable range (approx -1.7 to +1.7 for 5 elements)
+    assert result.min() > -2.0
+    assert result.max() < 2.0
 
 
-def test_lightgbm_ranker_target_prefers_monthly_breakout_shape():
-    pipeline = LightGBMRankerPipeline(label_horizon=20, drawdown_horizon=20, drawdown_penalty_weight=1.0)
-    merged = pd.DataFrame(
-        {
-            "trade_date": pd.to_datetime(["2025-01-02", "2025-01-02"]),
-            "stock_code": ["00901", "00902"],
-            "target_return": [0.19, 0.16],
-            "target_drawdown": [-0.05, -0.04],
-            "target_max_return": [0.33, 0.18],
-        }
-    )
+def test_lightgbm_ranker_cs_rank_norm_handles_nan():
+    """Test CSRankNorm handles NaN gracefully."""
+    from factor_engine.ml.lightgbm_ranker import _cs_rank_norm
 
-    scored = pipeline._build_training_target_frame(merged)
-
-    assert scored.loc[0, "target_breakout_bonus"] > 0
-    assert np.isclose(scored.loc[1, "target_breakout_bonus"], 0.0)
-    assert scored.loc[0, "target_score"] > scored.loc[1, "target_score"]
+    series = pd.Series([0.01, np.nan, 0.10])
+    result = _cs_rank_norm(series)
+    # NaN input stays NaN
+    assert pd.isna(result.iloc[1])
+    # Non-NaN values get normalized
+    assert result.iloc[0] < result.iloc[2]
 
 
 def test_lightgbm_ranker_excludes_target_columns_from_features():

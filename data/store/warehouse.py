@@ -32,12 +32,18 @@ class MarketDataWarehouse:
     SIGNALS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "signal_set", "year")
     TRADES_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "account_id", "year")
 
-    def __init__(self, layout):
+    def __init__(self, layout, read_only=False):
         self.layout = layout
+        self.read_only = read_only
         self.parquet_store = ParquetDataStore(layout)
         self.db_path = Path(self.layout.duckdb_path())
-        self.conn = duckdb.connect(str(self.db_path))
-        self._init_schema()
+        self.conn = duckdb.connect(str(self.db_path), read_only=read_only)
+        if not self.read_only:
+            self._init_schema()
+
+    def _ensure_writable(self):
+        if self.read_only:
+            raise RuntimeError(f"只读仓库不支持写入: {self.db_path}")
 
     def _init_schema(self):
         """初始化元数据表结构。"""
@@ -368,6 +374,7 @@ class MarketDataWarehouse:
 
     def upsert_stock_info(self, info):
         """保存标准化后的股票信息。"""
+        self._ensure_writable()
         payload = pd.DataFrame([info], columns=STOCK_INFO_FIELDS)
         self.conn.register("stock_info_frame", payload)
         self.conn.execute(
@@ -417,6 +424,7 @@ class MarketDataWarehouse:
 
     def upsert_stock_info_batch(self, info_list):
         """批量保存标准化后的股票信息。"""
+        self._ensure_writable()
         if not info_list:
             return {"rows": 0}
 

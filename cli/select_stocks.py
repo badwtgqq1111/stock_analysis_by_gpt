@@ -145,6 +145,23 @@ def main_select_stocks(
         pd.DataFrame(portfolio_result.get("selected", [])).to_csv(selected_path, index=False, encoding="utf-8-sig")
         pd.DataFrame(portfolio_result.get("watchlist", [])).to_csv(watchlist_path, index=False, encoding="utf-8-sig")
 
+        # 导出入选股票的每日信号时序 (供 K 线图标注买卖点)
+        signals_dir = export_path.parent / "signals"
+        signals_dir.mkdir(parents=True, exist_ok=True)
+        selected_codes = set(
+            str(r.get("stock_code", "")).zfill(5)
+            for r in portfolio_result.get("selected", [])
+        )
+        for item in analysis_results:
+            code = str(item.get("stock_code", "")).zfill(5)
+            if code not in selected_codes:
+                continue
+            buy_signals_df = item.get("buy_signals")
+            if buy_signals_df is not None and not buy_signals_df.empty:
+                sig_path = signals_dir / f"{code}_signals.csv"
+                buy_signals_df.to_csv(sig_path, index=False, encoding="utf-8-sig")
+        print(f"[OK] 已导出信号时序: {signals_dir}/")
+
         print(f"[OK] 已导出全市场排名: {ranking_path}")
         print(f"[OK] 已导出当前持有: {selected_path}")
         print(f"[OK] 已导出观察名单: {watchlist_path}")

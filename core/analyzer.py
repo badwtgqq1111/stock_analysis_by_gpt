@@ -39,7 +39,14 @@ class StockAnalyzer(
 ):
     """港股技术分析器"""
 
-    def __init__(self, db_dir="./assets", buy_strategy=None, sell_strategy=None, signal_recipes=None):
+    def __init__(
+        self,
+        db_dir="./assets",
+        buy_strategy=None,
+        sell_strategy=None,
+        signal_recipes=None,
+        market_read_only=True,
+    ):
         """
         初始化分析器
 
@@ -51,7 +58,7 @@ class StockAnalyzer(
         """
         self.db_dir = Path(db_dir)
         self.data_layout = DataLayout(base_dir=str(self.db_dir / "data"))
-        self.market_warehouse = MarketDataWarehouse(self.data_layout)
+        self.market_warehouse = MarketDataWarehouse(self.data_layout, read_only=market_read_only)
         if buy_strategy is None and sell_strategy is None:
             default_strategy = CurrentStrategy()
             self.buy_strategy = default_strategy

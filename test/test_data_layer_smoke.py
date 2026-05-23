@@ -66,6 +66,19 @@ def test_data_layer_smoke():
         warehouse.close()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
+        layout = DataLayout(base_dir=tmp_dir)
+        read_only_warehouse = MarketDataWarehouse(layout, read_only=True)
+        assert read_only_warehouse.read_only is True
+        try:
+            try:
+                read_only_warehouse.upsert_stock_info({"stock_code": "00700"})
+                raise AssertionError("expected read-only warehouse to reject writes")
+            except RuntimeError as exc:
+                assert "只读仓库不支持写入" in str(exc)
+        finally:
+            read_only_warehouse.close()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
         manager = DatabaseManager(tmp_dir)
         index_frame = raw_frame.copy()
         index_frame["date"] = pd.to_datetime(index_frame["date"])

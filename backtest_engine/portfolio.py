@@ -144,13 +144,32 @@ class TopNPortfolioBuilder:
         if not watchlist:
             watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak"][: self.top_n]
 
+        lightgbm_candidates = [item for item in ranking if item.get("selection_source") == "lightgbm_ranker"]
+        startup_candidate_rows = [item for item in lightgbm_candidates if item.get("startup_candidate")]
+        if lightgbm_candidates:
+            preferred_actionable = [item for item in preferred_actionable if item.get("startup_candidate")]
+            active_actionable = [item for item in active_actionable if item.get("startup_candidate")]
+            fallback_candidates = [item for item in fallback_candidates if item.get("startup_candidate")]
+            if startup_candidate_rows:
+                watchlist = [dict(item) for item in startup_candidate_rows if item.get("signal_tier") == "weak"][: self.top_n]
+                if not watchlist:
+                    watchlist = [dict(item) for item in startup_candidate_rows][: self.top_n]
+
         selected = (
             preferred_actionable[: self.top_n]
             if preferred_actionable
             else (
                 active_actionable[: self.top_n]
                 if active_actionable
-                else (fallback_candidates[: self.top_n] if fallback_candidates else ranking[: self.top_n])
+                else (
+                    fallback_candidates[: self.top_n]
+                    if fallback_candidates
+                    else (
+                        startup_candidate_rows[: self.top_n]
+                        if startup_candidate_rows
+                        else ranking[: self.top_n]
+                    )
+                )
             )
         )
         selected = [dict(item) for item in selected]
@@ -533,6 +552,67 @@ class TopNPortfolioBuilder:
             )
             or 0.0
         )
+        selection_source = result.get("selection_source")
+        if selection_source == "lightgbm_ranker":
+            risk_adjusted_score = np.nan_to_num(result.get("risk_adjusted_score", np.nan), nan=0.0)
+            latest_model_score = np.nan_to_num(result.get("latest_expected_3m_score", np.nan), nan=0.0)
+            latest_risk_score = np.nan_to_num(result.get("latest_risk_score", np.nan), nan=0.0)
+            drawdown_penalty_score = np.nan_to_num(result.get("drawdown_penalty_score", np.nan), nan=0.0)
+            startup_score = np.nan_to_num(result.get("startup_score", np.nan), nan=0.0)
+            startup_candidate_score = np.nan_to_num(result.get("startup_candidate_score", np.nan), nan=startup_score)
+            startup_candidate = bool(result.get("startup_candidate", False))
+            overheat_penalty_score = np.nan_to_num(result.get("overheat_penalty_score", np.nan), nan=0.0)
+            downtrend_penalty_score = np.nan_to_num(result.get("downtrend_penalty_score", np.nan), nan=0.0)
+            candidate_gate_bonus = 18.0 if startup_candidate else -28.0
+            ranking_score = (
+                risk_adjusted_score * 0.42
+                + latest_model_score * 0.08
+                + latest_risk_score * 0.08
+                + startup_score * 0.18
+                + startup_candidate_score * 0.22
+                + signal_freshness_score * 0.03
+                + candidate_gate_bonus
+                - drawdown_penalty_score * 0.08
+                - overheat_penalty_score * 0.20
+                - downtrend_penalty_score * 0.45
+            )
+            return {
+                "stock_code": stock_code,
+                "ranking_score": ranking_score,
+                "expected_3m_score": result["latest_expected_3m_score"],
+                "matrix_score": result["latest_matrix_score"],
+                "regime_score": result.get("latest_regime_score"),
+                "entry_type": result["latest_entry_type"],
+                "signal_tier": result.get("latest_signal_tier"),
+                "latest_signal_date": result.get("latest_signal_date"),
+                "current_signal_active": result.get("current_signal_active", False),
+                "current_signal_actionable": result.get("current_signal_actionable", False),
+                "current_signal_score": result.get("current_signal_score"),
+                "avg_forward_return_60_signal": avg_forward_return_60_signal,
+                "avg_forward_return_60_watch": avg_forward_return_60_watch,
+                "backtest_return": backtest.get("total_return", 0),
+                "win_rate": backtest.get("win_rate", 0),
+                "trade_count": backtest.get("total_trades", 0),
+                "factor_set": result.get("factor_set"),
+                "selection_source": selection_source,
+                "setup_type": setup_type,
+                "setup_score": setup_score,
+                "sideways_penalty": sideways_penalty,
+                "low_price_candidate": low_price_candidate,
+                "signal_freshness_score": signal_freshness_score,
+                "signal_age_days": signal_age_days,
+                "factor_explanation": result.get("factor_explanation", {}),
+                "risk_adjusted_score": result.get("risk_adjusted_score"),
+                "latest_risk_score": result.get("latest_risk_score"),
+                "drawdown_penalty_score": result.get("drawdown_penalty_score"),
+                "recent_drawdown": result.get("recent_drawdown"),
+                "startup_score": result.get("startup_score"),
+                "startup_candidate": startup_candidate,
+                "startup_candidate_score": result.get("startup_candidate_score"),
+                "overheat_penalty_score": result.get("overheat_penalty_score"),
+                "downtrend_penalty_score": result.get("downtrend_penalty_score"),
+                "trend_state": result.get("trend_state"),
+            }
         active_bonus = 100 if result.get("current_signal_active") and result.get("current_signal_actionable") else 0
         setup_type_bonus = {
             "pre_breakout": 18.0,
@@ -571,7 +651,7 @@ class TopNPortfolioBuilder:
             "win_rate": backtest.get("win_rate", 0),
             "trade_count": backtest.get("total_trades", 0),
             "factor_set": result.get("factor_set"),
-            "selection_source": result.get("selection_source"),
+            "selection_source": selection_source,
             "setup_type": setup_type,
             "setup_score": setup_score,
             "sideways_penalty": sideways_penalty,

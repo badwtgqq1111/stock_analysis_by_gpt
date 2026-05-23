@@ -175,6 +175,104 @@ def test_backtest_portfolio_supports_parallel_analysis():
     assert len(set(thread_names)) > 1
 
 
+def test_backtest_portfolio_supports_lightgbm_analysis_mode():
+    original_get_all_stocks = StockAnalyzer.get_all_stocks
+    original_analyze_lightgbm_market = getattr(StockAnalyzer, "_analyze_lightgbm_market", None)
+
+    def stub_get_all_stocks(self):
+        return ["00001", "00002", "00003"]
+
+    def stub_analyze_lightgbm_market(
+        self,
+        stock_codes,
+        days=365,
+        factor_set="qlib_alpha158",
+        signal_recipes=None,
+        persist_features=False,
+        show_progress=False,
+    ):
+        return [
+            {
+                "stock_code": "00001",
+                "data": None,
+                "buy_signals": None,
+                "sell_signals": None,
+                "backtest": {"total_return": 12.0, "win_rate": 60.0, "total_trades": 4},
+                "latest_price": 10.0,
+                "price_change_30d": 1.0,
+                "latest_expected_3m_score": 92.0,
+                "latest_matrix_score": 92.0,
+                "latest_regime_score": np.nan,
+                "latest_entry_type": "lightgbm_rank",
+                "latest_signal_tier": "strong",
+                "latest_signal_date": None,
+                "current_signal_active": True,
+                "current_signal_actionable": True,
+                "current_signal_score": 92.0,
+                "avg_forward_return_60_signal": 8.0,
+                "avg_forward_return_60_watch": 0.0,
+                "factor_set": factor_set,
+                "selection_source": "lightgbm_ranker",
+                "factor_explanation": {"top_features": [{"feature_name": "MA5", "importance": 0.8}]},
+                "setup_type": "neutral",
+                "setup_score": 0.0,
+                "sideways_penalty": 0.0,
+                "low_price_candidate": True,
+                "signal_freshness_score": 100.0,
+                "signal_age_days": 0,
+            },
+            {
+                "stock_code": "00002",
+                "data": None,
+                "buy_signals": None,
+                "sell_signals": None,
+                "backtest": {"total_return": 8.0, "win_rate": 55.0, "total_trades": 4},
+                "latest_price": 12.0,
+                "price_change_30d": 0.5,
+                "latest_expected_3m_score": 80.0,
+                "latest_matrix_score": 80.0,
+                "latest_regime_score": np.nan,
+                "latest_entry_type": "lightgbm_rank",
+                "latest_signal_tier": "medium",
+                "latest_signal_date": None,
+                "current_signal_active": True,
+                "current_signal_actionable": True,
+                "current_signal_score": 80.0,
+                "avg_forward_return_60_signal": 5.0,
+                "avg_forward_return_60_watch": 0.0,
+                "factor_set": factor_set,
+                "selection_source": "lightgbm_ranker",
+                "factor_explanation": {"top_features": [{"feature_name": "MA10", "importance": 0.5}]},
+                "setup_type": "neutral",
+                "setup_score": 0.0,
+                "sideways_penalty": 0.0,
+                "low_price_candidate": True,
+                "signal_freshness_score": 100.0,
+                "signal_age_days": 0,
+            },
+        ]
+
+    StockAnalyzer.get_all_stocks = stub_get_all_stocks
+    StockAnalyzer._analyze_lightgbm_market = stub_analyze_lightgbm_market
+    try:
+        analyzer = StockAnalyzer()
+        result = analyzer.backtest_portfolio(
+            stock_codes=None,
+            days=120,
+            top_n=1,
+            analysis_mode="lightgbm",
+        )
+    finally:
+        StockAnalyzer.get_all_stocks = original_get_all_stocks
+        if original_analyze_lightgbm_market is not None:
+            StockAnalyzer._analyze_lightgbm_market = original_analyze_lightgbm_market
+
+    assert result is not None
+    assert result["top_n"] == 1
+    assert result["selected"][0]["stock_code"] == "00001"
+    assert result["ranking"][0]["selection_source"] == "lightgbm_ranker"
+
+
 def test_stock_analyzer_reads_from_new_data_architecture_without_legacy_db():
     original_database_manager = getattr(sys.modules["analyzer_core"], "DatabaseManager", None)
 
@@ -648,6 +746,103 @@ def test_backtest_portfolio_factor_mode_reports_batch_progress_details():
     assert "eta=" in output
 
 
+def test_backtest_portfolio_lightgbm_mode_reports_progress_details():
+    analyzer_module = sys.modules["analyzer_core"]
+    original_load_stock_data_batch = StockAnalyzer.load_stock_data_batch
+    original_create_factor_set = analyzer_module.create_factor_set
+    original_ranker_cls = analyzer_module.LightGBMRankerPipeline
+    original_stderr = sys.stderr
+
+    class _Buffer:
+        def __init__(self):
+            self.parts = []
+
+        def write(self, text):
+            self.parts.append(str(text))
+            return len(str(text))
+
+        def flush(self):
+            return None
+
+        def getvalue(self):
+            return "".join(self.parts)
+
+    class DummyFactor:
+        def transform(self, ohlcv_frame, context=None):
+            trade_dates = pd.to_datetime(ohlcv_frame["trade_date"])
+            return pd.DataFrame(
+                {
+                    "MA5": np.linspace(1.0, 2.0, len(trade_dates)),
+                },
+                index=trade_dates,
+            )
+
+    class DummyRanker:
+        label_horizon = 20
+
+        def fit_predict(self, panel_features, panel_targets):
+            feature_index = panel_features.index
+            result = panel_features[["stock_code"]].copy()
+            result["model_score_raw"] = np.linspace(0.1, 0.9, len(result))
+            result["model_score"] = np.linspace(60.0, 90.0, len(result))
+            metadata = {
+                "train_rows": len(result) // 2,
+                "valid_rows": len(result) // 4,
+                "feature_count": 1,
+                "top_features": [{"feature_name": "MA5", "importance": 1.0, "importance_weight": 1.0}],
+            }
+            result.index = feature_index
+            return result, metadata
+
+    def stub_load_stock_data_batch(self, stock_codes, days=365):
+        batch_map = {}
+        for idx, stock_code in enumerate(stock_codes, start=1):
+            dates = pd.date_range("2024-01-02", periods=80, freq="B")
+            close = np.linspace(10 + idx, 14 + idx, len(dates))
+            batch_map[stock_code] = pd.DataFrame(
+                {
+                    "Open": close * 0.99,
+                    "Close": close,
+                    "High": close * 1.01,
+                    "Low": close * 0.98,
+                    "Volume": np.linspace(1000, 2000, len(dates)),
+                },
+                index=dates,
+            ).rename_axis("date")
+        return batch_map
+
+    StockAnalyzer.load_stock_data_batch = stub_load_stock_data_batch
+    analyzer_module.create_factor_set = lambda *args, **kwargs: DummyFactor()
+    analyzer_module.LightGBMRankerPipeline = DummyRanker
+    sys.stderr = _Buffer()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            analyzer = StockAnalyzer(db_dir=tmp_dir)
+            result = analyzer.backtest_portfolio(
+                stock_codes=["00001", "00002", "00003"],
+                days=120,
+                top_n=2,
+                analysis_mode="lightgbm",
+                show_progress=True,
+            )
+            output = sys.stderr.getvalue()
+            analyzer.close()
+    finally:
+        sys.stderr = original_stderr
+        StockAnalyzer.load_stock_data_batch = original_load_stock_data_batch
+        analyzer_module.create_factor_set = original_create_factor_set
+        analyzer_module.LightGBMRankerPipeline = original_ranker_cls
+
+    assert result is not None
+    assert "phase=lightgbm_prepare" in output
+    assert "phase=lightgbm_finalize" in output
+    assert "feature_ready=" in output
+    assert "prepared=" in output
+    assert "predicted=" in output
+    assert "stocks_done=" in output
+    assert "eta=" in output
+
+
 def test_validation_frame_helpers_trim_columns():
     feature_frame = pd.DataFrame(
         {
@@ -907,6 +1102,7 @@ if __name__ == "__main__":
     test_backtest_portfolio_uses_all_hk_stocks_when_stock_codes_missing()
     test_backtest_hk_market_delegates_to_portfolio_builder()
     test_backtest_portfolio_supports_parallel_analysis()
+    test_backtest_portfolio_supports_lightgbm_analysis_mode()
     test_stock_analyzer_reads_from_new_data_architecture_without_legacy_db()
     test_backtest_hk_market_factor_mode_does_not_require_strategy_signals()
     test_backtest_portfolio_factor_mode_supports_parallel_analysis()
@@ -914,4 +1110,5 @@ if __name__ == "__main__":
     test_backtest_portfolio_factor_mode_uses_batch_analysis()
     test_validation_frame_helpers_trim_columns()
     test_validation_batch_size_scales_down_without_dropping_stocks()
+    test_backtest_portfolio_lightgbm_mode_reports_progress_details()
     print("hk market topn tests passed")

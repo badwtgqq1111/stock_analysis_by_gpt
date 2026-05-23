@@ -42,6 +42,20 @@ uv sync --dev
 
 `uv` 会自动创建并管理 `.venv`。所有命令统一使用 `uv run python`，数据目录默认 `./assets`。
 
+如果你在 **macOS** 上准备使用 `LightGBM` 排序模式，先补上系统运行时依赖：
+
+```bash
+brew install libomp
+```
+
+然后再执行：
+
+```bash
+uv sync --dev
+```
+
+否则在运行 `--analysis-mode lightgbm` 时，可能会遇到 `Library not loaded: @rpath/libomp.dylib`。
+
 项目通过 `pyproject.toml` 中的 `[tool.uv.sources]` 将 `akshare` 指向同级目录 `../akshare` 并以可编辑模式安装；如果你的本地目录结构不同，先调整这一路径再执行 `uv sync`。
 
 港股历史同步默认优先使用 `akshare_eastmoney`。如果显式指定 `--data-source sina`，本地 `akshare` 会通过解码池复用预热后的 MiniRacer context，macOS 上也不需要默认降低整体并发；`--sina-max-concurrency` 仅作为兼容旧实现或异常环境的手动兜底。
@@ -152,6 +166,22 @@ uv run python stock_analyzer.py select_stocks \
   --export-csv output/selected_top10
 ```
 
+使用 LightGBM Ranker 直接训练并排序：
+
+```bash
+brew install libomp   # macOS 需要先安装一次
+uv sync
+
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --initial-capital 100000 \
+  --factor-set qlib_alpha158 \
+  --signal-recipes low_price_setup,range_breakout,box_pullback \
+  --export-csv output/lightgbm_top10
+```
+
 写信号层+批次号：
 
 ```bash
@@ -171,7 +201,7 @@ uv run python stock_analyzer.py select_stocks \
 | `--max-workers` | 并发线程数 | 0（自动） |
 | `--show-progress` | 显示进度 | 关 |
 | `--fast-mode` | 跳过组合净值回放 | 关 |
-| `--analysis-mode` | `factor` 或 `strategy` | `factor` |
+| `--analysis-mode` | `factor`、`strategy` 或 `lightgbm` | `factor` |
 | `--factor-set` | 因子集名称 | `qlib_alpha158` |
 | `--signal-recipes` | 信号 recipe，逗号分隔；可用 `low_price_setup`,`range_breakout`,`box_pullback` | `low_price_setup` |
 | `--export-csv` | 导出结果路径 | 不导出 |
@@ -186,6 +216,8 @@ uv run python stock_analyzer.py select_stocks \
 
 `factor` 模式下的批大小会根据股票总数、`--max-workers` 和当前设备可用内存自动调整，
 低内存环境会主动缩小批次，避免单批过大导致长时间无输出或内存压力过高。
+
+`lightgbm` 模式第一版会在一次命令中完成训练和预测，不依赖 `validate_factors` 生成的权重缓存；它直接复用 `factor_set` 生成的日频特征，并按未来收益构造横截面排序标签。
 
 导出文件：`{base}_ranking.csv`、`{base}_selected.csv`、`{base}_watchlist.csv`。
 

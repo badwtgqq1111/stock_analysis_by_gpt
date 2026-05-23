@@ -6,6 +6,7 @@
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from data.ingest.service import MarketDataService
 from data.model import normalize_ohlcv_frame
 from factor_engine import create_factor_set, list_factor_sets
+from factor_engine.ml.lightgbm_ranker import LightGBMRankerPipeline, _load_lightgbm_ranker_class
 
 
 def _make_ohlcv_frame(rows=90):
@@ -98,9 +100,96 @@ def test_service_can_compute_and_persist_factor_set():
             service.close()
 
 
+def test_lightgbm_ranker_loader_reports_missing_libomp_on_macos():
+    original_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "lightgbm":
+            raise OSError("dlopen(...): Library not loaded: @rpath/libomp.dylib")
+        return original_import(name, globals, locals, fromlist, level)
+
+    with patch("platform.system", return_value="Darwin"):
+        with patch("builtins.__import__", side_effect=fake_import):
+            try:
+                _load_lightgbm_ranker_class()
+                raised = None
+            except ImportError as exc:
+                raised = exc
+
+    assert raised is not None
+    assert "brew install libomp" in str(raised)
+    assert "uv sync" in str(raised)
+
+
+def test_lightgbm_ranker_builds_risk_adjusted_target():
+    pipeline = LightGBMRankerPipeline(label_horizon=20, drawdown_horizon=60, drawdown_penalty_weight=1.0)
+    merged = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2025-01-02", "2025-01-02"]),
+            "stock_code": ["00001", "00002"],
+            "target_return": [0.12, 0.10],
+            "target_drawdown": [-0.08, -0.01],
+            "target_max_return": [0.36, 0.11],
+        }
+    )
+
+    scored = pipeline._build_training_target_frame(merged)
+
+    assert "target_score" in scored.columns
+    assert np.isclose(scored.loc[0, "target_score"], 0.061)
+    assert np.isclose(scored.loc[1, "target_score"], 0.09)
+    assert scored.loc[1, "target_score"] > scored.loc[0, "target_score"]
+
+
+def test_lightgbm_ranker_target_prefers_monthly_breakout_shape():
+    pipeline = LightGBMRankerPipeline(label_horizon=20, drawdown_horizon=20, drawdown_penalty_weight=1.0)
+    merged = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2025-01-02", "2025-01-02"]),
+            "stock_code": ["00901", "00902"],
+            "target_return": [0.19, 0.16],
+            "target_drawdown": [-0.05, -0.04],
+            "target_max_return": [0.33, 0.18],
+        }
+    )
+
+    scored = pipeline._build_training_target_frame(merged)
+
+    assert scored.loc[0, "target_breakout_bonus"] > 0
+    assert np.isclose(scored.loc[1, "target_breakout_bonus"], 0.0)
+    assert scored.loc[0, "target_score"] > scored.loc[1, "target_score"]
+
+
+def test_lightgbm_ranker_excludes_target_columns_from_features():
+    pipeline = LightGBMRankerPipeline()
+    merged = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2025-01-02"]),
+            "stock_code": ["00001"],
+            "MA5": [1.01],
+            "STD20": [0.12],
+            "target_return": [0.08],
+            "target_drawdown": [-0.03],
+            "target_max_return": [0.11],
+            "target_drawdown_penalty": [0.03],
+            "target_breakout_bonus": [0.0],
+            "target_score": [0.05],
+            "label": [4],
+        }
+    )
+
+    feature_columns = pipeline._resolve_feature_columns(merged)
+
+    assert feature_columns == ["MA5", "STD20"]
+
+
 if __name__ == "__main__":
     test_factor_registry_contains_qlib_sets()
     test_alpha360_shape_and_basics()
     test_alpha158_default_feature_count_and_values()
     test_service_can_compute_and_persist_factor_set()
+    test_lightgbm_ranker_loader_reports_missing_libomp_on_macos()
+    test_lightgbm_ranker_builds_risk_adjusted_target()
+    test_lightgbm_ranker_target_prefers_monthly_breakout_shape()
+    test_lightgbm_ranker_excludes_target_columns_from_features()
     print("factor engine tests passed")

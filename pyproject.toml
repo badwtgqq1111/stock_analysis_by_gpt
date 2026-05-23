@@ -9,6 +9,7 @@ dependencies = [
     "baostock",
     "demjson3",
     "duckdb",
+    "lightgbm",
     "matplotlib",
     "numpy",
     "pandas",

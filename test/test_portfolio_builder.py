@@ -286,6 +286,154 @@ def test_ranking_row_prefers_fresh_breakout_over_stale_sideways_candidate():
     assert stale_row["setup_type"] == "sideways"
 
 
+def test_ranking_row_prefers_lower_drawdown_for_lightgbm_candidates():
+    safer = {
+        "stock_code": "01901",
+        "backtest": {"total_return": 14.0, "win_rate": 60.0, "total_trades": 5},
+        "latest_expected_3m_score": 88.0,
+        "latest_matrix_score": 88.0,
+        "latest_regime_score": np.nan,
+        "latest_entry_type": "lightgbm_rank",
+        "latest_signal_tier": "strong",
+        "latest_signal_date": pd.Timestamp("2025-01-10"),
+        "current_signal_active": True,
+        "current_signal_actionable": True,
+        "current_signal_score": 88.0,
+        "avg_forward_return_60_signal": 7.0,
+        "avg_forward_return_60_watch": 1.0,
+        "factor_set": "qlib_alpha158",
+        "selection_source": "lightgbm_ranker",
+        "setup_type": "bottom_rebound",
+        "setup_score": 75.0,
+        "sideways_penalty": 1.0,
+        "signal_freshness_score": 96.0,
+        "signal_age_days": 1,
+        "factor_explanation": {"model_type": "lightgbm_ranker"},
+        "risk_adjusted_score": 84.0,
+        "latest_risk_score": 92.0,
+        "drawdown_penalty_score": 8.0,
+        "recent_drawdown": -0.02,
+    }
+    riskier = {
+        **safer,
+        "stock_code": "01902",
+        "risk_adjusted_score": 72.0,
+        "latest_risk_score": 58.0,
+        "drawdown_penalty_score": 42.0,
+        "recent_drawdown": -0.11,
+    }
+
+    safer_row = TopNPortfolioBuilder._build_ranking_row(safer)
+    riskier_row = TopNPortfolioBuilder._build_ranking_row(riskier)
+
+    assert safer_row["ranking_score"] > riskier_row["ranking_score"]
+    assert safer_row["selection_source"] == "lightgbm_ranker"
+    assert safer_row["drawdown_penalty_score"] < riskier_row["drawdown_penalty_score"]
+
+
+def test_ranking_row_prefers_startup_candidate_over_downtrend_candidate_for_lightgbm():
+    startup = {
+        "stock_code": "02901",
+        "backtest": {"total_return": 16.0, "win_rate": 61.0, "total_trades": 5},
+        "latest_expected_3m_score": 82.0,
+        "latest_matrix_score": 82.0,
+        "latest_regime_score": np.nan,
+        "latest_entry_type": "lightgbm_rank",
+        "latest_signal_tier": "strong",
+        "latest_signal_date": pd.Timestamp("2025-01-10"),
+        "current_signal_active": True,
+        "current_signal_actionable": True,
+        "current_signal_score": 82.0,
+        "avg_forward_return_60_signal": 7.5,
+        "avg_forward_return_60_watch": 1.0,
+        "factor_set": "qlib_alpha158",
+        "selection_source": "lightgbm_ranker",
+        "setup_type": "pre_breakout",
+        "setup_score": 78.0,
+        "sideways_penalty": 0.0,
+        "signal_freshness_score": 96.0,
+        "signal_age_days": 1,
+        "factor_explanation": {"model_type": "lightgbm_ranker"},
+        "risk_adjusted_score": 80.0,
+        "latest_risk_score": 88.0,
+        "drawdown_penalty_score": 6.0,
+        "recent_drawdown": -0.015,
+        "startup_score": 86.0,
+        "overheat_penalty_score": 8.0,
+        "downtrend_penalty_score": 0.0,
+        "trend_state": "startup",
+    }
+    downtrend = {
+        **startup,
+        "stock_code": "02902",
+        "risk_adjusted_score": 84.0,
+        "startup_score": 12.0,
+        "overheat_penalty_score": 2.0,
+        "downtrend_penalty_score": 55.0,
+        "trend_state": "downtrend",
+    }
+
+    startup_row = TopNPortfolioBuilder._build_ranking_row(startup)
+    downtrend_row = TopNPortfolioBuilder._build_ranking_row(downtrend)
+
+    assert startup_row["ranking_score"] > downtrend_row["ranking_score"]
+    assert startup_row["selection_source"] == "lightgbm_ranker"
+    assert downtrend_row["downtrend_penalty_score"] > startup_row["downtrend_penalty_score"]
+
+
+def test_ranking_row_prefers_startup_candidate_over_non_candidate_for_lightgbm():
+    startup = {
+        "stock_code": "03901",
+        "backtest": {"total_return": 18.0, "win_rate": 58.0, "total_trades": 5},
+        "latest_expected_3m_score": 83.0,
+        "latest_matrix_score": 83.0,
+        "latest_regime_score": np.nan,
+        "latest_entry_type": "lightgbm_rank",
+        "latest_signal_tier": "strong",
+        "latest_signal_date": pd.Timestamp("2025-01-10"),
+        "current_signal_active": True,
+        "current_signal_actionable": True,
+        "current_signal_score": 83.0,
+        "avg_forward_return_60_signal": 8.0,
+        "avg_forward_return_60_watch": 1.0,
+        "factor_set": "qlib_alpha158",
+        "selection_source": "lightgbm_ranker",
+        "setup_type": "pre_breakout",
+        "setup_score": 80.0,
+        "sideways_penalty": 0.0,
+        "signal_freshness_score": 95.0,
+        "signal_age_days": 1,
+        "factor_explanation": {"model_type": "lightgbm_ranker"},
+        "risk_adjusted_score": 78.0,
+        "latest_risk_score": 85.0,
+        "drawdown_penalty_score": 5.0,
+        "recent_drawdown": -0.012,
+        "startup_score": 88.0,
+        "overheat_penalty_score": 7.0,
+        "downtrend_penalty_score": 0.0,
+        "trend_state": "startup",
+        "startup_candidate": True,
+        "startup_candidate_score": 91.0,
+    }
+    non_candidate = {
+        **startup,
+        "stock_code": "03902",
+        "risk_adjusted_score": 90.0,
+        "latest_expected_3m_score": 92.0,
+        "startup_score": 42.0,
+        "trend_state": "continuation",
+        "startup_candidate": False,
+        "startup_candidate_score": 48.0,
+    }
+
+    startup_row = TopNPortfolioBuilder._build_ranking_row(startup)
+    non_candidate_row = TopNPortfolioBuilder._build_ranking_row(non_candidate)
+
+    assert startup_row["ranking_score"] > non_candidate_row["ranking_score"]
+    assert startup_row["startup_candidate"] is True
+    assert non_candidate_row["startup_candidate"] is False
+
+
 def test_low_price_setup_snapshot_identifies_breakout_and_bottom_rebound():
     dates = pd.date_range("2024-01-02", periods=90, freq="B")
 
@@ -348,5 +496,8 @@ if __name__ == "__main__":
     test_portfolio_builder_replay_generates_real_trades()
     test_portfolio_builder_replay_applies_transaction_costs()
     test_ranking_row_prefers_fresh_breakout_over_stale_sideways_candidate()
+    test_ranking_row_prefers_lower_drawdown_for_lightgbm_candidates()
+    test_ranking_row_prefers_startup_candidate_over_downtrend_candidate_for_lightgbm()
+    test_ranking_row_prefers_startup_candidate_over_non_candidate_for_lightgbm()
     test_low_price_setup_snapshot_identifies_breakout_and_bottom_rebound()
     print("portfolio builder tests passed")

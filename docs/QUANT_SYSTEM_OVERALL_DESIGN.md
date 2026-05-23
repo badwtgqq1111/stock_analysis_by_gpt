@@ -228,15 +228,21 @@ flowchart TB
     FeatureStore --> Valid[factor_validation<br/>IC/RankIC/分组收益/换手率]
     FeatureStore --> ML[factor_engine/ml<br/>LightGBM Ranker]
     FeatureStore --> Deep[factor_engine/deep<br/>Transformer]
+    FeatureStore --> LNN[factor_engine/lnn<br/>CfC/LTC 液态神经网络]
+    FeatureStore --> Phase[factor_engine/phase<br/>PhaseFormer 相位模型]
     FeatureStore --> Symbolic[factor_engine/symbolic<br/>GP/gplearn]
     Recipes --> SignalScore[pattern_scores<br/>可解释形态分]
     ML --> ModelScore[model_score<br/>排序分数]
     Deep --> SeqScore[sequence_score<br/>时序分数]
+    LNN --> LNNScore[return_score + vol_score<br/>连续时间分数]
+    Phase --> PhaseScore[direction_score<br/>相位周期分数]
     Symbolic --> Candidate[候选公式因子]
     Candidate --> Valid
     SignalScore --> Post[postprocess<br/>标准化/中性化/合成]
     ModelScore --> Post
     SeqScore --> Post
+    LNNScore --> Post
+    PhaseScore --> Post
     Valid --> Post
     Post --> PortfolioInput[组合输入<br/>ranking_score]
 ```
@@ -324,12 +330,14 @@ strategy_signals/               # 配方目录（可扩展的形态库）
 
 #### 4.2.3 机器学习因子组合路线
 
-除手工信号配方外，系统规划四条 ML 路线学习因子间的非线性组合关系。每条路线有明确优先级和适用场景：
+除手工信号配方外，系统规划六条 ML 路线学习因子间的非线性组合关系。每条路线有明确优先级和适用场景：
 
 | 优先级 | 路线 | 推荐工具 | 适用场景 | 优点 | 风险 |
 |---|---|---|---|---|---|
 | **P1** | GBDT / Ranker | LightGBM | 截面选股、特征筛选、排序学习 | 训练快、对表格数据友好、适合 TopN | 时序建模能力有限，需防标签泄露 |
-| **P2** | 深度时序 | Time Series Transformer | 多步预测、序列信号挖掘 | 能建模复杂时序关系 | 训练成本高、调参复杂 |
+| **P2** | 深度时序（Transformer） | Time Series Transformer | 多步预测、序列信号挖掘 | 能建模复杂时序关系 | 训练成本高、调参复杂 |
+| **P2** | 液态神经网络（LNN/CfC） | ncps CfC / LTC / NCP | 连续时间建模、非均匀采样、价格+波动率双预测、择时 | 显存极低（≈6GB vs GRU 120GB）、自适应 τ、对噪声/黑天鹅鲁棒、ODE 可解释 | 生态不成熟、工具链少、调参依赖经验 |
+| **P2** | 相位轻量模型（PhaseFormer） | PhaseFormer | 高频/日内方向预测、强周期性时序、低延迟场景 | 极轻量（≈1k 参数）、推理毫秒级、显式周期建模、高频场景 SOTA | 无公开实盘案例、参数容量有限、周期假设可能被黑天鹅打破 |
 | **P2** | 符号回归 / GP | gplearn / GA | 自动表达式搜索、可解释因子发现 | 因子公式直观，可发现非线性关系 | 容易过拟合、搜索成本高 |
 | **P3** | LLM 辅助研究 | LLM + 实验配置 | 候选假设生成、公式解释、实验编排 | 提高探索效率 | 不能替代验证，易生成看似合理但无效的假设 |
 
@@ -339,15 +347,15 @@ strategy_signals/               # 配方目录（可扩展的形态库）
 Alpha158 / Alpha360 / 手工信号配方
   -> feature matrix
   -> label matrix
-  -> LightGBM / Ranker / Transformer / GP
-  -> expected_return_score / ranking_score
+  -> LightGBM / Ranker / Transformer / CfC(LNN) / PhaseFormer / GP
+  -> expected_return_score / ranking_score / return_score + vol_score / direction_score
   -> factor_validation (IC / RankIC / 分组收益 / 换手率)
   -> TopN portfolio
 ```
 
 **P1（LightGBM Ranker）优先实现**，原因是当前系统的主要使用场景是全市场 TopN 选股，目标更接近"横截面排序"而不是"精确预测收益率"。
 
-**ML / GP 研究流程图：**
+**ML / GP / LNN / PhaseFormer 研究流程图：**
 
 ```mermaid
 flowchart LR
@@ -356,11 +364,17 @@ flowchart LR
     Label --> Split
     Split --> LGBM[LightGBM Ranker<br/>LambdaRank/rank_xendcg]
     Split --> GP[GP/gplearn<br/>表达式搜索]
+    Split --> LNN[CfC/LTC<br/>连续时间ODE]
+    Split --> Phase[PhaseFormer<br/>相位周期建模]
     GP --> Candidate[候选公式因子]
     Candidate --> Complexity[复杂度/相关性/换手率过滤]
     LGBM --> ModelScore[model_score]
+    LNN --> LNNScore[return_score + vol_score]
+    Phase --> PhaseScore[direction_score]
     Complexity --> NewFactor[注册候选因子]
     ModelScore --> Validation[factor_validation]
+    LNNScore --> Validation
+    PhaseScore --> Validation
     NewFactor --> Validation
     Validation --> Select[select_stocks<br/>TopN 排序]
     Select --> Portfolio[组合回测与 signal 落库]
@@ -398,11 +412,21 @@ factor_engine/
 │   ├── labels.py              # 收益标签、分类标签
 │   ├── lightgbm_ranker.py     # LambdaRank / rank_xendcg 排序学习
 │   └── feature_selection.py   # 特征筛选与重要性分析
-├── deep/                      # [P2] Transformer 路线
+├── deep/                      # [P2] 深度时序路线
 │   ├── datasets.py            # 时序样本构造
 │   ├── transformer.py         # 时序 Transformer 模型
 │   ├── trainer.py             # 训练、验证、早停
 │   └── inference.py           # 批量推理与因子输出
+├── lnn/                       # [P2] 液态神经网络路线
+│   ├── model.py               # CfC/LTC/NCP 模型定义
+│   ├── datasets.py            # 非均匀时序样本构造（自动跳过节假日）
+│   ├── trainer.py             # ODE 训练、滚动窗口验证、早停
+│   └── inference.py           # 价格/波动率双预测与择时信号输出
+├── phase/                     # [P2] PhaseFormer 相位模型路线
+│   ├── model.py               # PhaseFormer 模型定义（相位Token + 轻量Transformer）
+│   ├── datasets.py            # 周期对齐时序样本构造
+│   ├── trainer.py             # 训练、周期检测、在线微调
+│   └── inference.py           # 方向预测与周期信号输出
 ├── symbolic/                  # [P2] 符号回归路线
 │   ├── function_set.py        # gplearn 函数集
 │   ├── search.py              # 表达式搜索
@@ -416,18 +440,18 @@ factor_engine/
     └── storage.py             # 中间结果缓存
 ```
 
-> **注意**：`ml/`、`deep/`、`symbolic/` 三个子目录在当前阶段（Phase 1-2）仅为代码组织占位，实际实现按 4.2.3 节优先级逐步填充，不追求一次性建完。
+> **注意**：`ml/`、`deep/`、`lnn/`、`phase/`、`symbolic/` 五个子目录在当前阶段（Phase 1-2）仅为代码组织占位，实际实现按 4.2.3 节优先级逐步填充，不追求一次性建完。
 
 #### 4.2.5 统一接口
 
-所有因子生成器（表达式、ML 模型、GP 搜索、信号配方）实现以下接口：
+所有因子生成器（表达式、ML 模型、GP 搜索、LNN、PhaseFormer、信号配方）实现以下接口：
 
 | 方法 | 用途 | 适用对象 |
 |---|---|---|
-| `fit(train_frame, valid_frame=None, config=None)` | 训练/估计 | LightGBM, Transformer, gplearn |
+| `fit(train_frame, valid_frame=None, config=None)` | 训练/估计 | LightGBM, Transformer, CfC/LTC, PhaseFormer, gplearn |
 | `transform(frame, context=None)` | 因子计算 | 所有因子生成器 |
-| `fit_transform(train_frame, valid_frame=None, config=None)` | 训练并输出训练期结果 | LightGBM, Transformer, gplearn |
-| `predict(frame, context=None)` | 样本外打分/预测 | LightGBM, Transformer |
+| `fit_transform(train_frame, valid_frame=None, config=None)` | 训练并输出训练期结果 | LightGBM, Transformer, CfC/LTC, PhaseFormer, gplearn |
+| `predict(frame, context=None)` | 样本外打分/预测 | LightGBM, Transformer, CfC/LTC, PhaseFormer |
 | `metadata()` | 返回因子名、依赖字段、参数、版本号 | 所有因子生成器 |
 
 数据流：
@@ -437,9 +461,305 @@ factor_engine/
 3. `factor_engine/signals` 提供条件组合框架，`strategy_signals/` 存放具体形态配方
 4. `factor_engine/ml` 将基础因子和原始特征拼成训练集，供 LightGBM 学习
 5. `factor_engine/deep` 将多资产时序窗口拼成序列样本，供 Transformer 学习
-6. `factor_engine/symbolic` 从基础算子和原始特征出发，用 gplearn 搜索新表达式
-7. 所有产出统一进入 `postprocess` 做标准化、中性化、合成
-8. 最终因子送入 `factor_validation` 和 `backtest_engine`
+6. `factor_engine/lnn` 将非均匀时序窗口拼成连续时间样本，供 CfC/LTC 学习
+7. `factor_engine/phase` 将周期对齐时序窗口拼成相位样本，供 PhaseFormer 学习
+8. `factor_engine/symbolic` 从基础算子和原始特征出发，用 gplearn 搜索新表达式
+9. 所有产出统一进入 `postprocess` 做标准化、中性化、合成
+10. 最终因子送入 `factor_validation` 和 `backtest_engine`
+
+#### 4.2.6 液态神经网络（LNN）路线详细设计
+
+##### 4.2.6.1 为什么 LNN 适合股票时序
+
+股票是**非平稳、多时间尺度、噪声强、事件驱动**的时序数据。传统模型的局限：
+
+- **RNN/LSTM/GRU**：离散等步长，周末/节假日与交易日同等看待；长依赖易梯度消失；显存大。
+- **Transformer**：离散+注意力窗口，对非均匀采样需插值，显存随窗口平方增长。
+
+液态神经网络（Liquid Neural Network, MIT 2020）用 **ODE 连续演化**，每个神经元有**动态时间常数 τ**：
+
+- 高 τ：慢变，抓长期趋势（如季度均线）
+- 低 τ：快变，抓短期波动（如日内跳空）
+
+这使得 LNN 天然适配金融时序的多尺度、非均匀、事件驱动特性。
+
+##### 4.2.6.2 LNN 变体选型
+
+| 变体 | 特点 | 适用场景 |
+|---|---|---|
+| **LTC**（Liquid Time-Constant） | 原始 ODE 版，表达力最强 | 研究探索、小规模精细建模 |
+| **CfC**（Closed-form Continuous-depth） | 闭式解，速度提升 5–10 倍 | **工业首选**，平衡速度与精度 |
+| **NCP**（Neural Circuit Policy） | 超小网络（<100 神经元） | 可解释性要求高、边缘部署 |
+
+**推荐**：生产环境使用 CfC，研究对比时加入 LTC 和 NCP。
+
+##### 4.2.6.3 LNN vs 传统模型对比
+
+| 维度 | LNN（CfC/NCP） | LSTM/GRU | Transformer |
+|---|---|---|---|
+| 时间建模 | 连续流动，自适应 τ | 离散等步长 | 离散+注意力窗口 |
+| 长时依赖 | 无梯度消失 | 依赖门控 | 依赖窗口大小 |
+| 非均匀采样 | 天然支持（跳过节假日） | 易崩 | 需插值 |
+| 显存（同等精度） | ≈6GB（GRU 的 5%） | ≈120GB | 数百 GB |
+| 鲁棒性（黑天鹅） | 强，事件驱动稀疏更新 | 弱，全时计算 | 弱，注意力敏感 |
+| 可解释性 | ODE 可解析 | 黑盒 | 黑盒 |
+
+##### 4.2.6.4 输入特征设计
+
+| 类别 | 特征 | 说明 |
+|---|---|---|
+| 基础行情 | OHLCV、收益率、对数收益率 | 标准价量 |
+| 趋势 | MA(5/20/60)、MACD、EMA | 多尺度趋势 |
+| 波动 | ATR、Bollinger Bands、RV（已实现波动率） | 波动率估计 |
+| 量价 | OBV、VWAP、量比 | 量价关系 |
+| 情绪/外部 | VIX、融资融券、北向资金 | 市场情绪 |
+
+时间对齐：**非均匀采样**，自动跳过节假日和停牌日，利用 LNN 天然支持不等间隔的优势。
+
+##### 4.2.6.5 模型结构
+
+```text
+输入层（20–30 特征）
+→ 2 层 CfC（隐藏单元 64–128，动态 τ，AutoNCP wiring）
+→ 全连接输出层
+```
+
+输出设计（三种模式）：
+
+| 模式 | 输出 | 损失函数 | 适用场景 |
+|---|---|---|---|
+| 收盘价回归 | 预测价格 | MSE / Huber | 单标的精细预测 |
+| 涨跌方向分类 | 涨/跌概率 | BCE / Focal Loss | 择时信号 |
+| 收益率+波动率双预测 | (μ, σ) | 联合损失 | **量化首选**，可同时生成择时+风控信号 |
+
+##### 4.2.6.6 训练流水线
+
+```mermaid
+flowchart LR
+    Data[clean OHLCV + 技术指标] --> Norm[归一化<br/>MinMax/Z-Score]
+    Norm --> Window[滚动窗口<br/>2年训练/1周预测]
+    Window --> CfC[CfC 模型<br/>AdamW + Huber Loss]
+    CfC --> Pred[预测输出<br/>收益率 + 波动率]
+    Pred --> Signal[择时信号<br/>收益率>阈值→买入]
+    Pred --> Risk[风控信号<br/>高波动→降仓]
+    Signal --> Validation[factor_validation<br/>IC/夏普/最大回撤]
+    Risk --> Validation
+```
+
+训练规范：
+
+- 优化器：AdamW，学习率 1e-3 → 1e-4（余弦退火）
+- 正则：Dropout(0.1–0.3)、权重衰减、早停（patience=10）
+- 验证：滚动窗口（walk-forward），不使用随机切分
+- 序列长度：60–120 个交易日
+- 批大小：32–64
+
+##### 4.2.6.7 量化信号生成
+
+LNN 输出转化为可交易信号：
+
+| 信号类型 | 生成逻辑 | 下游用途 |
+|---|---|---|
+| 择时信号 | 预测收益率 > 阈值 → 买入；< -阈值 → 卖出 | 单标的交易 |
+| 选股评分 | 全市场预测收益率排序，选 Top N | 组合构建 |
+| 动态仓位 | 结合波动率预测，高波动降仓 | 风控层输入 |
+
+##### 4.2.6.8 实证参考（公开研究）
+
+| 数据集 | 模型 | 指标 | 结果 |
+|---|---|---|---|
+| AAPL/TSLA 个股 | LTC | MSE / MAPE | 0.000317 / 1.8% |
+| S&P500 30 天收益 | CfC | MAE / 方向准确率 | 1.4% / 95.8% |
+| 显存对比（广发金工） | GRU vs LTC vs CfC | 显存占用 | 120GB / 80GB / 6GB |
+
+> **注意**：高方向准确率不等于高收益。实际部署需考虑交易成本、滑点、极端事件超出训练分布等因素。
+
+##### 4.2.6.9 代码框架（PyTorch + ncps）
+
+依赖：`torch`, `ncps`, `pandas`, `numpy`, `scikit-learn`
+
+```python
+import torch
+import torch.nn as nn
+from ncps.wirings import AutoNCP
+from ncps.torch import CfC
+
+class StockLNN(nn.Module):
+    """CfC 液态神经网络股票预测模型"""
+    def __init__(self, input_dim=25, hidden_dim=128, output_dim=2):
+        super().__init__()
+        # AutoNCP 自动生成稀疏连接拓扑
+        self.wiring = AutoNCP(hidden_dim, output_dim)
+        self.cfc = CfC(input_dim, self.wiring, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)  # output: (return, volatility)
+
+    def forward(self, x, timespans=None):
+        # x: (batch, seq_len, input_dim)
+        # timespans: (batch, seq_len, 1) 非均匀时间间隔
+        out, _ = self.cfc(x, timespans=timespans)
+        return self.fc(out[:, -1, :])
+```
+
+##### 4.2.6.10 风险与局限
+
+| 风险 | 说明 | 缓解措施 |
+|---|---|---|
+| 预测≠盈利 | 高准确率不代表高收益（交易成本、滑点） | 回测必须包含真实费用模型 |
+| 过拟合 | 小样本易过拟合 | 严格滚动验证 + 早停 + Dropout |
+| 黑天鹅失效 | 极端事件超出训练分布 | 结合规则风控（熔断/止损） |
+| 生态不成熟 | 工具链少，社区小 | 封装统一接口，降低切换成本 |
+
+##### 4.2.6.11 与系统集成方式
+
+LNN 模块通过统一的 `fit/transform/predict` 接口接入系统：
+
+```text
+data/store (clean OHLCV + feature)
+  → factor_engine/lnn/datasets.py (非均匀时序样本构造)
+  → factor_engine/lnn/model.py (CfC 模型)
+  → factor_engine/lnn/trainer.py (滚动训练)
+  → factor_engine/lnn/inference.py (预测输出: return_score + vol_score)
+  → postprocess (标准化/中性化)
+  → factor_validation (IC/夏普/回撤)
+  → backtest_engine (组合回测)
+```
+
+LNN 产出的 `return_score` 和 `vol_score` 与 LightGBM 的 `model_score`、Transformer 的 `sequence_score` 地位等同，统一进入后处理和验证流水线。
+
+#### 4.2.7 PhaseFormer 相位轻量模型路线详细设计
+
+##### 4.2.7.1 为什么 PhaseFormer 适合股票时序
+
+PhaseFormer（2026 ICLR）是一种基于**相位建模**的极轻量时序预测模型，核心思想：时序数据中存在跨周期的相同偏移模式（Phase Token），用极少参数即可捕获。
+
+股票数据与 PhaseFormer 的契合点：
+
+- **强周期性**：日/周/月节律、日内分钟波动、季报周期，天然符合"跨周期相同偏移"假设
+- **高噪声高波动**：论文明确验证在"复杂、高波动现实数据集"表现优异
+- **低延迟需求**：量化高频/日内策略对推理速度敏感，PhaseFormer 推理毫秒级
+- **极低算力**：≈1k 参数（比 PatchTST 少 99.9%），单卡可跑全 A 股分钟数据
+
+##### 4.2.7.2 模型核心机制
+
+| 组件 | 作用 |
+|---|---|
+| Phase Token | 将输入序列按周期分段，提取跨周期的相位偏移特征 |
+| 轻量 Transformer | 极少层注意力，学习相位间关系 |
+| 周期对齐 | 显式建模周期长度，输出对齐到目标预测窗口 |
+
+关键特性：
+
+- 参数量：≈1k（vs Transformer 数百万、LNN 数千）
+- 推理延迟：毫秒级
+- 显存：极低，单 GPU 可处理全市场分钟数据
+
+##### 4.2.7.3 PhaseFormer vs 其他深度时序模型
+
+| 维度 | PhaseFormer | Transformer | LNN（CfC） |
+|---|---|---|---|
+| 参数量 | ≈1k | 数百万 | 数千–数万 |
+| 推理速度 | 毫秒级 | 百毫秒级 | 十毫秒级 |
+| 周期建模 | 显式（Phase Token） | 隐式（注意力） | 隐式（动态 τ） |
+| 非均匀采样 | 需周期对齐预处理 | 需插值 | 天然支持 |
+| 适用频率 | **高频/日内首选** | 日频/多步 | 日频/多尺度 |
+| 成熟度 | 学术阶段，无实盘案例 | 工业成熟 | 早期探索 |
+
+##### 4.2.7.4 输入特征与周期设定
+
+周期参数（需根据频率设定）：
+
+| 数据频率 | 周期长度 | 说明 |
+|---|---|---|
+| 1 分钟 | 240（4 小时） | A 股日内交易时段 |
+| 5 分钟 | 48 | 日内 48 根 K 线 |
+| 日频 | 5（周）/ 20（月） | 交易周/月周期 |
+| 周频 | 52 | 年度周期 |
+
+输入特征：
+
+| 类别 | 特征 |
+|---|---|
+| 基础行情 | OHLCV、收益率 |
+| 技术指标 | RSI、MACD、VWAP、布林带 |
+| 量价 | 成交量变化率、资金流向 |
+| 周期辅助 | 日内时段编码、周几编码、月份编码 |
+
+##### 4.2.7.5 输出设计
+
+| 模式 | 输出 | 损失函数 | 适用场景 |
+|---|---|---|---|
+| 涨跌方向分类 | 涨/跌概率 | BCE / Focal Loss | **首选**，比价格回归更稳 |
+| 价格回归 | 预测价格 | MSE / Huber | 精细预测 |
+| 多步方向 | 未来 N 步涨跌序列 | 序列 BCE | 趋势持续性判断 |
+
+**推荐先做涨跌方向（二分类）**，比价格回归更稳定、更适合生成交易信号。
+
+##### 4.2.7.6 训练流水线
+
+```mermaid
+flowchart LR
+    Data[clean OHLCV + 技术指标] --> Period[周期检测<br/>FFT/自相关]
+    Period --> Align[周期对齐<br/>Phase Token 构造]
+    Align --> Window[滚动窗口<br/>walk-forward]
+    Window --> PF[PhaseFormer<br/>AdamW + Focal Loss]
+    PF --> Pred[方向预测<br/>涨/跌概率]
+    Pred --> Signal[direction_score<br/>择时信号]
+    Signal --> Validation[factor_validation<br/>IC/胜率/盈亏比]
+```
+
+训练规范：
+
+- 优化器：AdamW，学习率 1e-3（模型极小，收敛快）
+- 正则：Dropout(0.1)、早停（patience=5）
+- 验证：滚动窗口（walk-forward），不使用随机切分
+- 周期检测：训练前用 FFT / 自相关确定主周期，动态调整 Phase Token 长度
+- 在线微调：牛熊切换时触发重训练（检测预测准确率下降）
+
+##### 4.2.7.7 预期效果（参考同类模型）
+
+| 频率 | 方向准确率 | 说明 |
+|---|---|---|
+| 日频 | 58–65% | 保守估计，需扣除交易成本 |
+| 分钟频 | 62–70% | 高频场景优势更明显 |
+
+> **注意**：以上为同类相位/周期模型（Pegformer、CycleNet）在 A 股的参考数据，PhaseFormer 本身尚无公开金融实证。
+
+##### 4.2.7.8 风险与局限
+
+| 风险 | 说明 | 缓解措施 |
+|---|---|---|
+| 无实盘验证 | 公开数据仅非金融数据集 | 先回测验证，小资金试单 |
+| 周期假设脆弱 | 牛熊切换/黑天鹅打破周期 | 动态周期检测 + 在线微调 |
+| 参数容量有限 | ≈1k 参数难以融合复杂多因子 | 定位为高频/日内专用，不替代大模型 |
+| 学术阶段 | 工具链不完善 | 封装统一接口，降低切换成本 |
+
+##### 4.2.7.9 与系统集成方式
+
+PhaseFormer 模块通过统一的 `fit/transform/predict` 接口接入系统：
+
+```text
+data/store (clean OHLCV + feature)
+  → factor_engine/phase/datasets.py (周期检测 + Phase Token 构造)
+  → factor_engine/phase/model.py (PhaseFormer 模型)
+  → factor_engine/phase/trainer.py (滚动训练 + 在线微调)
+  → factor_engine/phase/inference.py (方向预测输出: direction_score)
+  → postprocess (标准化/中性化)
+  → factor_validation (IC/胜率/盈亏比)
+  → backtest_engine (组合回测)
+```
+
+PhaseFormer 产出的 `direction_score` 与 LightGBM 的 `model_score`、LNN 的 `return_score`、Transformer 的 `sequence_score` 地位等同，统一进入后处理和验证流水线。
+
+##### 4.2.7.10 与 LNN 的互补关系
+
+| 维度 | LNN（CfC） | PhaseFormer |
+|---|---|---|
+| 核心优势 | 连续时间、自适应多尺度 | 显式周期、极轻量 |
+| 最佳频率 | 日频、多尺度混合 | **高频/日内** |
+| 输出 | 收益率 + 波动率 | 涨跌方向 |
+| 组合使用 | 提供风控信号（波动率） | 提供择时信号（方向） |
+
+两者可组合：PhaseFormer 负责高频方向判断，LNN 负责波动率估计和风控，形成互补的信号体系。
 
 ### 4.3 策略执行与交易层
 
@@ -551,6 +871,8 @@ flowchart LR
 | `Dash + Plotly` | 交互式浏览器研究看板 |
 | `LightGBM` | 结构化因子的非线性建模和特征重要性排序 |
 | `Time Series Transformer` | 多特征时间序列预测与复杂序列表示学习 |
+| `ncps (CfC/LTC/NCP)` | 液态神经网络，连续时间 ODE 建模，低显存高鲁棒 |
+| `PhaseFormer` | 相位轻量时序模型，极低参数量，显式周期建模，高频/日内首选 |
 | `gplearn` | 符号回归和可解释公式挖掘 |
 
 ## 6. 当前仓库现状映射
@@ -667,6 +989,8 @@ flowchart LR
 - 可交互的 K 线、因子、模型与组合回测工作台（`web_app/`）
 - 符号回归/GP 实验线（P2，视 P1 效果决定投入）
 - 深度时序 Transformer 实验线（P2，视 P1 效果决定投入）
+- 液态神经网络 CfC/LTC 实验线（P2，连续时间建模+波动率预测，视 P1 效果决定投入）
+- PhaseFormer 相位模型实验线（P2，高频/日内方向预测，视 P1 效果决定投入）
 
 ### Phase 3：建立模拟交易闭环
 
@@ -718,6 +1042,8 @@ flowchart LR
 - `web_app/` K 线页、因子页、回测页、模型页
 - 符号回归/GP 自动因子挖掘实验线
 - 深度时序 Transformer 实验线
+- 液态神经网络（LNN/CfC）连续时间预测实验线
+- PhaseFormer 相位模型高频/日内方向预测实验线
 
 ## 9. 建议的目录演进
 
@@ -732,6 +1058,8 @@ stock_analysis_by_gpt/
 │   ├── signals/          # 信号配方框架
 │   ├── ml/               # [P1] LightGBM
 │   ├── deep/             # [P2] Transformer
+│   ├── lnn/              # [P2] 液态神经网络 CfC/LTC/NCP
+│   ├── phase/            # [P2] PhaseFormer 相位轻量模型
 │   ├── symbolic/         # [P2] gplearn/GP
 │   ├── postprocess/
 │   └── cache/

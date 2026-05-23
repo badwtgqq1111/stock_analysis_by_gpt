@@ -489,6 +489,61 @@ def test_run_cli_select_stocks_supports_signal_recipes():
     assert stock_analyzer_cls.last_call["signal_recipes"] == ("low_price_setup", "range_breakout")
 
 
+def test_run_cli_select_stocks_supports_lightgbm_mode():
+    stock_analyzer_cls, _ = _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        analyzer = stock_analyzer.StockAnalyzer()
+        cache_dir = Path(tmp_dir) / "factor_weight_cache"
+        validation_stock_codes = analyzer.get_all_stocks()
+        cache_key, _ = stock_analyzer._build_validation_cache_key(
+            factor_set="qlib_alpha158",
+            validation_days=365,
+            validation_horizons=(1, 5, 10, 20),
+            validation_quantiles=5,
+            validation_min_observations=5,
+            validation_stock_codes=validation_stock_codes,
+            validation_factor_scope="scoring_only",
+            validated_feature_names=analyzer.get_score_factor_names(),
+        )
+        cache_payload = {
+            "factor_score_config": {
+                "trend": {"MA20": {"weight": 1.0, "higher_is_better": False}},
+                "weights": {"trend_score": 1.0, "quality_score": 0.0, "risk_score": 0.0},
+            },
+            "factor_scorecard": [
+                {
+                    "feature_name": "MA20",
+                    "component": "trend",
+                    "validation_score": 1.0,
+                    "recommended_factor_weight": 1.0,
+                }
+            ],
+        }
+
+        cache_path = Path(cache_dir) / f"{cache_key}.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(stock_analyzer.json.dumps(cache_payload), encoding="utf-8")
+
+        original_cache_dir = stock_analyzer._get_validation_cache_dir
+        stock_analyzer._get_validation_cache_dir = lambda _analyzer: cache_dir
+        try:
+            stock_analyzer.run_cli(
+                [
+                    "select_stocks",
+                    "--analysis-mode",
+                    "lightgbm",
+                ]
+            )
+        finally:
+            stock_analyzer._get_validation_cache_dir = original_cache_dir
+
+    assert stock_analyzer_cls.last_call["analysis_mode"] == "lightgbm"
+
+
 def test_run_cli_all_hk_supports_export_csv():
     _install_stubs()
     if "stock_analyzer" in sys.modules:
@@ -838,6 +893,7 @@ if __name__ == "__main__":
     test_run_cli_all_hk_supports_max_workers()
     test_run_cli_all_hk_supports_strategy_mode_override()
     test_run_cli_all_hk_supports_progress_and_fast_mode()
+    test_run_cli_select_stocks_supports_lightgbm_mode()
     test_run_cli_all_hk_supports_export_csv()
     test_run_cli_all_hk_supports_persist_signals()
     test_run_cli_supports_review_batch_mode()

@@ -59,6 +59,44 @@ def _format_factor_reason_lines(item):
         return []
 
     lines = []
+    if explanation.get("model_type") == "lightgbm_ranker":
+        model_metadata = explanation.get("model_metadata") or {}
+        text_summary = explanation.get("text_summary", "")
+        if text_summary:
+            lines.append(f"  选股理由: {text_summary}")
+        lines.append(
+            "  模型分解: "
+            f"risk_adjusted={model_metadata.get('risk_adjusted_score', float('nan')):.1f}, "
+            f"model={model_metadata.get('latest_model_score', float('nan')):.1f}, "
+            f"risk={model_metadata.get('risk_score', float('nan')):.1f}"
+        )
+        lines.append(
+            "  风险约束: "
+            f"drawdown_penalty={model_metadata.get('drawdown_penalty_score', float('nan')):.1f}, "
+            f"recent_drawdown={model_metadata.get('recent_drawdown', float('nan')):.2%}, "
+            f"label_horizon={model_metadata.get('label_horizon')}, "
+            f"rolling_windows={model_metadata.get('rolling_windows')}"
+        )
+        lines.append(
+            "  战术状态: "
+            f"startup={item.get('startup_score', float('nan')):.1f}, "
+            f"startup_candidate={item.get('startup_candidate')}, "
+            f"startup_candidate_score={item.get('startup_candidate_score', float('nan')):.1f}, "
+            f"overheat_penalty={item.get('overheat_penalty_score', float('nan')):.1f}, "
+            f"downtrend_penalty={item.get('downtrend_penalty_score', float('nan')):.1f}, "
+            f"trend_state={item.get('trend_state')}"
+        )
+        if top_positive:
+            feature_parts = []
+            for factor in top_positive[:5]:
+                feature_parts.append(
+                    f"{factor.get('factor')}("
+                    f"w={factor.get('weight', 0):.2f}, "
+                    f"importance={factor.get('weighted_contribution', float('nan')):.2f})"
+                )
+            lines.append("  全局重要特征: " + ", ".join(feature_parts))
+        return lines
+
     lines.append(
         "  因子总分: "
         f"composite={component_scores.get('composite_score', float('nan')):.1f}, "
@@ -847,64 +885,72 @@ def main_select_stocks(
     validation_factor_scope="scoring_only",
     signal_recipes=None,
 ):
-    """从验证权重缓存读取推荐权重，执行全港股 TopN 选股+回测，不跑因子验证。"""
+    """执行全港股 TopN 选股+回测。factor 模式读取验证权重缓存，lightgbm 模式直接训练排序模型。"""
     print("=" * 80)
-    print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选（基于验证权重）")
+    if str(analysis_mode).strip().lower() == "lightgbm":
+        print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选（LightGBM Ranker）")
+    else:
+        print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选（基于验证权重）")
     print("=" * 80)
 
     analyzer = StockAnalyzer()
     try:
-        effective_scope = validation_factor_scope or "scoring_only"
-        validation_stock_codes = analyzer.get_all_stocks()
-        if validation_stock_limit is not None:
-            validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]
-        validated_feature_names = None
-        if effective_scope == "scoring_only":
-            validated_feature_names = analyzer.get_score_factor_names()
-        effective_validation_days = validation_days or days
-
-        cache_key, _ = _build_validation_cache_key(
-            factor_set=factor_set,
-            validation_days=effective_validation_days,
-            validation_horizons=validation_horizons,
-            validation_quantiles=validation_quantiles,
-            validation_min_observations=validation_min_observations,
-            validation_stock_codes=validation_stock_codes,
-            validation_factor_scope=effective_scope,
-            validated_feature_names=validated_feature_names,
-        )
-        cache_dir = _get_validation_cache_dir(analyzer)
-        cached_payload = _load_validation_weight_cache(cache_dir, cache_key)
-
-        if cached_payload is None:
-            print(
-                f"[ERROR] 未找到验证权重缓存: key={cache_key}\n"
-                f"  请先运行 validate_factors 生成权重缓存，再运行 select_stocks。"
-            )
-            return None
-
-        candidate_scorecard = _sanitize_validation_scorecard(
-            pd.DataFrame(cached_payload.get("factor_scorecard") or [])
-        )
-        if not _is_usable_validation_scorecard(candidate_scorecard):
-            print(f"[ERROR] 验证权重缓存已失效: key={cache_key}\n  请重新运行 validate_factors。")
-            return None
-
-        factor_score_config = deepcopy(cached_payload.get("factor_score_config") or {})
-        if not factor_score_config:
-            print(f"[ERROR] 缓存中缺少有效权重配置: key={cache_key}")
-            return None
-
-        print(f"[INFO] 已读取验证权重缓存: key={cache_key}, path={cached_payload.get('_cache_path')}")
-
+        normalized_mode = str(analysis_mode or "factor").strip().lower()
+        factor_score_config = None
         ridge_factors = None
-        if effective_scope == "all" and not candidate_scorecard.empty:
-            ridge_factors = StockAnalyzer._select_top_ridge_factors(candidate_scorecard, top_k=30)
-            if show_progress and ridge_factors is not None and not ridge_factors.empty:
+        if normalized_mode == "factor":
+            effective_scope = validation_factor_scope or "scoring_only"
+            validation_stock_codes = analyzer.get_all_stocks()
+            if validation_stock_limit is not None:
+                validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]
+            validated_feature_names = None
+            if effective_scope == "scoring_only":
+                validated_feature_names = analyzer.get_score_factor_names()
+            effective_validation_days = validation_days or days
+
+            cache_key, _ = _build_validation_cache_key(
+                factor_set=factor_set,
+                validation_days=effective_validation_days,
+                validation_horizons=validation_horizons,
+                validation_quantiles=validation_quantiles,
+                validation_min_observations=validation_min_observations,
+                validation_stock_codes=validation_stock_codes,
+                validation_factor_scope=effective_scope,
+                validated_feature_names=validated_feature_names,
+            )
+            cache_dir = _get_validation_cache_dir(analyzer)
+            cached_payload = _load_validation_weight_cache(cache_dir, cache_key)
+
+            if cached_payload is None:
                 print(
-                    f"[PROGRESS] ridge_factors selected top_k={len(ridge_factors)} "
-                    f"components={ridge_factors['component'].value_counts().to_dict()}"
+                    f"[ERROR] 未找到验证权重缓存: key={cache_key}\n"
+                    f"  请先运行 validate_factors 生成权重缓存，再运行 select_stocks。"
                 )
+                return None
+
+            candidate_scorecard = _sanitize_validation_scorecard(
+                pd.DataFrame(cached_payload.get("factor_scorecard") or [])
+            )
+            if not _is_usable_validation_scorecard(candidate_scorecard):
+                print(f"[ERROR] 验证权重缓存已失效: key={cache_key}\n  请重新运行 validate_factors。")
+                return None
+
+            factor_score_config = deepcopy(cached_payload.get("factor_score_config") or {})
+            if not factor_score_config:
+                print(f"[ERROR] 缓存中缺少有效权重配置: key={cache_key}")
+                return None
+
+            print(f"[INFO] 已读取验证权重缓存: key={cache_key}, path={cached_payload.get('_cache_path')}")
+
+            if effective_scope == "all" and not candidate_scorecard.empty:
+                ridge_factors = StockAnalyzer._select_top_ridge_factors(candidate_scorecard, top_k=30)
+                if show_progress and ridge_factors is not None and not ridge_factors.empty:
+                    print(
+                        f"[PROGRESS] ridge_factors selected top_k={len(ridge_factors)} "
+                        f"components={ridge_factors['component'].value_counts().to_dict()}"
+                    )
+        elif normalized_mode == "lightgbm":
+            print(f"[INFO] LightGBM 模式启用: factor_set={factor_set}, train_window={days}d")
 
         backtest_kwargs = {
             "days": days,
@@ -1679,8 +1725,8 @@ def run_cli(argv=None):
     parser.add_argument('--max-workers', dest='max_workers', type=int, default=0,
                         help='批量分析并发线程数，默认 0（自动根据系统资源决定）')
     parser.add_argument('--analysis-mode', dest='analysis_mode', default='factor',
-                        choices=['factor', 'strategy'],
-                        help='全市场分析模式：factor 或 strategy，默认 factor')
+                        choices=['factor', 'strategy', 'lightgbm'],
+                        help='全市场分析模式：factor / strategy / lightgbm，默认 factor')
     parser.add_argument('--factor-set', dest='factor_set', default='qlib_alpha158',
                         help='因子模式下使用的因子集，默认 qlib_alpha158')
     parser.add_argument('--signal-recipes', dest='signal_recipes', default=None,

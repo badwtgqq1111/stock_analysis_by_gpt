@@ -264,15 +264,16 @@ class LightGBMRankerPipeline:
         oos_frame["model_score"] = self._normalize_scores_by_date(oos_frame)
 
         # --- Train final model on all data for latest-date prediction ---
+        # Always train a final model (needed for SHAP and for predicting uncovered dates)
+        final_model = self._train_final_model(labeled, feature_columns, LGBMRegressor)
+
         # Dates without OOS predictions: either between rolling windows or too recent to have labels
         all_merged_dates = set(merged["trade_date"].unique())
         oos_covered_dates = set(oos_frame["trade_date"].unique())
         dates_needing_prediction = all_merged_dates - oos_covered_dates
-        if dates_needing_prediction:
-            # Train on all labeled data, predict on missing dates
-            final_model = self._train_final_model(labeled, feature_columns, LGBMRegressor)
+        if dates_needing_prediction and final_model is not None:
             missing_frame = merged[merged["trade_date"].isin(dates_needing_prediction)].copy()
-            if not missing_frame.empty and final_model is not None:
+            if not missing_frame.empty:
                 missing_preds = final_model.predict(missing_frame[feature_columns])
                 missing_pred_frame = missing_frame[["trade_date", "stock_code"]].copy()
                 missing_pred_frame["model_score_raw"] = missing_preds
@@ -304,12 +305,14 @@ class LightGBMRankerPipeline:
             "oos_dates": int(oos_frame["trade_date"].nunique()),
             "total_dates": len(all_dates),
             "feature_count": len(feature_columns),
+            "feature_columns": feature_columns,
             "label_method": "CSRankNorm",
             "objective": "mse",
             "rolling_details": rolling_metadata[-3:] if rolling_metadata else [],  # last 3 windows
             "oos_metrics": eval_metrics,
             "top_features": importance_frame.head(10).to_dict(orient="records"),
             "feature_importance": importance_frame.to_dict(orient="records"),
+            "final_model": final_model,
             # Legacy compat fields
             "train_rows": sum(w["train_rows"] for w in rolling_metadata) if rolling_metadata else 0,
             "valid_rows": sum(w["valid_rows"] for w in rolling_metadata) if rolling_metadata else 0,
@@ -556,3 +559,131 @@ def _get_best_iteration(model) -> int:
         return int(best)
     n_estimators = getattr(model, "n_estimators", 1000)
     return int(n_estimators)
+
+
+# ---------------------------------------------------------------------------
+# Per-stock explanation helpers
+# ---------------------------------------------------------------------------
+
+def compute_stock_shap(model, stock_features: pd.DataFrame, feature_columns: list[str], top_k: int = 5) -> dict:
+    """Compute SHAP values for a single stock's latest features.
+
+    Args:
+        model: Trained LGBMRegressor model.
+        stock_features: DataFrame with feature columns (use latest row).
+        feature_columns: List of feature column names.
+        top_k: Number of top positive and negative contributors to return.
+
+    Returns:
+        dict with 'positive' and 'negative' lists of {feature, shap_value} dicts.
+    """
+    if model is None or stock_features is None or stock_features.empty:
+        return {"positive": [], "negative": []}
+
+    try:
+        import shap
+    except ImportError:
+        return {"positive": [], "negative": []}
+
+    try:
+        # Use the latest row
+        latest_row = stock_features[feature_columns].iloc[[-1]]
+        # Replace inf/nan for SHAP computation
+        latest_row = latest_row.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(latest_row)
+
+        if shap_values is None:
+            return {"positive": [], "negative": []}
+
+        # shap_values shape: (1, n_features)
+        values = shap_values[0] if len(shap_values.shape) > 1 else shap_values
+        shap_series = pd.Series(values, index=feature_columns)
+
+        # Top positive contributors
+        positive = shap_series.nlargest(top_k)
+        positive_list = [
+            {"feature": name, "shap_value": round(float(val), 4)}
+            for name, val in positive.items()
+            if val > 0
+        ]
+
+        # Top negative contributors
+        negative = shap_series.nsmallest(top_k)
+        negative_list = [
+            {"feature": name, "shap_value": round(float(val), 4)}
+            for name, val in negative.items()
+            if val < 0
+        ]
+
+        return {"positive": positive_list, "negative": negative_list}
+
+    except Exception:
+        return {"positive": [], "negative": []}
+
+
+def compute_feature_percentiles(
+    stock_features: pd.DataFrame,
+    cross_section_features: pd.DataFrame,
+    feature_columns: list[str],
+    top_k: int = 5,
+) -> list[dict]:
+    """Compute where a stock's features rank in the cross-section.
+
+    Args:
+        stock_features: Single stock's feature DataFrame (use latest row).
+        cross_section_features: All stocks' features for the same date.
+        feature_columns: List of feature column names.
+        top_k: Number of most extreme features to return.
+
+    Returns:
+        List of {feature, percentile, direction} dicts for the most extreme features.
+    """
+    if (
+        stock_features is None
+        or stock_features.empty
+        or cross_section_features is None
+        or cross_section_features.empty
+    ):
+        return []
+
+    try:
+        stock_row = stock_features[feature_columns].iloc[-1]
+        cs_data = cross_section_features[feature_columns]
+
+        # Compute percentile rank for each feature
+        percentiles = {}
+        for col in feature_columns:
+            stock_val = stock_row.get(col)
+            if pd.isna(stock_val) or not np.isfinite(stock_val):
+                continue
+            col_values = cs_data[col].dropna()
+            if len(col_values) < 10:
+                continue
+            pct = float((col_values < stock_val).sum()) / len(col_values)
+            percentiles[col] = pct
+
+        if not percentiles:
+            return []
+
+        pct_series = pd.Series(percentiles)
+
+        # Find most extreme features (far from 0.5)
+        extremity = (pct_series - 0.5).abs()
+        top_extreme = extremity.nlargest(top_k)
+
+        result = []
+        for feature_name in top_extreme.index:
+            pct = pct_series[feature_name]
+            direction = "high" if pct >= 0.5 else "low"
+            result.append({
+                "feature": feature_name,
+                "percentile": round(float(pct) * 100, 1),
+                "direction": direction,
+            })
+
+        return result
+
+    except Exception:
+        return []

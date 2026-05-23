@@ -215,6 +215,8 @@ def _build_lightgbm_factor_explanation(
     drawdown_penalty_score,
     recent_drawdown,
     risk_score,
+    stock_shap_values=None,
+    stock_feature_percentiles=None,
 ):
     latest_model_score_value = float(latest_model_score) if pd.notna(latest_model_score) else np.nan
     risk_adjusted_score_value = float(risk_adjusted_score) if pd.notna(risk_adjusted_score) else np.nan
@@ -251,9 +253,36 @@ def _build_lightgbm_factor_explanation(
         else:
             summary_parts.append(f"模型得分{latest_model_score_value:.0f}/100")
 
-    if top_feature_names:
+    # Per-stock SHAP explanation (replaces generic "主要驱动因子")
+    if stock_shap_values and stock_shap_values.get("positive"):
+        shap_parts = []
+        for sv in stock_shap_values["positive"][:3]:
+            fname = sv["feature"]
+            cn_name = _FEATURE_NAME_MAP.get(fname, fname)
+            shap_parts.append(f"{cn_name}(+{sv['shap_value']:.2f})")
+        if stock_shap_values.get("negative"):
+            for sv in stock_shap_values["negative"][:2]:
+                fname = sv["feature"]
+                cn_name = _FEATURE_NAME_MAP.get(fname, fname)
+                shap_parts.append(f"{cn_name}({sv['shap_value']:.2f})")
+        summary_parts.append(f"个股驱动: {'、'.join(shap_parts)}")
+    elif top_feature_names:
         feature_desc = _translate_feature_names(top_feature_names[:3])
-        summary_parts.append(f"主要驱动因子: {feature_desc}")
+        summary_parts.append(f"全局驱动因子: {feature_desc}")
+
+    # Per-stock feature percentile explanation
+    if stock_feature_percentiles:
+        pct_parts = []
+        for fp in stock_feature_percentiles[:3]:
+            fname = fp["feature"]
+            cn_name = _FEATURE_NAME_MAP.get(fname, fname)
+            pct = fp["percentile"]
+            if fp["direction"] == "high":
+                pct_parts.append(f"{cn_name}=Top{100-pct:.0f}%")
+            else:
+                pct_parts.append(f"{cn_name}=Bottom{pct:.0f}%")
+        if pct_parts:
+            summary_parts.append(f"特征偏离: {'、'.join(pct_parts)}")
 
     if pd.notna(recent_drawdown_value) and recent_drawdown_value < -0.05:
         summary_parts.append(f"近期回撤{recent_drawdown_value:.1%}，注意风险")
@@ -268,6 +297,8 @@ def _build_lightgbm_factor_explanation(
     return {
         "model_type": "lightgbm_ranker",
         "text_summary": text_summary,
+        "stock_shap_values": stock_shap_values,
+        "stock_feature_percentiles": stock_feature_percentiles,
         "component_scores": {
             "composite_score": risk_adjusted_score_value,
             "trend_score": latest_model_score_value,

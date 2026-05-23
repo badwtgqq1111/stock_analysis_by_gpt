@@ -161,6 +161,8 @@ class LightGBMAnalysisMixin:
         drawdown_penalty_score,
         recent_drawdown,
         risk_score,
+        stock_shap_values=None,
+        stock_feature_percentiles=None,
     ):
         return _build_lightgbm_factor_explanation(
             model_metadata,
@@ -169,6 +171,8 @@ class LightGBMAnalysisMixin:
             drawdown_penalty_score,
             recent_drawdown,
             risk_score,
+            stock_shap_values=stock_shap_values,
+            stock_feature_percentiles=stock_feature_percentiles,
         )
 
     def _analyze_lightgbm_market(
@@ -348,6 +352,20 @@ class LightGBMAnalysisMixin:
         results = []
         finalize_started_at = time.time()
         finalize_total = len(batch_results)
+
+        # Extract model and feature columns for per-stock explanations
+        final_model = model_metadata.get("final_model")
+        feature_columns = model_metadata.get("feature_columns", [])
+
+        # Build cross-section of latest features for percentile calculation
+        cross_section_features = None
+        if feature_columns:
+            latest_date = panel_features.index.max() if hasattr(panel_features.index, 'max') else None
+            if latest_date is not None:
+                cs_mask = panel_features.index == latest_date
+                if cs_mask.any():
+                    cross_section_features = panel_features.loc[cs_mask].copy()
+
         for item in batch_results:
             stock_code = item["stock_code"]
             full_data = item["full_data"]
@@ -468,6 +486,24 @@ class LightGBMAnalysisMixin:
                 if pd.notna(latest_model_score) and pd.notna(drawdown_penalty_score)
                 else latest_model_score
             )
+            # Per-stock feature explanations
+            stock_shap_values = None
+            stock_feature_percentiles = None
+            if feature_columns and not feature_frame.empty:
+                from factor_engine.ml.lightgbm_ranker import compute_stock_shap, compute_feature_percentiles
+                # Feature percentiles (cheap, always compute)
+                if cross_section_features is not None and not cross_section_features.empty:
+                    stock_cs = cross_section_features[cross_section_features["stock_code"] == stock_code]
+                    if not stock_cs.empty:
+                        stock_feature_percentiles = compute_feature_percentiles(
+                            stock_cs, cross_section_features, feature_columns, top_k=5
+                        )
+                # SHAP (expensive, compute for all stocks with valid features)
+                if final_model is not None:
+                    stock_shap_values = compute_stock_shap(
+                        final_model, feature_frame, feature_columns, top_k=5
+                    )
+
             factor_explanation = self._build_lightgbm_factor_explanation(
                 model_metadata,
                 latest_model_score,
@@ -475,6 +511,8 @@ class LightGBMAnalysisMixin:
                 drawdown_penalty_score,
                 recent_drawdown,
                 risk_score,
+                stock_shap_values=stock_shap_values,
+                stock_feature_percentiles=stock_feature_percentiles,
             )
             setup_runner = self.signal_recipe_runner if signal_recipes is None else SignalRecipeRunner(signal_recipes)
             setup_snapshot = setup_runner.evaluate(

@@ -54,6 +54,28 @@ def _format_factor_reason_lines(item):
                     f"importance={factor.get('weighted_contribution', float('nan')):.2f})"
                 )
             lines.append("  全局重要特征: " + ", ".join(feature_parts))
+        # Per-stock SHAP values
+        stock_shap = explanation.get("stock_shap_values") or {}
+        shap_positive = stock_shap.get("positive", [])
+        shap_negative = stock_shap.get("negative", [])
+        if shap_positive or shap_negative:
+            shap_parts = []
+            for sv in shap_positive[:3]:
+                shap_parts.append(f"{sv['feature']}=+{sv['shap_value']:.2f}")
+            for sv in shap_negative[:2]:
+                shap_parts.append(f"{sv['feature']}={sv['shap_value']:.2f}")
+            lines.append("  个股SHAP: " + ", ".join(shap_parts))
+        # Per-stock feature percentiles
+        stock_pcts = explanation.get("stock_feature_percentiles") or []
+        if stock_pcts:
+            pct_parts = []
+            for fp in stock_pcts[:5]:
+                pct = fp["percentile"]
+                if fp["direction"] == "high":
+                    pct_parts.append(f"{fp['feature']}=Top{100-pct:.0f}%")
+                else:
+                    pct_parts.append(f"{fp['feature']}=Bottom{pct:.0f}%")
+            lines.append("  特征偏离: " + ", ".join(pct_parts))
         return lines
 
     lines.append(

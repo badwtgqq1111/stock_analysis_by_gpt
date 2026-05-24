@@ -175,6 +175,46 @@ def test_factor_validator_streaming_does_not_reload_all_batches(monkeypatch):
     assert streamed["validation_frame"].empty
 
 
+def test_factor_validator_streaming_reports_incremental_progress():
+    stock_codes, feature_frames, ohlcv_frame = _build_panel_frames(periods=12)
+    validator = FactorValidator(horizons=(1, 5), quantiles=3, min_observations=3)
+
+    long_feature_frames = []
+    for stock_code, feature_frame in zip(stock_codes, feature_frames):
+        current = feature_frame.copy()
+        current["stock_code"] = stock_code
+        current["feature_set"] = "alpha_demo"
+        long_feature_frames.append(current)
+    feature_frame = pd.concat(long_feature_frames, ignore_index=True)
+
+    batches = []
+    for start in range(0, len(stock_codes), 3):
+        current_codes = set(stock_codes[start:start + 3])
+        batch_feature = feature_frame[feature_frame["stock_code"].isin(current_codes)].copy()
+        batch_ohlcv = ohlcv_frame[ohlcv_frame["stock_code"].isin(current_codes)].copy()
+        batches.append({"feature_frame": batch_feature, "ohlcv_frame": batch_ohlcv})
+
+    progress_events = []
+
+    def _progress_callback(message, done=0, total=0):
+        progress_events.append((message, done, total))
+
+    streamed = validator.validate_streaming(batches, progress_callback=_progress_callback)
+
+    assert not streamed["ic_summary"].empty
+    assert ("stream ingest", 0, 0) in progress_events
+    assert ("stream finalize", 0, 0) in progress_events
+    assert ("stream ic", 1, 2) in progress_events
+    assert ("stream ic", 2, 2) in progress_events
+    assert ("stream quantile_returns", 1, 2) in progress_events
+    assert ("stream quantile_returns", 2, 2) in progress_events
+    turnover_events = [event for event in progress_events if event[0] == "stream turnover"]
+    assert turnover_events
+    assert turnover_events[0] == ("stream turnover", 0, 12)
+    assert turnover_events[-1] == ("stream turnover", 12, 12)
+    assert ("stream done", 1, 1) in progress_events
+
+
 def test_service_can_validate_feature_set():
     stock_codes, feature_frames, ohlcv_frame = _build_panel_frames()
 

@@ -120,12 +120,31 @@ class FactorValidationAccumulator:
         ).fetch_df()
         return FactorValidator._coerce_validation_batch_types(batch)
 
-    def finalize(self, validator):
-        if self.include_validation_frame:
-            return self._finalize_full_frame(validator)
-        return self._finalize_streaming(validator)
+    def _load_quantile_membership_batch(self, trade_date):
+        if self._rows_written <= 0 or not self._table_created:
+            return pd.DataFrame()
+        conn = self._ensure_connection()
+        batch = conn.execute(
+            """
+            SELECT feature_set, feature_name, trade_date, quantile, stock_code
+            FROM quantile_membership
+            WHERE trade_date = ?
+            ORDER BY feature_set, feature_name, quantile, stock_code
+            """,
+            [trade_date],
+        ).fetch_df()
+        if not batch.empty:
+            batch["trade_date"] = pd.to_datetime(batch["trade_date"], errors="coerce")
+        return batch
 
-    def _finalize_full_frame(self, validator):
+    def finalize(self, validator, progress_callback=None):
+        if progress_callback is None:
+            progress_callback = lambda _msg, _done=0, _total=0: None
+        if self.include_validation_frame:
+            return self._finalize_full_frame(validator, progress_callback)
+        return self._finalize_streaming(validator, progress_callback)
+
+    def _finalize_full_frame(self, validator, progress_callback=lambda _msg, _d=0, _t=0: None):
         validation_frame = self._load_all_batches()
         if validation_frame.empty:
             return validator._empty_validation_result(validation_frame)
@@ -167,17 +186,23 @@ class FactorValidationAccumulator:
         self.cleanup()
         return result
 
-    def _finalize_streaming(self, validator):
+    def _finalize_streaming(self, validator, progress_callback):
         trade_dates = self._iter_trade_dates()
         if not trade_dates:
             return validator._empty_validation_result(validator._empty_validation_frame())
 
         conn = self._ensure_connection()
+        conn.execute("PRAGMA threads=8")
+        try:
+            conn.execute("PRAGMA memory_limit='8GB'")
+        except Exception:
+            pass
         horizons = [int(h) for h in self.horizons]
         q = int(self.quantiles)
         min_obs = int(self.min_observations)
         min_required = max(min_obs, q)
         validation_frame = validator._empty_validation_frame()
+        n_horizons = len(horizons)
 
         table_cols = {
             row[0]
@@ -192,16 +217,15 @@ class FactorValidationAccumulator:
             return validator._empty_validation_result(validation_frame)
 
         # =========================================================================
-        # 1. Bulk IC / RankIC across all dates, features, and horizons in one query
+        # 1. Bulk IC / RankIC
         # =========================================================================
         ic_parts = []
-        for h in working_horizons:
+        total_ic_horizons = len(working_horizons)
+        for idx, h in enumerate(working_horizons, start=1):
             target = f"forward_return_{h}"
-            ic_parts.append(f"""
+            ic_sql = f"""
                 SELECT
-                    feature_set,
-                    feature_name,
-                    trade_date,
+                    feature_set, feature_name, trade_date,
                     {h} AS horizon,
                     COUNT(*) AS observation_count,
                     COUNT(DISTINCT feature_value) AS feature_unique,
@@ -226,16 +250,24 @@ class FactorValidationAccumulator:
                 HAVING COUNT(*) >= {min_obs}
                     AND COUNT(DISTINCT feature_value) > 1
                     AND COUNT(DISTINCT {target}) > 1
-            """)
-        try:
-            ic_by_date = conn.execute(" UNION ALL ".join(ic_parts)).fetch_df()
-        except Exception:
-            ic_by_date = self._calculate_ic_fallback(working_horizons, min_obs)
-        ic_by_date = FactorValidator._postprocess_ic_frame(ic_by_date)
+            """
+            try:
+                ic_df = conn.execute(ic_sql).fetch_df()
+                ic_df = FactorValidator._postprocess_ic_frame(ic_df)
+            except Exception:
+                ic_df = self._calculate_ic_fallback([h], min_obs)
+            ic_parts.append(ic_df)
+            progress_callback("stream ic", idx, total_ic_horizons)
+        ic_by_date = (
+            pd.concat(ic_parts, ignore_index=True)
+            if ic_parts
+            else validator._empty_ic_frame()
+        )
 
         # =========================================================================
-        # 2. Bulk quantile membership → DuckDB temp table
+        # 2. Quantile membership
         # =========================================================================
+        progress_callback("stream quantile", 0, 1)
         membership_sql = f"""
             CREATE OR REPLACE TEMP TABLE quantile_membership AS
             WITH dedup AS (
@@ -260,11 +292,12 @@ class FactorValidationAccumulator:
         conn.execute(membership_sql)
 
         # =========================================================================
-        # 3. Bulk quantile returns + long-short per horizon
+        # 3. Quantile returns + long-short per horizon
         # =========================================================================
         quantile_frames = []
         long_short_frames = []
-        for h in working_horizons:
+        for idx, h in enumerate(working_horizons):
+            progress_callback("stream quantile_returns", idx + 1, n_horizons)
             target = f"forward_return_{h}"
             qr_sql = f"""
                 WITH returns AS (
@@ -285,8 +318,7 @@ class FactorValidationAccumulator:
                         AND m.stock_code = r.stock_code
                 ),
                 counted AS (
-                    SELECT *,
-                        COUNT(*) OVER (PARTITION BY feature_set, feature_name, trade_date) AS obs_count
+                    SELECT *, COUNT(*) OVER (PARTITION BY feature_set, feature_name, trade_date) AS obs_count
                     FROM joined
                 ),
                 agg AS (
@@ -328,8 +360,7 @@ class FactorValidationAccumulator:
                         AND m.stock_code = r.stock_code
                 ),
                 counted AS (
-                    SELECT *,
-                        COUNT(*) OVER (PARTITION BY feature_set, feature_name, trade_date) AS obs_count
+                    SELECT *, COUNT(*) OVER (PARTITION BY feature_set, feature_name, trade_date) AS obs_count
                     FROM joined
                 ),
                 agg AS (
@@ -342,8 +373,7 @@ class FactorValidationAccumulator:
                 ),
                 extrema AS (
                     SELECT feature_set, feature_name, trade_date,
-                        MAX(quantile) AS top_quantile,
-                        MIN(quantile) AS bottom_quantile
+                        MAX(quantile) AS top_quantile, MIN(quantile) AS bottom_quantile
                     FROM agg
                     GROUP BY feature_set, feature_name, trade_date
                 )
@@ -354,15 +384,11 @@ class FactorValidationAccumulator:
                     q_top.mean_return - q_bottom.mean_return AS spread
                 FROM extrema e
                 INNER JOIN agg q_top
-                    ON e.feature_set = q_top.feature_set
-                    AND e.feature_name = q_top.feature_name
-                    AND e.trade_date = q_top.trade_date
-                    AND e.top_quantile = q_top.quantile
+                    ON e.feature_set = q_top.feature_set AND e.feature_name = q_top.feature_name
+                    AND e.trade_date = q_top.trade_date AND e.top_quantile = q_top.quantile
                 INNER JOIN agg q_bottom
-                    ON e.feature_set = q_bottom.feature_set
-                    AND e.feature_name = q_bottom.feature_name
-                    AND e.trade_date = q_bottom.trade_date
-                    AND e.bottom_quantile = q_bottom.quantile
+                    ON e.feature_set = q_bottom.feature_set AND e.feature_name = q_bottom.feature_name
+                    AND e.trade_date = q_bottom.trade_date AND e.bottom_quantile = q_bottom.quantile
             """
             ls_df = conn.execute(ls_sql).fetch_df()
             if not ls_df.empty:
@@ -372,67 +398,25 @@ class FactorValidationAccumulator:
             long_short_frames.append(ls_df)
 
         # =========================================================================
-        # 4. Bulk turnover
+        # 4. Turnover
         # =========================================================================
-        turnover_sql = f"""
-            WITH membership AS (
-                SELECT DISTINCT feature_set, feature_name, trade_date, quantile, stock_code
-                FROM quantile_membership
-            ),
-            counts AS (
-                SELECT feature_set, feature_name, quantile, trade_date,
-                    COUNT(DISTINCT stock_code) AS current_count
-                FROM membership
-                GROUP BY feature_set, feature_name, quantile, trade_date
-            ),
-            with_prev AS (
-                SELECT *,
-                    LAG(current_count) OVER w AS prev_count,
-                    LAG(trade_date) OVER w AS prev_trade_date
-                FROM counts
-                WINDOW w AS (PARTITION BY feature_set, feature_name, quantile ORDER BY trade_date)
-            ),
-            retained AS (
-                SELECT d1.feature_set, d1.feature_name, d1.quantile, d1.trade_date,
-                    COUNT(DISTINCT d1.stock_code) AS retained_count
-                FROM membership d1
-                INNER JOIN membership d2
-                    ON d1.feature_set = d2.feature_set
-                    AND d1.feature_name = d2.feature_name
-                    AND d1.quantile = d2.quantile
-                    AND d1.stock_code = d2.stock_code
-                INNER JOIN with_prev wp
-                    ON d1.feature_set = wp.feature_set
-                    AND d1.feature_name = wp.feature_name
-                    AND d1.quantile = wp.quantile
-                    AND d1.trade_date = wp.trade_date
-                    AND d2.trade_date = wp.prev_trade_date
-                GROUP BY d1.feature_set, d1.feature_name, d1.quantile, d1.trade_date
+        progress_callback("stream turnover", 0, len(trade_dates))
+        turnover_frames = []
+        previous_membership_groups = {}
+        for idx, trade_date in enumerate(trade_dates, start=1):
+            membership_batch = self._load_quantile_membership_batch(trade_date)
+            turnover_step, previous_membership_groups = validator.calculate_turnover_step(
+                membership_batch,
+                previous_membership_groups=previous_membership_groups,
             )
-            SELECT
-                wp.feature_set, wp.feature_name, wp.trade_date, wp.quantile,
-                wp.prev_count, wp.current_count,
-                COALESCE(r.retained_count, 0) AS retained_count,
-                wp.current_count - COALESCE(r.retained_count, 0) AS entered_count,
-                wp.prev_count - COALESCE(r.retained_count, 0) AS exited_count,
-                1.0 - COALESCE(r.retained_count, 0)::DOUBLE / GREATEST(wp.prev_count, wp.current_count) AS turnover_rate
-            FROM with_prev wp
-            LEFT JOIN retained r
-                ON wp.feature_set = r.feature_set
-                AND wp.feature_name = r.feature_name
-                AND wp.quantile = r.quantile
-                AND wp.trade_date = r.trade_date
-            WHERE wp.prev_count IS NOT NULL
-            ORDER BY feature_set, feature_name, quantile, trade_date
-        """
-        turnover_by_date = conn.execute(turnover_sql).fetch_df()
-        if not turnover_by_date.empty:
-            turnover_by_date["trade_date"] = pd.to_datetime(turnover_by_date["trade_date"], errors="coerce")
-            for col in ("prev_count", "current_count", "retained_count", "entered_count", "exited_count"):
-                if col in turnover_by_date.columns:
-                    turnover_by_date[col] = turnover_by_date[col].astype(int)
-        else:
-            turnover_by_date = validator._empty_turnover_frame()
+            if not turnover_step.empty:
+                turnover_frames.append(turnover_step)
+            progress_callback("stream turnover", idx, len(trade_dates))
+        turnover_by_date = (
+            pd.concat(turnover_frames, ignore_index=True)
+            if turnover_frames
+            else validator._empty_turnover_frame()
+        )
 
         # =========================================================================
         # 5. Output quantile membership
@@ -450,8 +434,9 @@ class FactorValidationAccumulator:
         conn.execute("DROP TABLE IF EXISTS quantile_membership")
 
         # =========================================================================
-        # 6. Assemble result
+        # 6. Summarize
         # =========================================================================
+        progress_callback("stream summarize_ic", 0, 1)
         quantile_returns_by_date = (
             pd.concat(quantile_frames, ignore_index=True)
             if quantile_frames
@@ -464,20 +449,29 @@ class FactorValidationAccumulator:
         )
 
         ic_summary = validator.summarize_ic(ic_by_date)
+        progress_callback("stream summarize_ls", 0, 1)
         long_short_summary = validator.summarize_long_short(long_short_by_date)
+        progress_callback("stream summarize_quantiles", 0, 1)
+        quantile_summary = validator.summarize_quantiles(quantile_returns_by_date)
+        progress_callback("stream summarize_turnover", 0, 1)
+        turnover_summary = validator.summarize_turnover(turnover_by_date)
+        progress_callback("stream summarize_decay", 0, 1)
+        decay_summary = validator.summarize_decay(ic_summary, long_short_summary)
+
         result = {
             "validation_frame": validation_frame,
             "ic_by_date": ic_by_date,
             "ic_summary": ic_summary,
             "quantile_returns_by_date": quantile_returns_by_date,
             "quantile_membership_by_date": quantile_membership_by_date,
-            "quantile_summary": validator.summarize_quantiles(quantile_returns_by_date),
+            "quantile_summary": quantile_summary,
             "long_short_by_date": long_short_by_date,
             "long_short_summary": long_short_summary,
             "turnover_by_date": turnover_by_date,
-            "turnover_summary": validator.summarize_turnover(turnover_by_date),
-            "decay_summary": validator.summarize_decay(ic_summary, long_short_summary),
+            "turnover_summary": turnover_summary,
+            "decay_summary": decay_summary,
         }
+        progress_callback("stream done", 1, 1)
         self.cleanup()
         return result
 
@@ -807,7 +801,7 @@ class FactorValidator:
     def validate(self, feature_frame, ohlcv_frame, progress_callback=None):
         """输出验证明细、IC 汇总和分组收益结果。"""
         if progress_callback is None:
-            progress_callback = lambda _message: None
+            progress_callback = lambda _message, _done=0, _total=0: None
 
         progress_callback("validation frame")
         validation_frame = self.build_validation_frame(feature_frame, ohlcv_frame)
@@ -862,7 +856,7 @@ class FactorValidator:
         include_membership=False,
     ):
         if progress_callback is None:
-            progress_callback = lambda _message: None
+            progress_callback = lambda _message, _done=0, _total=0: None
 
         accumulator = FactorValidationAccumulator(
             horizons=self.horizons,
@@ -878,7 +872,7 @@ class FactorValidator:
             validation_batch = self.build_validation_frame(feature_frame, ohlcv_frame)
             accumulator.update(validation_batch)
         progress_callback("stream finalize")
-        return self._normalize_validation_result(accumulator.finalize(self))
+        return self._normalize_validation_result(accumulator.finalize(self, progress_callback))
 
     def build_validation_frame(self, feature_frame, ohlcv_frame):
         """将因子值与前瞻收益拼接成验证底表。"""
@@ -1410,12 +1404,11 @@ class FactorValidator:
         trade_date = pd.to_datetime(membership["trade_date"].iloc[0], errors="coerce")
         rows = []
         grouped = membership.groupby(["feature_set", "feature_name", "quantile"], dropna=False)
-        next_membership_groups = {}
         for key, group in grouped:
             current_codes = set(group["stock_code"].astype(str))
-            next_membership_groups[key] = current_codes
             previous_codes = set(previous_membership_groups.get(key, set()))
             if not previous_codes:
+                previous_membership_groups[key] = current_codes
                 continue
 
             prev_count = len(previous_codes)
@@ -1437,12 +1430,13 @@ class FactorValidator:
                     "turnover_rate": turnover_rate,
                 }
             )
+            previous_membership_groups[key] = current_codes
 
         result = pd.DataFrame(rows) if rows else empty_turnover
         if not result.empty:
             result.sort_values(["feature_set", "feature_name", "quantile", "trade_date"], inplace=True)
             result.reset_index(drop=True, inplace=True)
-        return result, next_membership_groups
+        return result, previous_membership_groups
 
     def summarize_quantiles(self, quantile_returns_by_date):
         """汇总分组收益表现。"""

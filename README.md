@@ -195,6 +195,82 @@ uv run python stock_analyzer.py select_stocks \
 
 > Alpha158 和 Alpha360 **不建议合并使用**。Alpha360 已包含 Alpha158 的大部分因子，两者高度重叠，直接拼在一起会产生多重共线性。建议分别训练后对比 ICIR 和选股结果，选表现更好的一组。如果两组各有优势，可以在预测分数层面做加权集成，而不是在特征层合并。
 
+#### TA-Lib 技术指标因子
+
+Alpha158 现已集成 35 个 TA-Lib 技术指标算子，默认随 `qlib_alpha158` 一起启用。原有 158 个滚动统计因子 + 35 个 TA 指标 = **193 个特征**，LightGBM 会自动做特征选择。
+
+TA 指标分六类：
+
+| 类别 | 个数 | 指标 | 归一化方式 |
+|------|------|------|------------|
+| 动量/超买超卖 | 11 | `TA_RSI`, `TA_STOCHRSI_K/D`, `TA_STOCH_K/D`, `TA_WILLR`, `TA_CCI`, `TA_CMO`, `TA_ULTOSC`, `TA_MFI`, `TA_BOP` | 原值（天然有界） |
+| MACD 族 | 3 | `TA_MACD_DIF`, `TA_MACD_DEA`, `TA_MACD_HIST` | 除以收盘价 |
+| 趋势 | 11 | `TA_ADX`, `TA_ADXR`, `TA_PLUS_DI`, `TA_MINUS_DI`, `TA_AROON_UP/DOWN`, `TA_AROONOSC`, `TA_TRIX`, `TA_APO`, `TA_PPO`, `TA_MOM`, `TA_ROC` | 有界原值 / 百分比 |
+| 波动 | 5 | `TA_ATR`, `TA_NATR`, `TA_TRANGE`, `TA_BBANDS_PCT_B`, `TA_BBANDS_WIDTH` | 除以收盘价 / 原值 |
+| 量价 | 3 | `TA_OBV`, `TA_AD`, `TA_ADOSC` | 除以成交量均值 |
+| 特色 | 1 | `TA_KAMA` | 除以收盘价 |
+
+完整列表和算子注册表见 [factor_engine/expressions/ta_operators.py](factor_engine/expressions/ta_operators.py)。
+
+**测试方法：**
+
+```bash
+# 直接跑回测——TA 指标默认已启用，无需额外参数
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm \
+  --top-n 10 --days 365 \
+  --max-workers 8 --show-progress \
+  --export-csv output/lightgbm_ta
+
+# 对比：跑一版不加 TA 指标的作为 baseline
+# （通过 Python API 传入 config 关闭 TA，见下方代码示例）
+```
+
+或在 Python 中快速验证：
+
+```python
+from factor_engine.registry import create_factor_set
+import pandas as pd
+import numpy as np
+
+# 造一组假数据
+dates = pd.date_range("2023-01-01", periods=200, freq="B")
+df = pd.DataFrame({
+    "open": 100 + np.cumsum(np.random.randn(200) * 0.3),
+    "high": 101 + np.cumsum(np.random.randn(200) * 0.3),
+    "low": 99 + np.cumsum(np.random.randn(200) * 0.3),
+    "close": 100 + np.cumsum(np.random.randn(200) * 0.5),
+    "volume": np.abs(np.random.randn(200) * 10000 + 50000),
+}, index=dates)
+
+# 默认：193 个特征（158 + 35 TA）
+fs = create_factor_set("qlib_alpha158")
+result = fs.transform(df)
+print(f"总特征: {len(result.columns)}")
+print(f"TA 列: {[c for c in result.columns if c.startswith('TA_')]}")
+
+# 只用 5 个 TA 指标
+fs2 = create_factor_set("qlib_alpha158", config={
+    "ta": {"indicators": ["TA_RSI", "TA_MACD_DIF", "TA_ATR", "TA_OBV", "TA_ADX"]},
+})
+result2 = fs2.transform(df)
+print(f"精简: {len(result2.columns)} 特征")
+
+# 关闭 TA（仅 158 个原始因子）
+fs3 = create_factor_set("qlib_alpha158", config={"ta": {"indicators": []}})
+result3 = fs3.transform(df)
+print(f"无 TA: {len(result3.columns)} 特征")
+```
+
+**TA 因子分类**（用于因子评分和验证报告）：
+
+| 分类 | 新增 TA 指标 | 说明 |
+|------|-------------|------|
+| `trend` | MACD 族、ADX 族、AROON、TRIX、APO、PPO、MOM、ROC、KAMA | 趋势和动量 |
+| `quality` | OBV、AD、ADOSC、MFI、BOP、Stoch_K/D、ULTOSC | 量价关系 |
+| `risk` | ATR、NATR、TRANGE、BBANDS_PCT_B、BBANDS_WIDTH | 波动和风险 |
+| `sentiment` | RSI、StochRSI_K/D、WILLR、CCI、CMO | 超买超卖情绪（**新增分类**） |
+
 写信号层+批次号：
 
 ```bash

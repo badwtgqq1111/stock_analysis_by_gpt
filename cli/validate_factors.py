@@ -27,7 +27,7 @@ def main_validate_factors(
     validation_quantiles=5,
     validation_min_observations=5,
     validation_stock_limit=None,
-    validation_factor_scope="scoring_only",
+    validation_factor_scope="all",
     refresh_recommended_factor_weights=False,
     export_csv=None,
 ):
@@ -42,7 +42,7 @@ def main_validate_factors(
         if validation_stock_limit is not None:
             validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]
         validated_feature_names = None
-        effective_scope = validation_factor_scope or "scoring_only"
+        effective_scope = validation_factor_scope or "all"
         if effective_scope == "scoring_only":
             validated_feature_names = analyzer.get_score_factor_names()
 

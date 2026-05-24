@@ -158,7 +158,7 @@ def run_cli(argv=None):
                         help='强制重算 recommended_factor_weight，不使用本地缓存')
     parser.add_argument('--validation-factor-scope', dest='validation_factor_scope',
                         choices=['scoring_only', 'all'], default=None,
-                        help='因子验证范围：all_hk 推荐权重模式默认 scoring_only，factor_report 默认 all')
+                        help='因子验证范围，默认 all（全部因子），可选 scoring_only（仅评分配置中的因子）')
     args = parser.parse_args(argv)
     horizons = _parse_horizons(args.horizons)
     validation_horizons = _parse_horizons(args.validation_horizons)

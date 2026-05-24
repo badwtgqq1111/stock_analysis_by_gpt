@@ -28,21 +28,29 @@ class FactorScoringMixin:
         """从评分因子名列表反推最小化 Alpha158 计算配置，减少约 70% 算子计算。"""
         needed_operators = set()
         needed_windows = set()
+        needed_ta = []
         for name in (validated_feature_names or []):
+            name_str = str(name)
+            if name_str.startswith("TA_"):
+                needed_ta.append(name_str)
+                continue
             match = re.match(r"([A-Z]+)(\d+)", str(name))
             if match:
                 needed_operators.add(match.group(1))
                 needed_windows.add(int(match.group(2)))
-        if not needed_operators or not needed_windows:
-            return {}
-        return {
-            "price": {"windows": [], "feature": []},
-            "volume": {"windows": []},
-            "rolling": {
-                "windows": sorted(needed_windows),
-                "include": list(needed_operators),
-            },
-        }
+        config = {}
+        if needed_operators and needed_windows:
+            config.update({
+                "price": {"windows": [], "feature": []},
+                "volume": {"windows": []},
+                "rolling": {
+                    "windows": sorted(needed_windows),
+                    "include": list(needed_operators),
+                },
+            })
+        if needed_ta:
+            config["ta"] = {"indicators": needed_ta}
+        return config
 
     @staticmethod
     def _rolling_score(series, higher_is_better=True, window=120, min_periods=30, scale=12):

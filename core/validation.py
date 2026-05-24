@@ -373,10 +373,13 @@ class ValidationMixin:
                     "ohlcv_frame": batch_payload.get("ohlcv_frame"),
                 }
 
-        def _validation_progress(stage):
+        def _validation_progress(stage, _done=0, _total=0):
             if not show_progress:
                 return
-            print(f"[PROGRESS] validation stream {stage} stocks={success_count}")
+            detail = ""
+            if isinstance(_total, int) and _total > 1 and isinstance(_done, int) and _done > 0:
+                detail = f" {_done}/{_total}"
+            print(f"[PROGRESS] validation stream {stage}{detail} stocks={success_count}")
 
         validation_result = validator.validate_streaming(
             _stream_batches(),

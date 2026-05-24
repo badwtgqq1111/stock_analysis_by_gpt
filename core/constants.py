@@ -46,6 +46,13 @@ FACTOR_CLASSIFICATION_RULES = {
             "MA", "ROC", "BETA", "MAX", "MIN", "RSV", "IMAX", "IMIN", "IMXD",
             "RANK", "QTLU", "QTLD",
         },
+        "ta_indicators": {
+            "TA_MACD_DIF", "TA_MACD_DEA", "TA_MACD_HIST",
+            "TA_ADX", "TA_ADXR", "TA_PLUS_DI", "TA_MINUS_DI",
+            "TA_AROON_UP", "TA_AROON_DOWN", "TA_AROONOSC",
+            "TA_TRIX", "TA_APO", "TA_PPO", "TA_MOM", "TA_ROC",
+            "TA_KAMA",
+        },
         "price_fields": {"OPEN", "HIGH", "LOW", "CLOSE", "VWAP"},
         "description": "Price trend and momentum factors",
     },
@@ -57,12 +64,27 @@ FACTOR_CLASSIFICATION_RULES = {
         "kbar_operators": {
             "KMID", "KLEN", "KMID2", "KUP", "KUP2", "KLOW", "KLOW2", "KSFT", "KSFT2",
         },
+        "ta_indicators": {
+            "TA_OBV", "TA_AD", "TA_ADOSC", "TA_MFI", "TA_BOP",
+            "TA_STOCH_K", "TA_STOCH_D", "TA_ULTOSC",
+        },
         "volume_prefix": "VOLUME",
         "description": "Volume-price relationship and quality factors",
     },
     "risk": {
         "operators": {"STD", "VSTD"},
+        "ta_indicators": {
+            "TA_ATR", "TA_NATR", "TA_TRANGE",
+            "TA_BBANDS_PCT_B", "TA_BBANDS_WIDTH",
+        },
         "description": "Volatility and risk factors",
+    },
+    "sentiment": {
+        "ta_indicators": {
+            "TA_RSI", "TA_STOCHRSI_K", "TA_STOCHRSI_D",
+            "TA_WILLR", "TA_CCI", "TA_CMO",
+        },
+        "description": "Sentiment and overbought/oversold factors",
     },
 }
 

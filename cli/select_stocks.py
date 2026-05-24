@@ -34,7 +34,7 @@ def main_select_stocks(
     validation_quantiles=5,
     validation_min_observations=5,
     validation_stock_limit=None,
-    validation_factor_scope="scoring_only",
+    validation_factor_scope="all",
     signal_recipes=None,
     max_features=0,
 ):
@@ -52,7 +52,7 @@ def main_select_stocks(
         factor_score_config = None
         ridge_factors = None
         if normalized_mode == "factor":
-            effective_scope = validation_factor_scope or "scoring_only"
+            effective_scope = validation_factor_scope or "all"
             validation_stock_codes = analyzer.get_all_stocks()
             if validation_stock_limit is not None:
                 validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]

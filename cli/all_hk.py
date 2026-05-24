@@ -39,7 +39,7 @@ def main_all_hk(
     validation_stock_limit=None,
     use_recommended_factor_weights=False,
     refresh_recommended_factor_weights=False,
-    validation_factor_scope="scoring_only",
+    validation_factor_scope="all",
     signal_recipes=None,
 ):
     """对本地已同步的全部港股执行 TopN 组合分析（兼容旧接口：验证+选股一次完成）。"""
@@ -51,7 +51,7 @@ def main_all_hk(
     try:
         factor_score_config = None
         if analysis_mode == "factor" and use_recommended_factor_weights:
-            effective_validation_factor_scope = validation_factor_scope or "scoring_only"
+            effective_validation_factor_scope = validation_factor_scope or "all"
             validation_stock_codes = analyzer.get_all_stocks()
             if validation_stock_limit is not None:
                 validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]

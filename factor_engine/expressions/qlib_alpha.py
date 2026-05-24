@@ -27,6 +27,7 @@ from factor_engine.expressions.operators import (
     ts_std,
     ts_sum,
 )
+from factor_engine.expressions.ta_operators import compute_ta_features, DEFAULT_TA_INDICATORS
 from factor_engine.registry import register_factor_set
 
 
@@ -37,6 +38,7 @@ DEFAULT_ALPHA158_CONFIG = {
         "feature": ["OPEN", "HIGH", "LOW", "VWAP"],
     },
     "rolling": {},
+    "ta": {},
 }
 
 
@@ -110,6 +112,13 @@ def _alpha158_feature_names(config):
 
     if "rolling" not in config:
         return names
+
+    if "ta" in config:
+        ta_exclude = set(config["ta"].get("exclude", []))
+        ta_include = config["ta"].get("indicators", DEFAULT_TA_INDICATORS)
+        if ta_include is None:
+            ta_include = DEFAULT_TA_INDICATORS
+        names.extend([name for name in ta_include if name not in ta_exclude])
 
     windows = config["rolling"].get("windows", [5, 10, 20, 30, 60])
     include = config["rolling"].get("include", None)
@@ -256,6 +265,14 @@ class Alpha158FactorSet(BaseFactorSet):
             for window in volume_windows:
                 column_name = "VOLUME" + str(window)
                 columns[column_name] = safe_divide(ref(volume, window), volume) if window else safe_divide(volume, volume)
+
+        if "ta" in config:
+            ta_exclude = set(config["ta"].get("exclude", []))
+            ta_indicators = config["ta"].get("indicators", DEFAULT_TA_INDICATORS)
+            if ta_indicators is None:
+                ta_indicators = DEFAULT_TA_INDICATORS
+            ta_features = compute_ta_features(qlib_frame, indicators=ta_indicators, exclude=ta_exclude)
+            columns.update(ta_features)
 
         if "rolling" in config:
             rolling_windows = config["rolling"].get("windows", [5, 10, 20, 30, 60])

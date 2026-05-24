@@ -56,8 +56,21 @@
       </div>
 
       <hr>
+      <div v-if="importanceData.importances.length > 0" class="importance-section">
+        <h6>全局因子重要性 (Top 30, {{ importanceData.feature_count }} 因子中)</h6>
+        <div class="bar-chart" :style="{ height: Math.min(importanceData.importances.length, 20) * 26 + 'px' }">
+          <div v-for="(f, i) in importanceData.importances.slice(0, 20)" :key="f.factor" class="bar-row">
+            <span class="bar-label" style="width:90px">{{ f.factor }}</span>
+            <div class="bar-track">
+              <div class="bar-fill bar-up" :style="{ width: (f.importance / maxImp) * 100 + '%' }"></div>
+            </div>
+            <span class="bar-val" style="width:60px">{{ f.importance.toFixed(4) }}</span>
+          </div>
+        </div>
+      </div>
+      <hr>
       <div>
-        <h6>SHAP 因子贡献分析</h6>
+        <h6>SHAP 因子贡献分析 (单股)</h6>
         <select v-model="shapCode" @change="loadShap" class="stock-select">
           <option v-for="r in selectableStocks" :key="r.stock_code" :value="r.stock_code">
             ★ {{ r.stock_code }} {{ r.stock_name }}
@@ -84,19 +97,25 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { getSelection, getShap } from '@/api/client'
-import type { SelectionResponse, ShapFeature } from '@/types/api'
+import { getSelection, getShap, getImportance } from '@/api/client'
+import type { SelectionResponse, ShapFeature, ImportanceResponse } from '@/types/api'
 
 const data = ref<SelectionResponse | null>(null)
 const selectedCode = ref<string | null>(null)
 const shapCode = ref('')
 const shapFeatures = ref<(ShapFeature & { pct: number; offset: number })[]>([])
+const importanceData = ref<ImportanceResponse>({ factor_set: '', importances: [], feature_count: 0, train_rows: 0 })
 const sortKey = ref('ranking_score')
 const sortAsc = ref(false)
 const page = ref(1)
 const perPage = 15
 
-onMounted(async () => { data.value = await getSelection() })
+const maxImp = computed(() => Math.max(...importanceData.value.importances.map(f => f.importance), 0.01))
+
+onMounted(async () => {
+  data.value = await getSelection()
+  importanceData.value = await getImportance()
+})
 
 const selectableStocks = computed(() => data.value?.rows ?? [])
 

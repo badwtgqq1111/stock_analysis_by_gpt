@@ -33,6 +33,7 @@ class BacktestMixin:
         enable_portfolio_replay=True,
         ridge_factors=None,
         signal_recipes=None,
+        max_features=0,
     ):
         """固定股票池组合回测：按日期横向比较评分，只持有当日最优的 Top N 信号。"""
         from backtest_engine import TopNPortfolioBuilder
@@ -64,6 +65,7 @@ class BacktestMixin:
                 signal_recipes=signal_recipes,
                 persist_features=persist_features,
                 show_progress=show_progress,
+                max_features=max_features,
             )
             if not pool_results:
                 return None
@@ -338,6 +340,7 @@ class BacktestMixin:
         enable_portfolio_replay=True,
         ridge_factors=None,
         signal_recipes=None,
+        max_features=0,
     ):
         """对本地已同步的全部港股执行 TopN 组合回测。"""
         return self.backtest_portfolio(
@@ -359,6 +362,7 @@ class BacktestMixin:
             enable_portfolio_replay=enable_portfolio_replay,
             ridge_factors=ridge_factors,
             signal_recipes=signal_recipes,
+            max_features=max_features,
         )
 
     def backtest_strategy(self, data, buy_signals, sell_signals, initial_capital=100000, default_holding_days=60):

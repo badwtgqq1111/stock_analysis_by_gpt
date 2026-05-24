@@ -12,6 +12,10 @@
         <option :value="20">20天</option><option :value="40">40天</option>
         <option :value="60">60天</option>
       </select>
+      <select v-model="topN">
+        <option :value="5">Top 5</option><option :value="10">Top 10</option>
+        <option :value="15">Top 15</option><option :value="20">Top 20</option>
+      </select>
     </div>
 
     <div v-if="data" class="charts-grid">
@@ -78,6 +82,7 @@ import type { FactorICResponse, FactorICSummary } from '@/types/api'
 const data = ref<FactorICResponse | null>(null)
 const factorSet = ref('qlib_alpha158')
 const horizon = ref(20)
+const topN = ref(10)
 
 const icChartRef = ref<HTMLDivElement | null>(null)
 const rankChartRef = ref<HTMLDivElement | null>(null)
@@ -86,7 +91,12 @@ let rankChart: IChartApi | null = null
 const icSeriesMap = new Map<string, ISeriesApi<'Line'>>()
 const rankSeriesMap = new Map<string, ISeriesApi<'Line'>>()
 
-const LINE_COLORS = ['#00d4aa', '#ffd166', '#ff9f1c', '#118ab2', '#ef767a']
+const LINE_COLORS = [
+  '#ef476f', '#ffd166', '#ff9f1c', '#118ab2', '#06d6a0',
+  '#ef767a', '#a29bfe', '#55efc4', '#74b9ff', '#fdcb6e',
+  '#e17055', '#00cec9', '#6c5ce7', '#f9ca24', '#7bed9f',
+  '#e056a0', '#a29bfe', '#ff7979', '#badc58', '#c7ecee',
+]
 
 const icSortKey = ref('mean_ic')
 const icSortAsc = ref(false)
@@ -154,7 +164,7 @@ function renderRankChart() {
 }
 
 async function fetch() {
-  data.value = await getFactorIC(factorSet.value, horizon.value)
+  data.value = await getFactorIC(factorSet.value, horizon.value, topN.value)
   await nextTick()
   renderIcChart()
   renderRankChart()
@@ -163,7 +173,7 @@ async function fetch() {
 onMounted(fetch)
 onUnmounted(() => { icChart?.remove(); rankChart?.remove() })
 
-watch([factorSet, horizon], () => { fetch() })
+watch([factorSet, horizon, topN], () => { fetch() })
 
 function barPct(val: number | null): number {
   if (!val || !data.value) return 0

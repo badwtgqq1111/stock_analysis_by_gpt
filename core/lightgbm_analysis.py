@@ -183,6 +183,7 @@ class LightGBMAnalysisMixin:
         signal_recipes=None,
         persist_features=False,
         show_progress=False,
+        max_features=0,
     ):
         from factor_engine import FactorContext, create_factor_set
         from factor_engine.ml import LightGBMRankerPipeline
@@ -192,7 +193,7 @@ class LightGBMAnalysisMixin:
         if not stock_codes:
             return []
 
-        ranker = LightGBMRankerPipeline()
+        ranker = LightGBMRankerPipeline(max_features=max_features)
         warmup_days = max(days + 180, days + ranker.label_horizon + 60)
         batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days)
         batch_results = []

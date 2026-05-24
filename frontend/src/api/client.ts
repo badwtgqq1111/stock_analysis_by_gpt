@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type {
   StockListResponse, OhlcvResponse, SelectionResponse, ShapResponse,
-  FactorICResponse, PortfolioResponse,
+  FactorICResponse, PortfolioResponse, ImportanceResponse,
 } from '@/types/api'
 
 const http = axios.create({ baseURL: '/api', timeout: 30000 })
@@ -35,10 +35,20 @@ export async function getShap(code: string): Promise<ShapResponse> {
 
 // Factor IC
 export async function getFactorIC(
-  factorSet: string, horizon: number,
+  factorSet: string, horizon: number, topN: number = 10,
 ): Promise<FactorICResponse> {
   const { data } = await http.get<FactorICResponse>('/factor-ic', {
-    params: { factor_set: factorSet, horizon },
+    params: { factor_set: factorSet, horizon, top_n: topN },
+  })
+  return data
+}
+
+// Importance
+export async function getImportance(
+  factorSet: string = '',
+): Promise<ImportanceResponse> {
+  const { data } = await http.get<ImportanceResponse>('/importance', {
+    params: { factor_set: factorSet },
   })
   return data
 }

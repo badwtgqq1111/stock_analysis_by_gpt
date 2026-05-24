@@ -36,6 +36,7 @@ def main_select_stocks(
     validation_stock_limit=None,
     validation_factor_scope="scoring_only",
     signal_recipes=None,
+    max_features=0,
 ):
     """执行全港股 TopN 选股+回测。factor 模式读取验证权重缓存，lightgbm 模式直接训练排序模型。"""
     print("=" * 80)
@@ -102,7 +103,8 @@ def main_select_stocks(
                         f"components={ridge_factors['component'].value_counts().to_dict()}"
                     )
         elif normalized_mode == "lightgbm":
-            print(f"[INFO] LightGBM 模式启用: factor_set={factor_set}, train_window={days}d")
+            extra = f", max_features={max_features}" if max_features else ""
+            print(f"[INFO] LightGBM 模式启用: factor_set={factor_set}, train_window={days}d{extra}")
 
         backtest_kwargs = {
             "days": days,
@@ -114,6 +116,7 @@ def main_select_stocks(
             "factor_score_config": factor_score_config,
             "show_progress": show_progress,
             "enable_portfolio_replay": not fast_mode,
+            "max_features": max_features,
         }
         if signal_recipes is not None:
             backtest_kwargs["signal_recipes"] = signal_recipes

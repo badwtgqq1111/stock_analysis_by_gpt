@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -95,3 +96,58 @@ class SelectionService:
 
         features.sort(key=lambda x: abs(x["value"]), reverse=True)
         return {"features": features}
+
+    def get_importance(self, factor_set: str = "") -> dict:
+        """Extract global feature importance from the selected CSV's factor_explanation."""
+        df = load_selected_data(factor_set)
+        if df is None or df.empty:
+            df = load_ranking_data(factor_set)
+        if df is None or df.empty:
+            return {"factor_set": factor_set, "importances": [], "feature_count": 0, "train_rows": 0}
+
+        # Aggregate importance_weight from top_features across all selected stocks
+        agg: dict[str, float] = {}
+        count: dict[str, int] = {}
+        feature_count = 0
+        train_rows = 0
+
+        for _, row in df.iterrows():
+            expl = row.get("factor_explanation", None)
+            if pd.isna(expl) or not expl:
+                continue
+            expl_str = str(expl)
+
+            # Extract feature_count and train_rows
+            if not feature_count:
+                fc = re.search(r"'feature_count':\s*(\d+)", expl_str)
+                if fc:
+                    feature_count = int(fc.group(1))
+            if not train_rows:
+                tr = re.search(r"'train_rows':\s*(\d+)", expl_str)
+                if tr:
+                    train_rows = int(tr.group(1))
+
+            # Extract top_features array
+            for m in re.finditer(r"\{'feature_name':\s*'([^']+)',\s*'importance':\s*([\d.e+-]+)(?:[^}]*'importance_weight':\s*([\d.e+-]+))?", expl_str):
+                name = m.group(1)
+                try:
+                    w = float(m.group(3) if m.group(3) else m.group(2))
+                except (ValueError, IndexError):
+                    continue
+                agg[name] = agg.get(name, 0) + w
+                count[name] = count.get(name, 0) + 1
+
+        # Average importance across stocks
+        importances = []
+        for name, total in sorted(agg.items(), key=lambda x: -x[1]):
+            importances.append({
+                "factor": name,
+                "importance": round(total / count[name], 6),
+            })
+
+        return {
+            "factor_set": factor_set,
+            "importances": importances[:30],
+            "feature_count": feature_count,
+            "train_rows": train_rows,
+        }

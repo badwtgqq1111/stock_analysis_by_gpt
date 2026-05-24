@@ -11,5 +11,6 @@ _service = FactorICService()
 def get_factor_ic(
     factor_set: str = Query("qlib_alpha158"),
     horizon: int = Query(20),
+    top_n: int = Query(10),
 ):
-    return _service.get_factor_ic(factor_set, horizon)
+    return _service.get_factor_ic(factor_set, horizon, top_n)

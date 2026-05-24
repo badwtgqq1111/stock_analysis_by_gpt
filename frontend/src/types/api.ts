@@ -116,6 +116,19 @@ export interface FactorICResponse {
   top10: FactorICSummary[]
   factor_set: string
   horizon: number
+  top_n: number
+}
+
+export interface FeatureImportance {
+  factor: string
+  importance: number
+}
+
+export interface ImportanceResponse {
+  factor_set: string
+  importances: FeatureImportance[]
+  feature_count: number
+  train_rows: number
 }
 
 // ─── Portfolio ───

@@ -8,10 +8,19 @@ Reference: Qlib (Microsoft) LGBModel + CSRankNorm approach.
 
 from __future__ import annotations
 
+import sys
+import time
 import warnings
 from dataclasses import dataclass, field
 import platform
 from typing import Any
+
+_EMIT_ENABLED = True
+
+
+def _emit(msg: str):
+    if _EMIT_ENABLED:
+        print(f"[lightgbm] {msg}", file=sys.stderr, flush=True)
 
 import numpy as np
 import pandas as pd
@@ -77,6 +86,7 @@ class LightGBMRankerPipeline:
     valid_fraction: float = 0.15
     random_state: int = 42
     params: dict | None = None
+    max_features: int = 0
 
     # Legacy compatibility fields (deprecated, ignored in new logic)
     drawdown_horizon: int = 20
@@ -187,7 +197,24 @@ class LightGBMRankerPipeline:
         if first_test_idx >= len(all_dates):
             return self._fit_predict_single(labeled, feature_columns, merged, LGBMRegressor)
 
+        # Global feature selection (one-shot before rolling)
+        selected_features = feature_columns
+        if self.max_features and self.max_features < len(feature_columns):
+            initial_train_dates = set(all_dates[:first_test_idx - trunc_days])
+            initial_train = labeled[labeled["trade_date"].isin(initial_train_dates)]
+            model_params = self._default_params()
+            if self.params:
+                model_params.update(self.params)
+            probe = LGBMRegressor(**model_params)
+            probe.fit(initial_train[feature_columns], initial_train["label"])
+            feature_columns = self._select_top_features(probe, feature_columns)
+            _emit(f"global feature selection: {len(feature_columns)} factors kept")
+
+        total_windows = max(1, (len(all_dates) - first_test_idx + step - 1) // step)
+        _emit(f"rolling training: {total_windows} windows, {len(feature_columns)} features, {len(labeled)} rows")
         test_start_idx = first_test_idx
+        win_idx = 0
+        t_start = time.time()
         while test_start_idx < len(all_dates):
             test_end_idx = min(test_start_idx + step, len(all_dates))
             test_dates = all_dates[test_start_idx:test_end_idx]
@@ -253,6 +280,10 @@ class LightGBMRankerPipeline:
                 "test_rows": len(test_frame),
                 "n_estimators_used": _get_best_iteration(model),
             })
+
+            win_idx += 1
+            elapsed = time.time() - t_start
+            _emit(f"window {win_idx}/{total_windows} [{test_dates[0].strftime('%Y-%m-%d')[:10]}..{test_dates[-1].strftime('%Y-%m-%d')[:10]}] train={len(actual_train)} test={len(test_frame)} elapsed={elapsed:.0f}s")
 
             test_start_idx = test_end_idx
 
@@ -368,6 +399,13 @@ class LightGBMRankerPipeline:
             and not col.startswith("target_")
         ]
 
+    def _select_top_features(self, model, feature_columns: list[str]) -> list[str]:
+        """Select top N features by importance from a trained model."""
+        if not self.max_features or self.max_features >= len(feature_columns):
+            return feature_columns
+        importance = self._resolve_feature_importance(model, feature_columns)
+        return importance.head(self.max_features)["feature_name"].tolist()
+
     def _fit_predict_single(
         self,
         labeled: pd.DataFrame,
@@ -375,7 +413,7 @@ class LightGBMRankerPipeline:
         full_frame: pd.DataFrame,
         LGBMRegressor,
     ) -> tuple[pd.DataFrame, dict]:
-        """Fallback: single train/valid split when not enough data for rolling."""
+        """Single train/valid split. When max_features>0, uses two-stage: first fit to select top features, then refit."""
         all_dates = sorted(labeled["trade_date"].unique())
         valid_count = max(1, int(len(all_dates) * self.valid_fraction))
         valid_dates_set = set(all_dates[-valid_count:])
@@ -397,6 +435,19 @@ class LightGBMRankerPipeline:
             fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
 
         model.fit(train_frame[feature_columns], train_frame["label"], **fit_kwargs)
+
+        # Two-stage: select top features and refit
+        selected_features = self._select_top_features(model, feature_columns)
+        if selected_features != feature_columns:
+            _emit(f"feature selection: {len(feature_columns)} → {len(selected_features)} factors, refitting...")
+            model2 = LGBMRegressor(**model_params)
+            fit_kwargs2: dict[str, Any] = {}
+            if not valid_frame.empty:
+                fit_kwargs2["eval_set"] = [(valid_frame[selected_features], valid_frame["label"])]
+                fit_kwargs2["callbacks"] = [_early_stopping_callback(50)]
+            model2.fit(train_frame[selected_features], train_frame["label"], **fit_kwargs2)
+            model = model2
+            feature_columns = selected_features
 
         # Predict on full frame
         predict_frame = full_frame[["trade_date", "stock_code"]].copy()

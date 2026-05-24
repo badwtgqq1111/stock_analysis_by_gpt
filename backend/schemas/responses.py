@@ -115,6 +115,19 @@ class FactorICResponse(BaseModel):
     top10: list[FactorICSummary]
     factor_set: str
     horizon: int
+    top_n: int = 10
+
+
+class FeatureImportance(BaseModel):
+    factor: str
+    importance: float
+
+
+class ImportanceResponse(BaseModel):
+    factor_set: str
+    importances: list[FeatureImportance]
+    feature_count: int
+    train_rows: int
 
 
 # ─── Portfolio ───

@@ -9,23 +9,23 @@ from backend.services.data_service import load_factor_ic_data
 
 
 class FactorICService:
-    def get_factor_ic(self, factor_set: str = "qlib_alpha158", horizon: int = 20) -> dict:
+    def get_factor_ic(self, factor_set: str = "qlib_alpha158", horizon: int = 20, top_n: int = 10) -> dict:
         data = load_factor_ic_data(factor_set, horizon)
 
         dates = [d.strftime("%Y-%m-%d") for d in data["dates"]]
         factors = list(data["factors"])
 
-        # Top 5 factors by absolute mean IC
+        # Top N factors by absolute mean IC
         ic_means = {}
         for f in factors:
             arr = data["ic_series"].get(f, [])
             if len(arr) > 0:
                 ic_means[f] = abs(float(arr.mean()))
-        top5 = sorted(ic_means, key=ic_means.get, reverse=True)[:5]
+        top_factors = sorted(ic_means, key=ic_means.get, reverse=True)[:top_n]
 
         ic_series = {}
         rank_ic_series = {}
-        for f in top5:
+        for f in top_factors:
             ic_series[f] = [float(v) if not hasattr(v, 'isnan') or not bool(getattr(v, 'isnan', lambda: False)()) else None for v in data["ic_series"].get(f, [])]
             rank_ic_series[f] = [float(v) if not hasattr(v, 'isnan') or not bool(getattr(v, 'isnan', lambda: False)()) else None for v in data["rank_ic_series"].get(f, [])]
 
@@ -48,13 +48,14 @@ class FactorICService:
 
         return {
             "dates": dates,
-            "factors": top5,
+            "factors": top_factors,
             "ic_series": ic_series,
             "rank_ic_series": rank_ic_series,
             "summary": summary,
             "top10": top10,
             "factor_set": factor_set,
             "horizon": horizon,
+            "top_n": top_n,
         }
 
 

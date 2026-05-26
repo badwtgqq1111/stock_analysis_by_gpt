@@ -6,6 +6,7 @@ import pandas as pd
 
 from analyzer_core import StockAnalyzer
 from cli.formatters import _safe_close_analyzer
+from cli.generate_factors import main_generate_factors
 from cli.helpers import _parse_horizons, _parse_signal_recipes
 from cli.select_stocks import main_select_stocks
 from cli.validate_factors import main_validate_factors
@@ -99,7 +100,7 @@ def run_cli(argv=None):
         description="港股技术分析系统 - 支持单股回测、批量分析与多策略比较"
     )
     parser.add_argument('mode', nargs='?', default=None,
-                        help='运行模式：single / suite / all_hk / validate_factors / select_stocks / factor_report / review_batch / 直接股票代码')
+                        help='运行模式：single / suite / all_hk / validate_factors / generate_factors / select_stocks / factor_report / review_batch / 直接股票代码')
     parser.add_argument('value', nargs='?', default=None,
                         help='兼容旧模式：single 时为股票代码')
     parser.add_argument('--days', dest='days', type=int, default=365,
@@ -185,6 +186,15 @@ def run_cli(argv=None):
             validation_stock_limit=args.stock_limit,
             validation_factor_scope=args.validation_factor_scope,
             refresh_recommended_factor_weights=args.refresh_recommended_factor_weights,
+            export_csv=args.export_csv,
+        )
+    elif args.mode == "generate_factors":
+        return main_generate_factors(
+            days=args.days,
+            factor_set=args.factor_set,
+            stock_limit=args.stock_limit,
+            max_workers=args.max_workers,
+            show_progress=args.show_progress,
             export_csv=args.export_csv,
         )
     elif args.mode == "select_stocks":

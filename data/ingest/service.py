@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 
+import numpy as np
 import pandas as pd
 
 from data.ingest.cn_stock_loader import CNStockDataLoader
@@ -33,7 +34,12 @@ from data.model import (
 from data.store.layout import DataLayout
 from data.store.raw_store import RawDataStore
 from data.store.warehouse import MarketDataWarehouse
-from factor_engine import FactorContext, create_factor_set, list_factor_sets as list_registered_factor_sets
+from factor_engine import (
+    FactorContext,
+    build_feature_materialization_metadata,
+    create_factor_set,
+    list_factor_sets as list_registered_factor_sets,
+)
 from factor_validation import FactorValidator
 
 
@@ -103,6 +109,7 @@ class MarketDataService:
 
     def __init__(self, base_dir="./assets/data", data_source="akshare"):
         self.layout = DataLayout(base_dir=base_dir)
+        self.data_layout = self.layout
         self.warehouse = MarketDataWarehouse(self.layout)
         self.raw_store = RawDataStore(self.layout)
         self.hk_loader = HKStockDataLoader(
@@ -116,6 +123,17 @@ class MarketDataService:
             warehouse=self.warehouse,
         )
         self.data_source = data_source
+
+    def get_all_stock_codes(self, market="HK", asset_type="equity", frequency="daily", adjust="qfq"):
+        """返回 clean 层中可用的全部证券代码。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+        return self.warehouse.get_all_stock_codes(
+            market=normalized_market,
+            asset_type=asset_type,
+            frequency=frequency,
+            adjust=normalized_adjust,
+        )
 
     def sync_hk_stock(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily"):
         """同步单只港股到统一数据层。"""
@@ -184,6 +202,8 @@ class MarketDataService:
         frequency="daily",
         adjust="qfq",
         feature_set="default",
+        feature_version=None,
+        feature_config_hash=None,
         source=None,
         feature_columns=None,
     ):
@@ -199,6 +219,8 @@ class MarketDataService:
             frequency=frequency,
             adjust=normalized_adjust,
             feature_set=feature_set,
+            feature_version=feature_version,
+            feature_config_hash=feature_config_hash,
             source=source,
             feature_columns=feature_columns,
         )
@@ -213,6 +235,8 @@ class MarketDataService:
         frequency=None,
         adjust="qfq",
         feature_set=None,
+        feature_version=None,
+        feature_config_hash=None,
         feature_name=None,
         start_date=None,
         end_date=None,
@@ -229,6 +253,8 @@ class MarketDataService:
             frequency=frequency,
             adjust=normalized_adjust,
             feature_set=feature_set,
+            feature_version=feature_version,
+            feature_config_hash=feature_config_hash,
             feature_name=feature_name,
             start_date=start_date,
             end_date=end_date,
@@ -406,6 +432,11 @@ class MarketDataService:
             }
 
         factor = create_factor_set(factor_set, config=config)
+        materialization = build_feature_materialization_metadata(
+            factor_set=factor_set,
+            metadata=factor.metadata().to_dict(),
+            config=config,
+        )
         context = FactorContext(
             stock_code=normalized_code,
             market=normalized_market,
@@ -415,7 +446,7 @@ class MarketDataService:
             asset_type=asset_type,
         )
         feature_frame = factor.transform(ohlcv, context=context)
-        feature_frame = feature_frame.replace([float("inf"), float("-inf")], pd.NA)
+        feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
         write_result = None
         if persist and not feature_frame.empty:
             write_result = self.write_feature_frame(
@@ -427,9 +458,17 @@ class MarketDataService:
                 frequency=frequency,
                 adjust=normalized_adjust,
                 feature_set=factor_set,
+                feature_version=materialization["feature_version"],
+                feature_config_hash=materialization["feature_config_hash"],
                 source=source,
                 feature_columns=list(feature_frame.columns),
             )
+
+        metadata = factor.metadata().to_dict()
+        metadata.setdefault("extra", {})
+        metadata["extra"]["feature_version"] = materialization["feature_version"]
+        metadata["extra"]["feature_config_hash"] = materialization["feature_config_hash"]
+        metadata["extra"]["feature_config"] = materialization["feature_config"]
 
         return {
             "rows": len(feature_frame),
@@ -438,7 +477,7 @@ class MarketDataService:
             "factor_set": factor_set,
             "feature_frame": feature_frame,
             "write_result": write_result,
-            "metadata": factor.metadata().to_dict(),
+            "metadata": metadata,
         }
 
     def sync_factor_set(
@@ -470,6 +509,238 @@ class MarketDataService:
             source=source,
             config=config,
         )
+
+    def generate_factor_set(
+        self,
+        stock_codes=None,
+        factor_set="qlib_alpha158",
+        market="HK",
+        exchange=None,
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        days=365,
+        warmup_days=180,
+        max_workers=1,
+        show_progress=False,
+        source="factor_engine",
+        config=None,
+    ):
+        """批量生成并落库指定因子集，默认按缺失增量补齐。"""
+        normalized_market = (market or "HK").upper()
+        normalized_adjust = normalize_adjust(adjust)
+        normalized_codes = [
+            normalize_stock_code(code, market=normalized_market)
+            for code in (stock_codes or [])
+            if str(code).strip()
+        ]
+        if not normalized_codes:
+            normalized_codes = self.warehouse.get_all_stock_codes(
+                market=normalized_market,
+                asset_type=asset_type,
+                frequency=frequency,
+                adjust=normalized_adjust,
+            )
+        normalized_codes = list(dict.fromkeys(normalized_codes))
+
+        factor = create_factor_set(factor_set, config=config)
+        factor_metadata = factor.metadata().to_dict()
+        materialization = build_feature_materialization_metadata(
+            factor_set=factor_set,
+            metadata=factor_metadata,
+            config=config,
+        )
+        expected_feature_count = int((factor_metadata.get("extra") or {}).get("feature_count") or 0)
+
+        effective_days = max(int(days or 0), 1)
+        effective_warmup_days = max(int(warmup_days or 0), 0)
+        history_window_days = effective_days + effective_warmup_days
+        end_ts = pd.Timestamp.utcnow().tz_localize(None).normalize()
+        start_ts = end_ts - pd.Timedelta(days=history_window_days)
+        start_date = start_ts.strftime("%Y-%m-%d")
+        end_date = end_ts.strftime("%Y-%m-%d")
+        max_workers = max(int(max_workers or 0), 1)
+
+        def _read_existing_features(stock_code, latest_trade_date):
+            try:
+                return self.warehouse.read_features(
+                    stock_code=stock_code,
+                    market=normalized_market,
+                    exchange=exchange,
+                    asset_type=asset_type,
+                    frequency=frequency,
+                    adjust=normalized_adjust,
+                    feature_set=factor_set,
+                    feature_version=materialization["feature_version"],
+                    feature_config_hash=materialization["feature_config_hash"],
+                    start_date=start_date,
+                    end_date=str(latest_trade_date.date()),
+                )
+            except Exception:
+                return pd.DataFrame()
+
+        def _has_complete_coverage(existing_features, latest_trade_date):
+            if existing_features is None or existing_features.empty:
+                return False
+            feature_dates = pd.to_datetime(existing_features.get("trade_date"), errors="coerce").dropna()
+            if feature_dates.empty or feature_dates.max().normalize() < latest_trade_date.normalize():
+                return False
+            if expected_feature_count > 0 and existing_features["feature_name"].nunique() < expected_feature_count:
+                return False
+            return True
+
+        def _generate_one(stock_code):
+            try:
+                ohlcv_frame = self.warehouse.read_ohlcv(
+                    stock_code=stock_code,
+                    market=normalized_market,
+                    exchange=exchange,
+                    asset_type=asset_type,
+                    frequency=frequency,
+                    adjust=normalized_adjust,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if ohlcv_frame is None or ohlcv_frame.empty:
+                    return {
+                        "stock_code": stock_code,
+                        "status": "missing_ohlcv",
+                        "rows": 0,
+                        "rows_written": 0,
+                        "dataset_path": None,
+                    }
+
+                latest_trade_date = pd.to_datetime(ohlcv_frame["trade_date"], errors="coerce").dropna().max()
+                if pd.isna(latest_trade_date):
+                    return {
+                        "stock_code": stock_code,
+                        "status": "missing_ohlcv",
+                        "rows": 0,
+                        "rows_written": 0,
+                        "dataset_path": None,
+                    }
+
+                existing_features = _read_existing_features(stock_code, latest_trade_date)
+                if _has_complete_coverage(existing_features, latest_trade_date):
+                    return {
+                        "stock_code": stock_code,
+                        "status": "skipped",
+                        "rows": int(existing_features["trade_date"].nunique()),
+                        "rows_written": 0,
+                        "dataset_path": str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature")),
+                    }
+
+                compute_result = self.compute_factor_set(
+                    stock_code=stock_code,
+                    factor_set=factor_set,
+                    market=normalized_market,
+                    exchange=exchange,
+                    asset_type=asset_type,
+                    frequency=frequency,
+                    adjust=normalized_adjust,
+                    start_date=start_date,
+                    end_date=end_date,
+                    persist=False,
+                    source=source,
+                    config=config,
+                )
+                feature_frame = compute_result.get("feature_frame")
+                if feature_frame is None or feature_frame.empty:
+                    return {
+                        "stock_code": stock_code,
+                        "status": "empty",
+                        "rows": 0,
+                        "rows_written": 0,
+                        "dataset_path": None,
+                    }
+
+                normalized = normalize_feature_frame(
+                    feature_frame,
+                    stock_code=stock_code,
+                    market=normalized_market,
+                    exchange=exchange,
+                    asset_type=asset_type,
+                    frequency=frequency,
+                    adjust=normalized_adjust,
+                    feature_set=factor_set,
+                    feature_version=materialization["feature_version"],
+                    feature_config_hash=materialization["feature_config_hash"],
+                    source=source,
+                    feature_columns=list(feature_frame.columns),
+                )
+                write_result = self.warehouse.upsert_features(normalized)
+                return {
+                    "stock_code": stock_code,
+                    "status": "computed",
+                    "rows": int(len(feature_frame)),
+                    "rows_written": int((write_result or {}).get("rows", 0)),
+                    "dataset_path": (write_result or {}).get("dataset_path"),
+                }
+            except Exception as exc:
+                import traceback
+
+                err_msg = f"{type(exc).__name__}: {exc}"
+                return {
+                    "stock_code": stock_code,
+                    "status": "error",
+                    "rows": 0,
+                    "rows_written": 0,
+                    "dataset_path": None,
+                    "error": err_msg,
+                    "traceback": traceback.format_exc(),
+                }
+
+        total = len(normalized_codes)
+        results = []
+        if show_progress:
+            print(
+                f"[PROGRESS] factor_generation phase=features "
+                f"stocks={total} workers={max_workers} factor_set={factor_set} "
+                f"window_days={effective_days} warmup_days={effective_warmup_days}"
+            )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_code = {
+                executor.submit(_generate_one, stock_code): stock_code
+                for stock_code in normalized_codes
+            }
+            for index, future in enumerate(as_completed(future_to_code), start=1):
+                result = future.result()
+                results.append(result)
+                if show_progress:
+                    computed_n = sum(item['status'] == 'computed' for item in results)
+                    error_n = sum(item['status'] == 'error' for item in results)
+                    written = sum(int(item.get("rows_written", 0) or 0) for item in results)
+                    latest_err = ""
+                    if result["status"] == "error":
+                        latest_err = f" last_err={result['stock_code']}:{result.get('error','?')}"
+                    print(
+                        f"[PROGRESS] factor_generation completed={index}/{total} "
+                        f"computed={computed_n} "
+                        f"skipped={sum(item['status'] == 'skipped' for item in results)} "
+                        f"errors={error_n} "
+                        f"rows={written}{latest_err}"
+                    )
+
+        results.sort(key=lambda item: item["stock_code"])
+
+        total_rows_written = sum(int(r.get("rows_written", 0) or 0) for r in results)
+        dataset_path = str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature"))
+
+        return {
+            "stock_count": total,
+            "success_count": sum(item["status"] == "computed" for item in results),
+            "skipped_count": sum(item["status"] == "skipped" for item in results),
+            "empty_count": sum(item["status"] in {"empty", "missing_ohlcv"} for item in results),
+            "error_count": sum(item["status"] == "error" for item in results),
+            "rows_written": total_rows_written,
+            "dataset_path": dataset_path,
+            "factor_materialization": materialization,
+            "start_date": start_date,
+            "end_date": end_date,
+            "warmup_days": effective_warmup_days,
+            "results": results,
+        }
 
     def persist_backtest_result(
         self,

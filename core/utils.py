@@ -239,9 +239,25 @@ class UtilsMixin:
         if feature_long is None or feature_long.empty:
             return pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
 
-        keep_columns = [column for column in VALIDATION_FEATURE_BASE_COLUMNS if column in feature_long.columns]
-        trimmed = feature_long[keep_columns].copy()
-        for column in ("stock_code", "market", "exchange", "asset_type", "frequency", "adjust", "feature_set", "feature_name"):
+        trimmed = feature_long.copy()
+        if "feature_version" not in trimmed.columns:
+            trimmed["feature_version"] = "0.1.0"
+        if "feature_config_hash" not in trimmed.columns:
+            trimmed["feature_config_hash"] = "legacy"
+        keep_columns = [column for column in VALIDATION_FEATURE_BASE_COLUMNS if column in trimmed.columns]
+        trimmed = trimmed[keep_columns].copy()
+        for column in (
+            "stock_code",
+            "market",
+            "exchange",
+            "asset_type",
+            "frequency",
+            "adjust",
+            "feature_set",
+            "feature_version",
+            "feature_config_hash",
+            "feature_name",
+        ):
             if column in trimmed.columns and trimmed[column].dtype == object:
                 trimmed[column] = trimmed[column].astype("category")
         return trimmed
@@ -262,13 +278,23 @@ class UtilsMixin:
         return self.data_layout.layer_path("meta") / "validation_feature_cache"
 
     @staticmethod
-    def _build_validation_feature_cache_key(stock_code, days, factor_set, validation_factor_scope="all", validated_feature_names=None):
+    def _build_validation_feature_cache_key(
+        stock_code,
+        days,
+        factor_set,
+        validation_factor_scope="all",
+        validated_feature_names=None,
+        feature_version=None,
+        feature_config_hash=None,
+    ):
         identity = {
             "stock_code": str(stock_code),
             "days": int(days),
             "factor_set": str(factor_set),
             "validation_factor_scope": str(validation_factor_scope),
             "validated_feature_names": [str(item) for item in (validated_feature_names or []) if str(item).strip()],
+            "feature_version": str(feature_version or ""),
+            "feature_config_hash": str(feature_config_hash or ""),
         }
         cache_key = hashlib.sha1(
             json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")

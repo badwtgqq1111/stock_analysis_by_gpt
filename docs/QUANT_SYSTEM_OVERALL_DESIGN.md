@@ -326,7 +326,7 @@ strategy_signals/               # 配方目录（可扩展的形态库）
 └── ...                         # 后续扩展
 ```
 
-> **当前状态**：`strategy/` 目录下有遗留的策略实现代码，结构与目标 `strategy_signals/` 设计有偏差（耦合了止损止盈逻辑、未继承统一 SignalRecipe 基类、无独立条件层）。后续需按目标架构重构迁移。
+> **当前状态**：原 `strategy/` 目录中的策略实现已迁移至 `strategy_signals/`，当前主链路统一从 `strategy_signals/` 加载策略与配方。下一步重点不再是目录迁移，而是继续把配方表达收敛到 `factor_engine/signals/` 的统一条件/组合框架。
 
 #### 4.2.3 机器学习因子组合路线
 
@@ -884,7 +884,7 @@ flowchart LR
 | 数据标准化 | `data/model/` | 统一 OHLCV / stock info schema、交易日历、复权口径、质量巡检 |
 | 因子引擎 | `factor_engine/` | 最小骨架可用：registry + base + expressions/operators + Alpha158/Alpha360 |
 | 因子验证 | `factor_validation/` | 最小验证流水线可用，CLI 双模式分离（validate_factors / select_stocks） |
-| 信号配方 | `strategy/` (legacy) | 有遗留实现，需按 `strategy_signals/` 目标架构重构 |
+| 信号配方 | `strategy_signals/` | 已成为主配方目录，承接原 `strategy/` 迁移后的实现 |
 | 回测引擎 | `backtest_engine/` | 事件驱动撮合、费用/滑点、TopN 组合构建、全港股扫描 |
 | 分析入口 | `analyzer_core.py` | 主分析链路已切到新数据架构，编排因子计算→验证→选股→回测 |
 | 指标计算 | `indicators.py` | 技术指标库 |
@@ -970,7 +970,7 @@ flowchart LR
 - 提供标准因子计算接口 —— 已完成
 - 能跑基础单因子回测 —— 已完成
 - 信号配方框架层落地（`factor_engine/signals/`）
-- 遗留 `strategy/` 迁移至 `strategy_signals/`
+- `strategy_signals/` 已承接原 `strategy/` 迁移后的实现
 
 ### Phase 2：建立因子工厂与回测平台
 
@@ -1025,7 +1025,7 @@ flowchart LR
 - 企业行为层补齐（A 股企业行为、港股官方校验源、本地复权回放）
 - 数据质量自动修复流水线（停牌识别、节假日缺口、复权一致性）
 - `factor_engine/signals/` 框架（`base.py` / `conditions.py` / `combinators.py`）
-- 遗留 `strategy/` 代码审计，规划迁移路径
+- `strategy_signals/` 内部表达进一步统一到 `factor_engine/signals/conditions.py` / `combinators.py`
 
 #### Next：信号配方目录 + LightGBM 排序学习
 

@@ -13,6 +13,7 @@ from cli.helpers import (
     _is_usable_validation_scorecard,
     _load_validation_weight_cache,
     _sanitize_validation_scorecard,
+    _write_run_manifest,
 )
 from data.ingest.service import MarketDataService
 
@@ -48,6 +49,7 @@ def main_select_stocks(
 
     analyzer = StockAnalyzer()
     try:
+        cached_payload = None
         normalized_mode = str(analysis_mode or "factor").strip().lower()
         factor_score_config = None
         ridge_factors = None
@@ -137,6 +139,10 @@ def main_select_stocks(
     print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
     print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")
 
+    ranking_path = None
+    selected_path = None
+    watchlist_path = None
+    signals_dir = None
     if export_csv:
         export_path = Path(export_csv)
         export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,6 +190,45 @@ def main_select_stocks(
         finally:
             service.close()
         print(f"[OK] 已写入 signal 层: batch_id={persist_result['batch_id']}, rows={persist_result['signal_rows']}")
+    else:
+        persist_result = None
+
+    manifest_path, _ = _write_run_manifest(
+        run_type="select_stocks",
+        analyzer=analyzer,
+        fallback_base=export_csv,
+        params={
+            "days": int(days),
+            "top_n": int(top_n),
+            "initial_capital": float(initial_capital),
+            "analysis_mode": normalized_mode,
+            "factor_set": factor_set,
+            "max_workers": int(max_workers),
+            "validation_days": int(validation_days or days),
+            "validation_horizons": [int(item) for item in validation_horizons],
+            "validation_quantiles": int(validation_quantiles),
+            "validation_min_observations": int(validation_min_observations),
+            "validation_stock_limit": None if validation_stock_limit is None else int(validation_stock_limit),
+            "validation_factor_scope": validation_factor_scope or "all",
+            "signal_recipes": list(signal_recipes or []),
+            "max_features": int(max_features or 0),
+            "persist_signals": bool(persist_signals),
+        },
+        artifacts={
+            "ranking_csv_path": str(ranking_path) if ranking_path is not None else None,
+            "selected_csv_path": str(selected_path) if selected_path is not None else None,
+            "watchlist_csv_path": str(watchlist_path) if watchlist_path is not None else None,
+            "signals_dir": str(signals_dir) if signals_dir is not None else None,
+            "persist_batch_id": persist_result.get("batch_id") if persist_result is not None else None,
+        },
+        factor_materialization=(cached_payload or {}).get("feature_materialization") or {},
+        upstream={
+            "validation_cache_key": cache_key if normalized_mode == "factor" else None,
+            "validation_cache_path": (cached_payload or {}).get("_cache_path") if normalized_mode == "factor" else None,
+        },
+        status="ok",
+    )
+    print(f"[OK] 已写入 run manifest: {manifest_path}")
 
     print("\n当前建议持有:")
     for item in portfolio_result.get("selected", []):
@@ -194,4 +239,5 @@ def main_select_stocks(
     print("\n" + "=" * 80)
     print("全港股 TopN 分析完成！")
     print("=" * 80)
+    portfolio_result["manifest_path"] = str(manifest_path)
     return portfolio_result

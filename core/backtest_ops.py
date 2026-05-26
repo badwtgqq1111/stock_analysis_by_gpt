@@ -389,7 +389,7 @@ class BacktestMixin:
         min_commission=0.0,
     ):
         from reporting import generate_strategy_comparison_report
-        from strategy import STRATEGY_SUITE
+        from strategy_signals import STRATEGY_SUITE
         # Import lazily to avoid circular import at module level
         from core.analyzer import StockAnalyzer
 

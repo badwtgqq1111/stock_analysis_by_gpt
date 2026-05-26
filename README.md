@@ -1,6 +1,6 @@
 # 港股量化研究与回测工具
 
-基于 `Parquet + DuckDB` 数据底座的本地量化研究工具箱。架构设计详见 [QUANT_SYSTEM_OVERALL_DESIGN.md](./QUANT_SYSTEM_OVERALL_DESIGN.md)。
+基于 `ClickHouse + DuckDB` 数据底座的本地量化研究工具箱。架构设计详见 [QUANT_SYSTEM_OVERALL_DESIGN.md](./QUANT_SYSTEM_OVERALL_DESIGN.md)。
 
 ## 环境部署
 
@@ -117,11 +117,65 @@ uv run python sync_hk_market.py \
 - `assets/data/signal` — 批次扫描信号
 - `assets/data/trade` — 回测交易结果
 
+## 前置：启动 ClickHouse
+
+因子数据统一存储在 ClickHouse，支持 **8 worker 并发写入 + 无锁 INSERT**。只需要 Docker：
+
+```bash
+docker run -d --name clickhouse \
+  -p 8123:8123 -p 9000:9000 \
+  -e CLICKHOUSE_USER=default \
+  -e CLICKHOUSE_PASSWORD=quant2024 \
+  clickhouse/clickhouse-server
+```
+
+然后设置环境变量（可写入 `~/.zshrc`）：
+
+```bash
+export CLICKHOUSE_HOST=localhost
+export CLICKHOUSE_PORT=8123
+export CLICKHOUSE_USER=default
+export CLICKHOUSE_PASSWORD=quant2024
+```
+
+> 所有命令自动读取这些环境变量，无需每个命令加 `--clickhouse`。如果没设环境变量，则回退到 Parquet 后端。
+
+---
+
 ## 使用命令
 
-### 因子验证（独立运行）
+### 第一步：数据同步
 
-先跑验证，产出权重缓存和因子记分卡：
+先拉取全港股日线数据（2014 年起），只需执行一次：
+
+```bash
+uv run python sync_hk_market.py \
+  --db-dir ./assets \
+  --start-date 2014-01-01 \
+  --workers 24 \
+  --show-progress \
+  --frequencies daily \
+  --skip-existing
+```
+
+### 第二步：因子生成
+
+全市场批量计算 Alpha158 因子并写入 ClickHouse：
+
+```bash
+uv run python stock_analyzer.py generate_factors \
+  --days 365 \
+  --factor-set qlib_alpha158 \
+  --stock-limit 500 \
+  --max-workers 8 \
+  --show-progress
+```
+
+> `--stock-limit` 控制计算股票数；不加则跑全部。已入库的股票会自动跳过。
+
+### 第三步：因子验证
+
+验证因子 IC 质量，产出权重缓存，供后续选股使用：
 
 ```bash
 uv run python stock_analyzer.py validate_factors \
@@ -132,68 +186,24 @@ uv run python stock_analyzer.py validate_factors \
   --export-csv output/validation_scorecard
 ```
 
-参数说明：
+### 第四步：选股 + 回测
 
-| 参数 | 说明 | 默认值 |
-|---|---|---|
-| `--days` | 验证窗口天数 | 365 |
-| `--factor-set` | 因子集名称 | `qlib_alpha158` |
-| `--max-workers` | 并发线程数 | 0（自动） |
-| `--show-progress` | 显示进度 | 关 |
-| `--horizons` | 验证 horizon 列表 | `1,5,10,20` |
-| `--quantiles` | 分组数 | 5 |
-| `--min-observations` | 最小样本数 | 5 |
-| `--stock-limit` | 参与验证的股票上限 | 不限 |
-| `--validation-factor-scope` | `scoring_only` 或 `all` | `scoring_only` |
-| `--refresh-recommended-factor-weights` | 强制重算，跳过缓存 | 关 |
-| `--export-csv` | 导出因子记分卡路径 | 不导出 |
-
-验证完成后缓存写入 `assets/data/meta/factor_weight_cache/`。
-
-### 选股+回测（基于验证权重）
-
-读取验证缓存，执行全市场 TopN 选股+回测：
+基于验证后的因子权重选股并回测：
 
 ```bash
-uv run python stock_analyzer.py select_stocks \
-  --top-n 10 \
-  --days 365 \
-  --initial-capital 100000 \
-  --max-workers 8 \
-  --show-progress \
-  --factor-set qlib_alpha158 \
-  --signal-recipes low_price_setup,range_breakout,box_pullback \
-  --export-csv output/selected_top10
-```
-
-使用 LightGBM Ranker 直接训练并排序：
-
-```bash
-brew install libomp   # macOS 需要先安装一次
-uv sync
-
-# 使用 Alpha158（默认）
+# LightGBM 排序模式（推荐）
 uv run python stock_analyzer.py select_stocks \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
   --initial-capital 100000 \
+  --max-workers 8 --show-progress \
   --factor-set qlib_alpha158 \
-  --signal-recipes low_price_setup,range_breakout,box_pullback \
-  --export-csv output/lightgbm_top10
-
-# 使用 Alpha360（因子更多，覆盖更广）
-uv run python stock_analyzer.py select_stocks \
-  --analysis-mode lightgbm \
-  --top-n 10 \
-  --days 365 \
-  --initial-capital 100000 \
-  --factor-set qlib_alpha360 \
   --signal-recipes low_price_setup,range_breakout,box_pullback \
   --export-csv output/lightgbm_top10
 ```
 
-> Alpha158 和 Alpha360 **不建议合并使用**。Alpha360 已包含 Alpha158 的大部分因子，两者高度重叠，直接拼在一起会产生多重共线性。建议分别训练后对比 ICIR 和选股结果，选表现更好的一组。如果两组各有优势，可以在预测分数层面做加权集成，而不是在特征层合并。
+Alpha158 vs Alpha360：Alpha360 已包含 Alpha158 的大部分因子，两者高度重叠，不建议合并。分别训练后对比 ICIR，选表现更好的；或对预测分数做加权集成。
 
 #### TA-Lib 技术指标因子
 
@@ -313,6 +323,8 @@ uv run python stock_analyzer.py select_stocks \
 #### 信号 recipe 说明
 
 `--signal-recipes` 用于选择形态信号组合。因子层负责给股票打分，recipe 层负责把价量形态翻译成可排序的 `setup_type/setup_score`。
+
+当前 recipe 实现统一放在 `strategy_signals/`，`factor_engine/signals/` 负责配方运行与组合框架。
 
 | recipe | 识别形态 | 主要条件 | 适合用途 |
 |---|---|---|---|
@@ -459,18 +471,20 @@ result = analyzer.backtest_hk_market(
 )
 ```
 
-## 推荐工作流
+## 完整流程速览
 
 ```bash
-# 第一步：因子验证（内存密集，单独跑）
-uv run python stock_analyzer.py validate_factors \
-  --days 365 --factor-set qlib_alpha158 \
-  --max-workers 8 --show-progress
+# 1. 数据同步（仅首次）
+uv run python sync_hk_market.py --db-dir ./assets --start-date 2014-01-01 --workers 24 --frequencies daily --show-progress
 
-# 第二步：选股+回测（读缓存，轻量）
-uv run python stock_analyzer.py select_stocks \
-  --top-n 10 --days 365 --max-workers 8 --show-progress \
-  --export-csv output/top10 --persist-signals --batch-id hk_top10_latest
+# 2. 因子生成
+uv run python stock_analyzer.py generate_factors --days 365 --factor-set qlib_alpha158 --stock-limit 500 --max-workers 8 --show-progress
+
+# 3. 因子验证
+uv run python stock_analyzer.py validate_factors --days 365 --factor-set qlib_alpha158 --max-workers 8 --show-progress --export-csv output/validation
+
+# 4. 选股回测
+uv run python stock_analyzer.py select_stocks --analysis-mode lightgbm --top-n 10 --days 365 --max-workers 8 --show-progress --export-csv output/results
 ```
 
 ## 依赖

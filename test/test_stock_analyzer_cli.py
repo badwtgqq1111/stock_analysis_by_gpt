@@ -5,6 +5,7 @@
 
 import importlib
 import io
+import json
 import sys
 import tempfile
 import types
@@ -20,18 +21,40 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def _install_stubs():
+    for module_name in (
+        "cli",
+        "cli.all_hk",
+        "cli.factor_report",
+        "cli.formatters",
+        "cli.generate_factors",
+        "cli.helpers",
+        "cli.main",
+        "cli.review_batch",
+        "cli.select_stocks",
+        "cli.strategy_suite",
+        "cli.validate_factors",
+        "stock_analyzer",
+    ):
+        sys.modules.pop(module_name, None)
+
     analyzer_core_stub = types.ModuleType("analyzer_core")
 
     class StockAnalyzer:
         last_call = None
         last_validation_call = None
+        init_count = 0
 
         def __init__(self, *args, **kwargs):
-            pass
+            type(self).init_count += 1
 
         @staticmethod
         def get_score_factor_names(score_config=None):
             return ["MA20"]
+
+        @staticmethod
+        def _select_top_ridge_factors(scorecard, top_k=30):
+            working = scorecard.copy() if isinstance(scorecard, pd.DataFrame) else pd.DataFrame()
+            return working.head(int(top_k or 30))
 
         def backtest_hk_market(
             self,
@@ -45,6 +68,8 @@ def _install_stubs():
             show_progress=False,
             enable_portfolio_replay=True,
             signal_recipes=None,
+            max_features=0,
+            ridge_factors=None,
         ):
             type(self).last_call = {
                 "days": days,
@@ -58,6 +83,10 @@ def _install_stubs():
                 "enable_portfolio_replay": enable_portfolio_replay,
                 "signal_recipes": signal_recipes,
             }
+            if int(max_features or 0):
+                type(self).last_call["max_features"] = int(max_features)
+            if ridge_factors is not None:
+                type(self).last_call["ridge_factors_rows"] = len(ridge_factors)
             return {
                 "stock_pool": ["00001", "00002", "00003"],
                 "top_n": top_n,
@@ -125,6 +154,13 @@ def _install_stubs():
                     "horizons": tuple(horizons),
                     "quantiles": quantiles,
                     "min_observations": min_observations,
+                    "validation_factor_scope": validation_factor_scope,
+                    "validated_feature_names": list(validated_feature_names or []),
+                    "feature_materialization": {
+                        "feature_set": factor_set,
+                        "feature_version": "0.1.0",
+                        "feature_config_hash": "stubcfg1234567890",
+                    },
                     "factor_score_config": {
                         "trend": {"MA20": {"weight": 0.0, "higher_is_better": False}},
                         "weights": {"trend_score": 1.0, "quality_score": 0.0, "risk_score": 0.0},
@@ -242,9 +278,69 @@ def _install_stubs():
     class MarketDataService:
         last_persist_call = None
         last_get_signal_call = None
+        last_generate_call = None
+        last_get_all_stock_codes_call = None
 
         def __init__(self, *args, **kwargs):
             pass
+
+        def get_all_stock_codes(
+            self,
+            market="HK",
+            asset_type="equity",
+            frequency="daily",
+            adjust="qfq",
+        ):
+            type(self).last_get_all_stock_codes_call = {
+                "market": market,
+                "asset_type": asset_type,
+                "frequency": frequency,
+                "adjust": adjust,
+            }
+            return ["00001", "00002", "00003"]
+
+        def generate_factor_set(
+            self,
+            stock_codes=None,
+            factor_set="qlib_alpha158",
+            market="HK",
+            frequency="daily",
+            adjust="qfq",
+            days=365,
+            max_workers=1,
+            show_progress=False,
+        ):
+            type(self).last_generate_call = {
+                "stock_codes": list(stock_codes or []),
+                "factor_set": factor_set,
+                "market": market,
+                "frequency": frequency,
+                "adjust": adjust,
+                "days": days,
+                "max_workers": max_workers,
+                "show_progress": show_progress,
+            }
+            return {
+                "stock_count": len(stock_codes or []),
+                "success_count": len(stock_codes or []),
+                "skipped_count": 0,
+                "error_count": 0,
+                "rows_written": 579,
+                "dataset_path": "./assets/data/feature/features",
+                "factor_materialization": {
+                    "feature_set": factor_set,
+                    "feature_version": "0.1.0",
+                    "feature_config_hash": "stubcfg1234567890",
+                },
+                "results": [
+                    {
+                        "stock_code": stock_code,
+                        "status": "computed",
+                        "rows": 193,
+                    }
+                    for stock_code in (stock_codes or [])
+                ],
+            }
 
         def persist_portfolio_result(
             self,
@@ -312,7 +408,7 @@ def _install_stubs():
     reporting_stub.format_table_for_console = lambda table: str(table)
     sys.modules["reporting"] = reporting_stub
 
-    strategy_stub = types.ModuleType("strategy")
+    strategy_stub = types.ModuleType("strategy_signals")
 
     class _DummyBase:
         pass
@@ -320,7 +416,7 @@ def _install_stubs():
     strategy_stub.BuyStrategy = _DummyBase
     strategy_stub.SellStrategy = _DummyBase
     strategy_stub.CurrentStrategy = _DummyBase
-    sys.modules["strategy"] = strategy_stub
+    sys.modules["strategy_signals"] = strategy_stub
 
     return analyzer_core_stub.StockAnalyzer, data_ingest_service_stub.MarketDataService
 
@@ -330,6 +426,7 @@ def test_run_cli_supports_all_hk_mode():
     if "stock_analyzer" in sys.modules:
         del sys.modules["stock_analyzer"]
     stock_analyzer = importlib.import_module("stock_analyzer")
+    select_stocks_module = importlib.import_module("cli.select_stocks")
 
     buffer = io.StringIO()
     with redirect_stdout(buffer):
@@ -435,6 +532,7 @@ def test_run_cli_select_stocks_supports_signal_recipes():
     if "stock_analyzer" in sys.modules:
         del sys.modules["stock_analyzer"]
     stock_analyzer = importlib.import_module("stock_analyzer")
+    select_stocks_module = importlib.import_module("cli.select_stocks")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         analyzer = stock_analyzer.StockAnalyzer()
@@ -469,14 +567,16 @@ def test_run_cli_select_stocks_supports_signal_recipes():
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(stock_analyzer.json.dumps(cache_payload), encoding="utf-8")
 
-        original_cache_dir = stock_analyzer._get_validation_cache_dir
-        stock_analyzer._get_validation_cache_dir = lambda _analyzer: cache_dir
+        original_cache_dir = select_stocks_module._get_validation_cache_dir
+        select_stocks_module._get_validation_cache_dir = lambda _analyzer: cache_dir
         buffer = io.StringIO()
         try:
             with redirect_stdout(buffer):
                 stock_analyzer.run_cli(
                     [
                         "select_stocks",
+                        "--validation-factor-scope",
+                        "scoring_only",
                         "--signal-recipes",
                         "low_price_setup,range_breakout",
                         "--export-csv",
@@ -484,7 +584,7 @@ def test_run_cli_select_stocks_supports_signal_recipes():
                     ]
                 )
         finally:
-            stock_analyzer._get_validation_cache_dir = original_cache_dir
+            select_stocks_module._get_validation_cache_dir = original_cache_dir
 
     assert stock_analyzer_cls.last_call["signal_recipes"] == ("low_price_setup", "range_breakout")
 
@@ -542,6 +642,86 @@ def test_run_cli_select_stocks_supports_lightgbm_mode():
             stock_analyzer._get_validation_cache_dir = original_cache_dir
 
     assert stock_analyzer_cls.last_call["analysis_mode"] == "lightgbm"
+
+
+def test_run_cli_supports_generate_factors_mode():
+    stock_analyzer_cls, market_data_service_cls = _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        stock_analyzer.run_cli(
+            [
+                "generate_factors",
+                "--days",
+                "180",
+                "--factor-set",
+                "qlib_alpha158",
+                "--stock-limit",
+                "2",
+                "--max-workers",
+                "4",
+                "--show-progress",
+            ]
+        )
+
+    assert stock_analyzer_cls.last_call is None
+    assert stock_analyzer_cls.init_count == 0
+    assert market_data_service_cls.last_get_all_stock_codes_call == {
+        "market": "HK",
+        "asset_type": "equity",
+        "frequency": "daily",
+        "adjust": "qfq",
+    }
+    assert market_data_service_cls.last_generate_call == {
+        "stock_codes": ["00001", "00002"],
+        "factor_set": "qlib_alpha158",
+        "market": "HK",
+        "frequency": "daily",
+        "adjust": "qfq",
+        "days": 180,
+        "max_workers": 4,
+        "show_progress": True,
+    }
+
+
+def test_run_cli_generate_factors_writes_run_manifest():
+    _, market_data_service_cls = _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        export_base = Path(tmp_dir) / "generated_factors"
+        result = stock_analyzer.run_cli(
+            [
+                "generate_factors",
+                "--days",
+                "180",
+                "--factor-set",
+                "qlib_alpha158",
+                "--stock-limit",
+                "2",
+                "--max-workers",
+                "4",
+                "--export-csv",
+                str(export_base),
+            ]
+        )
+
+        manifest_path = Path(result["manifest_path"])
+        assert manifest_path.exists()
+        assert market_data_service_cls.last_generate_call["stock_codes"] == ["00001", "00002"]
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["run_type"] == "generate_factors"
+        assert manifest["params"]["factor_set"] == "qlib_alpha158"
+        assert manifest["params"]["stock_limit"] == 2
+        assert manifest["params"]["days"] == 180
+        assert manifest["factor_materialization"]["feature_config_hash"] == "stubcfg1234567890"
+        assert manifest["artifacts"]["summary_csv_path"].endswith("_summary.csv")
 
 
 def test_run_cli_all_hk_supports_export_csv():
@@ -699,6 +879,142 @@ def test_run_cli_supports_factor_report_mode():
         assert export_base.with_name(f"{export_base.stem}_metadata.json").exists()
 
 
+def test_run_cli_factor_report_writes_run_manifest():
+    _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        export_base = Path(tmp_dir) / "factor_report"
+        result = stock_analyzer.run_cli(
+            [
+                "factor_report",
+                "--days",
+                "180",
+                "--factor-set",
+                "qlib_alpha158",
+                "--stock-limit",
+                "2",
+                "--export-csv",
+                str(export_base),
+            ]
+        )
+
+        manifest_path = Path(result["manifest_path"])
+        assert manifest_path.exists()
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["run_type"] == "factor_report"
+        assert manifest["params"]["factor_set"] == "qlib_alpha158"
+        assert manifest["params"]["stock_limit"] == 2
+        assert manifest["factor_materialization"]["feature_config_hash"] == "stubcfg1234567890"
+        assert manifest["artifacts"]["metadata_json_path"].endswith("_metadata.json")
+
+
+def test_run_cli_validate_factors_writes_run_manifest():
+    _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        export_base = Path(tmp_dir) / "validation_scorecard"
+        result = stock_analyzer.run_cli(
+            [
+                "validate_factors",
+                "--factor-set",
+                "qlib_alpha158",
+                "--days",
+                "180",
+                "--export-csv",
+                str(export_base),
+            ]
+        )
+
+        manifest_path = Path(result["manifest_path"])
+        assert manifest_path.exists()
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["run_type"] == "validate_factors"
+        assert manifest["params"]["factor_set"] == "qlib_alpha158"
+        assert manifest["params"]["days"] == 180
+        assert manifest["artifacts"]["scorecard_csv_path"].endswith("_scorecard.csv")
+        assert manifest["artifacts"]["validation_cache_key"] == result["cache_key"]
+
+
+def test_run_cli_select_stocks_writes_run_manifest_with_validation_cache_reference():
+    stock_analyzer_cls, _ = _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+    select_stocks_module = importlib.import_module("cli.select_stocks")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        analyzer = stock_analyzer_cls()
+        cache_dir = Path(tmp_dir) / "factor_weight_cache"
+        validation_stock_codes = analyzer.get_all_stocks()
+        cache_key, _ = stock_analyzer._build_validation_cache_key(
+            factor_set="qlib_alpha158",
+            validation_days=365,
+            validation_horizons=(1, 5, 10, 20),
+            validation_quantiles=5,
+            validation_min_observations=5,
+            validation_stock_codes=validation_stock_codes,
+            validation_factor_scope="scoring_only",
+            validated_feature_names=analyzer.get_score_factor_names(),
+        )
+        cache_payload = {
+            "factor_score_config": {
+                "trend": {"MA20": {"weight": 1.0, "higher_is_better": False}},
+                "weights": {"trend_score": 1.0, "quality_score": 0.0, "risk_score": 0.0},
+            },
+            "factor_scorecard": [
+                {
+                    "feature_name": "MA20",
+                    "component": "trend",
+                    "validation_score": 1.0,
+                    "recommended_factor_weight": 1.0,
+                }
+            ],
+            "feature_materialization": {
+                "feature_set": "qlib_alpha158",
+                "feature_version": "0.1.0",
+                "feature_config_hash": "demo1234abcd5678",
+            },
+        }
+        cache_path = Path(cache_dir) / f"{cache_key}.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(stock_analyzer.json.dumps(cache_payload), encoding="utf-8")
+
+        original_cache_dir = select_stocks_module._get_validation_cache_dir
+        select_stocks_module._get_validation_cache_dir = lambda _analyzer: cache_dir
+        try:
+            export_base = Path(tmp_dir) / "selected_topn"
+            result = stock_analyzer.run_cli(
+                [
+                    "select_stocks",
+                    "--top-n",
+                    "2",
+                    "--validation-factor-scope",
+                    "scoring_only",
+                    "--export-csv",
+                    str(export_base),
+                ]
+            )
+        finally:
+            select_stocks_module._get_validation_cache_dir = original_cache_dir
+
+        manifest_path = Path(result["manifest_path"])
+        assert manifest_path.exists()
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["run_type"] == "select_stocks"
+        assert manifest["params"]["top_n"] == 2
+        assert manifest["upstream"]["validation_cache_key"] == cache_key
+        assert manifest["factor_materialization"]["feature_config_hash"] == "demo1234abcd5678"
+
+
 def test_run_cli_supports_signal_report_mode():
     stock_analyzer_cls, _ = _install_stubs()
     if "stock_analyzer" in sys.modules:
@@ -765,6 +1081,8 @@ def test_run_cli_all_hk_supports_recommended_factor_weights_mode():
                 "--top-n",
                 "2",
                 "--use-recommended-factor-weights",
+                "--validation-factor-scope",
+                "scoring_only",
                 "--validation-days",
                 "180",
                 "--validation-horizons",
@@ -788,6 +1106,50 @@ def test_run_cli_all_hk_supports_recommended_factor_weights_mode():
     assert stock_analyzer_cls.last_validation_call["validation_factor_scope"] == "scoring_only"
     assert stock_analyzer_cls.last_validation_call["validated_feature_names"] == ["MA20"]
     assert "已启用验证驱动权重模式" in output
+
+
+def test_run_cli_all_hk_writes_run_manifest_with_validation_reference():
+    _install_stubs()
+    if "stock_analyzer" in sys.modules:
+        del sys.modules["stock_analyzer"]
+    stock_analyzer = importlib.import_module("stock_analyzer")
+    all_hk_module = importlib.import_module("cli.all_hk")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        cache_dir = Path(tmp_dir) / "factor_weight_cache"
+        export_base = Path(tmp_dir) / "all_hk_topn"
+        original_cache_dir = all_hk_module._get_validation_cache_dir
+        all_hk_module._get_validation_cache_dir = lambda _analyzer: cache_dir
+        try:
+            result = stock_analyzer.run_cli(
+                [
+                    "all_hk",
+                    "--top-n",
+                    "2",
+                    "--use-recommended-factor-weights",
+                    "--refresh-recommended-factor-weights",
+                    "--validation-days",
+                    "180",
+                    "--validation-stock-limit",
+                    "2",
+                    "--export-csv",
+                    str(export_base),
+                ]
+            )
+        finally:
+            all_hk_module._get_validation_cache_dir = original_cache_dir
+
+        manifest_path = Path(result["manifest_path"])
+        assert manifest_path.exists()
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["run_type"] == "all_hk"
+        assert manifest["params"]["top_n"] == 2
+        assert manifest["params"]["use_recommended_factor_weights"] is True
+        assert manifest["params"]["validation_factor_scope"] == "all"
+        assert manifest["upstream"]["validation_cache_key"]
+        assert manifest["factor_materialization"]["feature_config_hash"] == "stubcfg1234567890"
+        assert manifest["artifacts"]["ranking_csv_path"].endswith("_ranking.csv")
 
 
 def test_merge_recommended_factor_weights_supports_feature_name_rows():

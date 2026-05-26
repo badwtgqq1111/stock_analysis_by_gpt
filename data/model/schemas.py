@@ -38,6 +38,8 @@ FEATURE_COLUMNS = [
     "frequency",
     "adjust",
     "feature_set",
+    "feature_version",
+    "feature_config_hash",
     "feature_name",
     "feature_value",
     "source",
@@ -263,6 +265,8 @@ def normalize_feature_frame(
     frequency="daily",
     adjust="qfq",
     feature_set="default",
+    feature_version=None,
+    feature_config_hash=None,
     source=None,
     feature_columns=None,
 ):
@@ -305,6 +309,8 @@ def normalize_feature_frame(
         "frequency",
         "adjust",
         "feature_set",
+        "feature_version",
+        "feature_config_hash",
         "feature_name",
         "feature_value",
         "source",
@@ -338,13 +344,28 @@ def normalize_feature_frame(
     long_frame["frequency"] = frequency
     long_frame["adjust"] = normalized_adjust
     long_frame["feature_set"] = str(feature_set or "default").strip() or "default"
+    long_frame["feature_version"] = str(feature_version or "0.1.0").strip() or "0.1.0"
+    long_frame["feature_config_hash"] = str(feature_config_hash or "default").strip() or "default"
     long_frame["source"] = source or "unknown"
     long_frame["ingest_time"] = pd.Timestamp.utcnow()
 
     long_frame = long_frame[FEATURE_COLUMNS].copy()
-    long_frame.sort_values(["trade_date", "feature_set", "feature_name"], inplace=True)
+    long_frame.sort_values(
+        ["trade_date", "feature_set", "feature_version", "feature_config_hash", "feature_name"],
+        inplace=True,
+    )
     long_frame.drop_duplicates(
-        subset=["market", "stock_code", "trade_date", "frequency", "adjust", "feature_set", "feature_name"],
+        subset=[
+            "market",
+            "stock_code",
+            "trade_date",
+            "frequency",
+            "adjust",
+            "feature_set",
+            "feature_version",
+            "feature_config_hash",
+            "feature_name",
+        ],
         keep="last",
         inplace=True,
     )

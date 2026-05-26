@@ -1,3 +1,4 @@
+import importlib
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ if str(ROOT_DIR) not in sys.path:
 from analyzer_core import StockAnalyzer
 from indicators import calculate_technical_indicators
 from reporting import build_strategy_comparison_tables, generate_strategy_comparison_report
-from strategy import (
+from strategy_signals import (
     STRATEGY_SUITE,
     BollingerUpperStochOrUnifiedSellStrategy,
     BottomVolumeReversalBuyStrategy,
@@ -89,6 +90,17 @@ def test_strategy_registry_contains_expected_suite():
         'trend_range_band',
         'bottom_volume_reversal',
     ]
+
+
+def test_legacy_strategy_package_is_removed():
+    sys.modules.pop("strategy", None)
+    try:
+        importlib.import_module("strategy")
+    except ModuleNotFoundError:
+        removed = True
+    else:
+        removed = False
+    assert removed is True
 
 
 def test_buy_strategies_return_dataframe_or_none():
@@ -193,7 +205,7 @@ def test_build_strategy_comparison_tables_shapes_dataframes():
 def test_compare_strategy_suite_with_stub_analyzer():
     original_backtest_portfolio = StockAnalyzer.backtest_portfolio
 
-    def stub_backtest_portfolio(self, stock_codes, days=365, top_n=3, initial_capital=100000):
+    def stub_backtest_portfolio(self, stock_codes, days=365, top_n=3, initial_capital=100000, **kwargs):
         analysis_results = []
         ranking = []
         for idx, stock_code in enumerate(stock_codes[:2]):

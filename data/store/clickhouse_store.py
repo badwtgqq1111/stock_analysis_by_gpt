@@ -1,0 +1,342 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""ClickHouse 数据存储后端 —— 支持并发写入。"""
+
+import pandas as pd
+from clickhouse_connect import get_client
+
+
+_FEATURES_COLUMNS = [
+    "trade_date", "stock_code", "market", "exchange", "asset_type",
+    "frequency", "adjust", "feature_set", "feature_version",
+    "feature_config_hash", "feature_name", "feature_value",
+    "source", "ingest_time",
+]
+
+_FEATURES_ORDER_BY = [
+    "market", "stock_code", "trade_date", "feature_set", "feature_version",
+    "feature_config_hash", "feature_name",
+]
+
+_FEATURES_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    trade_date Date,
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    exchange LowCardinality(String),
+    asset_type LowCardinality(String),
+    frequency LowCardinality(String),
+    adjust LowCardinality(String),
+    feature_set LowCardinality(String),
+    feature_version LowCardinality(String),
+    feature_config_hash LowCardinality(String),
+    feature_name LowCardinality(String),
+    feature_value Float64,
+    source LowCardinality(String),
+    ingest_time DateTime
+) ENGINE = ReplacingMergeTree()
+PARTITION BY (feature_set, feature_config_hash)
+ORDER BY ({order_by})
+"""
+
+_OHLCV_COLUMNS = [
+    "trade_date", "stock_code", "market", "exchange", "asset_type",
+    "frequency", "adjust", "open", "high", "low", "close", "volume",
+    "amount", "turnover", "vwap", "source", "ingest_time",
+]
+
+_OHLCV_ORDER_BY = ["market", "stock_code", "trade_date", "frequency", "adjust"]
+
+_OHLCV_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    trade_date Date,
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    exchange LowCardinality(String),
+    asset_type LowCardinality(String),
+    frequency LowCardinality(String),
+    adjust LowCardinality(String),
+    open Float64,
+    high Float64,
+    low Float64,
+    close Float64,
+    volume Float64,
+    amount Float64,
+    turnover Float64,
+    vwap Float64,
+    source LowCardinality(String),
+    ingest_time DateTime
+) ENGINE = ReplacingMergeTree()
+PARTITION BY (market, frequency, adjust)
+ORDER BY ({order_by})
+"""
+
+DATASET_SCHEMA = {
+    "features": {
+        "columns": _FEATURES_COLUMNS,
+        "ddl": _FEATURES_DDL,
+        "order_by": _FEATURES_ORDER_BY,
+    },
+    "ohlcv": {
+        "columns": _OHLCV_COLUMNS,
+        "ddl": _OHLCV_DDL,
+        "order_by": _OHLCV_ORDER_BY,
+    },
+}
+
+
+class ClickHouseStore:
+    """ClickHouse 数据存储。
+
+    所有 INSERT 天然支持并发写入，ReplacingMergeTree 自动去重。
+    """
+
+    def __init__(self, host="localhost", port=8123, user="default", password="",
+                 database="quant", layout=None):
+        self.host = host
+        self.port = port
+        self.user = user
+        self.password = password
+        self.database = database
+
+    def _connect(self):
+        return get_client(
+            host=self.host, port=self.port,
+            username=self.user, password=self.password,
+            database=self.database,
+        )
+
+    def _table_name(self, dataset_name, layer="clean"):
+        return f"{dataset_name}_{layer}"
+
+    def _ensure_table(self, client, dataset_name, layer):
+        table = self._table_name(dataset_name, layer)
+        schema = DATASET_SCHEMA.get(dataset_name)
+        if schema is None:
+            return table
+        ddl = schema["ddl"].format(table=table, order_by=", ".join(schema["order_by"]))
+        client.command(ddl)
+        return table
+
+    # ---- public interface (matches ParquetDataStore) ----
+
+    def dataset_exists(self, dataset_name, layer="clean"):
+        table = self._table_name(dataset_name, layer)
+        try:
+            client = self._connect()
+            result = client.query(
+                "SELECT 1 FROM system.tables WHERE database = {db:String} AND name = {tbl:String}",
+                parameters={"db": self.database, "tbl": table},
+            )
+            return len(result.result_rows) > 0
+        except Exception:
+            return False
+
+    def read_frame(self, dataset_name, layer="clean", filters=None, columns=None,
+                   order_by=None, range_filters=None):
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return pd.DataFrame()
+
+        table = self._table_name(dataset_name, layer)
+        select_sql = ", ".join(columns) if columns else "*"
+        query = f"SELECT {select_sql} FROM {table}"
+        params = {}
+        clauses = []
+
+        for i, (col, val) in enumerate((filters or {}).items()):
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple, set)):
+                vlist = list(val)
+                if not vlist:
+                    continue
+                placeholders = ", ".join(f"{{p{i}_{j}:String}}" for j in range(len(vlist)))
+                clauses.append(f"{col} IN ({placeholders})")
+                for j, v in enumerate(vlist):
+                    params[f"p{i}_{j}"] = str(v)
+            else:
+                clauses.append(f"{col} = {{p{i}:String}}")
+                params[f"p{i}"] = str(val)
+
+        for col, bounds in (range_filters or {}).items():
+            lower = bounds.get("gte")
+            if lower is not None:
+                clauses.append(f"{col} >= {{r_{col}_l:String}}")
+                params[f"r_{col}_l"] = str(lower)
+            upper = bounds.get("lte")
+            if upper is not None:
+                clauses.append(f"{col} <= {{r_{col}_u:String}}")
+                params[f"r_{col}_u"] = str(upper)
+
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        if order_by:
+            query += f" ORDER BY {order_by}"
+
+        client = self._connect()
+        try:
+            return client.query_df(query, parameters=params)
+        finally:
+            client.close()
+
+    def scalar_query(self, dataset_name, expression, layer="clean", filters=None,
+                     range_filters=None):
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return None
+
+        table = self._table_name(dataset_name, layer)
+        query = f"SELECT {expression} AS value FROM {table} FINAL"
+        params = {}
+        clauses = []
+
+        for i, (col, val) in enumerate((filters or {}).items()):
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple, set)):
+                vlist = list(val)
+                if not vlist:
+                    continue
+                placeholders = ", ".join(f"{{p{i}_{j}:String}}" for j in range(len(vlist)))
+                clauses.append(f"{col} IN ({placeholders})")
+                for j, v in enumerate(vlist):
+                    params[f"p{i}_{j}"] = str(v)
+            else:
+                clauses.append(f"{col} = {{p{i}:String}}")
+                params[f"p{i}"] = str(val)
+
+        for col, bounds in (range_filters or {}).items():
+            lower = bounds.get("gte")
+            if lower is not None:
+                clauses.append(f"{col} >= {{r_{col}_l:String}}")
+                params[f"r_{col}_l"] = str(lower)
+            upper = bounds.get("lte")
+            if upper is not None:
+                clauses.append(f"{col} <= {{r_{col}_u:String}}")
+                params[f"r_{col}_u"] = str(upper)
+
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+
+        client = self._connect()
+        try:
+            result = client.query(query, parameters=params)
+            rows = result.result_rows
+            return rows[0][0] if rows else None
+        finally:
+            client.close()
+
+    def values_query(self, dataset_name, column, layer="clean", filters=None,
+                     distinct=False, order_by=None, range_filters=None):
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return []
+
+        table = self._table_name(dataset_name, layer)
+        prefix = "DISTINCT " if distinct else ""
+        query = f"SELECT {prefix}{column} AS value FROM {table} FINAL"
+        params = {}
+        clauses = []
+
+        for i, (col, val) in enumerate((filters or {}).items()):
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple, set)):
+                vlist = list(val)
+                if not vlist:
+                    continue
+                placeholders = ", ".join(f"{{p{i}_{j}:String}}" for j in range(len(vlist)))
+                clauses.append(f"{col} IN ({placeholders})")
+                for j, v in enumerate(vlist):
+                    params[f"p{i}_{j}"] = str(v)
+            else:
+                clauses.append(f"{col} = {{p{i}:String}}")
+                params[f"p{i}"] = str(val)
+
+        for col, bounds in (range_filters or {}).items():
+            lower = bounds.get("gte")
+            if lower is not None:
+                clauses.append(f"{col} >= {{r_{col}_l:String}}")
+                params[f"r_{col}_l"] = str(lower)
+            upper = bounds.get("lte")
+            if upper is not None:
+                clauses.append(f"{col} <= {{r_{col}_u:String}}")
+                params[f"r_{col}_u"] = str(upper)
+
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        if order_by:
+            query += f" ORDER BY {order_by}"
+
+        client = self._connect()
+        try:
+            result = client.query(query, parameters=params)
+            return [row[0] for row in result.result_rows]
+        finally:
+            client.close()
+
+    def write_frame(self, dataset_name, frame, layer="clean", date_column="trade_date",
+                    partition_columns=None):
+        table = self._table_name(dataset_name, layer)
+        client = self._connect()
+        try:
+            self._ensure_table(client, dataset_name, layer)
+            client.command(f"TRUNCATE TABLE {table}")
+            if frame is not None and not frame.empty:
+                self._insert_frame(client, table, dataset_name, frame, date_column)
+        finally:
+            client.close()
+        return table
+
+    def append_frame(self, dataset_name, frame, layer="clean", date_column="trade_date",
+                     partition_columns=None):
+        table = self._table_name(dataset_name, layer)
+        client = self._connect()
+        try:
+            self._ensure_table(client, dataset_name, layer)
+            if frame is not None and not frame.empty:
+                self._insert_frame(client, table, dataset_name, frame, date_column)
+        finally:
+            client.close()
+        return table
+
+    def upsert_frame(self, dataset_name, frame, dedupe_keys, layer="clean",
+                     sort_by=None, date_column="trade_date", partition_columns=None):
+        table = self._table_name(dataset_name, layer)
+        client = self._connect()
+        try:
+            self._ensure_table(client, dataset_name, layer)
+            if frame is not None and not frame.empty:
+                self._insert_frame(client, table, dataset_name, frame, date_column)
+        finally:
+            client.close()
+        return table
+
+    def compact_dataset(self, dataset_name, dedupe_keys, sort_by=None, layer="clean",
+                        partition_columns=None):
+        table = self._table_name(dataset_name, layer)
+        client = self._connect()
+        try:
+            client.command(f"OPTIMIZE TABLE {table} FINAL DEDUPLICATE")
+        finally:
+            client.close()
+
+    # ---- internal helpers ----
+
+    def _insert_frame(self, client, table, dataset_name, frame, date_column):
+        if frame is None or frame.empty:
+            return
+
+        prepared = frame.copy()
+        if date_column and date_column in prepared.columns:
+            prepared[date_column] = pd.to_datetime(prepared[date_column], errors="coerce")
+            prepared.dropna(subset=[date_column], inplace=True)
+
+        if "ingest_time" not in prepared.columns:
+            prepared["ingest_time"] = pd.Timestamp.utcnow()
+
+        schema = DATASET_SCHEMA.get(dataset_name)
+        if schema:
+            cols = [c for c in schema["columns"] if c in prepared.columns]
+            prepared = prepared[cols]
+
+        client.insert_df(table, prepared)

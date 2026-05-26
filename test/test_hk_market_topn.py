@@ -10,6 +10,7 @@ from pathlib import Path
 import types
 import threading
 import time
+from unittest.mock import patch
 
 import pandas as pd
 import numpy as np
@@ -30,8 +31,8 @@ if "reporting" not in sys.modules:
     reporting_stub.generate_trading_strategy = lambda *args, **kwargs: {}
     sys.modules["reporting"] = reporting_stub
 
-if "strategy" not in sys.modules:
-    strategy_stub = types.ModuleType("strategy")
+if "strategy_signals" not in sys.modules:
+    strategy_stub = types.ModuleType("strategy_signals")
 
     class _DummyBase:
         def identify_buy_signals(self, data, stock_code=None):
@@ -53,7 +54,7 @@ if "strategy" not in sys.modules:
     strategy_stub.SellStrategy = SellStrategy
     strategy_stub.CurrentStrategy = CurrentStrategy
     strategy_stub.STRATEGY_SUITE = []
-    sys.modules["strategy"] = strategy_stub
+    sys.modules["strategy_signals"] = strategy_stub
 
 from analyzer_core import StockAnalyzer
 from data.model import normalize_ohlcv_frame
@@ -885,7 +886,8 @@ def test_validation_frame_helpers_trim_columns():
     assert "ingest_time" not in trimmed_feature.columns
     assert set(trimmed_feature.columns) == {
         "trade_date", "stock_code", "market", "exchange", "asset_type",
-        "frequency", "adjust", "feature_set", "feature_name", "feature_value",
+        "frequency", "adjust", "feature_set", "feature_version",
+        "feature_config_hash", "feature_name", "feature_value",
     }
     assert set(trimmed_ohlcv.columns) == {
         "trade_date", "stock_code", "market", "exchange", "asset_type",
@@ -1006,6 +1008,124 @@ def test_build_factor_validation_report_refreshes_stale_feature_cache():
     assert second is not None
     assert before_refresh == 2
     assert call_count["value"] == 4
+
+
+def test_build_factor_validation_report_reuses_feature_store_after_pickle_cache_removed():
+    import factor_engine as factor_engine_module
+
+    def _make_frame(stock_code, periods=50):
+        dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=periods)
+        offset = int(stock_code[-1])
+        close = np.linspace(10 + offset, 20 + offset, len(dates))
+        raw = pd.DataFrame(
+            {
+                "date": dates,
+                "Open": close * 0.99,
+                "Close": close,
+                "High": close * 1.01,
+                "Low": close * 0.98,
+                "Volume": np.linspace(1000, 2000, len(dates)),
+            }
+        )
+        return normalize_ohlcv_frame(raw, stock_code=stock_code, market="HK", source="unit_test")
+
+    transform_calls = {"value": 0}
+    real_create_factor_set = factor_engine_module.create_factor_set
+
+    def wrapped_create_factor_set(name, **kwargs):
+        factor = real_create_factor_set(name, **kwargs)
+        original_transform = factor.transform
+
+        def counting_transform(*args, **inner_kwargs):
+            transform_calls["value"] += 1
+            return original_transform(*args, **inner_kwargs)
+
+        factor.transform = counting_transform
+        return factor
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        analyzer = StockAnalyzer(db_dir=tmp_dir, market_read_only=False)
+        try:
+            analyzer.market_warehouse.upsert_ohlcv(
+                pd.concat([_make_frame("00001"), _make_frame("00002")], ignore_index=True)
+            )
+            kwargs = dict(
+                stock_codes=["00001", "00002"],
+                days=30,
+                factor_set="qlib_alpha158",
+                horizons=(5,),
+                quantiles=3,
+                min_observations=3,
+                max_workers=1,
+            )
+
+            with patch("factor_engine.create_factor_set", side_effect=wrapped_create_factor_set):
+                first = analyzer.build_factor_validation_report(**kwargs)
+                first_calls = transform_calls["value"]
+
+                cache_dir = analyzer.get_validation_feature_cache_dir()
+                for cache_file in cache_dir.glob("*.pkl"):
+                    cache_file.unlink()
+
+                second = analyzer.build_factor_validation_report(**kwargs)
+        finally:
+            analyzer.close()
+
+    assert first is not None
+    assert second is not None
+    assert first_calls == 2
+    assert transform_calls["value"] == first_calls
+
+
+def test_build_factor_validation_report_records_feature_materialization_metadata():
+    from factor_engine import build_feature_materialization_metadata, create_factor_set
+
+    original_load_stock_data = StockAnalyzer.load_stock_data
+
+    def stub_load_stock_data(self, stock_code, days=365):
+        dates = pd.date_range("2024-01-02", periods=40, freq="B")
+        close = np.linspace(10, 20, len(dates))
+        return pd.DataFrame(
+            {
+                "Open": close * 0.99,
+                "Close": close,
+                "High": close * 1.01,
+                "Low": close * 0.98,
+                "Volume": np.linspace(1000, 2000, len(dates)),
+            },
+            index=dates,
+        ).rename_axis("date")
+
+    validated_feature_names = ["MA20", "STD20"]
+    restricted_config = StockAnalyzer._parse_scoring_factors_to_alpha158_config(validated_feature_names)
+    factor_template = create_factor_set("qlib_alpha158", config=restricted_config)
+    expected_materialization = build_feature_materialization_metadata(
+        factor_set="qlib_alpha158",
+        metadata=factor_template.metadata().to_dict(),
+        config=restricted_config,
+    )
+
+    StockAnalyzer.load_stock_data = stub_load_stock_data
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            analyzer = StockAnalyzer(db_dir=tmp_dir)
+            result = analyzer.build_factor_validation_report(
+                stock_codes=["00001", "00002"],
+                days=30,
+                factor_set="qlib_alpha158",
+                horizons=(5,),
+                quantiles=3,
+                min_observations=3,
+                max_workers=1,
+                validation_factor_scope="scoring_only",
+                validated_feature_names=validated_feature_names,
+            )
+            analyzer.close()
+    finally:
+        StockAnalyzer.load_stock_data = original_load_stock_data
+
+    assert result is not None
+    assert result["metadata"]["feature_materialization"] == expected_materialization
 
 
 def test_analyze_factor_batch_handles_duplicate_panel_dates_without_series_truth_error(monkeypatch):

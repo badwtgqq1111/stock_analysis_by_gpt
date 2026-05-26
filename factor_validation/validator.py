@@ -23,6 +23,8 @@ FEATURE_METADATA_COLUMNS = {
     "frequency",
     "adjust",
     "feature_set",
+    "feature_version",
+    "feature_config_hash",
     "feature_name",
     "feature_value",
     "source",

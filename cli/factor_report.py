@@ -10,6 +10,7 @@ from cli.formatters import _safe_close_analyzer
 from cli.helpers import (
     _build_factor_scorecard_ridge,
     _merge_recommended_factor_weights,
+    _write_run_manifest,
 )
 
 
@@ -100,6 +101,15 @@ def main_factor_report(
         preview_columns = [column for column in preview_columns if column in factor_scorecard.columns]
         print(factor_scorecard[preview_columns].head(15).to_string(index=False))
 
+    stock_summary_path = None
+    factor_coverage_path = None
+    factor_scorecard_path = None
+    ic_summary_path = None
+    quantile_summary_path = None
+    long_short_summary_path = None
+    turnover_summary_path = None
+    decay_summary_path = None
+    metadata_file = None
     if export_csv:
         export_path = Path(export_csv)
         export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,11 +126,58 @@ def main_factor_report(
         for name, frame in outputs.items():
             output_file = export_path.with_name(f"{export_path.stem}_{name}.csv")
             frame.to_csv(output_file, index=False, encoding="utf-8-sig")
+            if name == "stock_summary":
+                stock_summary_path = output_file
+            elif name == "factor_coverage":
+                factor_coverage_path = output_file
+            elif name == "factor_scorecard":
+                factor_scorecard_path = output_file
+            elif name == "ic_summary":
+                ic_summary_path = output_file
+            elif name == "quantile_summary":
+                quantile_summary_path = output_file
+            elif name == "long_short_summary":
+                long_short_summary_path = output_file
+            elif name == "turnover_summary":
+                turnover_summary_path = output_file
+            elif name == "decay_summary":
+                decay_summary_path = output_file
             print(f"[OK] 已导出 {name}: {output_file}")
 
         metadata_file = export_path.with_name(f"{export_path.stem}_metadata.json")
         metadata_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print(f"[OK] 已导出 metadata: {metadata_file}")
+
+    manifest_path, _ = _write_run_manifest(
+        run_type="factor_report",
+        analyzer=analyzer,
+        fallback_base=export_csv,
+        params={
+            "days": int(days),
+            "factor_set": factor_set,
+            "max_workers": int(max_workers),
+            "show_progress": bool(show_progress),
+            "horizons": [int(item) for item in horizons],
+            "quantiles": int(quantiles),
+            "min_observations": int(min_observations),
+            "stock_limit": None if stock_limit is None else int(stock_limit),
+            "validation_factor_scope": effective_validation_factor_scope,
+        },
+        artifacts={
+            "stock_summary_csv_path": str(stock_summary_path) if stock_summary_path is not None else None,
+            "factor_coverage_csv_path": str(factor_coverage_path) if factor_coverage_path is not None else None,
+            "factor_scorecard_csv_path": str(factor_scorecard_path) if factor_scorecard_path is not None else None,
+            "ic_summary_csv_path": str(ic_summary_path) if ic_summary_path is not None else None,
+            "quantile_summary_csv_path": str(quantile_summary_path) if quantile_summary_path is not None else None,
+            "long_short_summary_csv_path": str(long_short_summary_path) if long_short_summary_path is not None else None,
+            "turnover_summary_csv_path": str(turnover_summary_path) if turnover_summary_path is not None else None,
+            "decay_summary_csv_path": str(decay_summary_path) if decay_summary_path is not None else None,
+            "metadata_json_path": str(metadata_file) if metadata_file is not None else None,
+        },
+        factor_materialization=metadata.get("feature_materialization") or {},
+        status="ok",
+    )
+    print(f"[OK] 已写入 run manifest: {manifest_path}")
 
     print("\n" + "=" * 80)
     print("因子验证报告完成！")
@@ -128,6 +185,7 @@ def main_factor_report(
     return {
         **report,
         "factor_scorecard": factor_scorecard,
+        "manifest_path": str(manifest_path),
     }
 
 

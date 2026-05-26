@@ -100,6 +100,59 @@ def test_service_can_compute_and_persist_factor_set():
             service.close()
 
 
+def test_service_can_persist_multiple_factor_materializations_for_same_factor_set():
+    raw_frame = _make_ohlcv_frame()
+    normalized = normalize_ohlcv_frame(raw_frame, stock_code="00700", market="HK", source="unit_test")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        try:
+            service.warehouse.upsert_ohlcv(normalized)
+
+            no_ta = service.sync_factor_set(
+                stock_code="00700",
+                market="HK",
+                factor_set="qlib_alpha158",
+                source="unit_test",
+                config={"ta": {"indicators": []}},
+            )
+            rsi_only = service.sync_factor_set(
+                stock_code="00700",
+                market="HK",
+                factor_set="qlib_alpha158",
+                source="unit_test",
+                config={"ta": {"indicators": ["TA_RSI"]}},
+            )
+
+            no_ta_meta = no_ta["metadata"]
+            rsi_only_meta = rsi_only["metadata"]
+
+            assert no_ta_meta["version"] == rsi_only_meta["version"]
+            assert no_ta_meta["extra"]["feature_config_hash"] != rsi_only_meta["extra"]["feature_config_hash"]
+
+            loaded_no_ta = service.get_feature_frame(
+                stock_code="00700",
+                market="HK",
+                feature_set="qlib_alpha158",
+                feature_version=no_ta_meta["version"],
+                feature_config_hash=no_ta_meta["extra"]["feature_config_hash"],
+            )
+            loaded_rsi_only = service.get_feature_frame(
+                stock_code="00700",
+                market="HK",
+                feature_set="qlib_alpha158",
+                feature_version=rsi_only_meta["version"],
+                feature_config_hash=rsi_only_meta["extra"]["feature_config_hash"],
+            )
+
+            assert not loaded_no_ta.empty
+            assert not loaded_rsi_only.empty
+            assert set(loaded_no_ta["feature_config_hash"]) == {no_ta_meta["extra"]["feature_config_hash"]}
+            assert set(loaded_rsi_only["feature_config_hash"]) == {rsi_only_meta["extra"]["feature_config_hash"]}
+        finally:
+            service.close()
+
+
 def test_lightgbm_ranker_loader_reports_missing_libomp_on_macos():
     original_import = __import__
 

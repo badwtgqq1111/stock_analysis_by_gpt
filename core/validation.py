@@ -1,6 +1,7 @@
 """Validation mixin for StockAnalyzer."""
 
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -19,6 +20,30 @@ from core.constants import (
 
 class ValidationMixin:
     """Methods for factor validation report building and caching."""
+
+    def _resolve_validation_materialization(self, factor_set, validated_feature_names=None, show_progress=False):
+        from factor_engine import build_feature_materialization_metadata, create_factor_set
+
+        validated_feature_names = [str(item) for item in (validated_feature_names or []) if str(item).strip()]
+        validated_feature_name_set = set(validated_feature_names)
+        restricted_config = {}
+        if validated_feature_name_set and factor_set == "qlib_alpha158":
+            restricted_config = self._parse_scoring_factors_to_alpha158_config(validated_feature_name_set)
+            if restricted_config and show_progress:
+                ops = restricted_config.get("rolling", {}).get("include", [])
+                wins = restricted_config.get("rolling", {}).get("windows", [])
+                print(
+                    f"[PROGRESS] validation factor_config restricted "
+                    f"operators={ops} windows={wins}"
+                )
+
+        factor_template = create_factor_set(factor_set, config=restricted_config)
+        materialization = build_feature_materialization_metadata(
+            factor_set=factor_set,
+            metadata=factor_template.metadata().to_dict(),
+            config=restricted_config,
+        )
+        return restricted_config, materialization
 
     @staticmethod
     def _is_validation_feature_cache_fresh(cache_path, ttl_seconds=VALIDATION_FEATURE_CACHE_TTL_SECONDS):
@@ -60,6 +85,48 @@ class ValidationMixin:
         pd.to_pickle(payload, path)
         return path
 
+    def _load_materialized_validation_features(
+        self,
+        stock_code,
+        ohlcv_frame,
+        factor_set,
+        feature_version,
+        feature_config_hash,
+        validated_feature_names=None,
+    ):
+        if ohlcv_frame is None or ohlcv_frame.empty:
+            return pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
+
+        trade_dates = pd.to_datetime(ohlcv_frame["trade_date"], errors="coerce").dropna()
+        if trade_dates.empty:
+            return pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
+
+        feature_long = self.market_warehouse.read_features(
+            stock_code=stock_code,
+            market="HK",
+            asset_type="equity",
+            frequency="daily",
+            adjust="qfq",
+            feature_set=factor_set,
+            feature_version=feature_version,
+            feature_config_hash=feature_config_hash,
+            start_date=trade_dates.min(),
+            end_date=trade_dates.max(),
+        )
+        if feature_long is None or feature_long.empty:
+            return pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
+
+        if validated_feature_names:
+            feature_name_set = {str(item) for item in validated_feature_names if str(item).strip()}
+            feature_long = feature_long[feature_long["feature_name"].isin(feature_name_set)].copy()
+            if feature_long.empty:
+                return pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
+
+        feature_dates = pd.to_datetime(feature_long["trade_date"], errors="coerce").dropna()
+        if feature_dates.empty or feature_dates.max() < trade_dates.max():
+            return pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
+        return feature_long
+
     def _iter_factor_validation_batches(
         self,
         stock_codes,
@@ -80,18 +147,13 @@ class ValidationMixin:
 
         validated_feature_names = [str(item) for item in (validated_feature_names or []) if str(item).strip()]
         validated_feature_name_set = set(validated_feature_names)
-        restricted_config = {}
-        if validated_feature_name_set and factor_set == "qlib_alpha158":
-            restricted_config = self._parse_scoring_factors_to_alpha158_config(validated_feature_name_set)
-            if restricted_config and show_progress:
-                ops = restricted_config.get("rolling", {}).get("include", [])
-                wins = restricted_config.get("rolling", {}).get("windows", [])
-                print(
-                    f"[PROGRESS] validation factor_config restricted "
-                    f"operators={ops} windows={wins}"
-                )
-        factor_set_config = restricted_config
+        factor_set_config, materialization = self._resolve_validation_materialization(
+            factor_set=factor_set,
+            validated_feature_names=validated_feature_names,
+            show_progress=show_progress,
+        )
         cache_dir = self.get_validation_feature_cache_dir()
+        persist_lock = threading.Lock()
 
         def run_analysis(stock_code):
             try:
@@ -101,6 +163,8 @@ class ValidationMixin:
                     factor_set=factor_set,
                     validation_factor_scope=validation_factor_scope,
                     validated_feature_names=validated_feature_names,
+                    feature_version=materialization["feature_version"],
+                    feature_config_hash=materialization["feature_config_hash"],
                 )
                 cache_path = Path(cache_dir) / f"{cache_key}.pkl"
                 if self._is_validation_feature_cache_fresh(cache_path):
@@ -118,27 +182,41 @@ class ValidationMixin:
                     stock_code=stock_code,
                     market="HK",
                 )
-                factor = create_factor_set(factor_set, config=factor_set_config)
-                context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
-                feature_frame = factor.transform(ohlcv_frame, context=context)
-                if feature_frame is None or feature_frame.empty:
-                    return None
-
-                feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
-                if validated_feature_name_set:
-                    keep_columns = [column for column in feature_frame.columns if column in validated_feature_name_set]
-                    if not keep_columns:
-                        return None
-                    feature_frame = feature_frame[keep_columns].copy()
-                feature_long = normalize_feature_frame(
-                    feature_frame.reset_index().rename(columns={feature_frame.index.name or "index": "trade_date"}),
+                feature_long = self._load_materialized_validation_features(
                     stock_code=stock_code,
-                    market="HK",
-                    frequency="daily",
-                    adjust="qfq",
-                    feature_set=factor_set,
-                    feature_columns=list(feature_frame.columns),
+                    ohlcv_frame=ohlcv_frame,
+                    factor_set=factor_set,
+                    feature_version=materialization["feature_version"],
+                    feature_config_hash=materialization["feature_config_hash"],
+                    validated_feature_names=validated_feature_names,
                 )
+                if feature_long.empty:
+                    factor = create_factor_set(factor_set, config=factor_set_config)
+                    context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
+                    feature_frame = factor.transform(ohlcv_frame, context=context)
+                    if feature_frame is None or feature_frame.empty:
+                        return None
+
+                    feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
+                    if validated_feature_name_set:
+                        keep_columns = [column for column in feature_frame.columns if column in validated_feature_name_set]
+                        if not keep_columns:
+                            return None
+                        feature_frame = feature_frame[keep_columns].copy()
+                    feature_long = normalize_feature_frame(
+                        feature_frame.reset_index().rename(columns={feature_frame.index.name or "index": "trade_date"}),
+                        stock_code=stock_code,
+                        market="HK",
+                        frequency="daily",
+                        adjust="qfq",
+                        feature_set=factor_set,
+                        feature_version=materialization["feature_version"],
+                        feature_config_hash=materialization["feature_config_hash"],
+                        feature_columns=list(feature_frame.columns),
+                    )
+                    if not feature_long.empty:
+                        with persist_lock:
+                            self.market_warehouse.upsert_features(feature_long)
                 feature_long = self._trim_validation_feature_frame(feature_long)
                 ohlcv_frame = self._trim_validation_ohlcv_frame(ohlcv_frame)
                 result = {
@@ -298,6 +376,11 @@ class ValidationMixin:
         validated_feature_names = [
             str(item) for item in (validated_feature_names or []) if str(item).strip()
         ]
+        _, materialization = self._resolve_validation_materialization(
+            factor_set=factor_set,
+            validated_feature_names=validated_feature_names,
+            show_progress=show_progress,
+        )
 
         validator = FactorValidator(horizons=horizons, quantiles=quantiles, min_observations=min_observations)
         requested_workers = max(int(max_workers or 1), 1)
@@ -430,6 +513,12 @@ class ValidationMixin:
                 "validation_frame_included": False,
                 "quantile_membership_included": False,
                 "validation_batch_size": int(batch_size),
+                "feature_materialization": {
+                    "feature_set": materialization["feature_set"],
+                    "feature_version": materialization["feature_version"],
+                    "feature_config_hash": materialization["feature_config_hash"],
+                    "feature_config": materialization["feature_config"],
+                },
             },
             "stock_summary": pd.DataFrame(stock_summary_rows),
             "factor_coverage": pd.DataFrame(factor_coverage_rows),

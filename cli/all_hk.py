@@ -15,6 +15,7 @@ from cli.helpers import (
     _load_validation_weight_cache,
     _merge_recommended_factor_weights,
     _sanitize_validation_scorecard,
+    _write_run_manifest,
     _write_validation_weight_cache,
 )
 from data.ingest.service import MarketDataService
@@ -48,14 +49,18 @@ def main_all_hk(
     print("=" * 80)
 
     analyzer = StockAnalyzer()
+    cache_key = None
+    cache_path = None
+    cached_payload = None
+    effective_validation_days = validation_days or days
+    effective_validation_factor_scope = validation_factor_scope or "all"
     try:
         factor_score_config = None
+        validation_scorecard = pd.DataFrame()
         if analysis_mode == "factor" and use_recommended_factor_weights:
-            effective_validation_factor_scope = validation_factor_scope or "all"
             validation_stock_codes = analyzer.get_all_stocks()
             if validation_stock_limit is not None:
                 validation_stock_codes = validation_stock_codes[: max(int(validation_stock_limit), 0)]
-            effective_validation_days = validation_days or days
             validated_feature_names = None
             if effective_validation_factor_scope == "scoring_only":
                 validated_feature_names = analyzer.get_score_factor_names()
@@ -70,7 +75,6 @@ def main_all_hk(
                 validated_feature_names=validated_feature_names,
             )
             cache_dir = _get_validation_cache_dir(analyzer)
-            cached_payload = None
             if not refresh_recommended_factor_weights:
                 cached_payload = _load_validation_weight_cache(cache_dir, cache_key)
 
@@ -124,8 +128,10 @@ def main_all_hk(
                     "identity": cache_identity,
                     "factor_score_config": factor_score_config,
                     "factor_scorecard": validation_scorecard.to_dict(orient="records"),
+                    "feature_materialization": (validation_report.get("metadata") or {}).get("feature_materialization") or {},
                     "created_at": pd.Timestamp.utcnow().isoformat(),
                 }
+                cached_payload = cache_payload
                 cache_path = _write_validation_weight_cache(cache_dir, cache_key, cache_payload)
                 if cache_path is not None:
                     print(f"[OK] 已写入验证权重缓存: {cache_path}")
@@ -184,6 +190,9 @@ def main_all_hk(
     print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
     print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")
 
+    ranking_path = None
+    selected_path = None
+    watchlist_path = None
     if export_csv:
         export_path = Path(export_csv)
         export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,6 +222,48 @@ def main_all_hk(
         finally:
             service.close()
         print(f"[OK] 已写入 signal 层: batch_id={persist_result['batch_id']}, rows={persist_result['signal_rows']}")
+    else:
+        persist_result = None
+
+    manifest_path, _ = _write_run_manifest(
+        run_type="all_hk",
+        analyzer=analyzer,
+        fallback_base=export_csv,
+        params={
+            "days": int(days),
+            "top_n": int(top_n),
+            "initial_capital": float(initial_capital),
+            "analysis_mode": str(analysis_mode or "factor").strip().lower(),
+            "factor_set": factor_set,
+            "max_workers": int(max_workers),
+            "show_progress": bool(show_progress),
+            "fast_mode": bool(fast_mode),
+            "persist_signals": bool(persist_signals),
+            "batch_id": batch_id,
+            "use_recommended_factor_weights": bool(use_recommended_factor_weights),
+            "refresh_recommended_factor_weights": bool(refresh_recommended_factor_weights),
+            "validation_days": int(effective_validation_days),
+            "validation_horizons": [int(item) for item in validation_horizons],
+            "validation_quantiles": int(validation_quantiles),
+            "validation_min_observations": int(validation_min_observations),
+            "validation_stock_limit": None if validation_stock_limit is None else int(validation_stock_limit),
+            "validation_factor_scope": effective_validation_factor_scope,
+            "signal_recipes": list(signal_recipes or []),
+        },
+        artifacts={
+            "ranking_csv_path": str(ranking_path) if ranking_path is not None else None,
+            "selected_csv_path": str(selected_path) if selected_path is not None else None,
+            "watchlist_csv_path": str(watchlist_path) if watchlist_path is not None else None,
+            "persist_batch_id": persist_result.get("batch_id") if persist_result is not None else None,
+        },
+        factor_materialization=(cached_payload or {}).get("feature_materialization") or {},
+        upstream={
+            "validation_cache_key": cache_key if use_recommended_factor_weights else None,
+            "validation_cache_path": (cached_payload or {}).get("_cache_path") if cached_payload is not None else str(cache_path) if cache_path is not None else None,
+        },
+        status="cache_hit" if cached_payload is not None and cached_payload.get("_cache_path") else "computed" if use_recommended_factor_weights else "ok",
+    )
+    print(f"[OK] 已写入 run manifest: {manifest_path}")
 
     print("\n当前建议持有:")
     for item in portfolio_result.get("selected", []):
@@ -223,4 +274,5 @@ def main_all_hk(
     print("\n" + "=" * 80)
     print("全港股 TopN 分析完成！")
     print("=" * 80)
+    portfolio_result["manifest_path"] = str(manifest_path)
     return portfolio_result

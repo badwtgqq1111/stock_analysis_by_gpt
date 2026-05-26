@@ -55,87 +55,131 @@ def ts_quantile(series, window, quantile):
     return series.rolling(window=window, min_periods=window).quantile(quantile)
 
 
-def _rolling_last_rank(values):
-    if np.isnan(values).any():
-        return np.nan
-    return pd.Series(values).rank(method="average", pct=True).iloc[-1]
+def _sliding_win(series, window):
+    """Return (win, idx, n) — win is the sliding_window_view or None if too short."""
+    arr = series.values.astype(np.float64)
+    idx = series.index
+    n = len(arr)
+    if n < window:
+        return None, idx, n
+    return np.lib.stride_tricks.sliding_window_view(arr, window), idx, n
+
+
+def _pad_result(values, window, idx):
+    """Prepend NaN padding for the first window-1 positions."""
+    pad = np.full(window - 1, np.nan)
+    return pd.Series(np.concatenate([pad, values]), index=idx)
 
 
 def ts_rank(series, window):
-    """当前值在窗口内的分位排名。"""
-    return series.rolling(window=window, min_periods=window).apply(_rolling_last_rank, raw=True)
-
-
-def _rolling_idxmax(values):
-    if np.isnan(values).any():
-        return np.nan
-    return float(np.argmax(values) + 1)
-
-
-def _rolling_idxmin(values):
-    if np.isnan(values).any():
-        return np.nan
-    return float(np.argmin(values) + 1)
+    """当前值在窗口内的分位排名（向量化）。"""
+    win, idx, n = _sliding_win(series, window)
+    if win is None:
+        return pd.Series(np.full(n, np.nan), index=idx)
+    has_nan = np.any(np.isnan(win), axis=1)
+    last = win[:, -1:]
+    lt = (win < last).sum(axis=1)
+    eq = (win == last).sum(axis=1)
+    rank_avg = (lt.astype(np.float64) + eq.astype(np.float64) / 2.0) / float(window)
+    rank_avg[has_nan] = np.nan
+    return _pad_result(rank_avg, window, idx)
 
 
 def ts_idxmax(series, window):
-    """窗口内最大值位置，返回 1..window。"""
-    return series.rolling(window=window, min_periods=window).apply(_rolling_idxmax, raw=True)
+    """窗口内最大值位置，返回 1..window（向量化）。"""
+    win, idx, n = _sliding_win(series, window)
+    if win is None:
+        return pd.Series(np.full(n, np.nan), index=idx)
+    has_nan = np.any(np.isnan(win), axis=1)
+    result = win.argmax(axis=1).astype(np.float64) + 1.0
+    result[has_nan] = np.nan
+    return _pad_result(result, window, idx)
 
 
 def ts_idxmin(series, window):
-    """窗口内最小值位置，返回 1..window。"""
-    return series.rolling(window=window, min_periods=window).apply(_rolling_idxmin, raw=True)
+    """窗口内最小值位置，返回 1..window（向量化）。"""
+    win, idx, n = _sliding_win(series, window)
+    if win is None:
+        return pd.Series(np.full(n, np.nan), index=idx)
+    has_nan = np.any(np.isnan(win), axis=1)
+    result = win.argmin(axis=1).astype(np.float64) + 1.0
+    result[has_nan] = np.nan
+    return _pad_result(result, window, idx)
 
 
-def _linear_fit(values):
-    if np.isnan(values).any():
-        return None
-    x = np.arange(len(values), dtype=float)
-    slope, intercept = np.polyfit(x, values, 1)
-    fitted = slope * x + intercept
-    return slope, intercept, fitted
+def _rolling_ols_coefficients(values, window):
+    """Vectorized rolling OLS: slope, rsquare, residual for a single window.
 
+    Fits y = slope * x + intercept where x = [0, 1, ..., window-1] at each
+    rolling position.  Returns three Series aligned with the input index.
+    """
+    n = len(values)
+    if n < window:
+        pad = np.full(n, np.nan)
+        idx = values.index if isinstance(values, pd.Series) else pd.RangeIndex(n)
+        return (
+            pd.Series(pad, index=idx),
+            pd.Series(pad, index=idx),
+            pd.Series(pad, index=idx),
+        )
 
-def _rolling_slope(values):
-    fitted = _linear_fit(values)
-    return np.nan if fitted is None else float(fitted[0])
+    arr = values.values.astype(np.float64) if isinstance(values, pd.Series) else np.asarray(values, dtype=np.float64)
+    idx = values.index if isinstance(values, pd.Series) else pd.RangeIndex(n)
+    w = window
+    nw = n - w + 1
 
+    win = np.lib.stride_tricks.sliding_window_view(arr, w)
 
-def _rolling_rsquare(values):
-    fitted = _linear_fit(values)
-    if fitted is None:
-        return np.nan
-    _, _, predicted = fitted
-    mean_value = np.mean(values)
-    ss_tot = np.sum((values - mean_value) ** 2)
-    if abs(ss_tot) <= EPSILON:
-        return np.nan
-    ss_res = np.sum((values - predicted) ** 2)
-    return float(1 - ss_res / ss_tot)
+    S_x = w * (w - 1) / 2.0
+    S_xx = w * (w - 1) * (2 * w - 1) / 6.0
+    denom = w * S_xx - S_x * S_x
 
+    S_y = win.sum(axis=1)
+    x = np.arange(w, dtype=np.float64)
+    S_xy = win @ x
 
-def _rolling_resi(values):
-    fitted = _linear_fit(values)
-    if fitted is None:
-        return np.nan
-    _, _, predicted = fitted
-    return float(values[-1] - predicted[-1])
+    slope = np.full(nw, np.nan)
+    if denom > EPSILON:
+        slope = (w * S_xy - S_x * S_y) / denom
+
+    mean_y = S_y / w
+    S_y2 = (win * win).sum(axis=1)
+    var_y = S_y2 / w - mean_y * mean_y
+    var_x = (w * w - 1) / 12.0
+
+    rsquare = np.full(nw, np.nan)
+    ok = var_y > EPSILON
+    rsquare[ok] = (slope[ok] * slope[ok]) * var_x / var_y[ok]
+    rsquare = np.clip(rsquare, 0.0, 1.0)
+
+    intercept = mean_y - slope * (w - 1) / 2.0
+    y_pred_last = slope * (w - 1) + intercept
+    resi = arr[w - 1:] - y_pred_last
+
+    pad = np.full(w - 1, np.nan)
+    return (
+        pd.Series(np.concatenate([pad, slope]), index=idx, name=idx.name),
+        pd.Series(np.concatenate([pad, rsquare]), index=idx, name=idx.name),
+        pd.Series(np.concatenate([pad, resi]), index=idx, name=idx.name),
+    )
 
 
 def ts_slope(series, window):
     """线性回归斜率。"""
-    return series.rolling(window=window, min_periods=window).apply(_rolling_slope, raw=True)
+    s, _, _ = _rolling_ols_coefficients(series, window)
+    return s
 
 
 def ts_rsquare(series, window):
     """线性回归 R^2。"""
-    return series.rolling(window=window, min_periods=window).apply(_rolling_rsquare, raw=True)
+    _, r, _ = _rolling_ols_coefficients(series, window)
+    return r
 
 
 def ts_resi(series, window):
     """线性回归末点残差。"""
-    return series.rolling(window=window, min_periods=window).apply(_rolling_resi, raw=True)
+    _, _, e = _rolling_ols_coefficients(series, window)
+    return e
 
 
 def corr(left, right, window):

@@ -97,6 +97,8 @@ VALIDATION_FEATURE_BASE_COLUMNS = [
     "frequency",
     "adjust",
     "feature_set",
+    "feature_version",
+    "feature_config_hash",
     "feature_name",
     "feature_value",
 ]

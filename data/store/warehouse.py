@@ -16,6 +16,8 @@ from data.model import (
     STOCK_INFO_FIELDS,
     TRADE_COLUMNS,
 )
+import os
+
 from data.store.parquet_store import ParquetDataStore
 
 
@@ -28,18 +30,50 @@ class MarketDataWarehouse:
     SIGNALS_DATASET = "signals"
     TRADES_DATASET = "trades"
     CORPORATE_ACTIONS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "action_type", "year")
-    FEATURES_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "feature_set", "year")
+    FEATURES_PARTITION_COLUMNS = (
+        "market",
+        "exchange",
+        "asset_type",
+        "frequency",
+        "adjust",
+        "feature_set",
+        "feature_version",
+        "feature_config_hash",
+        "year",
+    )
     SIGNALS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "signal_set", "year")
     TRADES_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "account_id", "year")
 
-    def __init__(self, layout, read_only=False):
+    def __init__(self, layout, read_only=False, clickhouse_store=None):
         self.layout = layout
-        self.read_only = read_only
+        self.read_only = bool(read_only and Path(self.layout.duckdb_path()).exists())
         self.parquet_store = ParquetDataStore(layout)
+
+        if clickhouse_store is not None:
+            self.clickhouse_store = clickhouse_store
+        elif os.environ.get("CLICKHOUSE_HOST"):
+            from data.store.clickhouse_store import ClickHouseStore
+
+            self.clickhouse_store = ClickHouseStore(
+                host=os.environ.get("CLICKHOUSE_HOST", "localhost"),
+                port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
+                user=os.environ.get("CLICKHOUSE_USER", "default"),
+                password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
+                database=os.environ.get("CLICKHOUSE_DATABASE", "quant"),
+                layout=layout,
+            )
+        else:
+            self.clickhouse_store = None
+
         self.db_path = Path(self.layout.duckdb_path())
-        self.conn = duckdb.connect(str(self.db_path), read_only=read_only)
+        self.conn = duckdb.connect(str(self.db_path), read_only=self.read_only)
         if not self.read_only:
             self._init_schema()
+
+    @property
+    def _feature_store(self):
+        """返回 features 数据集的后端存储，优先使用 ClickHouse。"""
+        return self.clickhouse_store or self.parquet_store
 
     def _ensure_writable(self):
         if self.read_only:
@@ -168,10 +202,21 @@ class MarketDataWarehouse:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="feature"))}
 
         payload = frame[FEATURE_COLUMNS].copy()
-        target = self.parquet_store.upsert_frame(
+        store = self._feature_store
+        target = store.upsert_frame(
             dataset_name=dataset_name,
             frame=payload,
-            dedupe_keys=["market", "stock_code", "trade_date", "frequency", "adjust", "feature_set", "feature_name"],
+            dedupe_keys=[
+                "market",
+                "stock_code",
+                "trade_date",
+                "frequency",
+                "adjust",
+                "feature_set",
+                "feature_version",
+                "feature_config_hash",
+                "feature_name",
+            ],
             layer="feature",
             sort_by=[
                 "market",
@@ -180,6 +225,8 @@ class MarketDataWarehouse:
                 "frequency",
                 "adjust",
                 "feature_set",
+                "feature_version",
+                "feature_config_hash",
                 "feature_name",
                 "ingest_time",
             ],
@@ -197,6 +244,8 @@ class MarketDataWarehouse:
         frequency=None,
         adjust=None,
         feature_set=None,
+        feature_version=None,
+        feature_config_hash=None,
         feature_name=None,
         start_date=None,
         end_date=None,
@@ -211,17 +260,46 @@ class MarketDataWarehouse:
             "frequency": frequency,
             "adjust": adjust,
             "feature_set": feature_set,
+            "feature_version": feature_version,
+            "feature_config_hash": feature_config_hash,
             "feature_name": feature_name,
         }
-        frame = self.parquet_store.read_frame(
-            dataset_name=dataset_name,
-            layer="feature",
-            filters=filters,
-            order_by="market, stock_code, trade_date, feature_set, feature_name",
-        )
+        store = self._feature_store
+        try:
+            frame = store.read_frame(
+                dataset_name=dataset_name,
+                layer="feature",
+                filters=filters,
+                order_by=(
+                    "market, stock_code, trade_date, feature_set, "
+                    "feature_version, feature_config_hash, feature_name"
+                ),
+            )
+        except Exception:
+            if feature_version is not None or feature_config_hash is not None:
+                return pd.DataFrame(columns=FEATURE_COLUMNS)
+            frame = store.read_frame(
+                dataset_name=dataset_name,
+                layer="feature",
+                filters={
+                    "stock_code": stock_code,
+                    "market": market,
+                    "exchange": exchange,
+                    "asset_type": asset_type,
+                    "frequency": frequency,
+                    "adjust": adjust,
+                    "feature_set": feature_set,
+                    "feature_name": feature_name,
+                },
+                order_by="market, stock_code, trade_date, feature_set, feature_name",
+            )
         if frame.empty:
             return frame
 
+        if "feature_version" not in frame.columns:
+            frame["feature_version"] = "0.1.0"
+        if "feature_config_hash" not in frame.columns:
+            frame["feature_config_hash"] = "legacy"
         frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
         if start_date:
             frame = frame.loc[frame["trade_date"] >= pd.to_datetime(start_date)]

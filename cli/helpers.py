@@ -1,9 +1,11 @@
 """Shared helper functions for CLI commands."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -164,6 +166,45 @@ def _write_validation_weight_cache(cache_dir, cache_key, payload):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return cache_path
+
+
+def _get_run_manifest_dir(analyzer=None, fallback_base=None):
+    data_layout = getattr(analyzer, "data_layout", None)
+    layer_path = getattr(data_layout, "layer_path", None)
+    if callable(layer_path):
+        return Path(layer_path("meta")) / "run_manifests"
+    if fallback_base is not None:
+        return Path(fallback_base).expanduser().resolve().parent / "run_manifests"
+    return (Path.cwd() / "output" / "run_manifests").resolve()
+
+
+def _write_run_manifest(
+    run_type,
+    params,
+    analyzer=None,
+    fallback_base=None,
+    artifacts=None,
+    factor_materialization=None,
+    upstream=None,
+    status="ok",
+):
+    manifest_dir = _get_run_manifest_dir(analyzer=analyzer, fallback_base=fallback_base)
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    created_at = datetime.now(timezone.utc)
+    run_id = f"{run_type}_{created_at.strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "run_id": run_id,
+        "run_type": str(run_type),
+        "status": str(status or "ok"),
+        "created_at": created_at.isoformat(),
+        "params": dict(params or {}),
+        "artifacts": dict(artifacts or {}),
+        "factor_materialization": dict(factor_materialization or {}),
+        "upstream": dict(upstream or {}),
+    }
+    manifest_path = manifest_dir / f"{run_id}.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return manifest_path, manifest
 
 
 def _fallback_classify_factor_name(name):

@@ -10,7 +10,7 @@ from data.store import DataLayout, MarketDataWarehouse
 from factor_engine.signals import DEFAULT_SIGNAL_RECIPES, SignalRecipeRunner
 from indicators import calculate_technical_indicators
 from reporting import generate_trading_strategy
-from strategy import BuyStrategy, CurrentStrategy, SellStrategy
+from strategy_signals import BuyStrategy, CurrentStrategy, SellStrategy
 
 from core.backtest_ops import BacktestMixin
 from core.data_loader import DataLoaderMixin

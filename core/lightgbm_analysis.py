@@ -119,6 +119,21 @@ class LightGBMAnalysisMixin:
         downtrend_penalty += np.clip((-ret5 - 0.01) * 180.0, 0.0, 18.0)
         downtrend_penalty = downtrend_penalty.clip(0.0, 100.0)
 
+        data_rows = len(close)
+        first_date = close.index[0] if data_rows > 0 else pd.NaT
+        last_date = close.index[-1] if data_rows > 0 else pd.NaT
+        days_since_first_trade = pd.Series(
+            (close.index - first_date).days if data_rows > 0 else 0,
+            index=close.index,
+            dtype=float,
+        )
+        trading_days = pd.Series(
+            range(1, data_rows + 1),
+            index=close.index,
+            dtype=float,
+        )
+        is_new_listing = (data_rows < 60)
+
         startup_candidate = (
             (score >= 58.0)
             & (close >= ma20 * 0.98)
@@ -149,6 +164,9 @@ class LightGBMAnalysisMixin:
                 "startup_candidate": startup_candidate.astype(float),
                 "overheat_penalty_score": overheat_penalty,
                 "downtrend_penalty_score": downtrend_penalty,
+                "ipo_days_since_first_trade": days_since_first_trade,
+                "ipo_trading_days": trading_days,
+                "ipo_is_new_listing": float(is_new_listing),
             },
             index=data.index,
         )
@@ -184,6 +202,7 @@ class LightGBMAnalysisMixin:
         persist_features=False,
         show_progress=False,
         max_features=0,
+        backtest_date=None,
     ):
         from factor_engine import FactorContext, create_factor_set
         from factor_engine.ml import LightGBMRankerPipeline
@@ -195,7 +214,7 @@ class LightGBMAnalysisMixin:
 
         ranker = LightGBMRankerPipeline(max_features=max_features)
         warmup_days = max(days + 180, days + ranker.label_horizon + 60)
-        batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days)
+        batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days, end_date=backtest_date)
         batch_results = []
         feature_frames = []
         target_frames = []
@@ -211,7 +230,8 @@ class LightGBMAnalysisMixin:
 
         for stock_code in stock_codes:
             full_data = batch_data_map.get(stock_code)
-            if full_data is None or full_data.empty or len(full_data) < 60:
+            min_rows = 15 if backtest_date else 60
+            if full_data is None or full_data.empty or len(full_data) < min_rows:
                 prepare_completed += 1
                 if show_progress:
                     self._emit_progress_line(

@@ -320,6 +320,76 @@ class ClickHouseStore:
         finally:
             client.close()
 
+    def compute_rps_features(self, factor_set="qlib_alpha158",
+                             windows=(5, 10, 20, 30, 60),
+                             layer="feature"):
+        """基于已有 ROC 因子计算横截面 RPS 排名并写入同一张表。
+
+        对每个窗口的 ROC 因子做跨股票百分位排名，生成 RPS_{w} 特征。
+        ROC{w} = close_past / close_today，值越低收益越高，所以升序排名。
+        """
+        table = self._table_name("features", layer=layer)
+        client = self._connect()
+        try:
+            self._ensure_table(client, "features", layer)
+            for w in windows:
+                roc_name = f"ROC{w}"
+                rps_name = f"RPS_{w}"
+
+                # Get existing metadata from one ROC row
+                meta = client.query(
+                    f"SELECT market, exchange, asset_type, frequency, adjust, "
+                    f"feature_version, feature_config_hash "
+                    f"FROM {table} "
+                    f"WHERE feature_name = {{src:String}} "
+                    f"AND feature_set = {{fs:String}} "
+                    f"LIMIT 1",
+                    parameters={"src": roc_name, "fs": factor_set},
+                )
+                if not meta.result_rows:
+                    continue
+                meta_row = meta.result_rows[0]
+                mkt, exch, atype, freq, adj, ver, fhash = meta_row
+
+                rps_df = client.query_df(
+                    f"SELECT "
+                    f"trade_date, stock_code, "
+                    f"(1 - rank() OVER ("
+                    f"    PARTITION BY trade_date ORDER BY feature_value ASC"
+                    f") / CAST(count() OVER ("
+                    f"    PARTITION BY trade_date"
+                    f") AS Float64)) * 100 AS rps_val "
+                    f"FROM {table} "
+                    f"WHERE feature_name = {{src:String}} "
+                    f"AND feature_set = {{fs:String}} "
+                    f"AND feature_value IS NOT NULL",
+                    parameters={"src": roc_name, "fs": factor_set},
+                )
+                if rps_df.empty:
+                    continue
+
+                import pandas as pd
+
+                rps_df["market"] = mkt
+                rps_df["exchange"] = exch
+                rps_df["asset_type"] = atype
+                rps_df["frequency"] = freq
+                rps_df["adjust"] = adj
+                rps_df["feature_set"] = factor_set
+                rps_df["feature_version"] = ver
+                rps_df["feature_config_hash"] = fhash
+                rps_df["feature_name"] = rps_name
+                rps_df["feature_value"] = rps_df["rps_val"]
+                rps_df["source"] = "rps"
+                rps_df["ingest_time"] = pd.Timestamp.utcnow()
+                rps_df.drop(columns=["rps_val"], inplace=True)
+                rps_df["trade_date"] = pd.to_datetime(rps_df["trade_date"])
+
+                client.insert_df(table, rps_df)
+        finally:
+            client.close()
+        return len(windows)
+
     # ---- internal helpers ----
 
     def _insert_frame(self, client, table, dataset_name, frame, date_column):

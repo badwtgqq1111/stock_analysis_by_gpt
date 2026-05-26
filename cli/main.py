@@ -155,6 +155,8 @@ def run_cli(argv=None):
                         help='验证驱动权重模式下的最小样本数，默认 5')
     parser.add_argument('--validation-stock-limit', dest='validation_stock_limit', type=int, default=None,
                         help='验证驱动权重模式下限制参与验证的股票数量，默认不限制')
+    parser.add_argument('--backtest-date', dest='backtest_date', default=None,
+                        help='回测日期: 仅使用指定日期之前的数据选股，格式 YYYY-MM-DD')
     parser.add_argument('--refresh-recommended-factor-weights', dest='refresh_recommended_factor_weights', action='store_true',
                         help='强制重算 recommended_factor_weight，不使用本地缓存')
     parser.add_argument('--validation-factor-scope', dest='validation_factor_scope',
@@ -210,6 +212,7 @@ def run_cli(argv=None):
             factor_set=args.factor_set,
             show_progress=args.show_progress,
             fast_mode=args.fast_mode,
+            backtest_date=args.backtest_date,
             validation_days=args.validation_days,
             validation_horizons=validation_horizons,
             validation_quantiles=args.quantiles,

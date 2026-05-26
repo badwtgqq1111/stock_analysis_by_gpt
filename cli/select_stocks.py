@@ -38,6 +38,7 @@ def main_select_stocks(
     validation_factor_scope="all",
     signal_recipes=None,
     max_features=0,
+    backtest_date=None,
 ):
     """执行全港股 TopN 选股+回测。factor 模式读取验证权重缓存，lightgbm 模式直接训练排序模型。"""
     print("=" * 80)
@@ -120,6 +121,9 @@ def main_select_stocks(
             "enable_portfolio_replay": not fast_mode,
             "max_features": max_features,
         }
+        if backtest_date is not None:
+            backtest_kwargs["backtest_date"] = str(backtest_date)
+            print(f"[INFO] 回测模式: 仅使用 {backtest_date} 之前的数据")
         if signal_recipes is not None:
             backtest_kwargs["signal_recipes"] = signal_recipes
         if ridge_factors is not None:

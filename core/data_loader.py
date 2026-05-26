@@ -42,14 +42,17 @@ class DataLoaderMixin:
         data.index.name = "date"
         return data.sort_index()
 
-    def load_stock_data_batch(self, stock_codes, days=365):
+    def load_stock_data_batch(self, stock_codes, days=365, end_date=None):
         """批量加载多只股票的历史数据，减少并发 parquet 打开次数。"""
         normalized_codes = [str(code).strip() for code in (stock_codes or []) if str(code).strip()]
         if not normalized_codes:
             return {}
 
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
+        if end_date is not None:
+            end_dt = pd.Timestamp(end_date).date()
+        else:
+            end_dt = datetime.now().date()
+        start_date = end_dt - timedelta(days=days)
         warehouse_df = self.market_warehouse.read_ohlcv(
             stock_code=normalized_codes,
             market="HK",
@@ -57,7 +60,7 @@ class DataLoaderMixin:
             frequency="daily",
             adjust="qfq",
             start_date=start_date.strftime('%Y-%m-%d'),
-            end_date=end_date.strftime('%Y-%m-%d'),
+            end_date=end_dt.strftime('%Y-%m-%d'),
         )
         if warehouse_df is None or warehouse_df.empty:
             return {}

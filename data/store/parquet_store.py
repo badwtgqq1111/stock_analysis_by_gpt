@@ -277,6 +277,62 @@ class ParquetDataStore:
 
         temp_dir.rename(dataset_path)
 
+    def compute_rps_features(self, factor_set="qlib_alpha158",
+                             windows=(5, 10, 20, 30, 60),
+                             layer="feature"):
+        """基于已有 ROC 因子计算横截面 RPS 排名（pandas 实现）。
+
+        ROC{w} = close_past / close_today，值越低收益越高。
+        """
+        import numpy as np
+
+        roc_names = [f"ROC{w}" for w in windows]
+        roc_long = self.read_frame(
+            "features", layer=layer,
+            filters={"feature_set": factor_set, "feature_name": roc_names},
+            order_by="trade_date, stock_code, feature_name",
+        )
+        if roc_long.empty:
+            return 0
+
+        rows = []
+        for feature_name, group in roc_long.groupby("feature_name", sort=False):
+            w = int(feature_name.replace("ROC", ""))
+            rps_name = f"RPS_{w}"
+            group = group.dropna(subset=["feature_value"]).copy()
+            if group.empty:
+                continue
+            group["feature_value"] = (
+                group.groupby("trade_date")["feature_value"]
+                .rank(ascending=True, pct=True) * 100
+            )
+            group["feature_name"] = rps_name
+            group["source"] = "rps"
+            group["ingest_time"] = pd.Timestamp.utcnow()
+            rows.append(group)
+
+        if not rows:
+            return 0
+
+        result = pd.concat(rows, ignore_index=True)
+        columns_to_write = [
+            "trade_date", "stock_code", "market", "exchange", "asset_type",
+            "frequency", "adjust", "feature_set", "feature_version",
+            "feature_config_hash", "feature_name", "feature_value",
+            "source", "ingest_time",
+        ]
+        result = result[[c for c in columns_to_write if c in result.columns]]
+        self.upsert_frame(
+            "features", result,
+            dedupe_keys=[
+                "market", "stock_code", "trade_date", "frequency", "adjust",
+                "feature_set", "feature_version", "feature_config_hash", "feature_name",
+            ],
+            layer=layer,
+            date_column="trade_date",
+        )
+        return len(rows)
+
     def _append_dataset(self, dataset_dir, frame, date_column="trade_date", partition_columns=None):
         dataset_path = Path(dataset_dir)
         dataset_path.mkdir(parents=True, exist_ok=True)

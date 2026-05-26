@@ -751,6 +751,13 @@ class MarketDataWarehouse:
         )
         return int(total or 0)
 
+    def compute_rps_features(self, factor_set="qlib_alpha158",
+                             windows=(5, 10, 20, 30, 60)):
+        """基于已有 ROC 因子计算横截面 RPS 排名并写入 feature 层。"""
+        return self._feature_store.compute_rps_features(
+            factor_set=factor_set, windows=windows,
+        )
+
     def compact_ohlcv(self, dataset_name=OHLCV_DATASET):
         """对 OHLCV 数据集进行统一压实去重。"""
         target = self.parquet_store.compact_dataset(

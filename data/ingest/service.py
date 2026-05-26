@@ -727,6 +727,15 @@ class MarketDataService:
         total_rows_written = sum(int(r.get("rows_written", 0) or 0) for r in results)
         dataset_path = str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature"))
 
+        computed_n = sum(item["status"] == "computed" for item in results)
+        if computed_n > 0:
+            if show_progress:
+                print("[PROGRESS] rps computing cross-sectional ranks")
+            n_rps = self.warehouse.compute_rps_features(factor_set=factor_set)
+            total_rows_written += n_rps
+            if show_progress:
+                print(f"[PROGRESS] rps done features={n_rps}")
+
         return {
             "stock_count": total,
             "success_count": sum(item["status"] == "computed" for item in results),

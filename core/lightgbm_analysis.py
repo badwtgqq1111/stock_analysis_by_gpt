@@ -172,6 +172,15 @@ class LightGBMAnalysisMixin:
         )
 
     @staticmethod
+    def _compute_sector_features(batch_data_map):
+        """从 batch OHLCV 数据计算行业/赛道特征。"""
+        try:
+            from core.sector_features import compute_sector_features
+            return compute_sector_features(batch_data_map)
+        except Exception:
+            return pd.DataFrame()
+
+    @staticmethod
     def _build_lightgbm_factor_explanation(
         model_metadata,
         latest_model_score,
@@ -215,6 +224,9 @@ class LightGBMAnalysisMixin:
         ranker = LightGBMRankerPipeline(max_features=max_features)
         warmup_days = max(days + 180, days + ranker.label_horizon + 60)
         batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days, end_date=backtest_date)
+
+        sector_features = self._compute_sector_features(batch_data_map)
+
         batch_results = []
         feature_frames = []
         target_frames = []
@@ -271,6 +283,12 @@ class LightGBMAnalysisMixin:
             startup_feature_frame = self._compute_lightgbm_startup_feature_frame(full_data)
             if startup_feature_frame is not None and not startup_feature_frame.empty:
                 feature_frame = feature_frame.join(startup_feature_frame, how="left")
+            if not sector_features.empty:
+                stock_sector = sector_features[sector_features["stock_code"] == stock_code]
+                if not stock_sector.empty:
+                    for col in stock_sector.columns:
+                        if col != "stock_code":
+                            feature_frame[col] = stock_sector[col].iloc[0]
             feature_frame["stock_code"] = stock_code
             feature_frames.append(feature_frame)
 

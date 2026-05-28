@@ -263,6 +263,19 @@ uv run python stock_analyzer.py select_stocks \
 #  --model-type catboost
 ```
 
+```
+# V9 新公式 + 优化因子
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm --top-n 10 --days 365 \
+  --initial-capital 100000 --max-workers 16 --show-progress \
+  --factor-set alpha158_hk --export-csv output/lightgbm_v10 \
+  --min-market-cap 30 --min-daily-turnover 500
+
+# IC 分析（跑完回测后再跑这个）
+uv run python experiments/factor_ic_analysis.py --stocks 200 --days 365
+
+```
+
 Alpha158 vs Alpha360：Alpha360 已包含 Alpha158 的大部分因子，两者高度重叠，不建议合并。分别训练后对比 ICIR，选表现更好的；或对预测分数做加权集成。
 
 #### TA-Lib 技术指标因子

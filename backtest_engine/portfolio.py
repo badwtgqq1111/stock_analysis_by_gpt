@@ -563,29 +563,35 @@ class TopNPortfolioBuilder:
             startup_candidate = bool(result.get("startup_candidate", False))
             overheat_penalty_score = np.nan_to_num(result.get("overheat_penalty_score", np.nan), nan=0.0)
             downtrend_penalty_score = np.nan_to_num(result.get("downtrend_penalty_score", np.nan), nan=0.0)
-            # Setup-type aware adjustments (v8: pure data-driven, no heuristic bonuses)
+            # Setup-type aware adjustments (v10: IC-validated, value-driven)
             hot_sector_value_score = np.nan_to_num(result.get("hot_sector_value_score", 50.0), nan=50.0)
             win_rate_pct = np.nan_to_num(result.get("win_rate", 50.0), nan=50.0)
             trade_count = int(result.get("trade_count", 60) or 60)
             pb_ratio = np.nan_to_num(result.get("pb_ratio", 0), nan=0.0)
-            pb_bonus = float(np.clip(pb_ratio, 0, 12) * 1.5)
+            # IC=-0.58: low price position → higher future return (value premium)
+            # Reward cheap stocks: invert so low PB proxy = high bonus
+            pb_value_score = float(np.clip(12.0 - pb_ratio, 0, 12))
+            pb_bonus = pb_value_score / 12.0 * 100.0 * 0.06
 
             if setup_type == "bottom_rebound":
-                downtrend_weight = 0.10
+                downtrend_weight = 0.08
             elif setup_type == "pre_breakout":
-                downtrend_weight = 0.20
+                downtrend_weight = 0.12
             else:
-                downtrend_weight = 0.30
+                downtrend_weight = 0.25
+
+            pre_breakout_bonus = 8.0 if setup_type == "pre_breakout" else 0.0
 
             ranking_score = (
-                win_rate_pct * 0.65
-                + overheat_penalty_score * 0.18
+                win_rate_pct * 0.63
+                + overheat_penalty_score * 0.14
+                + latest_model_score * 0.15
                 + pb_bonus
-                + latest_model_score * 0.10
                 + risk_adjusted_score * 0.05
-                + signal_freshness_score * 0.02
+                + signal_freshness_score * 0.04
+                + pre_breakout_bonus
                 - hot_sector_value_score * 0.05
-                - drawdown_penalty_score * 0.03
+                - drawdown_penalty_score * 0.04
                 - downtrend_penalty_score * downtrend_weight
                 - trade_count * 0.02
             )

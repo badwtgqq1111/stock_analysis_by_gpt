@@ -125,6 +125,9 @@ def run_cli(argv=None):
                         help='因子模式下使用的因子集，默认 qlib_alpha158')
     parser.add_argument('--max-features', dest='max_features', type=int, default=0,
                         help='LightGBM 模式下的最大因子数（先训练→按 importance 筛到 TopN→重训），0 表示使用全部因子')
+    parser.add_argument('--model-type', dest='model_type', default='lightgbm',
+                        choices=['lightgbm', 'xgboost', 'catboost'],
+                        help='Ranker 模型类型: lightgbm (默认), xgboost, catboost')
     parser.add_argument('--signal-recipes', dest='signal_recipes', default=None,
                         help='信号 recipe 名称，逗号分隔；默认 low_price_setup')
     parser.add_argument('--signal-cooldown-days', dest='signal_cooldown_days', type=int, default=20,
@@ -228,6 +231,7 @@ def run_cli(argv=None):
             validation_factor_scope=args.validation_factor_scope,
             signal_recipes=signal_recipes,
             max_features=args.max_features,
+            model_type=args.model_type,
             min_market_cap=args.min_market_cap,
             min_daily_turnover=args.min_daily_turnover,
             min_ipo_days=args.min_ipo_days,

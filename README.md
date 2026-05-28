@@ -254,10 +254,13 @@ uv run python stock_analyzer.py select_stocks \
   --max-workers 16 \
   --show-progress \
   --factor-set qlib_alpha158 \
-  --export-csv output/lightgbm_v8 \
+  --export-csv output/lightgbm_v8_xgb \
   --min-market-cap 30 \
-  --min-daily-turnover 500
+  --min-daily-turnover 500 \
+  --model-type xgboost
 
+#  --model-type lightgbm
+#  --model-type catboost
 ```
 
 Alpha158 vs Alpha360：Alpha360 已包含 Alpha158 的大部分因子，两者高度重叠，不建议合并。分别训练后对比 ICIR，选表现更好的；或对预测分数做加权集成。

@@ -34,6 +34,7 @@ class BacktestMixin:
         ridge_factors=None,
         signal_recipes=None,
         max_features=0,
+        model_type="lightgbm",
         backtest_date=None,
         min_market_cap=None,
         min_daily_turnover=None,
@@ -128,6 +129,7 @@ class BacktestMixin:
                 persist_features=persist_features,
                 show_progress=show_progress,
                 max_features=max_features,
+                model_type=model_type,
                 backtest_date=backtest_date,
             )
             if not pool_results:
@@ -404,6 +406,7 @@ class BacktestMixin:
         ridge_factors=None,
         signal_recipes=None,
         max_features=0,
+        model_type="lightgbm",
         backtest_date=None,
         min_market_cap=None,
         min_daily_turnover=None,
@@ -433,6 +436,7 @@ class BacktestMixin:
             ridge_factors=ridge_factors,
             signal_recipes=signal_recipes,
             max_features=max_features,
+            model_type=model_type,
             backtest_date=backtest_date,
         )
 

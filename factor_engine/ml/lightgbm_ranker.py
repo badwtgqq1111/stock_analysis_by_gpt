@@ -44,6 +44,74 @@ def _load_lightgbm_regressor_class():
         raise ImportError(f"failed to load lightgbm runtime: {message}") from exc
 
 
+def _load_xgboost_regressor_class():
+    try:
+        from xgboost import XGBRegressor
+        return XGBRegressor
+    except ImportError:
+        raise ImportError("xgboost is not installed. Run `uv pip install xgboost`.")
+
+
+def _load_catboost_regressor_class():
+    try:
+        from catboost import CatBoostRegressor
+        return CatBoostRegressor
+    except ImportError:
+        raise ImportError("catboost is not installed. Run `uv pip install catboost`.")
+
+
+_MODEL_LOADERS = {
+    "lightgbm": _load_lightgbm_regressor_class,
+    "xgboost": _load_xgboost_regressor_class,
+    "catboost": _load_catboost_regressor_class,
+}
+
+_MODEL_DEFAULT_PARAMS = {
+    "lightgbm": {
+        "objective": "regression",
+        "metric": "mse",
+        "learning_rate": 0.1,
+        "n_estimators": 1000,
+        "num_leaves": 128,
+        "max_depth": 8,
+        "lambda_l1": 200.0,
+        "lambda_l2": 500.0,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "min_child_samples": 20,
+        "importance_type": "gain",
+        "verbosity": -1,
+        "n_jobs": -1,
+    },
+    "xgboost": {
+        "objective": "reg:squarederror",
+        "learning_rate": 0.1,
+        "n_estimators": 1000,
+        "max_depth": 8,
+        "reg_alpha": 200.0,
+        "reg_lambda": 500.0,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "verbosity": 0,
+        "n_jobs": -1,
+        "random_state": 42,
+    },
+    "catboost": {
+        "objective": "RMSE",
+        "learning_rate": 0.1,
+        "iterations": 1000,
+        "depth": 8,
+        "l2_leaf_reg": 500.0,
+        "subsample": 0.9,
+        "colsample_bylevel": 0.9,
+        "verbose": 0,
+        "thread_count": -1,
+        "random_seed": 42,
+        "allow_writing_files": False,
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # CSRankNorm: cross-sectional rank normalization (Qlib standard)
 # ---------------------------------------------------------------------------
@@ -87,6 +155,7 @@ class LightGBMRankerPipeline:
     random_state: int = 42
     params: dict | None = None
     max_features: int = 0
+    model_type: str = "lightgbm"
 
     # Legacy compatibility fields (deprecated, ignored in new logic)
     drawdown_horizon: int = 20
@@ -98,24 +167,21 @@ class LightGBMRankerPipeline:
     train_fraction: float = 0.8
 
     def _default_params(self) -> dict:
-        """Default LightGBM parameters aligned with Qlib CSI500 benchmark."""
-        return {
-            "objective": "regression",
-            "metric": "mse",
-            "learning_rate": 0.1,
-            "n_estimators": 1000,
-            "num_leaves": 128,
-            "max_depth": 8,
-            "lambda_l1": 200.0,
-            "lambda_l2": 500.0,
-            "subsample": 0.9,
-            "colsample_bytree": 0.9,
-            "min_child_samples": 20,
-            "importance_type": "gain",
-            "random_state": int(self.random_state),
-            "verbosity": -1,
-            "n_jobs": -1,
-        }
+        """Default model parameters keyed by model_type."""
+        base = _MODEL_DEFAULT_PARAMS.get(self.model_type, _MODEL_DEFAULT_PARAMS["lightgbm"])
+        params = dict(base)
+        if "random_state" in params:
+            params["random_state"] = int(self.random_state)
+        elif "random_seed" in params:
+            params["random_seed"] = int(self.random_state)
+        return params
+
+    def _load_model_class(self):
+        """Load the regressor class for the configured model_type."""
+        loader = _MODEL_LOADERS.get(self.model_type)
+        if loader is None:
+            raise ValueError(f"Unknown model_type: {self.model_type}. Choices: {list(_MODEL_LOADERS)}")
+        return loader()
 
     # ------------------------------------------------------------------
     # Public API
@@ -156,7 +222,7 @@ class LightGBMRankerPipeline:
         Returns:
             (result_frame, metadata)
         """
-        LGBMRegressor = _load_lightgbm_regressor_class()
+        RegressorClass = self._load_model_class()
 
         if panel_features is None or panel_features.empty:
             raise ValueError("panel_features is empty")
@@ -187,7 +253,7 @@ class LightGBMRankerPipeline:
         all_dates = sorted(labeled["trade_date"].unique())
         if len(all_dates) < min_train_days + step:
             # Not enough data for rolling — fall back to single split
-            return self._fit_predict_single(labeled, feature_columns, merged, LGBMRegressor)
+            return self._fit_predict_single(labeled, feature_columns, merged, RegressorClass)
 
         oos_predictions = []
         rolling_metadata = []
@@ -195,7 +261,7 @@ class LightGBMRankerPipeline:
         # First test window starts after min_train_days + trunc_days
         first_test_idx = min_train_days + trunc_days
         if first_test_idx >= len(all_dates):
-            return self._fit_predict_single(labeled, feature_columns, merged, LGBMRegressor)
+            return self._fit_predict_single(labeled, feature_columns, merged, RegressorClass)
 
         # Global feature selection (one-shot before rolling)
         selected_features = feature_columns
@@ -205,7 +271,7 @@ class LightGBMRankerPipeline:
             model_params = self._default_params()
             if self.params:
                 model_params.update(self.params)
-            probe = LGBMRegressor(**model_params)
+            probe = RegressorClass(**model_params)
             probe.fit(initial_train[feature_columns], initial_train["label"])
             feature_columns = self._select_top_features(probe, feature_columns)
             _emit(f"global feature selection: {len(feature_columns)} factors kept")
@@ -251,12 +317,20 @@ class LightGBMRankerPipeline:
             model_params = self._default_params()
             if self.params:
                 model_params.update(self.params)
+            if self.model_type == "xgboost":
+                model_params["early_stopping_rounds"] = 50
 
-            model = LGBMRegressor(**model_params)
+            model = RegressorClass(**model_params)
             fit_kwargs: dict[str, Any] = {}
             if not actual_valid.empty:
-                fit_kwargs["eval_set"] = [(actual_valid[feature_columns], actual_valid["label"])]
-                fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
+                eval_data = (actual_valid[feature_columns], actual_valid["label"])
+                if self.model_type == "catboost":
+                    fit_kwargs["eval_set"] = eval_data
+                    fit_kwargs["early_stopping_rounds"] = 50
+                else:
+                    fit_kwargs["eval_set"] = [eval_data]
+                if self.model_type == "lightgbm":
+                    fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
 
             model.fit(
                 actual_train[feature_columns],
@@ -288,7 +362,7 @@ class LightGBMRankerPipeline:
             test_start_idx = test_end_idx
 
         if not oos_predictions:
-            return self._fit_predict_single(labeled, feature_columns, merged, LGBMRegressor)
+            return self._fit_predict_single(labeled, feature_columns, merged, RegressorClass)
 
         # --- Assemble OOS predictions ---
         oos_frame = pd.concat(oos_predictions, ignore_index=True)
@@ -296,7 +370,7 @@ class LightGBMRankerPipeline:
 
         # --- Train final model on all data for latest-date prediction ---
         # Always train a final model (needed for SHAP and for predicting uncovered dates)
-        final_model = self._train_final_model(labeled, feature_columns, LGBMRegressor)
+        final_model = self._train_final_model(labeled, feature_columns, RegressorClass)
 
         # Dates without OOS predictions: either between rolling windows or too recent to have labels
         all_merged_dates = set(merged["trade_date"].unique())
@@ -411,7 +485,7 @@ class LightGBMRankerPipeline:
         labeled: pd.DataFrame,
         feature_columns: list[str],
         full_frame: pd.DataFrame,
-        LGBMRegressor,
+        RegressorClass,
     ) -> tuple[pd.DataFrame, dict]:
         """Single train/valid split. When max_features>0, uses two-stage: first fit to select top features, then refit."""
         all_dates = sorted(labeled["trade_date"].unique())
@@ -427,12 +501,19 @@ class LightGBMRankerPipeline:
         model_params = self._default_params()
         if self.params:
             model_params.update(self.params)
+        if self.model_type == "xgboost":
+            model_params["early_stopping_rounds"] = 50
 
-        model = LGBMRegressor(**model_params)
+        model = RegressorClass(**model_params)
         fit_kwargs: dict[str, Any] = {}
         if not valid_frame.empty:
-            fit_kwargs["eval_set"] = [(valid_frame[feature_columns], valid_frame["label"])]
-            fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
+            eval_data = (valid_frame[feature_columns], valid_frame["label"])
+            if self.model_type == "catboost":
+                fit_kwargs["eval_set"] = eval_data
+            else:
+                fit_kwargs["eval_set"] = [eval_data]
+            if self.model_type == "lightgbm":
+                fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
 
         model.fit(train_frame[feature_columns], train_frame["label"], **fit_kwargs)
 
@@ -440,11 +521,17 @@ class LightGBMRankerPipeline:
         selected_features = self._select_top_features(model, feature_columns)
         if selected_features != feature_columns:
             _emit(f"feature selection: {len(feature_columns)} → {len(selected_features)} factors, refitting...")
-            model2 = LGBMRegressor(**model_params)
+            model2_params = dict(model_params)
+            model2 = RegressorClass(**model2_params)
             fit_kwargs2: dict[str, Any] = {}
             if not valid_frame.empty:
-                fit_kwargs2["eval_set"] = [(valid_frame[selected_features], valid_frame["label"])]
-                fit_kwargs2["callbacks"] = [_early_stopping_callback(50)]
+                eval_data2 = (valid_frame[selected_features], valid_frame["label"])
+                if self.model_type == "catboost":
+                    fit_kwargs2["eval_set"] = eval_data2
+                else:
+                    fit_kwargs2["eval_set"] = [eval_data2]
+                if self.model_type == "lightgbm":
+                    fit_kwargs2["callbacks"] = [_early_stopping_callback(50)]
             model2.fit(train_frame[selected_features], train_frame["label"], **fit_kwargs2)
             model = model2
             feature_columns = selected_features
@@ -475,7 +562,7 @@ class LightGBMRankerPipeline:
         }
         return result, metadata
 
-    def _train_final_model(self, labeled: pd.DataFrame, feature_columns: list[str], LGBMRegressor):
+    def _train_final_model(self, labeled: pd.DataFrame, feature_columns: list[str], RegressorClass):
         """Train a model on all available labeled data for latest predictions."""
         if labeled.empty:
             return None
@@ -493,12 +580,19 @@ class LightGBMRankerPipeline:
         model_params = self._default_params()
         if self.params:
             model_params.update(self.params)
+        if self.model_type == "xgboost":
+            model_params["early_stopping_rounds"] = 50
 
-        model = LGBMRegressor(**model_params)
+        model = RegressorClass(**model_params)
         fit_kwargs: dict[str, Any] = {}
         if not valid_frame.empty:
-            fit_kwargs["eval_set"] = [(valid_frame[feature_columns], valid_frame["label"])]
-            fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
+            eval_data = (valid_frame[feature_columns], valid_frame["label"])
+            if self.model_type == "catboost":
+                fit_kwargs["eval_set"] = eval_data
+            else:
+                fit_kwargs["eval_set"] = [eval_data]
+            if self.model_type == "lightgbm":
+                fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
 
         model.fit(train_frame[feature_columns], train_frame["label"], **fit_kwargs)
         return model
@@ -620,7 +714,7 @@ def compute_stock_shap(model, stock_features: pd.DataFrame, feature_columns: lis
     """Compute SHAP values for a single stock's latest features.
 
     Args:
-        model: Trained LGBMRegressor model.
+        model: Trained RegressorClass model.
         stock_features: DataFrame with feature columns (use latest row).
         feature_columns: List of feature column names.
         top_k: Number of top positive and negative contributors to return.

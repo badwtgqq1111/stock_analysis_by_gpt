@@ -319,6 +319,7 @@ class LightGBMAnalysisMixin:
         persist_features=False,
         show_progress=False,
         max_features=0,
+        model_type="lightgbm",
         backtest_date=None,
     ):
         from factor_engine import FactorContext, create_factor_set
@@ -329,7 +330,7 @@ class LightGBMAnalysisMixin:
         if not stock_codes:
             return []
 
-        ranker = LightGBMRankerPipeline(max_features=max_features)
+        ranker = LightGBMRankerPipeline(max_features=max_features, model_type=model_type)
         warmup_days = max(days + 180, days + ranker.label_horizon + 60)
         batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days, end_date=backtest_date)
 

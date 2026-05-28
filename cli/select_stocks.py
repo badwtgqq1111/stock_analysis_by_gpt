@@ -38,6 +38,7 @@ def main_select_stocks(
     validation_factor_scope="all",
     signal_recipes=None,
     max_features=0,
+    model_type="lightgbm",
     backtest_date=None,
     min_market_cap=None,
     min_daily_turnover=None,
@@ -110,6 +111,8 @@ def main_select_stocks(
                     )
         elif normalized_mode == "lightgbm":
             extra = f", max_features={max_features}" if max_features else ""
+            if model_type not in ("", "lightgbm", None):
+                extra += f", model={model_type}"
             print(f"[INFO] LightGBM 模式启用: factor_set={factor_set}, train_window={days}d{extra}")
 
         backtest_kwargs = {
@@ -123,6 +126,7 @@ def main_select_stocks(
             "show_progress": show_progress,
             "enable_portfolio_replay": not fast_mode,
             "max_features": max_features,
+            "model_type": model_type,
             "min_market_cap": min_market_cap,
             "min_daily_turnover": min_daily_turnover,
             "min_ipo_days": min_ipo_days,

@@ -39,6 +39,9 @@ def main_select_stocks(
     signal_recipes=None,
     max_features=0,
     backtest_date=None,
+    min_market_cap=None,
+    min_daily_turnover=None,
+    min_ipo_days=None,
 ):
     """执行全港股 TopN 选股+回测。factor 模式读取验证权重缓存，lightgbm 模式直接训练排序模型。"""
     print("=" * 80)
@@ -120,6 +123,9 @@ def main_select_stocks(
             "show_progress": show_progress,
             "enable_portfolio_replay": not fast_mode,
             "max_features": max_features,
+            "min_market_cap": min_market_cap,
+            "min_daily_turnover": min_daily_turnover,
+            "min_ipo_days": min_ipo_days,
         }
         if backtest_date is not None:
             backtest_kwargs["backtest_date"] = str(backtest_date)

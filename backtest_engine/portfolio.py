@@ -144,16 +144,20 @@ class TopNPortfolioBuilder:
         if not watchlist:
             watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak"][: self.top_n]
 
+        ranking_filtered = list(ranking)
         lightgbm_candidates = [item for item in ranking if item.get("selection_source") == "lightgbm_ranker"]
-        startup_candidate_rows = [item for item in lightgbm_candidates if item.get("startup_candidate")]
         if lightgbm_candidates:
-            preferred_actionable = [item for item in preferred_actionable if item.get("startup_candidate")]
-            active_actionable = [item for item in active_actionable if item.get("startup_candidate")]
-            fallback_candidates = [item for item in fallback_candidates if item.get("startup_candidate")]
-            if startup_candidate_rows:
-                watchlist = [dict(item) for item in startup_candidate_rows if item.get("signal_tier") == "weak"][: self.top_n]
-                if not watchlist:
-                    watchlist = [dict(item) for item in startup_candidate_rows][: self.top_n]
+            # Win-rate quality gate: filter out proven losers (backtest wr < 35%)
+            min_win_rate = 35.0
+            preferred_actionable = [item for item in preferred_actionable if item.get("win_rate", 0) >= min_win_rate]
+            active_actionable = [item for item in active_actionable if item.get("win_rate", 0) >= min_win_rate]
+            fallback_candidates = [item for item in fallback_candidates if item.get("win_rate", 0) >= min_win_rate]
+            # Build watchlist from ranking (all setup types allowed)
+            watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak" and item.get("win_rate", 0) >= min_win_rate][: self.top_n]
+            if not watchlist:
+                watchlist = [dict(item) for item in ranking if item.get("win_rate", 0) >= min_win_rate][: self.top_n]
+            # Final ranking fallback also respects quality gate
+            ranking_filtered = [item for item in ranking if item.get("win_rate", 0) >= min_win_rate]
 
         selected = (
             preferred_actionable[: self.top_n]
@@ -164,11 +168,7 @@ class TopNPortfolioBuilder:
                 else (
                     fallback_candidates[: self.top_n]
                     if fallback_candidates
-                    else (
-                        startup_candidate_rows[: self.top_n]
-                        if startup_candidate_rows
-                        else ranking[: self.top_n]
-                    )
+                    else (ranking_filtered[: self.top_n] if lightgbm_candidates and ranking_filtered else ranking[: self.top_n])
                 )
             )
         )
@@ -563,18 +563,31 @@ class TopNPortfolioBuilder:
             startup_candidate = bool(result.get("startup_candidate", False))
             overheat_penalty_score = np.nan_to_num(result.get("overheat_penalty_score", np.nan), nan=0.0)
             downtrend_penalty_score = np.nan_to_num(result.get("downtrend_penalty_score", np.nan), nan=0.0)
-            candidate_gate_bonus = 18.0 if startup_candidate else -28.0
+            # Setup-type aware adjustments (v8: pure data-driven, no heuristic bonuses)
+            hot_sector_value_score = np.nan_to_num(result.get("hot_sector_value_score", 50.0), nan=50.0)
+            win_rate_pct = np.nan_to_num(result.get("win_rate", 50.0), nan=50.0)
+            trade_count = int(result.get("trade_count", 60) or 60)
+            pb_ratio = np.nan_to_num(result.get("pb_ratio", 0), nan=0.0)
+            pb_bonus = float(np.clip(pb_ratio, 0, 12) * 1.5)
+
+            if setup_type == "bottom_rebound":
+                downtrend_weight = 0.10
+            elif setup_type == "pre_breakout":
+                downtrend_weight = 0.20
+            else:
+                downtrend_weight = 0.30
+
             ranking_score = (
-                risk_adjusted_score * 0.42
-                + latest_model_score * 0.08
-                + latest_risk_score * 0.08
-                + startup_score * 0.18
-                + startup_candidate_score * 0.22
-                + signal_freshness_score * 0.03
-                + candidate_gate_bonus
-                - drawdown_penalty_score * 0.08
-                - overheat_penalty_score * 0.20
-                - downtrend_penalty_score * 0.45
+                win_rate_pct * 0.65
+                + overheat_penalty_score * 0.18
+                + pb_bonus
+                + latest_model_score * 0.10
+                + risk_adjusted_score * 0.05
+                + signal_freshness_score * 0.02
+                - hot_sector_value_score * 0.05
+                - drawdown_penalty_score * 0.03
+                - downtrend_penalty_score * downtrend_weight
+                - trade_count * 0.02
             )
             return {
                 "stock_code": stock_code,
@@ -612,6 +625,10 @@ class TopNPortfolioBuilder:
                 "overheat_penalty_score": result.get("overheat_penalty_score"),
                 "downtrend_penalty_score": result.get("downtrend_penalty_score"),
                 "trend_state": result.get("trend_state"),
+                "hot_sector_value_score": hot_sector_value_score,
+                "pe_ratio": result.get("pe_ratio"),
+                "pb_ratio": result.get("pb_ratio"),
+                "cluster_rps": result.get("cluster_rps"),
             }
         active_bonus = 100 if result.get("current_signal_active") and result.get("current_signal_actionable") else 0
         setup_type_bonus = {

@@ -158,7 +158,49 @@ uv run python sync_hk_market.py \
   --skip-existing
 ```
 
-### 第二步：因子生成
+### 第二步（可选）：另类数据采集 — 新闻情感
+
+独立于 K 线数据，抓取港股个股新闻并做情感分析，产出 `alt_sentiment_*` 特征，供 LightGBM 排序学习使用。
+
+```bash
+# 抓取全港股新闻情感，持久化到 feature 层
+uv run python stock_analyzer.py fetch_alt_data \
+  --stock-limit 100 \
+  --show-progress \
+  --persist-signals
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--stock-limit N` | 限制抓取股票数，不设为全部 |
+| `--show-progress` | 显示逐只进度 |
+| `--persist-signals` | 写入 feature 层（ClickHouse 或 Parquet） |
+
+**数据流**：
+
+```
+AKShare (东方财富个股新闻)
+  → alt_data/news_fetcher.py      # 每只股票最近 ~10 条，含标题+正文
+  → alt_data/sentiment.py         # 情感分析（DistilBERT 多语言 / 规则引擎 fallback）
+  → alt_data/service.py           # 日度聚合：6 个 alt_sentiment_* 特征
+  → data/store/warehouse.py       # 持久化到 feature 层
+  → LightGBM 训练时自动读取       # 与 Alpha158 因子一同参与排序
+```
+
+**必须与 K 线分开**：新闻抓取每只股票有 0.3s 限速，全市场 2780 只需要约 14 分钟，不适合跟 K 线同步跑。建议每日用 cron 调度一次。
+
+**两种情感分析后端**：
+
+| 后端 | 模型 | 速度 | 精度 | 启动方式 |
+|---|---|---|---|---|
+| Transformers | DistilBERT 多语言 (~400MB) | GPU 快 / CPU 可用 | 较高 | 默认，`transformers` 已安装 |
+| 规则引擎 | 中文金融关键词字典 | 毫秒级 | 中等 | `force_rule_based=True` |
+
+如果 `transformers` 模型加载失败，自动降级为规则引擎。
+
+**LightGBM 集成**：`select_stocks --analysis-mode lightgbm` 会自动尝试从 feature 层加载 `alt_sentiment` 特征并合并到训练面板。如果 feature 层无数据则跳过，不影响主流程。
+
+### 第三步：因子生成
 
 全市场批量计算 Alpha158 因子并写入 ClickHouse：
 
@@ -173,7 +215,7 @@ uv run python stock_analyzer.py generate_factors \
 
 > `--stock-limit` 控制计算股票数；不加则跑全部。已入库的股票会自动跳过。
 
-### 第三步：因子验证
+### 第四步：因子验证
 
 验证因子 IC 质量，产出权重缓存，供后续选股使用：
 
@@ -186,7 +228,7 @@ uv run python stock_analyzer.py validate_factors \
   --export-csv output/validation_scorecard
 ```
 
-### 第四步：选股 + 回测
+### 第五步：选股 + 回测
 
 基于验证后的因子权重选股并回测：
 
@@ -201,6 +243,21 @@ uv run python stock_analyzer.py select_stocks \
   --factor-set qlib_alpha158 \
   --signal-recipes low_price_setup,range_breakout,box_pullback \
   --export-csv output/lightgbm_top10
+```
+
+```
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --initial-capital 100000 \
+  --max-workers 16 \
+  --show-progress \
+  --factor-set qlib_alpha158 \
+  --export-csv output/lightgbm_v8 \
+  --min-market-cap 30 \
+  --min-daily-turnover 500
+
 ```
 
 Alpha158 vs Alpha360：Alpha360 已包含 Alpha158 的大部分因子，两者高度重叠，不建议合并。分别训练后对比 ICIR，选表现更好的；或对预测分数做加权集成。

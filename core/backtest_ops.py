@@ -35,6 +35,9 @@ class BacktestMixin:
         signal_recipes=None,
         max_features=0,
         backtest_date=None,
+        min_market_cap=None,
+        min_daily_turnover=None,
+        min_ipo_days=None,
     ):
         """固定股票池组合回测：按日期横向比较评分，只持有当日最优的 Top N 信号。"""
         from backtest_engine import TopNPortfolioBuilder
@@ -45,6 +48,64 @@ class BacktestMixin:
         stock_codes = list(stock_codes or [])
         if not stock_codes:
             return None
+
+        # --- Market quality filters ---
+        if min_market_cap or min_daily_turnover or min_ipo_days:
+            from core.market_filter import (
+                apply_filters,
+                compute_trading_days_batch,
+                fetch_market_data_batch,
+                print_filter_report,
+            )
+
+            # CLI passes turnover in 万港元, convert to 港元 for filter
+            turnover_hkd = min_daily_turnover * 1e4 if min_daily_turnover else None
+
+            print("[FILTER] 正在获取市场数据以进行质量过滤...")
+            t0 = time.time()
+            market_data = fetch_market_data_batch(
+                stock_codes,
+                max_workers=min(max_workers or 20, 30),
+                progress_callback=(
+                    lambda done, total: print(
+                        f"\r[FILTER] 市场数据获取 {done}/{total} ({done/total*100:.0f}%)",
+                        end="", file=sys.stderr,
+                    )
+                    if show_progress else None
+                ),
+            )
+            if show_progress:
+                print(file=sys.stderr)
+
+            trading_days = None
+            if min_ipo_days is not None:
+                print("[FILTER] 正在统计各股票上市天数...")
+                trading_days = compute_trading_days_batch(
+                    stock_codes, self.market_warehouse, max_workers=8,
+                )
+
+            filter_result = apply_filters(
+                stock_codes,
+                market_data,
+                trading_days=trading_days,
+                min_market_cap=min_market_cap,
+                min_daily_turnover=turnover_hkd,
+                min_ipo_days=min_ipo_days,
+            )
+            elapsed = time.time() - t0
+            print(f"[FILTER] 过滤完成，耗时 {elapsed:.1f}s")
+            print_filter_report(
+                filter_result,
+                min_market_cap=min_market_cap,
+                min_daily_turnover=turnover_hkd,
+                min_ipo_days=min_ipo_days,
+            )
+
+            if not filter_result.passed:
+                print("[ERROR] 过滤后无股票剩余，请放宽过滤条件")
+                return None
+
+            stock_codes = filter_result.passed
 
         pool_results = []
         requested_workers = int(max_workers or 0)
@@ -344,6 +405,9 @@ class BacktestMixin:
         signal_recipes=None,
         max_features=0,
         backtest_date=None,
+        min_market_cap=None,
+        min_daily_turnover=None,
+        min_ipo_days=None,
     ):
         """对本地已同步的全部港股执行 TopN 组合回测。"""
         return self.backtest_portfolio(
@@ -362,6 +426,9 @@ class BacktestMixin:
             factor_score_config=factor_score_config,
             persist_features=persist_features,
             show_progress=show_progress,
+            min_market_cap=min_market_cap,
+            min_daily_turnover=min_daily_turnover,
+            min_ipo_days=min_ipo_days,
             enable_portfolio_replay=enable_portfolio_replay,
             ridge_factors=ridge_factors,
             signal_recipes=signal_recipes,

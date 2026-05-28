@@ -181,6 +181,114 @@ class LightGBMAnalysisMixin:
             return pd.DataFrame()
 
     @staticmethod
+    def _merge_alt_sentiment_features(panel_features, stock_codes, show_progress=False):
+        """Merge alternative sentiment features into the LightGBM feature panel.
+
+        Loads pre-computed alt_sentiment features from the feature layer.
+        Falls back to live fetching only for a limited number of stocks.
+        """
+        try:
+            from alt_data.service import AltDataService, merge_sentiment_features
+
+            # 1. Try loading from warehouse first (fast path)
+            panel_with_alt = LightGBMAnalysisMixin._load_alt_from_warehouse(
+                panel_features, stock_codes, show_progress
+            )
+            if panel_with_alt is not None:
+                return panel_with_alt
+
+            # 2. Live fetch fallback — only for a manageable number of stocks
+            MAX_LIVE_STOCKS = 30
+            if len(stock_codes) > MAX_LIVE_STOCKS:
+                if show_progress:
+                    print(
+                        f"[PROGRESS] analysis phase=lightgbm_alt_features "
+                        f"skipped (live fetch limited to {MAX_LIVE_STOCKS} stocks, "
+                        f"got {len(stock_codes)}). Run alt_data persistence first."
+                    )
+                return panel_features
+
+            alt_service = AltDataService.get_or_create()
+            alt_result = alt_service.fetch_and_analyze(
+                stock_codes, lookback_days=30,
+            )
+
+            if alt_result.feature_df is None or alt_result.feature_df.empty:
+                if show_progress:
+                    print("[PROGRESS] analysis phase=lightgbm_alt_features alt_features=0 (no news)")
+                return panel_features
+
+            merged = merge_sentiment_features(panel_features, alt_result.feature_df)
+            alt_cols = [c for c in merged.columns if c.startswith("alt_")]
+            if show_progress:
+                print(
+                    f"[PROGRESS] analysis phase=lightgbm_alt_features "
+                    f"alt_features={len(alt_cols)} "
+                    f"news_records={len(alt_result.records)} "
+                    f"stocks_with_news={alt_result.feature_df['stock_code'].nunique()}"
+                )
+            return merged
+
+        except Exception as e:
+            if show_progress:
+                print(f"[PROGRESS] analysis phase=lightgbm_alt_features error={e}")
+            return panel_features
+
+    @staticmethod
+    def _load_alt_from_warehouse(panel_features, stock_codes, show_progress=False):
+        """Try to load pre-computed alt_sentiment features from the feature layer.
+
+        Returns merged panel if features exist, None otherwise.
+        """
+        try:
+            from data.store.layout import DataLayout
+            from data.store.warehouse import MarketDataWarehouse
+            from data.model.schemas import FEATURE_COLUMNS as _FEATURE_COLS
+
+            layout = DataLayout(base_dir="assets/data")
+            wh = MarketDataWarehouse(layout, read_only=True)
+
+            trade_dates = panel_features.index.unique()
+            start_date = str(pd.Timestamp(min(trade_dates)).date())
+            end_date = str(pd.Timestamp(max(trade_dates)).date())
+
+            feature_df = wh.read_features(
+                feature_set="alt_sentiment",
+                market="HK",
+                frequency="daily",
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            if feature_df is None or feature_df.empty:
+                return None
+
+            # Convert long-format to wide for merge
+            wide = feature_df.pivot_table(
+                index=["trade_date", "stock_code"],
+                columns="feature_name",
+                values="feature_value",
+            ).reset_index()
+
+            if wide.empty:
+                return None
+
+            from alt_data.service import merge_sentiment_features
+
+            merged = merge_sentiment_features(panel_features, wide)
+            alt_cols = [c for c in merged.columns if c.startswith("alt_")]
+            if show_progress:
+                print(
+                    f"[PROGRESS] analysis phase=lightgbm_alt_features "
+                    f"alt_features={len(alt_cols)} source=warehouse "
+                    f"stocks_with_news={wide['stock_code'].nunique()}"
+                )
+            return merged
+
+        except Exception:
+            return None
+
+    @staticmethod
     def _build_lightgbm_factor_explanation(
         model_metadata,
         latest_model_score,
@@ -331,6 +439,12 @@ class LightGBMAnalysisMixin:
 
         panel_features = pd.concat(feature_frames, axis=0, sort=False)
         panel_targets = pd.concat(target_frames, axis=0, sort=False)
+
+        # Merge alt sentiment features if available
+        panel_features = self._merge_alt_sentiment_features(
+            panel_features, stock_codes, show_progress=show_progress
+        )
+
         fit_started_at = time.time()
         if show_progress:
             print(
@@ -388,6 +502,63 @@ class LightGBMAnalysisMixin:
                 print(f"  预估年化超额:  ~{est_annual_excess:.0f}% (粗略估计, 实际取决于换手和成本)")
             print(f"{'='*60}\n")
 
+        # Fetch fundamental quality scores for all stocks in batch
+        quality_scores: dict[str, float] = {}
+        try:
+            batch_codes = [item["stock_code"] for item in batch_results]
+            from core.quality import enrich_with_quality, fetch_quality_scores
+
+            if show_progress:
+                print("[QUALITY] 正在获取基本面质量评分...")
+            quality_raw = fetch_quality_scores(
+                batch_codes,
+                max_workers=8,
+                progress_callback=(
+                    lambda done, total: print(
+                        f"\r[QUALITY] {done}/{total} ({done/total*100:.0f}%)",
+                        end="", file=sys.stderr,
+                    )
+                    if show_progress else None
+                ),
+            )
+            if show_progress:
+                print(file=sys.stderr)
+            quality_scores = enrich_with_quality(batch_codes, quality_raw, show_progress=show_progress)
+        except Exception as exc:
+            if show_progress:
+                print(f"[QUALITY] 质量评分获取失败，使用默认值: {exc}")
+
+        # Fetch hot-sector + relative valuation scores
+        valuation_scores: dict[str, dict] = {}
+        try:
+            from core.sector_valuation import compute_sector_valuation, fetch_valuation_batch
+
+            if show_progress:
+                print("[VALUATION] 正在获取估值与赛道热度评分...")
+            pe_pb_data = fetch_valuation_batch(
+                batch_codes,
+                max_workers=20,
+                progress_callback=(
+                    lambda done, total: print(
+                        f"\r[VALUATION] {done}/{total} ({done/total*100:.0f}%)",
+                        end="", file=sys.stderr,
+                    )
+                    if show_progress else None
+                ),
+            )
+            if show_progress:
+                print(file=sys.stderr)
+            valuation_df = compute_sector_valuation(batch_data_map, pe_pb_data, sector_features)
+            for _, row in valuation_df.iterrows():
+                valuation_scores[row["stock_code"]] = row.to_dict()
+            valid_pe = sum(1 for v in valuation_scores.values() if pd.notna(v.get("pe_ratio")))
+            valid_pb = sum(1 for v in valuation_scores.values() if pd.notna(v.get("pb_ratio")))
+            if show_progress:
+                print(f"[VALUATION] 估值评分完成: {valid_pe} 只PE有效, {valid_pb} 只PB有效")
+        except Exception as exc:
+            if show_progress:
+                print(f"[VALUATION] 估值评分获取失败，使用默认值: {exc}")
+
         results = []
         finalize_started_at = time.time()
         finalize_total = len(batch_results)
@@ -427,9 +598,13 @@ class LightGBMAnalysisMixin:
 
             stock_scores = stock_scores.sort_index()
             stock_scores["trend_score"] = stock_scores["model_score"]
-            stock_scores["quality_score"] = np.nan
+            q_score = quality_scores.get(stock_code, 50.0) if quality_scores else 50.0
+            stock_scores["quality_score"] = q_score
             stock_scores["risk_score"] = np.nan
-            stock_scores["composite_score"] = stock_scores["model_score"]
+            # Blend: 60% trend + 40% quality
+            stock_scores["composite_score"] = (
+                stock_scores["model_score"] * 0.60 + q_score * 0.40
+            )
 
             analysis_start_idx = max(len(feature_frame) - days, 0)
             analysis_start_date = feature_frame.index[analysis_start_idx]
@@ -563,6 +738,17 @@ class LightGBMAnalysisMixin:
                 },
             )
 
+            # Extract sector features and valuation for this stock
+            _stock_sec = sector_features[sector_features["stock_code"] == stock_code] if not sector_features.empty else pd.DataFrame()
+            _cluster_rps = float(_stock_sec["cluster_rps"].iloc[0]) if not _stock_sec.empty and "cluster_rps" in _stock_sec.columns else 50.0
+            _cluster_breadth5 = float(_stock_sec["cluster_breadth5"].iloc[0]) if not _stock_sec.empty and "cluster_breadth5" in _stock_sec.columns else 0.5
+            _cluster_breadth20 = float(_stock_sec["cluster_breadth20"].iloc[0]) if not _stock_sec.empty and "cluster_breadth20" in _stock_sec.columns else 0.5
+            _hot_sector_leader = float(_stock_sec["hot_sector_leader"].iloc[0]) if not _stock_sec.empty and "hot_sector_leader" in _stock_sec.columns else 0.5
+            _val = valuation_scores.get(stock_code, {})
+            _hsv_score = _val.get("hot_sector_value_score", 50.0)
+            _pe = _val.get("pe_ratio", np.nan)
+            _pb = _val.get("pb_ratio", np.nan)
+
             results.append(
                 {
                     "stock_code": stock_code,
@@ -611,6 +797,15 @@ class LightGBMAnalysisMixin:
                     "signal_recipe_names": setup_snapshot.get("signal_recipe_names", list(self.signal_recipes)),
                     "signal_freshness_score": freshness_score,
                     "signal_age_days": signal_age_days,
+                    # Sector features
+                    "cluster_rps": _cluster_rps,
+                    "cluster_breadth5": _cluster_breadth5,
+                    "cluster_breadth20": _cluster_breadth20,
+                    "hot_sector_leader": _hot_sector_leader,
+                    # Valuation scores
+                    "hot_sector_value_score": _hsv_score,
+                    "pe_ratio": _pe,
+                    "pb_ratio": _pb,
                 }
             )
             if show_progress:

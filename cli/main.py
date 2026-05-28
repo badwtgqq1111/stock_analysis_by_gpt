@@ -13,6 +13,7 @@ from cli.validate_factors import main_validate_factors
 from cli.all_hk import main_all_hk
 from cli.review_batch import main_review_batch
 from cli.factor_report import main_factor_report, main_signal_report
+from cli.fetch_alt_data import main_fetch_alt_data
 from cli.strategy_suite import main_strategy_suite, analyze_single_stock_with_visualization
 
 TARGET_STOCKS = ['03633', '02706', '02015', '01860', '02432', '02590', '09866', '00020']
@@ -100,7 +101,7 @@ def run_cli(argv=None):
         description="港股技术分析系统 - 支持单股回测、批量分析与多策略比较"
     )
     parser.add_argument('mode', nargs='?', default=None,
-                        help='运行模式：single / suite / all_hk / validate_factors / generate_factors / select_stocks / factor_report / review_batch / 直接股票代码')
+                        help='运行模式：single / suite / all_hk / validate_factors / generate_factors / select_stocks / fetch_alt_data / factor_report / review_batch / 直接股票代码')
     parser.add_argument('value', nargs='?', default=None,
                         help='兼容旧模式：single 时为股票代码')
     parser.add_argument('--days', dest='days', type=int, default=365,
@@ -157,6 +158,12 @@ def run_cli(argv=None):
                         help='验证驱动权重模式下限制参与验证的股票数量，默认不限制')
     parser.add_argument('--backtest-date', dest='backtest_date', default=None,
                         help='回测日期: 仅使用指定日期之前的数据选股，格式 YYYY-MM-DD')
+    parser.add_argument('--min-market-cap', dest='min_market_cap', type=float, default=None,
+                        help='最低市值过滤（亿港元），默认不过滤')
+    parser.add_argument('--min-daily-turnover', dest='min_daily_turnover', type=float, default=None,
+                        help='最低日成交额过滤（万港元），默认不过滤')
+    parser.add_argument('--min-ipo-days', dest='min_ipo_days', type=int, default=None,
+                        help='最低上市天数过滤（交易日），默认不过滤；建议 >= 250')
     parser.add_argument('--refresh-recommended-factor-weights', dest='refresh_recommended_factor_weights', action='store_true',
                         help='强制重算 recommended_factor_weight，不使用本地缓存')
     parser.add_argument('--validation-factor-scope', dest='validation_factor_scope',
@@ -221,6 +228,9 @@ def run_cli(argv=None):
             validation_factor_scope=args.validation_factor_scope,
             signal_recipes=signal_recipes,
             max_features=args.max_features,
+            min_market_cap=args.min_market_cap,
+            min_daily_turnover=args.min_daily_turnover,
+            min_ipo_days=args.min_ipo_days,
         )
     elif args.mode == "all_hk":
         return main_all_hk(
@@ -244,6 +254,9 @@ def run_cli(argv=None):
             refresh_recommended_factor_weights=args.refresh_recommended_factor_weights,
             validation_factor_scope=args.validation_factor_scope,
             signal_recipes=signal_recipes,
+            min_market_cap=args.min_market_cap,
+            min_daily_turnover=args.min_daily_turnover,
+            min_ipo_days=args.min_ipo_days,
         )
     elif args.mode == "factor_report":
         return main_factor_report(
@@ -269,6 +282,13 @@ def run_cli(argv=None):
             signal_recipes=signal_recipes,
             signal_cooldown_days=args.signal_cooldown_days,
             signal_event_policy=args.signal_event_policy,
+        )
+    elif args.mode == "fetch_alt_data":
+        return main_fetch_alt_data(
+            stock_limit=args.stock_limit,
+            max_workers=args.max_workers or 20,
+            show_progress=args.show_progress,
+            persist=args.persist_signals,
         )
     elif args.mode == "review_batch":
         return main_review_batch(

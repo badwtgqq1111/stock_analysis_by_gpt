@@ -143,6 +143,20 @@ class LowPriceSetupRecipe(SignalRecipe):
         low_price_candidate = 0.20 <= latest_close <= 8.0
         liquidity_ok = pd.notna(median_turnover_20) and median_turnover_20 >= 1_000_000.0
 
+        # Bottom-rebound quality filters: volume expansion + follow-through
+        volume_ma5 = float(volume.tail(5).mean()) if not volume.tail(5).dropna().empty else np.nan
+        volume_trend_expanding = (
+            pd.notna(volume_ma5) and pd.notna(volume_ma20)
+            and volume_ma20 > 0 and volume_ma5 >= volume_ma20 * 1.10
+        )
+        up_days_3 = int((returns.tail(3) > 0).sum()) if not returns.tail(3).dropna().empty else 0
+        consecutive_2_of_3_up = up_days_3 >= 2
+        close_position_20 = (
+            (latest_close - low20) / (high20 - low20)
+            if pd.notna(high20) and pd.notna(low20) and high20 > low20
+            else np.nan
+        )
+
         pre_breakout_score = 0.0
         if low_price_candidate:
             pre_breakout_score += 16.0
@@ -163,21 +177,30 @@ class LowPriceSetupRecipe(SignalRecipe):
 
         bottom_rebound_score = 0.0
         if low_price_candidate:
-            bottom_rebound_score += 16.0
+            bottom_rebound_score += 14.0
         if liquidity_ok:
             bottom_rebound_score += 12.0
         if pd.notna(return_60d) and return_60d <= -0.18:
             bottom_rebound_score += 18.0
         if pd.notna(distance_from_60d_low) and 0.06 <= distance_from_60d_low <= 0.35:
             bottom_rebound_score += 16.0
-        if pd.notna(volume_ratio_20) and volume_ratio_20 >= 1.15:
+        # Volume expansion on bounce (replaces simple vol>avg check)
+        if volume_trend_expanding:
             bottom_rebound_score += 14.0
-        if pd.notna(return_5d) and return_5d >= 0.04:
-            bottom_rebound_score += 12.0
-        if pd.notna(ma10) and latest_close >= ma10:
-            bottom_rebound_score += 10.0
-        if pd.notna(ma20) and latest_close >= ma20 * 0.97:
+        elif pd.notna(volume_ratio_20) and volume_ratio_20 >= 1.15:
             bottom_rebound_score += 8.0
+        # Consecutive up-days = follow-through confirmation
+        if consecutive_2_of_3_up:
+            bottom_rebound_score += 12.0
+        if pd.notna(return_5d) and return_5d >= 0.04:
+            bottom_rebound_score += 10.0
+        # Close in upper half of range = bullish positioning
+        if pd.notna(close_position_20) and close_position_20 >= 0.50:
+            bottom_rebound_score += 8.0
+        if pd.notna(ma10) and latest_close >= ma10:
+            bottom_rebound_score += 6.0
+        if pd.notna(ma20) and latest_close >= ma20 * 0.97:
+            bottom_rebound_score += 6.0
 
         sideways_penalty = 0.0
         if pd.notna(return_20d) and abs(return_20d) <= 0.06:
@@ -190,7 +213,11 @@ class LowPriceSetupRecipe(SignalRecipe):
             sideways_penalty += 6.0
 
         rebound_context = pd.notna(return_60d) and return_60d <= -0.18
-        if rebound_context and bottom_rebound_score >= max(52.0, pre_breakout_score - 4.0, sideways_penalty + 6.0):
+        rebound_quality_ok = consecutive_2_of_3_up or volume_trend_expanding
+        if rebound_context and rebound_quality_ok and bottom_rebound_score >= max(52.0, pre_breakout_score - 4.0, sideways_penalty + 6.0):
+            setup_type = "bottom_rebound"
+            setup_score = bottom_rebound_score
+        elif bottom_rebound_score >= 55.0 and rebound_quality_ok and bottom_rebound_score >= max(pre_breakout_score - 4.0, sideways_penalty + 6.0):
             setup_type = "bottom_rebound"
             setup_score = bottom_rebound_score
         elif pre_breakout_score >= bottom_rebound_score and pre_breakout_score >= max(55.0, sideways_penalty + 8.0):
@@ -222,6 +249,9 @@ class LowPriceSetupRecipe(SignalRecipe):
                 "return_5d": return_5d,
                 "return_20d": return_20d,
                 "return_60d": return_60d,
+                "volume_trend_expanding": bool(volume_trend_expanding),
+                "consecutive_2_of_3_up": bool(consecutive_2_of_3_up),
+                "close_position_20": close_position_20,
                 "recipe_scores": {
                     "pre_breakout": float(pre_breakout_score),
                     "bottom_rebound": float(bottom_rebound_score),

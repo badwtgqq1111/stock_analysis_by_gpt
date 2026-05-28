@@ -42,6 +42,9 @@ def main_all_hk(
     refresh_recommended_factor_weights=False,
     validation_factor_scope="all",
     signal_recipes=None,
+    min_market_cap=None,
+    min_daily_turnover=None,
+    min_ipo_days=None,
 ):
     """对本地已同步的全部港股执行 TopN 组合分析（兼容旧接口：验证+选股一次完成）。"""
     print("=" * 80)
@@ -171,6 +174,9 @@ def main_all_hk(
             "factor_score_config": factor_score_config,
             "show_progress": show_progress,
             "enable_portfolio_replay": not fast_mode,
+            "min_market_cap": min_market_cap,
+            "min_daily_turnover": min_daily_turnover,
+            "min_ipo_days": min_ipo_days,
         }
         if signal_recipes is not None:
             backtest_kwargs["signal_recipes"] = signal_recipes

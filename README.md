@@ -211,6 +211,12 @@ uv run python stock_analyzer.py generate_factors \
   --stock-limit 500 \
   --max-workers 8 \
   --show-progress
+
+uv run python stock_analyzer.py generate_factors \
+  --days 365 \
+  --factor-set qlib_alpha158 \
+  --max-workers 8 \
+  --show-progress
 ```
 
 > `--stock-limit` 控制计算股票数；不加则跑全部。已入库的股票会自动跳过。
@@ -243,6 +249,16 @@ uv run python stock_analyzer.py select_stocks \
   --factor-set qlib_alpha158 \
   --signal-recipes low_price_setup,range_breakout,box_pullback \
   --export-csv output/lightgbm_top10
+
+# 选股后自动生成 LLM 分析报告
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm \
+  --top-n 10 --days 365 \
+  --max-workers 8 --show-progress \
+  --factor-set alpha158_hk \
+  --export-csv output/lightgbm_v11 \
+  --min-market-cap 30 --min-daily-turnover 500 \
+  --llm-report
 ```
 
 ```
@@ -264,12 +280,13 @@ uv run python stock_analyzer.py select_stocks \
 ```
 
 ```
-# V9 新公式 + 优化因子
+# V11 新公式 + 优化因子
 uv run python stock_analyzer.py select_stocks \
   --analysis-mode lightgbm --top-n 10 --days 365 \
   --initial-capital 100000 --max-workers 16 --show-progress \
-  --factor-set alpha158_hk --export-csv output/lightgbm_v10 \
+  --factor-set alpha158_hk --export-csv output/lightgbm_v11 \
   --min-market-cap 30 --min-daily-turnover 500
+
 
 # IC 分析（跑完回测后再跑这个）
 uv run python experiments/factor_ic_analysis.py --stocks 200 --days 365
@@ -381,6 +398,8 @@ uv run python stock_analyzer.py select_stocks \
 | `--batch-id` | 批次号 | 自动生成 |
 | `--validation-days` | 验证窗口天数 | 同 `--days` |
 | `--validation-factor-scope` | 与验证时保持一致 | `scoring_only` |
+| `--llm-report` | 选股完成后自动调用 DeepSeek 生成 AI 分析报告 | 关 |
+| `--llm-model` | LLM 模型名称 | `deepseek-v4-pro` |
 
 开启 `--show-progress` 后，`select_stocks` 的因子批量模式会先打印
 `phase=batch_factor` 摘要，包含总股票数、批次数、自动批大小、实际 worker 数和当前可用内存；
@@ -475,6 +494,56 @@ uv run python stock_analyzer.py signal_report \
 | `p95_forward_drawdown_*` | 较差 5% 情况下的最大回撤分位 |
 | `return_drawdown_ratio_*` | 平均未来收益 / 平均最大回撤绝对值 |
 | `avg_win_*` / `avg_loss_*` | 盈利样本平均收益 / 亏损样本平均收益 |
+
+### LLM 自动分析报告
+
+选股完成后，系统可自动调用 DeepSeek API 生成 AI 分析报告，归档到 `docs/report/`。
+
+**执行阶段：** LLM 报告在选股流水线的最后执行——回测、CSV 导出、signal 持久化、manifest 写入全部完成后，打印持仓建议之前。
+
+```
+回测 → CSV导出 → Signal持久化 → Manifest写入 → ⭐ LLM报告 → 打印持仓
+```
+
+**前置条件：** 设置环境变量 `DEEPSEEK_API_KEY`（已写入 `~/.zshrc` 则自动生效）：
+
+```bash
+export DEEPSEEK_API_KEY="sk-your-key"
+```
+
+**使用方式：**
+
+```bash
+# 默认模型 (deepseek-v4-pro)
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm --top-n 10 --days 365 \
+  --max-workers 16 --show-progress \
+  --factor-set alpha158_hk \
+  --initial-capital 100000 \
+  --export-csv output/lightgbm_v11 \
+  --min-market-cap 30 --min-daily-turnover 500 \
+  --llm-report
+
+# 指定模型
+uv run python stock_analyzer.py select_stocks \
+  --analysis-mode lightgbm --top-n 10 --days 365 \
+  --max-workers 16 --show-progress \
+  --factor-set alpha158_hk \
+  --initial-capital 100000 \
+  --export-csv output/lightgbm_v11 \
+  --llm-report --llm-model deepseek-chat
+```
+
+**报告内容：** 自动获取每只持仓股实时行情（PE/PB/市值/换手率），结合回测结果（胜率/setup/风险惩罚分），生成逐只分析 + 汇总建议，评级分为 ⭐强烈推荐 / ✅推荐 / ✅可买入 / ⚠️跳过。
+
+**输出文件：** `docs/report/{YYYY-MM-DD}_llm.md`（同一天多次运行自动递增序号）。
+
+**模块结构：**
+
+| 文件 | 职责 |
+|------|------|
+| `core/llm/client.py` | DeepSeek API 客户端（OpenAI 兼容协议，自动重试） |
+| `core/llm/report.py` | 报告生成器：数据抓取 → prompt 构建 → LLM 调用 → 归档 |
 
 ### 因子研究报告（CSV 导出）
 

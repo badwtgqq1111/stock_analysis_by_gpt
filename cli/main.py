@@ -135,6 +135,10 @@ def run_cli(argv=None):
     parser.add_argument('--signal-event-policy', dest='signal_event_policy',
                         choices=['first', 'latest', 'best_score'], default='first',
                         help='signal_report 合并窗口内选择事件的方式，默认 first')
+    parser.add_argument('--llm-report', dest='llm_report', action='store_true',
+                        help='选股完成后自动生成 LLM 分析报告并归档到 docs/report/')
+    parser.add_argument('--llm-model', dest='llm_model', default='deepseek-v4-pro',
+                        help='LLM 模型名称 (default: deepseek-v4-pro)')
     parser.add_argument('--show-progress', dest='show_progress', action='store_true',
                         help='显示全市场分析进度')
     parser.add_argument('--fast-mode', dest='fast_mode', action='store_true',
@@ -235,6 +239,8 @@ def run_cli(argv=None):
             min_market_cap=args.min_market_cap,
             min_daily_turnover=args.min_daily_turnover,
             min_ipo_days=args.min_ipo_days,
+            llm_report=args.llm_report,
+            llm_model=args.llm_model,
         )
     elif args.mode == "all_hk":
         return main_all_hk(

@@ -15,6 +15,7 @@ from cli.helpers import (
     _sanitize_validation_scorecard,
     _write_run_manifest,
 )
+from core.llm.report import run_auto_report
 from data.ingest.service import MarketDataService
 
 
@@ -43,6 +44,8 @@ def main_select_stocks(
     min_market_cap=None,
     min_daily_turnover=None,
     min_ipo_days=None,
+    llm_report=False,
+    llm_model="deepseek-v4-pro",
 ):
     """执行全港股 TopN 选股+回测。factor 模式读取验证权重缓存，lightgbm 模式直接训练排序模型。"""
     print("=" * 80)
@@ -243,6 +246,15 @@ def main_select_stocks(
         status="ok",
     )
     print(f"[OK] 已写入 run manifest: {manifest_path}")
+
+    if llm_report and portfolio_result:
+        print("\n[LLM] 正在生成 AI 分析报告...")
+        run_auto_report(
+            portfolio_result,
+            model=llm_model,
+            formula_version="v11",
+        )
+        print("[LLM] 报告生成完成")
 
     print("\n当前建议持有:")
     for item in portfolio_result.get("selected", []):

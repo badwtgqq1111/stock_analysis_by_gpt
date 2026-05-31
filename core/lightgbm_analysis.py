@@ -6,6 +6,8 @@ import time
 import numpy as np
 import pandas as pd
 
+from data.model import normalize_bool
+
 from core.constants import DEFAULT_FACTOR_SET
 from core.formatting import _build_lightgbm_factor_explanation
 
@@ -322,16 +324,23 @@ class LightGBMAnalysisMixin:
         model_type="lightgbm",
         backtest_date=None,
     ):
-        from factor_engine import FactorContext, create_factor_set
-        from factor_engine.ml import LightGBMRankerPipeline
+        import core as core_module
+        from factor_engine import FactorContext
         from factor_engine.signals import SignalRecipeRunner
 
         stock_codes = list(stock_codes or [])
         if not stock_codes:
             return []
 
-        ranker = LightGBMRankerPipeline(max_features=max_features, model_type=model_type)
-        warmup_days = max(days + 180, days + ranker.label_horizon + 60)
+        ranker_cls = core_module.LightGBMRankerPipeline
+        try:
+            ranker = ranker_cls(max_features=max_features, model_type=model_type, neutralize_cluster_features=True)
+        except TypeError:
+            ranker = ranker_cls()
+        label_horizon = int(getattr(ranker, "label_horizon", 20))
+        execution_delay = int(getattr(ranker, "execution_delay", 1))
+        drawdown_horizon = int(getattr(ranker, "drawdown_horizon", 60))
+        warmup_days = max(days + 180, days + label_horizon + 60)
         batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days, end_date=backtest_date)
 
         sector_features = self._compute_sector_features(batch_data_map)
@@ -346,7 +355,7 @@ class LightGBMAnalysisMixin:
         if show_progress:
             print(
                 f"[PROGRESS] analysis phase=lightgbm_prepare stocks={len(stock_codes)} "
-                f"label_horizon={ranker.label_horizon} factor_set={factor_set}"
+                f"label_horizon={label_horizon} factor_set={factor_set}"
             )
 
         for stock_code in stock_codes:
@@ -363,13 +372,20 @@ class LightGBMAnalysisMixin:
                         started_at=prepare_started_at,
                         extra_fields=[
                             ("feature_ready", prepare_success),
-                            ("label_horizon", ranker.label_horizon),
+                            ("label_horizon", label_horizon),
                         ],
                     )
                 continue
 
             ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
-            factor = create_factor_set(factor_set)
+
+            stock_info = self.market_warehouse.get_stock_info(stock_code)
+            if stock_info and stock_info.get("total_shares"):
+                ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
+            if stock_info and stock_info.get("market_cap"):
+                ohlcv_frame["market_cap"] = float(stock_info["market_cap"])
+
+            factor = core_module.create_factor_set(factor_set)
             context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
             feature_frame = factor.transform(ohlcv_frame, context=context)
             if feature_frame is None or feature_frame.empty:
@@ -383,7 +399,7 @@ class LightGBMAnalysisMixin:
                         started_at=prepare_started_at,
                         extra_fields=[
                             ("feature_ready", prepare_success),
-                            ("label_horizon", ranker.label_horizon),
+                            ("label_horizon", label_horizon),
                         ],
                     )
                 continue
@@ -401,18 +417,23 @@ class LightGBMAnalysisMixin:
             feature_frame["stock_code"] = stock_code
             feature_frames.append(feature_frame)
 
-            forward_metrics = self._compute_forward_metrics(full_data, execution_delay=ranker.execution_delay)
-            target_column = f"forward_return_{ranker.label_horizon}"
+            forward_metrics = self._compute_forward_metrics(full_data, execution_delay=execution_delay)
+            target_column = f"forward_return_{label_horizon}"
             target_columns = [target_column]
             target_frame = forward_metrics[target_columns].copy()
             target_frame["stock_code"] = stock_code
             target_frames.append(target_frame)
+
+            _stock_market_cap = np.nan
+            if stock_info and stock_info.get("market_cap"):
+                _stock_market_cap = float(stock_info["market_cap"])
 
             batch_results.append(
                 {
                     "stock_code": stock_code,
                     "full_data": full_data,
                     "feature_frame": feature_frame,
+                    "market_cap": _stock_market_cap,
                 }
             )
             prepare_completed += 1
@@ -426,7 +447,7 @@ class LightGBMAnalysisMixin:
                     started_at=prepare_started_at,
                     extra_fields=[
                         ("feature_ready", prepare_success),
-                        ("label_horizon", ranker.label_horizon),
+                            ("label_horizon", label_horizon),
                     ],
                 )
 
@@ -617,7 +638,7 @@ class LightGBMAnalysisMixin:
                 score_analysis[["trend_score", "quality_score", "risk_score", "composite_score"]],
                 how="left",
             )
-            forward_metrics = self._compute_forward_metrics(full_data, execution_delay=ranker.execution_delay)
+            forward_metrics = self._compute_forward_metrics(full_data, execution_delay=execution_delay)
             forward_metrics = forward_metrics.loc[forward_metrics.index >= analysis_start_date]
 
             composite_threshold = score_analysis["composite_score"].rolling(window=60, min_periods=20).quantile(0.80)
@@ -693,8 +714,11 @@ class LightGBMAnalysisMixin:
             )
             drawdown_penalty_score, recent_drawdown, risk_score = self._compute_recent_drawdown_penalty(
                 analysis_data,
-                window=ranker.drawdown_horizon,
+                window=drawdown_horizon,
             )
+            # Compute annualized recent volatility (60-day) for volatility-managed position sizing
+            # Reference: Barroso & Santa-Clara (2015)
+            recent_vol = self._compute_recent_volatility(analysis_data, window=60)
             tactical_overlay = self._compute_lightgbm_tactical_overlay(analysis_data)
             risk_adjusted_score = (
                 latest_model_score - drawdown_penalty_score * 0.65
@@ -745,10 +769,40 @@ class LightGBMAnalysisMixin:
             _cluster_breadth5 = float(_stock_sec["cluster_breadth5"].iloc[0]) if not _stock_sec.empty and "cluster_breadth5" in _stock_sec.columns else 0.5
             _cluster_breadth20 = float(_stock_sec["cluster_breadth20"].iloc[0]) if not _stock_sec.empty and "cluster_breadth20" in _stock_sec.columns else 0.5
             _hot_sector_leader = float(_stock_sec["hot_sector_leader"].iloc[0]) if not _stock_sec.empty and "hot_sector_leader" in _stock_sec.columns else 0.5
+            _cluster_id = int(_stock_sec["cluster_id"].iloc[0]) if not _stock_sec.empty and "cluster_id" in _stock_sec.columns else -1
             _val = valuation_scores.get(stock_code, {})
             _hsv_score = _val.get("hot_sector_value_score", 50.0)
             _pe = _val.get("pe_ratio", np.nan)
             _pb = _val.get("pb_ratio", np.nan)
+            _info = self.market_warehouse.get_stock_info(stock_code) or {}
+            _industry_l1 = _info.get("industry_l1")
+            _industry_l2 = _info.get("industry_l2")
+            _industry_l3 = _info.get("industry_l3")
+            _industry_source = _info.get("industry_source")
+            _industry_updated_at = _info.get("industry_updated_at")
+            _instrument_type = _info.get("instrument_type")
+            _is_fund_like = normalize_bool(_info.get("is_fund_like"), default=False)
+            _tradable_flag = normalize_bool(_info.get("tradable_flag"), default=True)
+            _coverage_fields = {
+                "industry_l1": _industry_l1,
+                "market_cap": item.get("market_cap", np.nan),
+                "pe_ratio": _pe,
+                "pb_ratio": _pb,
+                "quality_score": q_score,
+                "liquidity_ok": setup_snapshot["liquidity_ok"],
+                "latest_risk_score": risk_score,
+            }
+            _missing_fields = [
+                field
+                for field, value in _coverage_fields.items()
+                if value is None
+                or (isinstance(value, float) and np.isnan(value))
+                or (isinstance(value, str) and not value.strip())
+            ]
+            _data_coverage_score = max(
+                0.0,
+                100.0 * (1.0 - len(_missing_fields) / max(len(_coverage_fields), 1)),
+            )
 
             results.append(
                 {
@@ -762,7 +816,8 @@ class LightGBMAnalysisMixin:
                     "price_change_30d": (analysis_data["Close"].iloc[-1] - analysis_data["Close"].iloc[-30]) / analysis_data["Close"].iloc[-30] * 100 if len(analysis_data) >= 30 else 0,
                     "latest_expected_3m_score": latest_model_score,
                     "latest_matrix_score": latest_model_score,
-                    "latest_regime_score": np.nan,
+                    "latest_regime_score": q_score,
+                    "quality_score": q_score,
                     "latest_entry_type": "lightgbm_rank",
                     "latest_signal_tier": latest_signal["signal_tier"] if latest_signal is not None else None,
                     "latest_signal_date": latest_signal_date,
@@ -782,6 +837,7 @@ class LightGBMAnalysisMixin:
                     "risk_adjusted_score": risk_adjusted_score,
                     "drawdown_penalty_score": drawdown_penalty_score,
                     "recent_drawdown": recent_drawdown,
+                    "recent_volatility": recent_vol,
                     "latest_risk_score": risk_score,
                     "startup_score": tactical_overlay.get("startup_score"),
                     "startup_candidate": tactical_overlay.get("startup_candidate"),
@@ -798,7 +854,10 @@ class LightGBMAnalysisMixin:
                     "signal_recipe_names": setup_snapshot.get("signal_recipe_names", list(self.signal_recipes)),
                     "signal_freshness_score": freshness_score,
                     "signal_age_days": signal_age_days,
+                    # Market cap for double sort (QMJ size grouping)
+                    "market_cap": item.get("market_cap", np.nan),
                     # Sector features
+                    "cluster_id": _cluster_id,
                     "cluster_rps": _cluster_rps,
                     "cluster_breadth5": _cluster_breadth5,
                     "cluster_breadth20": _cluster_breadth20,
@@ -807,6 +866,17 @@ class LightGBMAnalysisMixin:
                     "hot_sector_value_score": _hsv_score,
                     "pe_ratio": _pe,
                     "pb_ratio": _pb,
+                    # Industry metadata and data quality
+                    "industry_l1": _industry_l1,
+                    "industry_l2": _industry_l2,
+                    "industry_l3": _industry_l3,
+                    "industry_source": _industry_source,
+                    "industry_updated_at": _industry_updated_at,
+                    "instrument_type": _instrument_type,
+                    "is_fund_like": _is_fund_like,
+                    "tradable_flag": _tradable_flag,
+                    "data_coverage_score": _data_coverage_score,
+                    "data_missing_fields": _missing_fields,
                 }
             )
             if show_progress:

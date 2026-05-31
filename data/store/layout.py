@@ -39,7 +39,3 @@ class DataLayout:
     def dataset_glob(self, dataset_name, layer="clean"):
         """返回某个 parquet 数据集的 glob 路径。"""
         return str(self.dataset_path(dataset_name, layer=layer) / "**" / "*.parquet")
-
-    def duckdb_path(self):
-        """返回元数据 duckdb 文件路径。"""
-        return self.layer_path("meta") / "market_data.duckdb"

@@ -34,6 +34,13 @@ class FactorAnalysisMixin:
         batch_results = []
         feature_frames = []
         batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days)
+        if len(batch_data_map) < len(stock_codes):
+            for stock_code in stock_codes:
+                if stock_code in batch_data_map:
+                    continue
+                stock_data = self.load_stock_data(stock_code, warmup_days)
+                if stock_data is not None and not stock_data.empty:
+                    batch_data_map[stock_code] = stock_data
 
         for stock_code in stock_codes:
             full_data = batch_data_map.get(stock_code)
@@ -43,6 +50,11 @@ class FactorAnalysisMixin:
                 continue
 
             ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
+
+            stock_info = self.market_warehouse.get_stock_info(stock_code)
+            if stock_info and stock_info.get("total_shares"):
+                ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
+
             factor = create_factor_set(factor_set)
             context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
             feature_frame = factor.transform(ohlcv_frame, context=context)
@@ -269,6 +281,11 @@ class FactorAnalysisMixin:
             return None
 
         ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
+
+        stock_info = self.market_warehouse.get_stock_info(stock_code)
+        if stock_info and stock_info.get("total_shares"):
+            ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
+
         factor = create_factor_set(factor_set)
         context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
         feature_frame = factor.transform(ohlcv_frame, context=context)

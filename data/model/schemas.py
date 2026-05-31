@@ -100,8 +100,23 @@ STOCK_INFO_FIELDS = [
     "volume",
     "market_cap",
     "pe_ratio",
+    "pb_ratio",
+    "dividend_yield",
+    "total_shares",
+    "circulating_shares",
     "week_52_high",
     "week_52_low",
+    "industry_l1",
+    "industry_l2",
+    "industry_l3",
+    "theme_tags",
+    "industry_source",
+    "industry_updated_at",
+    "instrument_type",
+    "is_fund_like",
+    "tradable_flag",
+    "instrument_source",
+    "instrument_updated_at",
     "source",
     "ingest_time",
 ]
@@ -116,6 +131,128 @@ DEFAULT_CURRENCY_BY_MARKET = {
     "CN": "CNY",
     "US": "USD",
 }
+
+
+HK_FUND_LIKE_CODE_PREFIXES = (
+    "03",  # ETF / listed funds
+    "09",  # USD/RMB counters for ETFs and funds
+    "28",  # ETF / listed fund block
+    "30",  # ETF block
+    "31",  # ETF block
+    "34",  # ETF block
+    "43",  # depositary / structured products
+    "72",  # leveraged and inverse products
+    "73",
+    "75",
+    "77",
+)
+
+HK_FUND_LIKE_NAME_KEYWORDS = (
+    "ETF",
+    "ETP",
+    "基金",
+    "信托基金",
+    "房产信托",
+    "房地产信托",
+    "REIT",
+    "REITS",
+    "债券",
+    "债",
+    "票据",
+    "黄金",
+    "白银",
+    "原油",
+    "期货",
+    "杠杆",
+    "反向",
+    "反",
+    "两倍",
+    "二倍",
+    "每日",
+    "牛熊",
+    "权证",
+    "认购",
+    "认沽",
+    "备兑",
+    "比特币",
+    "以太币",
+    "BITCOIN",
+    "ETHER",
+    "USD",
+    "美元",
+    "港元",
+)
+
+HK_REIT_NAME_KEYWORDS = (
+    "REIT",
+    "REITS",
+    "房产信托",
+    "房地产信托",
+    "置富产业信托",
+    "领展房产基金",
+    "冠君产业信托",
+    "阳光房地产基金",
+)
+
+
+def infer_instrument_type(stock_code, market="HK", name=None, asset_type="equity"):
+    """Infer security type for universe hygiene; conservative for HK fund blocks."""
+    normalized_market = (market or "HK").upper()
+    normalized_code = normalize_stock_code(stock_code, market=normalized_market)
+    normalized_asset_type = str(asset_type or "equity").strip().lower() or "equity"
+    normalized_name = str(name or "").upper()
+
+    if normalized_asset_type not in {"equity", "stock"}:
+        return normalized_asset_type
+
+    if normalized_market == "HK":
+        digits = re.sub(r"\D", "", normalized_code)
+        if any(keyword.upper() in normalized_name for keyword in HK_REIT_NAME_KEYWORDS):
+            return "reit"
+        if digits.startswith(HK_FUND_LIKE_CODE_PREFIXES):
+            return "fund_like"
+        if any(keyword.upper() in normalized_name for keyword in HK_FUND_LIKE_NAME_KEYWORDS):
+            return "fund_like"
+
+    return "common_stock"
+
+
+def is_fund_like_instrument(instrument_type=None, stock_code=None, market="HK", name=None, asset_type="equity"):
+    """Return True for funds, ETFs, REITs, structured and leveraged products."""
+    inferred = str(
+        instrument_type
+        or infer_instrument_type(stock_code, market=market, name=name, asset_type=asset_type)
+        or ""
+    ).strip().lower()
+    return inferred in {
+        "fund",
+        "fund_like",
+        "etf",
+        "reit",
+        "structured_product",
+        "warrant",
+        "bond",
+        "note",
+        "trust",
+    }
+
+
+def normalize_bool(value, default=False):
+    """Normalize nullable/scalar bool-ish values without treating NaN as True."""
+    if value is None:
+        return bool(default)
+    try:
+        if pd.isna(value):
+            return bool(default)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "是"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "否", ""}:
+            return False
+    return bool(value)
 
 
 def infer_exchange(stock_code, market="HK"):
@@ -531,12 +668,36 @@ def normalize_stock_info(
     normalized_market = (market or "HK").upper()
     normalized_code = normalize_stock_code(stock_code, market=normalized_market)
     normalized_exchange = (exchange or infer_exchange(normalized_code, market=normalized_market)).upper()
+    payload_asset_type = payload.get("asset_type") or asset_type
+    payload_name = payload.get("name")
+    instrument_type = (
+        payload.get("instrument_type")
+        or payload.get("security_type")
+        or infer_instrument_type(
+            normalized_code,
+            market=normalized_market,
+            name=payload_name,
+            asset_type=payload_asset_type,
+        )
+    )
+    is_fund_like = payload.get("is_fund_like")
+    if is_fund_like is None:
+        is_fund_like = is_fund_like_instrument(
+            instrument_type=instrument_type,
+            stock_code=normalized_code,
+            market=normalized_market,
+            name=payload_name,
+            asset_type=payload_asset_type,
+        )
+    theme_tags = payload.get("theme_tags")
+    if isinstance(theme_tags, (list, tuple, set)):
+        theme_tags = ",".join(str(tag).strip() for tag in theme_tags if str(tag).strip())
     return {
         "stock_code": normalized_code,
         "market": normalized_market,
         "exchange": normalized_exchange,
-        "asset_type": asset_type,
-        "name": payload.get("name"),
+        "asset_type": payload_asset_type,
+        "name": payload_name,
         "current_price": payload.get("current_price"),
         "close_price": payload.get("close_price"),
         "open_price": payload.get("open_price"),
@@ -545,8 +706,23 @@ def normalize_stock_info(
         "volume": payload.get("volume"),
         "market_cap": payload.get("market_cap"),
         "pe_ratio": payload.get("pe_ratio"),
+        "pb_ratio": payload.get("pb_ratio"),
+        "dividend_yield": payload.get("dividend_yield"),
+        "total_shares": payload.get("total_shares"),
+        "circulating_shares": payload.get("circulating_shares"),
         "week_52_high": payload.get("52_week_high") or payload.get("week_52_high"),
         "week_52_low": payload.get("52_week_low") or payload.get("week_52_low"),
+        "industry_l1": payload.get("industry_l1") or payload.get("sector") or payload.get("industry"),
+        "industry_l2": payload.get("industry_l2") or payload.get("sub_industry"),
+        "industry_l3": payload.get("industry_l3"),
+        "theme_tags": theme_tags,
+        "industry_source": payload.get("industry_source"),
+        "industry_updated_at": payload.get("industry_updated_at"),
+        "instrument_type": instrument_type,
+        "is_fund_like": normalize_bool(is_fund_like, default=False),
+        "tradable_flag": normalize_bool(payload.get("tradable_flag"), default=True),
+        "instrument_source": payload.get("instrument_source") or "local_inference",
+        "instrument_updated_at": payload.get("instrument_updated_at") or datetime.utcnow().isoformat(),
         "source": source or payload.get("source") or "unknown",
         "ingest_time": datetime.utcnow().isoformat(),
     }

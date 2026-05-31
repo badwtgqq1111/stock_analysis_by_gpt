@@ -4,11 +4,8 @@
 """IC / RankIC / 分组收益 / 换手率 / 衰减验证。"""
 
 import math
-from pathlib import Path
-import shutil
-import tempfile
+from collections import defaultdict
 
-import duckdb
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -56,88 +53,53 @@ class FactorValidationAccumulator:
         self.include_validation_frame = bool(include_validation_frame)
         self.include_membership = bool(include_membership)
         self._rows_written = 0
-        self._temp_dir = None
-        self._database_path = None
-        self._conn = None
-        self._table_created = False
+        self._batches = []
 
     def update(self, validation_batch):
         if validation_batch is None or validation_batch.empty:
             return
-        working = validation_batch.copy()
-        working["trade_date"] = pd.to_datetime(working["trade_date"], errors="coerce")
-        working.dropna(subset=["trade_date", "stock_code", "feature_name", "feature_value"], inplace=True)
-        if working.empty:
+        # Data is already a fresh frame from build_validation_frame — no copy needed.
+        validation_batch["trade_date"] = pd.to_datetime(
+            validation_batch["trade_date"], errors="coerce"
+        )
+        validation_batch.dropna(
+            subset=["trade_date", "stock_code", "feature_name", "feature_value"],
+            inplace=True,
+        )
+        if validation_batch.empty:
             return
 
-        self._rows_written += len(working)
-        conn = self._ensure_connection()
-        conn.register("validation_batch_df", working)
-        if not self._table_created:
-            conn.execute("CREATE TABLE validation_batches AS SELECT * FROM validation_batch_df")
-            self._table_created = True
-        else:
-            conn.execute("INSERT INTO validation_batches SELECT * FROM validation_batch_df")
-        conn.unregister("validation_batch_df")
+        self._rows_written += len(validation_batch)
+        self._batches.append(validation_batch)
 
     def _load_all_batches(self):
-        if self._rows_written <= 0 or not self._table_created:
+        if self._rows_written <= 0 or not self._batches:
             return pd.DataFrame()
-        conn = self._ensure_connection()
-        return conn.execute(
-            "SELECT * FROM validation_batches ORDER BY trade_date, feature_set, feature_name, stock_code"
-        ).fetch_df()
+        return self._concat_batches()
 
-    def _ensure_connection(self):
-        if self._conn is not None:
-            return self._conn
-        if self._temp_dir is None:
-            self._temp_dir = Path(tempfile.mkdtemp(prefix="factor_validation_"))
-        if self._database_path is None:
-            self._database_path = self._temp_dir / "validation.duckdb"
-        self._conn = duckdb.connect(str(self._database_path))
-        return self._conn
+    def _concat_batches(self):
+        if not self._batches:
+            return pd.DataFrame()
+        frame = pd.concat(self._batches, ignore_index=True)
+        frame.sort_values(["trade_date", "feature_set", "feature_name", "stock_code"], inplace=True)
+        frame.reset_index(drop=True, inplace=True)
+        return FactorValidator._coerce_validation_batch_types(frame)
 
     def _iter_trade_dates(self):
-        if self._rows_written <= 0 or not self._table_created:
+        if self._rows_written <= 0 or not self._batches:
             return []
-        conn = self._ensure_connection()
-        rows = conn.execute(
-            "SELECT DISTINCT trade_date FROM validation_batches ORDER BY trade_date"
-        ).fetchall()
-        return [row[0] for row in rows if row and row[0] is not None]
+        frame = self._load_all_batches()
+        if frame.empty or "trade_date" not in frame.columns:
+            return []
+        return frame["trade_date"].dropna().drop_duplicates().sort_values().tolist()
 
     def _load_trade_date_batch(self, trade_date):
-        if self._rows_written <= 0 or not self._table_created:
+        if self._rows_written <= 0 or not self._batches:
             return pd.DataFrame()
-        conn = self._ensure_connection()
-        batch = conn.execute(
-            """
-            SELECT *
-            FROM validation_batches
-            WHERE trade_date = ?
-            ORDER BY feature_set, feature_name, stock_code
-            """,
-            [trade_date],
-        ).fetch_df()
+        frame = self._load_all_batches()
+        batch = frame.loc[frame["trade_date"] == pd.to_datetime(trade_date)].copy()
+        batch.sort_values(["feature_set", "feature_name", "stock_code"], inplace=True)
         return FactorValidator._coerce_validation_batch_types(batch)
-
-    def _load_quantile_membership_batch(self, trade_date):
-        if self._rows_written <= 0 or not self._table_created:
-            return pd.DataFrame()
-        conn = self._ensure_connection()
-        batch = conn.execute(
-            """
-            SELECT feature_set, feature_name, trade_date, quantile, stock_code
-            FROM quantile_membership
-            WHERE trade_date = ?
-            ORDER BY feature_set, feature_name, quantile, stock_code
-            """,
-            [trade_date],
-        ).fetch_df()
-        if not batch.empty:
-            batch["trade_date"] = pd.to_datetime(batch["trade_date"], errors="coerce")
-        return batch
 
     def finalize(self, validator, progress_callback=None):
         if progress_callback is None:
@@ -189,283 +151,132 @@ class FactorValidationAccumulator:
         return result
 
     def _finalize_streaming(self, validator, progress_callback):
-        trade_dates = self._iter_trade_dates()
-        if not trade_dates:
-            return validator._empty_validation_result(validator._empty_validation_frame())
+        """Date-by-date finalize — avoids building one giant concatenated frame.
 
-        conn = self._ensure_connection()
-        conn.execute("PRAGMA threads=8")
-        try:
-            conn.execute("PRAGMA memory_limit='8GB'")
-        except Exception:
-            pass
-        horizons = [int(h) for h in self.horizons]
-        q = int(self.quantiles)
-        min_obs = int(self.min_observations)
-        min_required = max(min_obs, q)
-        validation_frame = validator._empty_validation_frame()
-        n_horizons = len(horizons)
-
-        table_cols = {
-            row[0]
-            for row in conn.execute(
-                "SELECT column_name FROM information_schema.columns WHERE table_name='validation_batches'"
-            ).fetchall()
-        }
-        working_horizons = [h for h in horizons if f"forward_return_{h}" in table_cols]
-        if not working_horizons:
-            for table_name in ("quantile_membership", "temp_merged"):
-                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-            return validator._empty_validation_result(validation_frame)
-
-        # =========================================================================
-        # 1. Bulk IC / RankIC
-        # =========================================================================
-        ic_parts = []
-        total_ic_horizons = len(working_horizons)
-        for idx, h in enumerate(working_horizons, start=1):
-            target = f"forward_return_{h}"
-            ic_sql = f"""
-                SELECT
-                    feature_set, feature_name, trade_date,
-                    {h} AS horizon,
-                    COUNT(*) AS observation_count,
-                    COUNT(DISTINCT feature_value) AS feature_unique,
-                    COUNT(DISTINCT {target}) AS target_unique,
-                    CORR(feature_value, {target}) AS ic,
-                    CORR(feature_rank, target_rank) AS rank_ic
-                FROM (
-                    SELECT
-                        feature_set, feature_name, trade_date, feature_value, {target},
-                        RANK() OVER w_f AS feature_rank,
-                        RANK() OVER w_t AS target_rank
-                    FROM validation_batches
-                    WHERE feature_value IS NOT NULL
-                        AND {target} IS NOT NULL
-                        AND ABS(feature_value) BETWEEN 0 AND 1e150
-                        AND ABS({target}) BETWEEN 0 AND 1e150
-                    WINDOW
-                        w_f AS (PARTITION BY feature_set, feature_name, trade_date ORDER BY feature_value),
-                        w_t AS (PARTITION BY feature_set, feature_name, trade_date ORDER BY {target})
-                ) ranked
-                GROUP BY feature_set, feature_name, trade_date
-                HAVING COUNT(*) >= {min_obs}
-                    AND COUNT(DISTINCT feature_value) > 1
-                    AND COUNT(DISTINCT {target}) > 1
-            """
-            try:
-                ic_df = conn.execute(ic_sql).fetch_df()
-                ic_df = FactorValidator._postprocess_ic_frame(ic_df)
-            except Exception:
-                ic_df = self._calculate_ic_fallback([h], min_obs)
-            ic_parts.append(ic_df)
-            progress_callback("stream ic", idx, total_ic_horizons)
-        ic_by_date = (
-            pd.concat(ic_parts, ignore_index=True)
-            if ic_parts
-            else validator._empty_ic_frame()
-        )
-
-        # =========================================================================
-        # 2. Quantile membership
-        # =========================================================================
-        progress_callback("stream quantile", 0, 1)
-        membership_sql = f"""
-            CREATE OR REPLACE TEMP TABLE quantile_membership AS
-            WITH dedup AS (
-                SELECT
-                    feature_set, feature_name, trade_date, stock_code,
-                    MAX(feature_value) AS feature_value
-                FROM validation_batches
-                WHERE stock_code IS NOT NULL AND feature_value IS NOT NULL
-                GROUP BY feature_set, feature_name, trade_date, stock_code
-            ),
-            counted AS (
-                SELECT *,
-                    COUNT(*) OVER (PARTITION BY feature_set, feature_name, trade_date) AS obs_count
-                FROM dedup
-            )
-            SELECT
-                feature_set, feature_name, trade_date, stock_code,
-                NTILE({q}) OVER (PARTITION BY feature_set, feature_name, trade_date ORDER BY feature_value) AS quantile
-            FROM counted
-            WHERE obs_count >= {min_required}
+        Instead of ``pd.concat``-ing all batches into a massive single DataFrame
+        (doubling peak memory and paying a full sort), we build a date→batch
+        index, then process each trade date independently.  Only one date's
+        worth of data lives in memory at a time.
         """
-        conn.execute(membership_sql)
+        n_batches = len(self._batches)
+        if n_batches == 0:
+            return validator._empty_validation_result(pd.DataFrame())
 
-        # =========================================================================
-        # 3. Quantile returns + long-short per horizon
-        # =========================================================================
-        quantile_frames = []
-        long_short_frames = []
-        for idx, h in enumerate(working_horizons):
-            progress_callback("stream quantile_returns", idx + 1, n_horizons)
-            target = f"forward_return_{h}"
-            qr_sql = f"""
-                WITH returns AS (
-                    SELECT
-                        feature_set, feature_name, trade_date, stock_code,
-                        MAX({target}) AS {target}
-                    FROM validation_batches
-                    WHERE {target} IS NOT NULL
-                    GROUP BY feature_set, feature_name, trade_date, stock_code
-                ),
-                joined AS (
-                    SELECT m.feature_set, m.feature_name, m.trade_date, m.quantile, r.{target}
-                    FROM quantile_membership m
-                    INNER JOIN returns r
-                        ON m.feature_set = r.feature_set
-                        AND m.feature_name = r.feature_name
-                        AND m.trade_date = r.trade_date
-                        AND m.stock_code = r.stock_code
-                ),
-                counted AS (
-                    SELECT *, COUNT(*) OVER (PARTITION BY feature_set, feature_name, trade_date) AS obs_count
-                    FROM joined
-                ),
-                agg AS (
-                    SELECT
-                        feature_set, feature_name, trade_date, quantile,
-                        AVG({target}) AS mean_return,
-                        COUNT(*) AS observation_count
-                    FROM counted
-                    WHERE obs_count >= {min_required}
-                    GROUP BY feature_set, feature_name, trade_date, quantile
-                )
-                SELECT feature_set, feature_name, trade_date, {h} AS horizon, quantile,
-                       mean_return, observation_count
-                FROM agg
-            """
-            qr_df = conn.execute(qr_sql).fetch_df()
-            if not qr_df.empty:
-                qr_df["trade_date"] = pd.to_datetime(qr_df["trade_date"], errors="coerce")
-                qr_df.sort_values(["feature_set", "feature_name", "trade_date", "quantile"], inplace=True)
-                qr_df.reset_index(drop=True, inplace=True)
-            quantile_frames.append(qr_df)
+        horizons = [int(h) for h in self.horizons]
 
-            ls_sql = f"""
-                WITH returns AS (
-                    SELECT
-                        feature_set, feature_name, trade_date, stock_code,
-                        MAX({target}) AS {target}
-                    FROM validation_batches
-                    WHERE {target} IS NOT NULL
-                    GROUP BY feature_set, feature_name, trade_date, stock_code
-                ),
-                joined AS (
-                    SELECT m.feature_set, m.feature_name, m.trade_date, m.quantile, r.{target}
-                    FROM quantile_membership m
-                    INNER JOIN returns r
-                        ON m.feature_set = r.feature_set
-                        AND m.feature_name = r.feature_name
-                        AND m.trade_date = r.trade_date
-                        AND m.stock_code = r.stock_code
-                ),
-                counted AS (
-                    SELECT *, COUNT(*) OVER (PARTITION BY feature_set, feature_name, trade_date) AS obs_count
-                    FROM joined
-                ),
-                agg AS (
-                    SELECT
-                        feature_set, feature_name, trade_date, quantile,
-                        AVG({target}) AS mean_return
-                    FROM counted
-                    WHERE obs_count >= {min_required}
-                    GROUP BY feature_set, feature_name, trade_date, quantile
-                ),
-                extrema AS (
-                    SELECT feature_set, feature_name, trade_date,
-                        MAX(quantile) AS top_quantile, MIN(quantile) AS bottom_quantile
-                    FROM agg
-                    GROUP BY feature_set, feature_name, trade_date
-                )
-                SELECT
-                    e.feature_set, e.feature_name, e.trade_date,
-                    {h} AS horizon,
-                    e.top_quantile, e.bottom_quantile,
-                    q_top.mean_return - q_bottom.mean_return AS spread
-                FROM extrema e
-                INNER JOIN agg q_top
-                    ON e.feature_set = q_top.feature_set AND e.feature_name = q_top.feature_name
-                    AND e.trade_date = q_top.trade_date AND e.top_quantile = q_top.quantile
-                INNER JOIN agg q_bottom
-                    ON e.feature_set = q_bottom.feature_set AND e.feature_name = q_bottom.feature_name
-                    AND e.trade_date = q_bottom.trade_date AND e.bottom_quantile = q_bottom.quantile
-            """
-            ls_df = conn.execute(ls_sql).fetch_df()
-            if not ls_df.empty:
-                ls_df["trade_date"] = pd.to_datetime(ls_df["trade_date"], errors="coerce")
-                ls_df.sort_values(["feature_set", "feature_name", "trade_date"], inplace=True)
-                ls_df.reset_index(drop=True, inplace=True)
-            long_short_frames.append(ls_df)
+        # ---- 1. Build date → batch_indices map (one pass, no copy) ----
+        progress_callback("index", 0, n_batches)
+        date_to_batch_idx = defaultdict(list)
+        all_dates_set = set()
+        for i, batch in enumerate(self._batches):
+            if "trade_date" not in batch.columns:
+                continue
+            for d in batch["trade_date"].dropna().unique():
+                ts = pd.Timestamp(d)
+                date_to_batch_idx[ts].append(i)
+                all_dates_set.add(ts)
+            if (i + 1) % 20 == 0:
+                progress_callback("index", i + 1, n_batches)
+        progress_callback("index", n_batches, n_batches)
 
-        # =========================================================================
-        # 4. Turnover
-        # =========================================================================
-        progress_callback("stream turnover", 0, len(trade_dates))
-        turnover_frames = []
-        previous_membership_groups = {}
-        for idx, trade_date in enumerate(trade_dates, start=1):
-            membership_batch = self._load_quantile_membership_batch(trade_date)
-            turnover_step, previous_membership_groups = validator.calculate_turnover_step(
-                membership_batch,
-                previous_membership_groups=previous_membership_groups,
-            )
-            if not turnover_step.empty:
-                turnover_frames.append(turnover_step)
-            progress_callback("stream turnover", idx, len(trade_dates))
-        turnover_by_date = (
-            pd.concat(turnover_frames, ignore_index=True)
-            if turnover_frames
-            else validator._empty_turnover_frame()
-        )
+        all_dates = sorted(all_dates_set)
+        n_dates = len(all_dates)
+        if n_dates == 0:
+            return validator._empty_validation_result(pd.DataFrame())
 
-        # =========================================================================
-        # 5. Output quantile membership
-        # =========================================================================
-        if self.include_membership:
-            membership_out = conn.execute(
-                "SELECT * FROM quantile_membership ORDER BY feature_set, feature_name, trade_date, quantile, stock_code"
-            ).fetch_df()
-            if not membership_out.empty:
-                membership_out["trade_date"] = pd.to_datetime(membership_out["trade_date"], errors="coerce")
-            quantile_membership_by_date = membership_out
-        else:
-            quantile_membership_by_date = validator._empty_quantile_membership_frame()
+        # ---- 2. Date-by-date computation ----
+        ic_rows = []
+        quantile_return_rows = []
+        long_short_rows = []
+        membership_rows = []
 
-        conn.execute("DROP TABLE IF EXISTS quantile_membership")
+        report_every = max(1, n_dates // 10)
 
-        # =========================================================================
-        # 6. Summarize
-        # =========================================================================
-        progress_callback("stream summarize_ic", 0, 1)
+        for date_idx, date in enumerate(all_dates):
+            # Collect only this date's rows from relevant batches
+            date_parts = []
+            for batch_idx in date_to_batch_idx[date]:
+                batch = self._batches[batch_idx]
+                mask = batch["trade_date"] == date
+                date_parts.append(batch.loc[mask])
+            date_frame = pd.concat(date_parts, ignore_index=True) if date_parts else pd.DataFrame()
+            if date_frame.empty:
+                continue
+            date_frame.dropna(subset=["feature_value"], inplace=True)
+            if date_frame.empty:
+                continue
+
+            # IC per horizon
+            for horizon in horizons:
+                target_col = f"forward_return_{horizon}"
+                if target_col not in date_frame.columns:
+                    continue
+                ic_df = validator.calculate_ic_by_date(date_frame, horizon=horizon)
+                if not ic_df.empty:
+                    ic_rows.append(ic_df)
+
+            # Quantile membership (tiny: stock_code + quantile only)
+            membership = validator.calculate_quantile_membership_by_date(date_frame)
+            if not membership.empty:
+                membership_rows.append(membership)
+
+                # Quantile returns & long-short per horizon
+                for horizon in horizons:
+                    target_col = f"forward_return_{horizon}"
+                    if target_col not in date_frame.columns:
+                        continue
+                    qr, ls = validator.calculate_quantile_returns_by_date(
+                        date_frame,
+                        quantile_membership_by_date=membership,
+                        horizon=horizon,
+                    )
+                    if not qr.empty:
+                        quantile_return_rows.append(qr)
+                    if not ls.empty:
+                        long_short_rows.append(ls)
+
+            if (date_idx + 1) % report_every == 0 or date_idx == n_dates - 1:
+                progress_callback("compute", date_idx + 1, n_dates)
+
+        # ---- 3. Assemble summary frames (tiny) + turnover (from accumulated membership) ----
+        progress_callback("summarize", 0, 1)
+
+        ic_by_date = pd.concat(ic_rows, ignore_index=True) if ic_rows else validator._empty_ic_frame()
         quantile_returns_by_date = (
-            pd.concat(quantile_frames, ignore_index=True)
-            if quantile_frames
+            pd.concat(quantile_return_rows, ignore_index=True)
+            if quantile_return_rows
             else validator._empty_quantile_frame()
         )
         long_short_by_date = (
-            pd.concat(long_short_frames, ignore_index=True)
-            if long_short_frames
+            pd.concat(long_short_rows, ignore_index=True)
+            if long_short_rows
             else validator._empty_long_short_frame()
         )
+        quantile_membership_by_date = (
+            pd.concat(membership_rows, ignore_index=True)
+            if membership_rows
+            else validator._empty_quantile_membership_frame()
+        )
+        turnover_by_date = validator.calculate_turnover_by_date(quantile_membership_by_date)
 
         ic_summary = validator.summarize_ic(ic_by_date)
-        progress_callback("stream summarize_ls", 0, 1)
         long_short_summary = validator.summarize_long_short(long_short_by_date)
-        progress_callback("stream summarize_quantiles", 0, 1)
         quantile_summary = validator.summarize_quantiles(quantile_returns_by_date)
-        progress_callback("stream summarize_turnover", 0, 1)
         turnover_summary = validator.summarize_turnover(turnover_by_date)
-        progress_callback("stream summarize_decay", 0, 1)
         decay_summary = validator.summarize_decay(ic_summary, long_short_summary)
 
-        result = {
-            "validation_frame": validation_frame,
+        progress_callback("summarize", 1, 1)
+        self.cleanup()
+        return {
+            "validation_frame": validator._empty_validation_frame(),
             "ic_by_date": ic_by_date,
             "ic_summary": ic_summary,
             "quantile_returns_by_date": quantile_returns_by_date,
-            "quantile_membership_by_date": quantile_membership_by_date,
+            "quantile_membership_by_date": (
+                quantile_membership_by_date
+                if self.include_membership
+                else validator._empty_quantile_membership_frame()
+            ),
             "quantile_summary": quantile_summary,
             "long_short_by_date": long_short_by_date,
             "long_short_summary": long_short_summary,
@@ -473,92 +284,10 @@ class FactorValidationAccumulator:
             "turnover_summary": turnover_summary,
             "decay_summary": decay_summary,
         }
-        progress_callback("stream done", 1, 1)
-        self.cleanup()
-        return result
-
-    def _calculate_ic_fallback(self, working_horizons, min_obs):
-        """Fallback IC computation in Python when DuckDB CORR overflows."""
-        conn = self._ensure_connection()
-        ic_frames = []
-        for h in working_horizons:
-            target = f"forward_return_{h}"
-            raw = conn.execute(f"""
-                SELECT
-                    feature_set, feature_name, trade_date,
-                    feature_value, {target}
-                FROM validation_batches
-                WHERE feature_value IS NOT NULL
-                    AND {target} IS NOT NULL
-                    AND ABS(feature_value) BETWEEN 0 AND 1e150
-                    AND ABS({target}) BETWEEN 0 AND 1e150
-            """).fetch_df()
-            if raw.empty:
-                continue
-            ranks = raw.groupby(
-                ["feature_set", "feature_name", "trade_date"], dropna=False
-            )
-            raw["feature_rank"] = ranks["feature_value"].rank(method="average")
-            raw["target_rank"] = ranks[target].rank(method="average")
-            grouped = raw.groupby(
-                ["feature_set", "feature_name", "trade_date"], dropna=False
-            )
-            agg = grouped.agg(
-                observation_count=("feature_value", "size"),
-                feature_unique=("feature_value", "nunique"),
-                target_unique=(target, "nunique"),
-                sum_f=("feature_value", "sum"),
-                sum_t=(target, "sum"),
-                sum_ff=("feature_value", lambda s: (s.astype(float) ** 2).sum()),
-                sum_tt=(target, lambda s: (s.astype(float) ** 2).sum()),
-                sum_ft=(target, lambda s: (s.astype(float) * raw.loc[s.index, "feature_value"].astype(float)).sum()),
-                sum_fr=("feature_rank", "sum"),
-                sum_tr=("target_rank", "sum"),
-                sum_frfr=("feature_rank", lambda s: (s.astype(float) ** 2).sum()),
-                sum_trtr=("target_rank", lambda s: (s.astype(float) ** 2).sum()),
-                sum_frtr=(target, lambda s: (raw.loc[s.index, "feature_rank"].astype(float) * raw.loc[s.index, "target_rank"].astype(float)).sum()),
-            ).reset_index()
-
-            n = agg["observation_count"]
-            valid = (n >= min_obs) & (agg["feature_unique"] > 1) & (agg["target_unique"] > 1)
-
-            agg["ic"] = _pearson_r(
-                n, agg["sum_f"], agg["sum_t"], agg["sum_ff"], agg["sum_tt"], agg["sum_ft"], valid
-            )
-            agg["rank_ic"] = _pearson_r(
-                n, agg["sum_fr"], agg["sum_tr"], agg["sum_frfr"], agg["sum_trtr"], agg["sum_frtr"], valid
-            )
-
-            ic_frame = agg[[
-                "feature_set", "feature_name", "trade_date",
-                "observation_count", "feature_unique", "target_unique",
-                "ic", "rank_ic",
-            ]].copy()
-            ic_frame["horizon"] = int(h)
-            ic_frames.append(ic_frame)
-        if not ic_frames:
-            return pd.DataFrame(columns=[
-                "feature_set", "feature_name", "trade_date", "horizon",
-                "observation_count", "feature_unique", "target_unique", "ic", "rank_ic",
-            ])
-        ic_by_date = pd.concat(ic_frames, ignore_index=True)
-        return FactorValidator._postprocess_ic_frame(ic_by_date)
 
     def cleanup(self):
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
-        self._database_path = None
-        self._table_created = False
-        if self._temp_dir is not None:
-            try:
-                shutil.rmtree(self._temp_dir, ignore_errors=True)
-            except Exception:
-                pass
-            self._temp_dir = None
+        self._batches = []
+        self._rows_written = 0
 
 
 class FactorValidator:
@@ -867,23 +596,34 @@ class FactorValidator:
             include_validation_frame=include_validation_frame,
             include_membership=include_membership,
         )
-        progress_callback("stream ingest")
+        progress_callback("ingest", 0, 1)
         for batch in batches or []:
             feature_frame = (batch or {}).get("feature_frame")
+            returns_frame = (batch or {}).get("returns_frame")
             ohlcv_frame = (batch or {}).get("ohlcv_frame")
-            validation_batch = self.build_validation_frame(feature_frame, ohlcv_frame)
+            validation_batch = self.build_validation_frame(
+                feature_frame, ohlcv_frame=ohlcv_frame, returns_frame=returns_frame,
+            )
             accumulator.update(validation_batch)
-        progress_callback("stream finalize")
+        progress_callback("finalize", 0, 1)
         return self._normalize_validation_result(accumulator.finalize(self, progress_callback))
 
-    def build_validation_frame(self, feature_frame, ohlcv_frame):
-        """将因子值与前瞻收益拼接成验证底表。"""
+    def build_validation_frame(self, feature_frame, ohlcv_frame=None, returns_frame=None):
+        """将因子值与前瞻收益拼接成验证底表。
+
+        Prefer ``returns_frame`` (pre-computed forward returns) over
+        ``ohlcv_frame`` — it avoids passing heavy OHLCV data through the
+        batch pipeline and recomputing forward returns here.
+        """
         feature_long = self._coerce_feature_frame(feature_frame)
         if feature_long.empty:
             return feature_long
 
-        returns_frame = self.compute_forward_returns(ohlcv_frame, horizons=self.horizons)
-        if returns_frame.empty:
+        if returns_frame is not None and not returns_frame.empty:
+            pass  # already computed upstream
+        elif ohlcv_frame is not None and not ohlcv_frame.empty:
+            returns_frame = self.compute_forward_returns(ohlcv_frame, horizons=self.horizons)
+        else:
             return pd.DataFrame()
 
         merge_keys = [
@@ -1546,7 +1286,7 @@ class FactorValidator:
 
     @staticmethod
     def _postprocess_ic_frame(ic_df):
-        """为 DuckDB 批量计算出的 IC 结果补充 p-value 列。"""
+        """为批量计算出的 IC 结果补充 p-value 列。"""
         if ic_df is None or ic_df.empty:
             return pd.DataFrame(
                 columns=[

@@ -9,20 +9,9 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from analyzer_core import StockAnalyzer
-from indicators import calculate_technical_indicators
-from reporting import build_strategy_comparison_tables, generate_strategy_comparison_report
-from strategy_signals import (
-    STRATEGY_SUITE,
-    BollingerUpperStochOrUnifiedSellStrategy,
-    BottomVolumeReversalBuyStrategy,
-    BullishImpulseCYCBuyStrategy,
-    BullishTrend2560BuyStrategy,
-    StochOverboughtOrUnifiedSellStrategy,
-    TrendPullbackReboundBuyStrategy,
-    TrendRangeBandBuyStrategy,
-    UnifiedHighVolumeBearishSellStrategy,
-)
+from core import StockAnalyzer
+from portfolio_strategy import STRATEGY_SUITE
+from core.reporting import build_strategy_comparison_tables, generate_strategy_comparison_report
 
 
 def make_sample_data(rows=140):
@@ -52,44 +41,9 @@ def run_test(name, fn):
     print(f"[OK] {name}")
 
 
-def test_indicators_add_new_columns():
-    df = calculate_technical_indicators(make_sample_data())
-    assert df is not None
-    assert 'Volume_MA60' in df.columns
-    assert 'Volume_Cross_5_60' in df.columns
-    assert 'MACD_Bullish_Divergence' in df.columns
-    assert 'Alpha101_Range_Reversion' in df.columns
-    assert 'Alpha101_Volatility_Compression' in df.columns
-    assert 'Alpha101_VWAP_Stretch' in df.columns
-    assert 'Alpha101_Range_Stability' in df.columns
-    assert 'Alpha101_Range_Long_Composite' in df.columns
-
-
-def test_alpha101_range_factor_scores_are_bounded():
-    df = calculate_technical_indicators(make_sample_data())
-    columns = [
-        'Alpha101_Range_Reversion',
-        'Alpha101_Volatility_Compression',
-        'Alpha101_VWAP_Stretch',
-        'Alpha101_Range_Stability',
-        'Alpha101_Range_Long_Composite',
-    ]
-    for column in columns:
-        series = df[column].dropna()
-        assert not series.empty
-        assert series.between(0, 100).all()
-
-
 def test_strategy_registry_contains_expected_suite():
     codes = [item['code'] for item in STRATEGY_SUITE]
-    assert codes == [
-        'current_strategy',
-        'bullish_trend_2560',
-        'bullish_impulse_cyc',
-        'trend_pullback_rebound',
-        'trend_range_band',
-        'bottom_volume_reversal',
-    ]
+    assert codes == ['model_driven']
 
 
 def test_legacy_strategy_package_is_removed():
@@ -102,47 +56,27 @@ def test_legacy_strategy_package_is_removed():
         removed = False
     assert removed is True
 
-
-def test_buy_strategies_return_dataframe_or_none():
-    data = calculate_technical_indicators(make_sample_data())
-    strategies = [
-        BullishTrend2560BuyStrategy(),
-        BullishImpulseCYCBuyStrategy(),
-        TrendPullbackReboundBuyStrategy(),
-        TrendRangeBandBuyStrategy(),
-        BottomVolumeReversalBuyStrategy(),
-    ]
-    for strategy in strategies:
-        result = strategy.identify_buy_signals(data)
-        assert result is None or {'date', 'close', 'signal_strength', 'entry_type'}.issubset(result.columns)
+    sys.modules.pop("strategy_signals", None)
+    try:
+        importlib.import_module("strategy_signals")
+    except ModuleNotFoundError:
+        removed = True
+    else:
+        removed = False
+    assert removed is True
 
 
-def test_bottom_volume_reversal_merges_nearby_signals():
-    strategy = BottomVolumeReversalBuyStrategy()
-    buy_signals = pd.DataFrame([
-        {'date': pd.Timestamp('2025-12-23'), 'signal_strength': 8, 'reasons': ['a']},
-        {'date': pd.Timestamp('2025-12-24'), 'signal_strength': 9, 'reasons': ['b']},
-        {'date': pd.Timestamp('2025-12-31'), 'signal_strength': 7, 'reasons': ['c']},
-    ])
-    merged = strategy.merge_buy_signal_zones(buy_signals)
-    assert len(merged) == 2
-    assert merged.iloc[0]['date'] == pd.Timestamp('2025-12-24')
-    assert merged.iloc[0]['merged_signal_count'] == 2
-    assert merged.iloc[0]['zone_start_date'] == pd.Timestamp('2025-12-23')
-    assert merged.iloc[0]['zone_end_date'] == pd.Timestamp('2025-12-24')
-    assert merged.iloc[0]['zone_type'] == 'bottom_volume_reversal'
+def test_analyzer_signal_methods_are_available():
+    analyzer = StockAnalyzer(db_dir='./assets')
+    data = make_sample_data()
+    result = analyzer.identify_buy_signals(data)
+    assert result is None  # no model score columns in sample data
 
+    sell_result = analyzer.identify_sell_signals(data)
+    assert sell_result is None or {'date', 'close', 'signal_strength', 'signal_type'}.issubset(sell_result.columns)
 
-def test_sell_strategies_return_dataframe_or_none():
-    data = calculate_technical_indicators(make_sample_data())
-    strategies = [
-        UnifiedHighVolumeBearishSellStrategy(),
-        StochOverboughtOrUnifiedSellStrategy(),
-        BollingerUpperStochOrUnifiedSellStrategy(),
-    ]
-    for strategy in strategies:
-        result = strategy.identify_sell_signals(data)
-        assert result is None or {'date', 'close', 'signal_strength', 'signal_type'}.issubset(result.columns)
+    merged = analyzer.merge_buy_signal_zones(result)
+    assert merged is None
 
 
 def test_generate_strategy_comparison_report_shapes_matrix():
@@ -164,7 +98,6 @@ def test_generate_strategy_comparison_report_shapes_matrix():
     assert len(report['strategy_summaries']) == 1
     assert report['return_matrix'][0]['03633'] == 12.3
     assert report['return_matrix'][0]['02706'] == -2.5
-
 
 
 def test_build_strategy_comparison_tables_shapes_dataframes():
@@ -262,12 +195,8 @@ def test_compare_strategy_suite_with_stub_analyzer():
 
 
 if __name__ == '__main__':
-    run_test('indicators add new columns', test_indicators_add_new_columns)
-    run_test('alpha101 range factors are bounded', test_alpha101_range_factor_scores_are_bounded)
     run_test('strategy registry contains expected suite', test_strategy_registry_contains_expected_suite)
-    run_test('buy strategies return dataframe or none', test_buy_strategies_return_dataframe_or_none)
-    run_test('bottom volume reversal merges nearby signals', test_bottom_volume_reversal_merges_nearby_signals)
-    run_test('sell strategies return dataframe or none', test_sell_strategies_return_dataframe_or_none)
+    run_test('analyzer signal methods are available', test_analyzer_signal_methods_are_available)
     run_test('comparison report shapes matrix', test_generate_strategy_comparison_report_shapes_matrix)
     run_test('comparison tables shape dataframes', test_build_strategy_comparison_tables_shapes_dataframes)
     run_test('compare strategy suite with stub analyzer', test_compare_strategy_suite_with_stub_analyzer)

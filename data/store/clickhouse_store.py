@@ -72,6 +72,58 @@ PARTITION BY (market, frequency, adjust)
 ORDER BY ({order_by})
 """
 
+_STOCK_INFO_COLUMNS = [
+    "stock_code", "market", "exchange", "asset_type", "name",
+    "current_price", "close_price", "open_price", "high", "low",
+    "volume", "market_cap", "pe_ratio", "pb_ratio", "dividend_yield",
+    "total_shares", "circulating_shares", "week_52_high", "week_52_low",
+    "industry_l1", "industry_l2", "industry_l3", "theme_tags",
+    "industry_source", "industry_updated_at", "instrument_type",
+    "is_fund_like", "tradable_flag", "instrument_source",
+    "instrument_updated_at", "source", "ingest_time",
+]
+
+_STOCK_INFO_ORDER_BY = ["market", "stock_code"]
+
+_STOCK_INFO_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    exchange LowCardinality(String),
+    asset_type LowCardinality(String),
+    name String,
+    current_price Nullable(Float64),
+    close_price Nullable(Float64),
+    open_price Nullable(Float64),
+    high Nullable(Float64),
+    low Nullable(Float64),
+    volume Nullable(Float64),
+    market_cap Nullable(Float64),
+    pe_ratio Nullable(Float64),
+    pb_ratio Nullable(Float64),
+    dividend_yield Nullable(Float64),
+    total_shares Nullable(Float64),
+    circulating_shares Nullable(Float64),
+    week_52_high Nullable(Float64),
+    week_52_low Nullable(Float64),
+    industry_l1 String,
+    industry_l2 String,
+    industry_l3 String,
+    theme_tags String,
+    industry_source String,
+    industry_updated_at Nullable(DateTime),
+    instrument_type LowCardinality(String),
+    is_fund_like Bool,
+    tradable_flag Bool,
+    instrument_source String,
+    instrument_updated_at Nullable(DateTime),
+    source String,
+    ingest_time DateTime
+) ENGINE = ReplacingMergeTree(ingest_time)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
 DATASET_SCHEMA = {
     "features": {
         "columns": _FEATURES_COLUMNS,
@@ -82,6 +134,11 @@ DATASET_SCHEMA = {
         "columns": _OHLCV_COLUMNS,
         "ddl": _OHLCV_DDL,
         "order_by": _OHLCV_ORDER_BY,
+    },
+    "stock_info_registry": {
+        "columns": _STOCK_INFO_COLUMNS,
+        "ddl": _STOCK_INFO_DDL,
+        "order_by": _STOCK_INFO_ORDER_BY,
     },
 }
 
@@ -403,6 +460,19 @@ class ClickHouseStore:
 
         if "ingest_time" not in prepared.columns:
             prepared["ingest_time"] = pd.Timestamp.utcnow()
+
+        for column in ["industry_updated_at", "instrument_updated_at", "ingest_time"]:
+            if column in prepared.columns:
+                prepared[column] = pd.to_datetime(prepared[column], errors="coerce")
+        for column in ["is_fund_like", "tradable_flag"]:
+            if column in prepared.columns:
+                prepared[column] = prepared[column].fillna(False).astype(bool)
+        for column in [
+            "name", "industry_l1", "industry_l2", "industry_l3", "theme_tags",
+            "industry_source", "instrument_type", "instrument_source", "source",
+        ]:
+            if column in prepared.columns:
+                prepared[column] = prepared[column].fillna("").astype(str)
 
         schema = DATASET_SCHEMA.get(dataset_name)
         if schema:

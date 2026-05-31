@@ -91,7 +91,11 @@ def _prepare_qlib_frame(frame):
 
     working.set_index("trade_date", inplace=True)
     working.index.name = "trade_date"
-    return working[["open", "high", "low", "close", "volume", "vwap"]]
+    keep_columns = ["open", "high", "low", "close", "volume", "vwap"]
+    for col in ["total_shares"]:
+        if col in working.columns:
+            keep_columns.append(col)
+    return working[keep_columns]
 
 
 def _alpha158_feature_names(config):

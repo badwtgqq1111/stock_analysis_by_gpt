@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Parquet 主存储 + DuckDB 元数据查询层。"""
+"""Parquet/ClickHouse 主存储与本地元数据查询层。"""
 
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
 from data.model import (
@@ -46,7 +45,7 @@ class MarketDataWarehouse:
 
     def __init__(self, layout, read_only=False, clickhouse_store=None):
         self.layout = layout
-        self.read_only = bool(read_only and Path(self.layout.duckdb_path()).exists())
+        self.read_only = bool(read_only)
         self.parquet_store = ParquetDataStore(layout)
 
         if clickhouse_store is not None:
@@ -65,53 +64,127 @@ class MarketDataWarehouse:
         else:
             self.clickhouse_store = None
 
-        self.db_path = Path(self.layout.duckdb_path())
-        self.conn = duckdb.connect(str(self.db_path), read_only=self.read_only)
-        if not self.read_only:
-            self._init_schema()
+        self.stock_info_dataset = "stock_info_registry"
+        self._clickhouse_disabled_reason = None
 
     @property
     def _feature_store(self):
         """返回 features 数据集的后端存储，优先使用 ClickHouse。"""
         return self.clickhouse_store or self.parquet_store
 
+    def _feature_store_candidates(self):
+        """返回 features 可用后端，ClickHouse 不可用时允许降级到 parquet。"""
+        stores = []
+        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+            stores.append(self.clickhouse_store)
+        stores.append(self.parquet_store)
+        return stores
+
     def _ensure_writable(self):
         if self.read_only:
-            raise RuntimeError(f"只读仓库不支持写入: {self.db_path}")
+            raise RuntimeError(f"只读仓库不支持写入: {self.layout.base_path}")
 
-    def _init_schema(self):
-        """初始化元数据表结构。"""
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS stock_info_registry (
-                stock_code VARCHAR NOT NULL,
-                market VARCHAR NOT NULL,
-                exchange VARCHAR NOT NULL,
-                asset_type VARCHAR NOT NULL,
-                name VARCHAR,
-                current_price DOUBLE,
-                close_price DOUBLE,
-                open_price DOUBLE,
-                high DOUBLE,
-                low DOUBLE,
-                volume DOUBLE,
-                market_cap DOUBLE,
-                pe_ratio DOUBLE,
-                week_52_high DOUBLE,
-                week_52_low DOUBLE,
-                source VARCHAR,
-                ingest_time TIMESTAMP,
-                PRIMARY KEY (market, stock_code)
-            )
-            """
+    @property
+    def _stock_info_store(self):
+        """返回 stock_info registry 后端，优先使用 ClickHouse。"""
+        return self.clickhouse_store or self.parquet_store
+
+    def _stock_info_store_candidates(self):
+        stores = []
+        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+            stores.append(self.clickhouse_store)
+        stores.append(self.parquet_store)
+        return stores
+
+    def _read_stock_info_registry(self, filters=None, columns=None, order_by=None):
+        frame = pd.DataFrame()
+        stores = []
+        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+            stores.append(self.clickhouse_store)
+        stores.append(self.parquet_store)
+        for store in stores:
+            try:
+                frame = store.read_frame(
+                    self.stock_info_dataset,
+                    layer="meta",
+                    filters=filters,
+                    columns=columns,
+                    order_by=order_by,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                frame = pd.DataFrame(columns=columns or STOCK_INFO_FIELDS)
+            if frame is not None and not frame.empty:
+                break
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=columns or STOCK_INFO_FIELDS)
+        for column in STOCK_INFO_FIELDS:
+            if column not in frame.columns:
+                frame[column] = None
+        return frame[[column for column in STOCK_INFO_FIELDS if column in frame.columns]].copy()
+
+    def _preserve_existing_stock_info_fields(self, payload, fields=None):
+        """Fill missing metadata from the existing registry row before replace-upsert."""
+        if payload is None or payload.empty:
+            return payload
+
+        preserve_fields = tuple(fields or (
+            "industry_l1",
+            "industry_l2",
+            "industry_l3",
+            "theme_tags",
+            "industry_source",
+            "industry_updated_at",
+            "instrument_type",
+            "is_fund_like",
+            "tradable_flag",
+            "instrument_source",
+            "instrument_updated_at",
+        ))
+        available_fields = [field for field in preserve_fields if field in payload.columns]
+        if not available_fields:
+            return payload
+
+        keys = payload[["market", "stock_code"]].dropna().drop_duplicates()
+        if keys.empty:
+            return payload
+
+        existing = self._read_stock_info_registry(
+            filters={
+                "market": keys["market"].astype(str).unique().tolist(),
+                "stock_code": keys["stock_code"].astype(str).unique().tolist(),
+            },
+            columns=["market", "stock_code", *available_fields],
         )
-        for statement in [
-            "ALTER TABLE stock_info_registry ADD COLUMN IF NOT EXISTS exchange VARCHAR",
-            "ALTER TABLE stock_info_registry ADD COLUMN IF NOT EXISTS asset_type VARCHAR",
-            "ALTER TABLE stock_info_registry ADD COLUMN IF NOT EXISTS source VARCHAR",
-            "ALTER TABLE stock_info_registry ADD COLUMN IF NOT EXISTS ingest_time TIMESTAMP",
-        ]:
-            self.conn.execute(statement)
+        if existing.empty:
+            return payload
+
+        merged = payload.merge(
+            existing,
+            on=["market", "stock_code"],
+            how="left",
+            suffixes=("", "_existing"),
+        )
+        # Convert all preserve fields to object dtype upfront to prevent
+        # LossySetitemError when assigning across incompatible dtypes (e.g.
+        # bool column receiving string "[]" from existing registry data).
+        for field in available_fields:
+            existing_field = f"{field}_existing"
+            if existing_field not in merged.columns:
+                continue
+            merged[field] = merged[field].astype(object)
+            merged[existing_field] = merged[existing_field].astype(object)
+
+        for field in available_fields:
+            existing_field = f"{field}_existing"
+            if existing_field not in merged.columns:
+                continue
+            missing_mask = merged[field].isna()
+            missing_mask = missing_mask | (merged[field].astype(str).str.strip() == "")
+            merged.loc[missing_mask, field] = merged.loc[missing_mask, existing_field]
+            merged.drop(columns=[existing_field], inplace=True)
+        return merged[payload.columns].copy()
 
     def upsert_ohlcv(self, frame, dataset_name=OHLCV_DATASET):
         """将标准 OHLCV 数据 upsert 到分区 parquet 数据集。"""
@@ -198,41 +271,54 @@ class MarketDataWarehouse:
 
     def upsert_features(self, frame, dataset_name=FEATURES_DATASET):
         """将标准特征数据 upsert 到 feature 层 parquet 数据集。"""
+        self._ensure_writable()
         if frame is None or frame.empty:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="feature"))}
 
         payload = frame[FEATURE_COLUMNS].copy()
-        store = self._feature_store
-        target = store.upsert_frame(
-            dataset_name=dataset_name,
-            frame=payload,
-            dedupe_keys=[
-                "market",
-                "stock_code",
-                "trade_date",
-                "frequency",
-                "adjust",
-                "feature_set",
-                "feature_version",
-                "feature_config_hash",
-                "feature_name",
-            ],
-            layer="feature",
-            sort_by=[
-                "market",
-                "stock_code",
-                "trade_date",
-                "frequency",
-                "adjust",
-                "feature_set",
-                "feature_version",
-                "feature_config_hash",
-                "feature_name",
-                "ingest_time",
-            ],
-            date_column="trade_date",
-            partition_columns=self.FEATURES_PARTITION_COLUMNS,
-        )
+        last_error = None
+        for store in self._feature_store_candidates():
+            try:
+                target = store.upsert_frame(
+                    dataset_name=dataset_name,
+                    frame=payload,
+                    dedupe_keys=[
+                        "market",
+                        "stock_code",
+                        "trade_date",
+                        "frequency",
+                        "adjust",
+                        "feature_set",
+                        "feature_version",
+                        "feature_config_hash",
+                        "feature_name",
+                    ],
+                    layer="feature",
+                    sort_by=[
+                        "market",
+                        "stock_code",
+                        "trade_date",
+                        "frequency",
+                        "adjust",
+                        "feature_set",
+                        "feature_version",
+                        "feature_config_hash",
+                        "feature_name",
+                        "ingest_time",
+                    ],
+                    date_column="trade_date",
+                    partition_columns=self.FEATURES_PARTITION_COLUMNS,
+                )
+                return {"rows": len(payload), "dataset_path": str(target)}
+            except Exception as exc:
+                last_error = exc
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                if store is self.parquet_store:
+                    raise
+                continue
+        if last_error is not None:
+            raise last_error
         return {"rows": len(payload), "dataset_path": str(target)}
 
     def read_features(
@@ -264,35 +350,42 @@ class MarketDataWarehouse:
             "feature_config_hash": feature_config_hash,
             "feature_name": feature_name,
         }
-        store = self._feature_store
-        try:
-            frame = store.read_frame(
-                dataset_name=dataset_name,
-                layer="feature",
-                filters=filters,
-                order_by=(
-                    "market, stock_code, trade_date, feature_set, "
-                    "feature_version, feature_config_hash, feature_name"
-                ),
-            )
-        except Exception:
-            if feature_version is not None or feature_config_hash is not None:
-                return pd.DataFrame(columns=FEATURE_COLUMNS)
-            frame = store.read_frame(
-                dataset_name=dataset_name,
-                layer="feature",
-                filters={
-                    "stock_code": stock_code,
-                    "market": market,
-                    "exchange": exchange,
-                    "asset_type": asset_type,
-                    "frequency": frequency,
-                    "adjust": adjust,
-                    "feature_set": feature_set,
-                    "feature_name": feature_name,
-                },
-                order_by="market, stock_code, trade_date, feature_set, feature_name",
-            )
+        frame = pd.DataFrame()
+        for store in self._feature_store_candidates():
+            try:
+                frame = store.read_frame(
+                    dataset_name=dataset_name,
+                    layer="feature",
+                    filters=filters,
+                    order_by=(
+                        "market, stock_code, trade_date, feature_set, "
+                        "feature_version, feature_config_hash, feature_name"
+                    ),
+                )
+            except Exception:
+                if feature_version is not None or feature_config_hash is not None:
+                    frame = pd.DataFrame(columns=FEATURE_COLUMNS)
+                else:
+                    try:
+                        frame = store.read_frame(
+                            dataset_name=dataset_name,
+                            layer="feature",
+                            filters={
+                                "stock_code": stock_code,
+                                "market": market,
+                                "exchange": exchange,
+                                "asset_type": asset_type,
+                                "frequency": frequency,
+                                "adjust": adjust,
+                                "feature_set": feature_set,
+                                "feature_name": feature_name,
+                            },
+                            order_by="market, stock_code, trade_date, feature_set, feature_name",
+                        )
+                    except Exception:
+                        frame = pd.DataFrame(columns=FEATURE_COLUMNS)
+            if frame is not None and not frame.empty:
+                break
         if frame.empty:
             return frame
 
@@ -454,50 +547,8 @@ class MarketDataWarehouse:
         """保存标准化后的股票信息。"""
         self._ensure_writable()
         payload = pd.DataFrame([info], columns=STOCK_INFO_FIELDS)
-        self.conn.register("stock_info_frame", payload)
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO stock_info_registry (
-                stock_code,
-                market,
-                exchange,
-                asset_type,
-                name,
-                current_price,
-                close_price,
-                open_price,
-                high,
-                low,
-                volume,
-                market_cap,
-                pe_ratio,
-                week_52_high,
-                week_52_low,
-                source,
-                ingest_time
-            )
-            SELECT
-                stock_code,
-                market,
-                exchange,
-                asset_type,
-                name,
-                current_price,
-                close_price,
-                open_price,
-                high,
-                low,
-                volume,
-                market_cap,
-                pe_ratio,
-                week_52_high,
-                week_52_low,
-                source,
-                ingest_time
-            FROM stock_info_frame
-            """
-        )
-        self.conn.unregister("stock_info_frame")
+        payload = self._preserve_existing_stock_info_fields(payload)
+        self._upsert_stock_info_payload(payload)
         return {"rows": 1}
 
     def upsert_stock_info_batch(self, info_list):
@@ -508,51 +559,31 @@ class MarketDataWarehouse:
 
         payload = pd.DataFrame(info_list, columns=STOCK_INFO_FIELDS)
         payload.drop_duplicates(subset=["market", "stock_code"], keep="last", inplace=True)
-        self.conn.register("stock_info_frame_batch", payload)
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO stock_info_registry (
-                stock_code,
-                market,
-                exchange,
-                asset_type,
-                name,
-                current_price,
-                close_price,
-                open_price,
-                high,
-                low,
-                volume,
-                market_cap,
-                pe_ratio,
-                week_52_high,
-                week_52_low,
-                source,
-                ingest_time
-            )
-            SELECT
-                stock_code,
-                market,
-                exchange,
-                asset_type,
-                name,
-                current_price,
-                close_price,
-                open_price,
-                high,
-                low,
-                volume,
-                market_cap,
-                pe_ratio,
-                week_52_high,
-                week_52_low,
-                source,
-                ingest_time
-            FROM stock_info_frame_batch
-            """
-        )
-        self.conn.unregister("stock_info_frame_batch")
+        payload = self._preserve_existing_stock_info_fields(payload)
+        self._upsert_stock_info_payload(payload)
         return {"rows": len(payload)}
+
+    def _upsert_stock_info_payload(self, payload):
+        last_error = None
+        for store in self._stock_info_store_candidates():
+            try:
+                store.upsert_frame(
+                    dataset_name=self.stock_info_dataset,
+                    frame=payload,
+                    dedupe_keys=["market", "stock_code"],
+                    layer="meta",
+                    sort_by=["market", "stock_code", "ingest_time"],
+                    date_column="ingest_time",
+                    partition_columns=("market",),
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if store is self.parquet_store:
+                    raise
+                continue
+        if last_error is not None:
+            raise last_error
 
     def read_ohlcv(
         self,
@@ -620,25 +651,31 @@ class MarketDataWarehouse:
 
     def get_stock_info(self, stock_code, market=None):
         """读取标准化股票信息。"""
-        clauses = ["stock_code = ?"]
-        params = [stock_code]
+        filters = {"stock_code": stock_code}
         if market:
-            clauses.append("market = ?")
-            params.append(market)
-
-        result = self.conn.execute(
-            f"""
-            SELECT {", ".join(STOCK_INFO_FIELDS)}
-            FROM stock_info_registry
-            WHERE {" AND ".join(clauses)}
-            ORDER BY ingest_time DESC
-            LIMIT 1
-            """,
-            params,
-        ).fetchone()
-        if not result:
+            filters["market"] = market
+        frame = self._read_stock_info_registry(
+            filters=filters,
+            columns=STOCK_INFO_FIELDS,
+            order_by="ingest_time DESC",
+        )
+        if frame.empty:
             return None
-        return dict(zip(STOCK_INFO_FIELDS, result))
+        row = frame.iloc[0]
+        return {field: row.get(field) for field in STOCK_INFO_FIELDS}
+
+    def read_stock_info(self, stock_codes=None, market=None, columns=None, order_by=None):
+        """批量读取 stock info registry。"""
+        filters = {}
+        if stock_codes:
+            filters["stock_code"] = list(dict.fromkeys(stock_codes))
+        if market:
+            filters["market"] = market
+        return self._read_stock_info_registry(
+            filters=filters,
+            columns=columns or STOCK_INFO_FIELDS,
+            order_by=order_by or "market, stock_code",
+        )
 
     def get_latest_trade_date(
         self,
@@ -671,6 +708,48 @@ class MarketDataWarehouse:
         if frequency and frequency != "daily":
             return latest_ts.strftime("%Y-%m-%d %H:%M:%S")
         return str(latest_ts.date())
+
+    def get_latest_trade_dates(
+        self,
+        stock_codes=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequencies=None,
+        adjust=None,
+        dataset_name=OHLCV_DATASET,
+    ):
+        """批量获取证券最新交易日，避免全市场同步前逐只扫描 Parquet。"""
+        filters = {
+            "stock_code": list(dict.fromkeys(stock_codes)) if stock_codes else None,
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "frequency": list(dict.fromkeys(frequencies)) if frequencies else None,
+            "adjust": adjust,
+        }
+        columns = ["stock_code", "market", "frequency", "adjust", "trade_date"]
+        frame = self.parquet_store.read_frame(
+            dataset_name=dataset_name,
+            layer="clean",
+            filters=filters,
+            columns=columns,
+        )
+        if frame is None or frame.empty:
+            return {}
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame.dropna(subset=["stock_code", "frequency", "trade_date"], inplace=True)
+        if frame.empty:
+            return {}
+        grouped = (
+            frame.groupby(["stock_code", "frequency"], dropna=False)["trade_date"]
+            .max()
+            .reset_index()
+        )
+        latest = {}
+        for row in grouped.itertuples(index=False):
+            latest[(str(row.stock_code), str(row.frequency))] = row.trade_date
+        return latest
 
     def get_statistics(
         self,
@@ -770,4 +849,4 @@ class MarketDataWarehouse:
 
     def close(self):
         """关闭仓库连接。"""
-        self.conn.close()
+        return None

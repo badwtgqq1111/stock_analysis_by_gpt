@@ -2,9 +2,9 @@
 
 import pandas as pd
 
-from analyzer_core import StockAnalyzer
+from core import StockAnalyzer
 from cli.formatters import _safe_close_analyzer
-from reporting import (
+from core.reporting import (
     analyze_buy_points,
     analyze_target_date_alignment,
     build_strategy_comparison_tables,
@@ -90,20 +90,13 @@ def analyze_single_stock_with_visualization(stock_code="03633", days=365):
 
         print(f"[OK] 成功加载 {len(full_data)} 条数据记录")
 
-        print(f"\n[INFO] 使用TA-Lib计算技术指标...")
-        data_with_indicators = analyzer.calculate_technical_indicators(full_data)
-
-        if data_with_indicators is None:
-            print(f"[ERROR] 技术指标计算失败")
-            return None
-
-        analysis_start_idx = max(len(data_with_indicators) - days, 0)
-        analysis_data = data_with_indicators.iloc[analysis_start_idx:].copy()
+        analysis_start_idx = max(len(full_data) - days, 0)
+        analysis_data = full_data.iloc[analysis_start_idx:].copy()
         analysis_start_date = analysis_data.index[0]
 
         print(f"[INFO] 识别买卖信号...")
-        buy_signals_full = analyzer.identify_buy_signals(data_with_indicators, stock_code=stock_code)
-        sell_signals_full = analyzer.identify_sell_signals(data_with_indicators)
+        buy_signals_full = analyzer.identify_buy_signals(full_data, stock_code=stock_code)
+        sell_signals_full = analyzer.identify_sell_signals(full_data)
 
         buy_signals = None
         if buy_signals_full is not None and not buy_signals_full.empty:

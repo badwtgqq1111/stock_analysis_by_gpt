@@ -6,8 +6,89 @@
 import numpy as np
 import pandas as pd
 
+from data.model import normalize_bool
+
 from backtest_engine.models import EquityPoint, PortfolioBuildResult, PortfolioReplayResult, TradeRecord
 from factor_engine.signals import summarize_low_price_setup
+
+
+def _concentration_penalty(count_in_cluster: int) -> float:
+    """Progressive concentration penalty for soft sector constraints.
+
+    Reference: Ehsani, Harvey & Li (2023) — long-only investors should use
+    soft constraints rather than hard sector caps.
+
+    Penalty schedule:
+      0-1 stocks in cluster: no penalty
+      2 stocks (3rd entry): moderate penalty (8 points)
+      3 stocks (4th entry): significant penalty (18 points)
+      4+ stocks (5th+ entry): near-hard block (35 points)
+    """
+    if count_in_cluster <= 1:
+        return 0.0
+    elif count_in_cluster == 2:
+        return 8.0
+    elif count_in_cluster == 3:
+        return 18.0
+    else:
+        return 35.0
+
+
+def _apply_within_cluster_quality_zscore(extracted: list[dict]) -> None:
+    """Normalize quality_score within each cluster (QMJ-style).
+
+    Reference: Asness, Frazzini & Pedersen (2014) — z-score quality within
+    Fama-French 12 industry groups to eliminate sector bias.
+
+    For each cluster:
+      z = (quality - cluster_mean) / cluster_std
+      quality_z = 50 + z * 10  (map to 0-100 scale; z=-3→20, z=+3→80)
+
+    Clusters with < 3 stocks or zero variance keep their original score.
+    cluster_id == -1 falls back to global z-score.
+    """
+    if len(extracted) < 3:
+        return
+
+    # Group by cluster_id
+    clusters: dict[int, list[int]] = {}
+    for i, e in enumerate(extracted):
+        cid = e.get("cluster_id", -1)
+        clusters.setdefault(cid, []).append(i)
+
+    # Compute global stats for fallback
+    all_qualities = [e["components"]["quality_score"] for e in extracted]
+    global_mean = np.mean(all_qualities)
+    global_std = np.std(all_qualities, ddof=1)
+
+    for cid, indices in clusters.items():
+        if len(indices) < 3:
+            # Small cluster: use global z-score
+            for i in indices:
+                q = extracted[i]["components"]["quality_score"]
+                if global_std > 0.01:
+                    z = (q - global_mean) / global_std
+                else:
+                    z = 0.0
+                extracted[i]["components"]["quality_score"] = float(np.clip(50.0 + z * 10.0, 0.0, 100.0))
+            continue
+
+        cluster_qualities = [extracted[i]["components"]["quality_score"] for i in indices]
+        c_mean = np.mean(cluster_qualities)
+        c_std = np.std(cluster_qualities, ddof=1)
+
+        if c_std < 0.01:
+            # All same quality in this cluster → neutral 50
+            for i in indices:
+                extracted[i]["components"]["quality_score"] = 50.0
+            continue
+
+        for i in indices:
+            q = extracted[i]["components"]["quality_score"]
+            z = (q - c_mean) / c_std
+            # Cap z at ±3 to prevent extreme outliers from dominating
+            z = np.clip(z, -3.0, 3.0)
+            extracted[i]["components"]["quality_score"] = float(np.clip(50.0 + z * 10.0, 0.0, 100.0))
 
 
 class TopNPortfolioBuilder:
@@ -41,10 +122,9 @@ class TopNPortfolioBuilder:
         if not pool_results:
             return None
 
-        ranking = []
+        ranking = self._build_ranking_rows(pool_results)
         signal_rows = []
         for result in pool_results:
-            ranking.append(self._build_ranking_row(result))
             signal_rows.extend(self._collect_signal_rows(result))
 
         ranking.sort(
@@ -56,6 +136,9 @@ class TopNPortfolioBuilder:
                 -item["backtest_return"],
             )
         )
+        for item in ranking:
+            eligibility = self._compute_selection_eligibility(item)
+            item.update(eligibility)
 
         cross_sectional_picks = []
         grouped_candidates = {}
@@ -116,9 +199,27 @@ class TopNPortfolioBuilder:
         estimated_portfolio_return = portfolio_return_sum / portfolio_return_count if portfolio_return_count > 0 else 0
         estimated_portfolio_win_rate = portfolio_win_count / portfolio_return_count * 100 if portfolio_return_count > 0 else 0
 
+        # Kelly dynamic position sizing
+        if contributions:
+            contrib_returns = [c["contribution_return"] for c in contributions]
+            wins = [r for r in contrib_returns if r > 0]
+            losses = [abs(r) for r in contrib_returns if r < 0]
+            avg_win = sum(wins) / len(wins) if wins else 0.0
+            avg_loss = sum(losses) / len(losses) if losses else 0.0
+            b_ratio = (avg_win / avg_loss) if avg_loss > 0 else 2.0
+            p = estimated_portfolio_win_rate / 100.0
+            kelly_f = max(0.0, (p * b_ratio - (1.0 - p)) / b_ratio) if b_ratio > 0 else 0.0
+            half_kelly = kelly_f * 0.5
+            kelly_position_ratio = half_kelly
+        else:
+            kelly_position_ratio = 1.0 / self.top_n if self.top_n > 0 else 0.1
+
+        eligible_ranking = [item for item in ranking if item.get("selection_eligible")]
+
         preferred_actionable = [
             item for item in ranking
-            if item.get("current_signal_active")
+            if item.get("selection_eligible")
+            and item.get("current_signal_active")
             and item.get("current_signal_actionable")
             and item.get("low_price_candidate", True)
             and item.get("signal_freshness_score", 100) >= 40
@@ -126,14 +227,16 @@ class TopNPortfolioBuilder:
         ]
         active_actionable = [
             item for item in ranking
-            if item.get("current_signal_active")
+            if item.get("selection_eligible")
+            and item.get("current_signal_active")
             and item.get("current_signal_actionable")
             and item.get("signal_freshness_score", 100) >= 35
             and item.get("setup_type") != "sideways"
         ]
         fallback_candidates = [
             item for item in ranking
-            if item.get("signal_tier") != "weak"
+            if item.get("selection_eligible")
+            and item.get("signal_tier") != "weak"
             and item.get("signal_freshness_score", 100) >= 30
             and item.get("setup_type") != "sideways"
         ]
@@ -144,7 +247,7 @@ class TopNPortfolioBuilder:
         if not watchlist:
             watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak"][: self.top_n]
 
-        ranking_filtered = list(ranking)
+        ranking_filtered = list(eligible_ranking)
         lightgbm_candidates = [item for item in ranking if item.get("selection_source") == "lightgbm_ranker"]
         if lightgbm_candidates:
             # Win-rate quality gate: filter out proven losers (backtest wr < 35%)
@@ -156,8 +259,15 @@ class TopNPortfolioBuilder:
             watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak" and item.get("win_rate", 0) >= min_win_rate][: self.top_n]
             if not watchlist:
                 watchlist = [dict(item) for item in ranking if item.get("win_rate", 0) >= min_win_rate][: self.top_n]
-            # Final ranking fallback also respects quality gate
-            ranking_filtered = [item for item in ranking if item.get("win_rate", 0) >= min_win_rate]
+            # Final ranking fallback also respects quality and eligibility gates
+            ranking_filtered = [item for item in eligible_ranking if item.get("win_rate", 0) >= min_win_rate]
+
+        # Build final fallback: QMJ double sort if enough data, else score-based
+        _final_fallback = None
+        if lightgbm_candidates and ranking_filtered:
+            _final_fallback = TopNPortfolioBuilder._double_sort_select(ranking_filtered, self.top_n)
+        if not _final_fallback:
+            _final_fallback = ranking_filtered[: self.top_n] if lightgbm_candidates and ranking_filtered else eligible_ranking[: self.top_n]
 
         selected = (
             preferred_actionable[: self.top_n]
@@ -168,11 +278,73 @@ class TopNPortfolioBuilder:
                 else (
                     fallback_candidates[: self.top_n]
                     if fallback_candidates
-                    else (ranking_filtered[: self.top_n] if lightgbm_candidates and ranking_filtered else ranking[: self.top_n])
+                    else _final_fallback
                 )
             )
         )
         selected = [dict(item) for item in selected]
+
+        # --- Data quality filter: demote PE ≤ 0 or PE > 500 to watchlist ---
+        selected, data_quality_watch = [], list(selected)
+        for item in data_quality_watch[:]:
+            pe = item.get("pe_ratio")
+            if pe is not None and np.isfinite(pe) and (pe <= 0 or pe > 500):
+                watchlist.insert(0, item)
+                data_quality_watch.remove(item)
+        selected = data_quality_watch
+
+        # --- Sector concentration: progressive penalty (soft constraint) ---
+        # Reference: Ehsani, Harvey & Li (2023) — long-only investors should avoid hard
+        # sector neutralization. Instead, apply a progressive concentration penalty that
+        # allows exceptional stocks to overcome cluster crowding.
+        if selected:
+            # Greedy selection with concentration-adjusted scores
+            cluster_counts: dict[int, int] = {}
+            capped_selected = []
+            sector_demoted = []
+
+            # Build a working copy of the ranking with adjusted scores
+            remaining = [dict(item) for item in ranking_filtered
+                         if item["stock_code"] not in {s["stock_code"] for s in selected}]
+
+            for item in selected:
+                cid = int(item.get("cluster_id", -1) or -1)
+                cnt = cluster_counts.get(cid, 0)
+                penalty = _concentration_penalty(cnt)
+                cluster_counts[cid] = cnt + 1
+                if penalty >= 15:  # Hard block at 4+ concentration
+                    sector_demoted.append(item)
+                else:
+                    capped_selected.append(item)
+
+            # Fill vacancies from demotions with best remaining (concentration-aware)
+            existing_codes = {item["stock_code"] for item in capped_selected}
+            while len(capped_selected) < self.top_n and remaining:
+                best_idx = -1
+                best_adj_score = -1e9
+                for i, item in enumerate(remaining):
+                    if item["stock_code"] in existing_codes:
+                        continue
+                    cid = int(item.get("cluster_id", -1) or -1)
+                    cnt = cluster_counts.get(cid, 0)
+                    penalty = _concentration_penalty(cnt)
+                    adj_score = item.get("ranking_score", 0) - penalty
+                    if adj_score > best_adj_score:
+                        best_adj_score = adj_score
+                        best_idx = i
+                if best_idx < 0:
+                    break
+                chosen = remaining.pop(best_idx)
+                cid = int(chosen.get("cluster_id", -1) or -1)
+                cluster_counts[cid] = cluster_counts.get(cid, 0) + 1
+                capped_selected.append(chosen)
+                existing_codes.add(chosen["stock_code"])
+
+            if sector_demoted:
+                watchlist.extend(sector_demoted)
+            selected = capped_selected
+
+        self.kelly_position_ratio = kelly_position_ratio
         self._apply_weights(selected)
 
         synthetic_portfolio_equity_curve = self._build_synthetic_portfolio_equity_curve(cross_sectional_picks)
@@ -206,6 +378,7 @@ class TopNPortfolioBuilder:
             estimated_portfolio_return=estimated_portfolio_return,
             estimated_portfolio_win_rate=estimated_portfolio_win_rate,
             estimated_trade_count=portfolio_return_count,
+            kelly_position_ratio=kelly_position_ratio,
             synthetic_portfolio_equity_curve=synthetic_portfolio_equity_curve,
             portfolio_equity_curve=portfolio_equity_curve,
             portfolio_final_value=final_portfolio_value,
@@ -218,15 +391,49 @@ class TopNPortfolioBuilder:
         return result.to_dict()
 
     def _apply_weights(self, selected):
-        """对选中的标的分配权重与资金。"""
+        """对选中的标的分配权重与资金（Kelly 动态仓位缩放 + 波动率缩放）。
+
+        P4c: Volatility-managed position sizing (Barroso & Santa-Clara 2015).
+        Inverse-volatility scaling reduces exposure to high-volatility stocks
+        and increases exposure to low-volatility stocks, nearly doubling the
+        Sharpe ratio of momentum portfolios.
+        """
         if not selected:
             return
 
+        kelly_scale = getattr(self, 'kelly_position_ratio', 1.0 / max(len(selected), 1))
+        effective_capital = self.initial_capital * kelly_scale
+
+        # Compute volatility scaling factors
+        vols = []
+        for item in selected:
+            vol = item.get("recent_volatility")
+            if vol is None or not np.isfinite(vol) or vol <= 0:
+                vol = np.nan
+            vols.append(vol)
+
+        median_vol = np.nanmedian(vols) if not all(np.isnan(v) for v in vols) else 0.25
+        if median_vol <= 0:
+            median_vol = 0.25
+
+        vol_scales = []
+        for vol in vols:
+            if np.isnan(vol) or vol <= 0:
+                vol_scales.append(1.0)
+            else:
+                # Inverse-vol: scale by median/vol, capped at [0.5, 2.0]
+                scale = median_vol / vol
+                vol_scales.append(float(np.clip(scale, 0.5, 2.0)))
+
         if self.weighting_mode == "equal_weight":
-            weight = 1.0 / len(selected)
-            for item in selected:
-                item["portfolio_weight"] = weight
-                item["allocated_capital"] = self.initial_capital * weight
+            base_weight = 1.0 / len(selected)
+            total_scale = sum(vol_scales)
+            for item, vs in zip(selected, vol_scales):
+                adj_weight = base_weight * (vs / (total_scale / len(selected))) * kelly_scale
+                item["portfolio_weight"] = adj_weight
+                item["allocated_capital"] = self.initial_capital * adj_weight
+                item["kelly_scale"] = kelly_scale
+                item["vol_scale"] = vs
             return
 
         scores = []
@@ -237,15 +444,22 @@ class TopNPortfolioBuilder:
         total_score = sum(scores)
         if total_score <= 0:
             equal_weight = 1.0 / len(selected)
-            for item in selected:
-                item["portfolio_weight"] = equal_weight
-                item["allocated_capital"] = self.initial_capital * equal_weight
+            total_scale = sum(vol_scales)
+            for item, vs in zip(selected, vol_scales):
+                adj_weight = equal_weight * (vs / (total_scale / len(selected))) * kelly_scale
+                item["portfolio_weight"] = adj_weight
+                item["allocated_capital"] = self.initial_capital * adj_weight
+                item["kelly_scale"] = kelly_scale
+                item["vol_scale"] = vs
             return
 
-        for item, score in zip(selected, scores):
-            weight = score / total_score
-            item["portfolio_weight"] = weight
-            item["allocated_capital"] = self.initial_capital * weight
+        for item, score, vs in zip(selected, scores, vol_scales):
+            base_weight = (score / total_score)
+            adj_weight = base_weight * vs * kelly_scale
+            item["portfolio_weight"] = adj_weight
+            item["allocated_capital"] = self.initial_capital * adj_weight
+            item["kelly_scale"] = kelly_scale
+            item["vol_scale"] = vs
 
     def _build_pick_record(self, item, signal_date, selected_group):
         """构建单个横截面入选记录，并附带当日权重。"""
@@ -532,156 +746,415 @@ class TopNPortfolioBuilder:
             return 0.0
         return max(gross_amount * rate, self.min_commission)
 
+    # ---- Ranking 组件配置 (工业标准: 截面 Rank 标准化) ----
+    # 每个组件在截面上转换为 0-100 百分位排名, 免疫厚尾和量纲差异.
+    # direction: +1=越高越好, -1=越低越好
+    # weight: 组件在复合得分中的相对权重
+    _LIGHTGBM_COMPONENTS = [
+        # (name,               direction, weight)
+        ("win_rate_pct",         1,  0.15),
+        ("latest_model_score",   1,  0.30),
+        ("quality_score",        1,  0.15),
+        ("risk_adjusted_score",  1,  0.06),
+        ("signal_freshness",     1,  0.06),
+        ("pb_value_score",       1,  0.06),
+        ("overheat_penalty",    -1,  0.08),
+        ("drawdown_penalty",    -1,  0.05),
+        ("downtrend_penalty",   -1,  0.05),
+        ("hot_sector_value",    -1,  0.02),
+        ("trade_count",         -1,  0.02),
+    ]
+
+    _FACTOR_COMPONENTS = [
+        # (name,                       direction, weight)
+        ("current_signal_score",        1,  0.28),
+        ("latest_expected_3m_score",    1,  0.24),
+        ("latest_matrix_score",         1,  0.18),
+        ("latest_regime_score",         1,  0.12),
+        ("signal_freshness",            1,  0.08),
+        ("sideways_penalty",           -1,  0.10),
+    ]
+
     @staticmethod
-    def _build_ranking_row(result):
-        stock_code = result["stock_code"]
-        backtest = result.get("backtest") or {}
-        avg_forward_return_60_signal = np.nan_to_num(result.get("avg_forward_return_60_signal", 0), nan=0)
-        avg_forward_return_60_watch = np.nan_to_num(result.get("avg_forward_return_60_watch", 0), nan=0)
-        setup_type = result.get("setup_type", "neutral")
-        setup_score = float(result.get("setup_score", 0.0) or 0.0)
-        sideways_penalty = float(result.get("sideways_penalty", 0.0) or 0.0)
-        low_price_candidate = bool(result.get("low_price_candidate", setup_type != "sideways"))
-        signal_age_days = int(
-            result.get("signal_age_days", TopNPortfolioBuilder._compute_signal_age_days(result.get("latest_signal_date"))) or 0
-        )
-        signal_freshness_score = float(
-            result.get(
-                "signal_freshness_score",
-                max(0.0, 100.0 - max(signal_age_days, 0) * 8.0),
-            )
-            or 0.0
-        )
-        selection_source = result.get("selection_source")
-        if selection_source == "lightgbm_ranker":
-            risk_adjusted_score = np.nan_to_num(result.get("risk_adjusted_score", np.nan), nan=0.0)
-            latest_model_score = np.nan_to_num(result.get("latest_expected_3m_score", np.nan), nan=0.0)
-            latest_risk_score = np.nan_to_num(result.get("latest_risk_score", np.nan), nan=0.0)
-            drawdown_penalty_score = np.nan_to_num(result.get("drawdown_penalty_score", np.nan), nan=0.0)
-            startup_score = np.nan_to_num(result.get("startup_score", np.nan), nan=0.0)
-            startup_candidate_score = np.nan_to_num(result.get("startup_candidate_score", np.nan), nan=startup_score)
-            startup_candidate = bool(result.get("startup_candidate", False))
-            overheat_penalty_score = np.nan_to_num(result.get("overheat_penalty_score", np.nan), nan=0.0)
-            downtrend_penalty_score = np.nan_to_num(result.get("downtrend_penalty_score", np.nan), nan=0.0)
-            # Setup-type aware adjustments (v11: win_rate dominant + stronger value tilt)
-            hot_sector_value_score = np.nan_to_num(result.get("hot_sector_value_score", 50.0), nan=50.0)
-            win_rate_pct = np.nan_to_num(result.get("win_rate", 50.0), nan=50.0)
-            trade_count = int(result.get("trade_count", 60) or 60)
-            pb_ratio = np.nan_to_num(result.get("pb_ratio", 0), nan=0.0)
-            # IC=-0.58: low price position → higher future return (value premium)
-            pb_value_score = float(np.clip(12.0 - pb_ratio, 0, 12))
-            pb_bonus = pb_value_score / 12.0 * 100.0 * 0.10
+    def _cross_sectional_rank(values):
+        """截面百分位排名 (0-100).
 
-            if setup_type == "bottom_rebound":
-                downtrend_weight = 0.08
-            elif setup_type == "pre_breakout":
-                downtrend_weight = 0.12
+        工业标准方法: 将任意分布的因子值映射到 [0,100] 均匀分布,
+        天然免疫厚尾异常值和不同因子间的量纲差异.
+        """
+        n = len(values)
+        if n <= 1:
+            return [50.0] * n
+        arr = np.asarray(values, dtype=float)
+        nan_mask = np.isnan(arr)
+        if nan_mask.any():
+            arr = np.where(nan_mask, np.nanmedian(arr), arr)
+        order = np.argsort(np.argsort(arr, kind="mergesort"), kind="mergesort")
+        ranks = order.astype(float) / (n - 1) * 100.0
+        return ranks.tolist()
+
+    @staticmethod
+    def _build_ranking_rows(pool_results):
+        """工业级排名: 截面 Rank 标准化 + 加权复合.
+
+        两阶段流程:
+          1. 提取每只股票的原始组件值 (含 James-Stein 收缩等预处理)
+          2. 每个组件做截面百分位排名 → 按 direction 翻转 → 加权求和
+          3. 叠加 binary/categorical bonus (pre_breakout, low_price 等)
+
+        相比线性加法:
+          - 截面 Rank 免疫厚尾 —— 不再需要手动平方过热罚分
+          - 所有组件贡献归一化到同等尺度 —— 量纲差异自动消除
+          - 权重含义清晰: weight=0.25 ≡ 该组件最高贡献 25 分
+        """
+        lightgbm_results = []
+        factor_results = []
+        for r in pool_results:
+            if r.get("selection_source") == "lightgbm_ranker":
+                lightgbm_results.append(r)
             else:
-                downtrend_weight = 0.25
+                factor_results.append(r)
 
-            pre_breakout_bonus = 8.0 if setup_type == "pre_breakout" else 0.0
+        rows = []
+        if lightgbm_results:
+            rows.extend(TopNPortfolioBuilder._build_lightgbm_rank_rows(lightgbm_results))
+        if factor_results:
+            rows.extend(TopNPortfolioBuilder._build_factor_rank_rows(factor_results))
+        return rows
 
-            ranking_score = (
-                win_rate_pct * 0.70
-                + overheat_penalty_score * 0.14
-                + latest_model_score * 0.15
-                + pb_bonus
-                + risk_adjusted_score * 0.03
-                + signal_freshness_score * 0.04
-                + pre_breakout_bonus
-                - hot_sector_value_score * 0.05
-                - drawdown_penalty_score * 0.04
-                - downtrend_penalty_score * downtrend_weight
-                - trade_count * 0.02
-            )
-            return {
+    @staticmethod
+    def _build_lightgbm_rank_rows(results):
+        """LightGBM 路径: 截面 Rank 排名."""
+        # ---- Phase 1: 提取原始组件值 ----
+        extracted = []
+        for r in results:
+            stock_code = r["stock_code"]
+            setup_type = r.get("setup_type", "neutral")
+
+            raw_win_rate = np.nan_to_num(r.get("win_rate", 50.0), nan=50.0)
+            trade_count = int(r.get("trade_count", 60) or 60)
+            prior_wr = 55.0
+            cred = min(trade_count / 20.0, 1.0)
+            win_rate_pct = prior_wr + cred * (raw_win_rate - prior_wr)
+
+            latest_model_score = np.nan_to_num(r.get("latest_expected_3m_score", np.nan), nan=0.0)
+            quality_score = np.nan_to_num(r.get("quality_score", np.nan), nan=50.0)
+            risk_adj = np.nan_to_num(r.get("risk_adjusted_score", np.nan), nan=0.0)
+            overheat = np.nan_to_num(r.get("overheat_penalty_score", np.nan), nan=0.0)
+            drawdown = np.nan_to_num(r.get("drawdown_penalty_score", np.nan), nan=0.0)
+            downtrend = np.nan_to_num(r.get("downtrend_penalty_score", np.nan), nan=0.0)
+            hot_sector = np.nan_to_num(r.get("hot_sector_value_score", 50.0), nan=50.0)
+
+            signal_age = int(r.get("signal_age_days",
+                TopNPortfolioBuilder._compute_signal_age_days(r.get("latest_signal_date"))) or 0)
+            signal_freshness = max(0.0, 100.0 - max(signal_age, 0) * 8.0)
+
+            pb_ratio = np.nan_to_num(r.get("pb_ratio", 0), nan=0.0)
+            pb_value_score = float(np.clip(12.0 - pb_ratio, 0, 12)) / 12.0 * 100.0
+
+            # setup-specific downtrend scaling (preserved as pre-rank adjustment)
+            if setup_type == "bottom_rebound":
+                dw_scale = 0.40
+            elif setup_type == "pre_breakout":
+                dw_scale = 0.60
+            else:
+                dw_scale = 1.00
+            downtrend = downtrend * dw_scale
+
+            pre_breakout_flag = 1.0 if setup_type == "pre_breakout" else 0.0
+
+            extracted.append({
                 "stock_code": stock_code,
-                "ranking_score": ranking_score,
-                "expected_3m_score": result["latest_expected_3m_score"],
-                "matrix_score": result["latest_matrix_score"],
-                "regime_score": result.get("latest_regime_score"),
-                "entry_type": result["latest_entry_type"],
-                "signal_tier": result.get("latest_signal_tier"),
-                "latest_signal_date": result.get("latest_signal_date"),
-                "current_signal_active": result.get("current_signal_active", False),
-                "current_signal_actionable": result.get("current_signal_actionable", False),
-                "current_signal_score": result.get("current_signal_score"),
-                "avg_forward_return_60_signal": avg_forward_return_60_signal,
-                "avg_forward_return_60_watch": avg_forward_return_60_watch,
+                "selection_source": "lightgbm_ranker",
+                "components": {
+                    "win_rate_pct":        win_rate_pct,
+                    "latest_model_score":  latest_model_score,
+                    "quality_score":       quality_score,
+                    "risk_adjusted_score": risk_adj,
+                    "signal_freshness":    signal_freshness,
+                    "pb_value_score":      pb_value_score,
+                    "overheat_penalty":    overheat,
+                    "drawdown_penalty":    drawdown,
+                    "downtrend_penalty":   downtrend,
+                    "hot_sector_value":    hot_sector,
+                    "trade_count":         float(trade_count),
+                },
+                "pre_breakout_flag": pre_breakout_flag,
+                "result": r,
+                "win_rate_pct": win_rate_pct,
+                "trade_count": trade_count,
+                "signal_freshness_score": signal_freshness,
+                "signal_age_days": signal_age,
+                "setup_type": setup_type,
+                "cluster_id": int(r.get("cluster_id", -1) or -1),
+            })
+
+        # ---- Phase 2: 截面 Rank 标准化 ----
+        # P4b: Within-cluster quality normalization (QMJ-style)
+        # Reference: Asness, Frazzini & Pedersen (2014) — quality z-scored
+        # within industry groups to remove sector bias before portfolio ranking.
+        _apply_within_cluster_quality_zscore(extracted)
+
+        comp_cfg = TopNPortfolioBuilder._LIGHTGBM_COMPONENTS
+        n = len(extracted)
+        for name, direction, weight in comp_cfg:
+            values = [e["components"][name] for e in extracted]
+            ranks = TopNPortfolioBuilder._cross_sectional_rank(values)
+            for i, e in enumerate(extracted):
+                e["components"][name + "_rank"] = 100.0 - ranks[i] if direction < 0 else ranks[i]
+
+        # ---- Phase 3: 加权复合 + 返回行 ----
+        rows = []
+        for e in extracted:
+            r = e["result"]
+            setup_type = e["setup_type"]
+
+            score = sum(
+                e["components"][name + "_rank"] * weight
+                for name, _direction, weight in comp_cfg
+            )
+            score += e["pre_breakout_flag"] * 8.0  # binary bonus
+
+            # Data quality penalty: PE ≤ 0 or PE > 500
+            pe_val = r.get("pe_ratio")
+            if pe_val is not None and np.isfinite(pe_val) and (pe_val <= 0 or pe_val > 500):
+                score -= 30.0
+
+            # P0: Liquidity hard filter — reject untradeable stocks (halted / zero turnover)
+            if not r.get("liquidity_ok", True):
+                score -= 100.0
+
+            # P1: Nonlinear overheat penalty — extreme speculation signals crash risk
+            # Reference: Barroso & Santa-Clara (2015) volatility-managed portfolios
+            overheat_val = np.nan_to_num(r.get("overheat_penalty_score", np.nan), nan=0.0)
+            if overheat_val > 80:
+                score -= 25.0
+            elif overheat_val > 60:
+                score -= 10.0
+            if bool(r.get("startup_candidate", False)) or r.get("trend_state") == "startup":
+                score += 12.0
+            if r.get("trend_state") == "downtrend":
+                score -= 12.0
+
+            backtest = r.get("backtest") or {}
+            rows.append({
+                "stock_code": e["stock_code"],
+                "ranking_score": score,
+                "expected_3m_score": r["latest_expected_3m_score"],
+                "matrix_score": r["latest_matrix_score"],
+                "regime_score": r.get("latest_regime_score"),
+                "quality_score": r.get("quality_score"),
+                "entry_type": r["latest_entry_type"],
+                "signal_tier": r.get("latest_signal_tier"),
+                "latest_signal_date": r.get("latest_signal_date"),
+                "current_signal_active": r.get("current_signal_active", False),
+                "current_signal_actionable": r.get("current_signal_actionable", False),
+                "current_signal_score": r.get("current_signal_score"),
+                "avg_forward_return_60_signal": np.nan_to_num(r.get("avg_forward_return_60_signal", 0), nan=0),
+                "avg_forward_return_60_watch": np.nan_to_num(r.get("avg_forward_return_60_watch", 0), nan=0),
                 "backtest_return": backtest.get("total_return", 0),
                 "win_rate": backtest.get("win_rate", 0),
                 "trade_count": backtest.get("total_trades", 0),
-                "factor_set": result.get("factor_set"),
-                "selection_source": selection_source,
+                "factor_set": r.get("factor_set"),
+                "selection_source": "lightgbm_ranker",
                 "setup_type": setup_type,
-                "setup_score": setup_score,
-                "sideways_penalty": sideways_penalty,
-                "low_price_candidate": low_price_candidate,
-                "signal_freshness_score": signal_freshness_score,
-                "signal_age_days": signal_age_days,
-                "factor_explanation": result.get("factor_explanation", {}),
-                "risk_adjusted_score": result.get("risk_adjusted_score"),
-                "latest_risk_score": result.get("latest_risk_score"),
-                "drawdown_penalty_score": result.get("drawdown_penalty_score"),
-                "recent_drawdown": result.get("recent_drawdown"),
-                "startup_score": result.get("startup_score"),
-                "startup_candidate": startup_candidate,
-                "startup_candidate_score": result.get("startup_candidate_score"),
-                "overheat_penalty_score": result.get("overheat_penalty_score"),
-                "downtrend_penalty_score": result.get("downtrend_penalty_score"),
-                "trend_state": result.get("trend_state"),
-                "hot_sector_value_score": hot_sector_value_score,
-                "pe_ratio": result.get("pe_ratio"),
-                "pb_ratio": result.get("pb_ratio"),
-                "cluster_rps": result.get("cluster_rps"),
-            }
-        active_bonus = 100 if result.get("current_signal_active") and result.get("current_signal_actionable") else 0
-        setup_type_bonus = {
-            "pre_breakout": 18.0,
-            "bottom_rebound": 20.0,
-            "neutral": 0.0,
-            "sideways": -16.0,
-        }.get(setup_type, 0.0)
-        low_price_bonus = 8.0 if low_price_candidate else -22.0
-        ranking_score = (
-            active_bonus
-            + np.nan_to_num(result.get("current_signal_score", np.nan), nan=0) * 0.50
-            + np.nan_to_num(result.get("latest_expected_3m_score", np.nan), nan=0) * 0.20
-            + np.nan_to_num(result.get("latest_matrix_score", np.nan), nan=0) * 0.15
-            + np.nan_to_num(result.get("latest_regime_score", np.nan), nan=0) * 0.15
-            + setup_type_bonus
-            + setup_score * 0.18
-            + signal_freshness_score * 0.10
-            + low_price_bonus
-            - sideways_penalty * 0.90
-        )
-        return {
-            "stock_code": stock_code,
-            "ranking_score": ranking_score,
-            "expected_3m_score": result["latest_expected_3m_score"],
-            "matrix_score": result["latest_matrix_score"],
-            "regime_score": result.get("latest_regime_score"),
-            "entry_type": result["latest_entry_type"],
-            "signal_tier": result.get("latest_signal_tier"),
-            "latest_signal_date": result.get("latest_signal_date"),
-            "current_signal_active": result.get("current_signal_active", False),
-            "current_signal_actionable": result.get("current_signal_actionable", False),
-            "current_signal_score": result.get("current_signal_score"),
-            "avg_forward_return_60_signal": avg_forward_return_60_signal,
-            "avg_forward_return_60_watch": avg_forward_return_60_watch,
-            "backtest_return": backtest.get("total_return", 0),
-            "win_rate": backtest.get("win_rate", 0),
-            "trade_count": backtest.get("total_trades", 0),
-            "factor_set": result.get("factor_set"),
-            "selection_source": selection_source,
-            "setup_type": setup_type,
-            "setup_score": setup_score,
-            "sideways_penalty": sideways_penalty,
-            "low_price_candidate": low_price_candidate,
-            "signal_freshness_score": signal_freshness_score,
-            "signal_age_days": signal_age_days,
-            "factor_explanation": result.get("factor_explanation", {}),
+                "setup_score": float(r.get("setup_score", 0.0) or 0.0),
+                "sideways_penalty": float(r.get("sideways_penalty", 0.0) or 0.0),
+                "low_price_candidate": bool(r.get("low_price_candidate", setup_type != "sideways")),
+                "liquidity_ok": bool(r.get("liquidity_ok", True)),
+                "signal_freshness_score": e["signal_freshness_score"],
+                "signal_age_days": e["signal_age_days"],
+                "factor_explanation": r.get("factor_explanation", {}),
+                "risk_adjusted_score": r.get("risk_adjusted_score"),
+                "latest_risk_score": r.get("latest_risk_score"),
+                "drawdown_penalty_score": r.get("drawdown_penalty_score"),
+                "recent_drawdown": r.get("recent_drawdown"),
+                "recent_volatility": r.get("recent_volatility"),
+                "startup_score": r.get("startup_score"),
+                "startup_candidate": bool(r.get("startup_candidate", False)),
+                "startup_candidate_score": r.get("startup_candidate_score"),
+                "overheat_penalty_score": r.get("overheat_penalty_score"),
+                "downtrend_penalty_score": r.get("downtrend_penalty_score"),
+                "trend_state": r.get("trend_state"),
+                "hot_sector_value_score": r.get("hot_sector_value_score"),
+                "pe_ratio": r.get("pe_ratio"),
+                "pb_ratio": r.get("pb_ratio"),
+                "cluster_rps": r.get("cluster_rps"),
+                "cluster_id": r.get("cluster_id"),
+                "market_cap": r.get("market_cap"),
+                "industry_l1": r.get("industry_l1"),
+                "industry_l2": r.get("industry_l2"),
+                "industry_l3": r.get("industry_l3"),
+                "industry_source": r.get("industry_source"),
+                "industry_updated_at": r.get("industry_updated_at"),
+                "instrument_type": r.get("instrument_type"),
+                "is_fund_like": normalize_bool(r.get("is_fund_like"), default=False),
+                "tradable_flag": normalize_bool(r.get("tradable_flag"), default=True),
+                "value_score": r.get("value_score"),
+                "data_coverage_score": r.get("data_coverage_score"),
+                "data_missing_fields": r.get("data_missing_fields"),
+                "require_complete_data_for_selection": bool(r.get("require_complete_data_for_selection", False)),
+            })
+
+        return rows
+
+    @staticmethod
+    def _compute_selection_eligibility(item):
+        """Compute hard selection eligibility and data coverage for final holdings."""
+        reasons = []
+        coverage_fields = {
+            "current_signal_actionable": item.get("current_signal_actionable"),
+            "liquidity_ok": item.get("liquidity_ok", True),
+            "market_cap": item.get("market_cap"),
+            "latest_risk_score": item.get("latest_risk_score"),
+            "risk_adjusted_score": item.get("risk_adjusted_score"),
+            "drawdown_penalty_score": item.get("drawdown_penalty_score"),
+            "industry_l1": item.get("industry_l1"),
         }
+        missing_fields = []
+        for field, value in coverage_fields.items():
+            if value is None:
+                missing_fields.append(field)
+            elif isinstance(value, float) and np.isnan(value):
+                missing_fields.append(field)
+            elif isinstance(value, str) and not value.strip():
+                missing_fields.append(field)
+
+        data_coverage_score = max(0.0, 100.0 * (1.0 - len(missing_fields) / max(len(coverage_fields), 1)))
+
+        if not item.get("current_signal_active"):
+            reasons.append("signal_not_active")
+        if not item.get("current_signal_actionable"):
+            reasons.append("signal_not_actionable")
+        if not item.get("liquidity_ok", True):
+            reasons.append("liquidity_not_ok")
+        if item.get("is_fund_like", False):
+            reasons.append("fund_like_instrument")
+        if not item.get("tradable_flag", True):
+            reasons.append("not_tradable")
+        if item.get("setup_type") == "sideways":
+            reasons.append("sideways_setup")
+        if item.get("require_complete_data_for_selection", False) and data_coverage_score < 70:
+            reasons.append("insufficient_data_coverage")
+
+        explicit_coverage = item.get("data_coverage_score")
+        if explicit_coverage is not None and np.isfinite(explicit_coverage):
+            data_coverage_score = float(explicit_coverage)
+
+        return {
+            "selection_eligible": not reasons,
+            "eligibility_reasons": reasons,
+            "data_coverage_score": float(data_coverage_score),
+            "data_missing_fields": item.get("data_missing_fields") or missing_fields,
+        }
+
+    @staticmethod
+    def _build_factor_rank_rows(results):
+        """Factor 验证路径: 截面 Rank 排名."""
+        extracted = []
+        for r in results:
+            stock_code = r["stock_code"]
+            setup_type = r.get("setup_type", "neutral")
+
+            signal_age = int(r.get("signal_age_days",
+                TopNPortfolioBuilder._compute_signal_age_days(r.get("latest_signal_date"))) or 0)
+            signal_freshness = max(0.0, 100.0 - max(signal_age, 0) * 8.0)
+
+            sideways_penalty = float(r.get("sideways_penalty", 0.0) or 0.0)
+            active = r.get("current_signal_active") and r.get("current_signal_actionable")
+
+            extracted.append({
+                "stock_code": stock_code,
+                "selection_source": r.get("selection_source"),
+                "components": {
+                    "current_signal_score":     np.nan_to_num(r.get("current_signal_score", np.nan), nan=0),
+                    "latest_expected_3m_score": np.nan_to_num(r.get("latest_expected_3m_score", np.nan), nan=0),
+                    "latest_matrix_score":      np.nan_to_num(r.get("latest_matrix_score", np.nan), nan=0),
+                    "latest_regime_score":      np.nan_to_num(r.get("latest_regime_score", np.nan), nan=0),
+                    "signal_freshness":         signal_freshness,
+                    "sideways_penalty":         sideways_penalty,
+                },
+                "active": active,
+                "setup_type": setup_type,
+                "setup_score": float(r.get("setup_score", 0.0) or 0.0),
+                "signal_freshness_score": signal_freshness,
+                "signal_age_days": signal_age,
+                "result": r,
+            })
+
+        comp_cfg = TopNPortfolioBuilder._FACTOR_COMPONENTS
+        n = len(extracted)
+        for name, direction, weight in comp_cfg:
+            values = [e["components"][name] for e in extracted]
+            ranks = TopNPortfolioBuilder._cross_sectional_rank(values)
+            for i, e in enumerate(extracted):
+                e["components"][name + "_rank"] = 100.0 - ranks[i] if direction < 0 else ranks[i]
+
+        rows = []
+        for e in extracted:
+            r = e["result"]
+            setup_type = e["setup_type"]
+
+            score = sum(
+                e["components"][name + "_rank"] * weight
+                for name, _direction, weight in comp_cfg
+            )
+            # categorical bonuses
+            setup_bonus = {"pre_breakout": 18.0, "bottom_rebound": 20.0, "neutral": 0.0, "sideways": -16.0}.get(setup_type, 0.0)
+            low_price_bonus = 8.0 if bool(r.get("low_price_candidate", setup_type != "sideways")) else -22.0
+            active_bonus = 100.0 if e["active"] else 0.0
+
+            score += setup_bonus + low_price_bonus + active_bonus
+
+            backtest = r.get("backtest") or {}
+            rows.append({
+                "stock_code": e["stock_code"],
+                "ranking_score": score,
+                "expected_3m_score": r["latest_expected_3m_score"],
+                "matrix_score": r["latest_matrix_score"],
+                "regime_score": r.get("latest_regime_score"),
+                "entry_type": r["latest_entry_type"],
+                "signal_tier": r.get("latest_signal_tier"),
+                "latest_signal_date": r.get("latest_signal_date"),
+                "current_signal_active": r.get("current_signal_active", False),
+                "current_signal_actionable": r.get("current_signal_actionable", False),
+                "current_signal_score": r.get("current_signal_score"),
+                "avg_forward_return_60_signal": np.nan_to_num(r.get("avg_forward_return_60_signal", 0), nan=0),
+                "avg_forward_return_60_watch": np.nan_to_num(r.get("avg_forward_return_60_watch", 0), nan=0),
+                "backtest_return": backtest.get("total_return", 0),
+                "win_rate": backtest.get("win_rate", 0),
+                "trade_count": backtest.get("total_trades", 0),
+                "factor_set": r.get("factor_set"),
+                "selection_source": e["selection_source"],
+                "setup_type": setup_type,
+                "setup_score": e["setup_score"],
+                "sideways_penalty": e["components"]["sideways_penalty"],
+                "low_price_candidate": bool(r.get("low_price_candidate", setup_type != "sideways")),
+                "signal_freshness_score": e["signal_freshness_score"],
+                "signal_age_days": e["signal_age_days"],
+                "factor_explanation": r.get("factor_explanation", {}),
+                "industry_l1": r.get("industry_l1"),
+                "industry_l2": r.get("industry_l2"),
+                "industry_l3": r.get("industry_l3"),
+                "industry_source": r.get("industry_source"),
+                "industry_updated_at": r.get("industry_updated_at"),
+                "liquidity_ok": bool(r.get("liquidity_ok", True)),
+                "market_cap": r.get("market_cap"),
+                "pe_ratio": r.get("pe_ratio"),
+                "pb_ratio": r.get("pb_ratio"),
+                "quality_score": r.get("quality_score"),
+                "value_score": r.get("value_score"),
+                "risk_adjusted_score": r.get("risk_adjusted_score"),
+                "latest_risk_score": r.get("latest_risk_score"),
+                "drawdown_penalty_score": r.get("drawdown_penalty_score"),
+                "recent_drawdown": r.get("recent_drawdown"),
+                "recent_volatility": r.get("recent_volatility"),
+                "data_coverage_score": r.get("data_coverage_score"),
+                "data_missing_fields": r.get("data_missing_fields"),
+                "require_complete_data_for_selection": bool(r.get("require_complete_data_for_selection", False)),
+            })
+
+        return rows
 
     @staticmethod
     def _compute_signal_age_days(latest_signal_date):
@@ -690,6 +1163,65 @@ class TopNPortfolioBuilder:
         signal_date = pd.Timestamp(latest_signal_date)
         reference_date = pd.Timestamp.now("UTC").tz_localize(None).normalize()
         return max(int((reference_date - signal_date.normalize()).days), 0)
+
+    @staticmethod
+    def _double_sort_select(ranking: list[dict], top_n: int) -> list[dict] | None:
+        """QMJ Double Sort: size x quality portfolio construction.
+
+        Reference: Asness, Frazzini & Pedersen (2014) — double sort on size
+        and quality produces the QMJ factor. We adapt it for long-only top-N
+        selection.
+
+        1. Split by market_cap median -> Big / Small
+        2. Within each, split by quality_score tercile -> High / Mid / Low
+        3. Select preferentially from: Big+High, Small+High, Big+Mid, ...
+
+        Returns selected list or None if insufficient data for double sort.
+        """
+        valid = [
+            r for r in ranking
+            if (mc := r.get("market_cap")) is not None
+            and np.isfinite(mc) and mc > 0
+            and (qs := r.get("quality_score")) is not None
+            and np.isfinite(qs)
+        ]
+        if len(valid) < max(top_n * 2, 20):
+            return None
+
+        caps = [r["market_cap"] for r in valid]
+        cap_median = np.median(caps)
+        big = [r for r in valid if r["market_cap"] >= cap_median]
+        small = [r for r in valid if r["market_cap"] < cap_median]
+
+        def _quality_terciles(group):
+            if len(group) < 3:
+                return {"High": group, "Mid": [], "Low": []}
+            qualities = [r["quality_score"] for r in group]
+            q33 = float(np.percentile(qualities, 33.33))
+            q67 = float(np.percentile(qualities, 66.67))
+            return {
+                "High": [r for r in group if r["quality_score"] >= q67],
+                "Mid": [r for r in group if q33 <= r["quality_score"] < q67],
+                "Low": [r for r in group if r["quality_score"] < q33],
+            }
+
+        big_q = _quality_terciles(big)
+        small_q = _quality_terciles(small)
+
+        # Sort within each bucket by ranking_score
+        for bucket in [big_q["High"], small_q["High"], big_q["Mid"],
+                       small_q["Mid"], big_q["Low"], small_q["Low"]]:
+            bucket.sort(key=lambda r: r.get("ranking_score", 0), reverse=True)
+
+        selected = []
+        for bucket in [big_q["High"], small_q["High"], big_q["Mid"],
+                       small_q["Mid"], big_q["Low"], small_q["Low"]]:
+            needed = top_n - len(selected)
+            if needed <= 0:
+                break
+            selected.extend(bucket[:needed])
+
+        return selected if len(selected) >= top_n else None
 
     @staticmethod
     def _summarize_low_price_setup(data):

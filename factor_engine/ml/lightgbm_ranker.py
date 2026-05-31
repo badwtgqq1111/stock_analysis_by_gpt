@@ -156,6 +156,7 @@ class LightGBMRankerPipeline:
     params: dict | None = None
     max_features: int = 0
     model_type: str = "lightgbm"
+    neutralize_cluster_features: bool = False
 
     # Legacy compatibility fields (deprecated, ignored in new logic)
     drawdown_horizon: int = 20
@@ -239,11 +240,20 @@ class LightGBMRankerPipeline:
         if not feature_columns:
             raise ValueError("no feature columns available for LightGBM")
 
-        # --- Build CSRankNorm labels ---
+        # --- Cluster feature neutralization (QMJ-style) ---
+        if self.neutralize_cluster_features:
+            merged = self._neutralize_cluster_features(merged, feature_columns)
+
+        # --- Winsorize forward returns (cross-sectional, 0.5%/99.5% quantiles) ---
         target_col = f"forward_return_{self.label_horizon}"
         if target_col not in merged.columns:
             raise ValueError(f"target column {target_col} not found in merged frame")
 
+        merged[target_col] = merged.groupby("trade_date", sort=True)[target_col].transform(
+            lambda x: x.clip(x.quantile(0.005), x.quantile(0.995))
+        )
+
+        # --- Build CSRankNorm labels ---
         merged["label"] = merged.groupby("trade_date", sort=True)[target_col].transform(_cs_rank_norm)
         labeled = merged.dropna(subset=["label"]).copy()
         if labeled.empty:
@@ -471,7 +481,43 @@ class LightGBMRankerPipeline:
             if col not in blocked
             and not col.startswith("forward_")
             and not col.startswith("target_")
+            and not col.startswith("ipo_")
         ]
+
+    @staticmethod
+    def _neutralize_cluster_features(merged: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
+        """Residualize features against cluster membership.
+
+        For each feature, subtract the within-cluster mean, removing sector-level
+        bias from the feature signal. Stocks with cluster_id == -1 use the global
+        mean (no cluster info available).
+
+        Reference: QMJ within-industry rank normalization (Asness et al. 2014).
+        Cluster-mean residualization is the continuous-feature analogue of
+        within-industry z-scoring.
+        """
+        if "cluster_id" not in merged.columns:
+            return merged
+
+        # Only neutralize if we have meaningful cluster diversity
+        valid_clusters = merged["cluster_id"].replace(-1, np.nan).dropna().nunique()
+        if valid_clusters < 2:
+            return merged
+
+        global_means = merged[feature_columns].mean()
+        neutralized = merged.copy()
+
+        for col in feature_columns:
+            cluster_means = merged.groupby("cluster_id")[col].transform(
+                lambda x: x.mean() if x.notna().sum() >= 3 else global_means[col]
+            )
+            # For cluster_id == -1, use global mean
+            unknown_mask = merged["cluster_id"] == -1
+            if unknown_mask.any():
+                cluster_means.loc[unknown_mask] = global_means[col]
+            neutralized[col] = merged[col].fillna(global_means[col]) - cluster_means
+
+        return neutralized
 
     def _select_top_features(self, model, feature_columns: list[str]) -> list[str]:
         """Select top N features by importance from a trained model."""
@@ -488,6 +534,10 @@ class LightGBMRankerPipeline:
         RegressorClass,
     ) -> tuple[pd.DataFrame, dict]:
         """Single train/valid split. When max_features>0, uses two-stage: first fit to select top features, then refit."""
+        if self.neutralize_cluster_features:
+            labeled = self._neutralize_cluster_features(labeled, feature_columns)
+            full_frame = self._neutralize_cluster_features(full_frame, feature_columns)
+
         all_dates = sorted(labeled["trade_date"].unique())
         valid_count = max(1, int(len(all_dates) * self.valid_fraction))
         valid_dates_set = set(all_dates[-valid_count:])

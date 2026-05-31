@@ -31,73 +31,58 @@ if "reporting" not in sys.modules:
     reporting_stub.generate_trading_strategy = lambda *args, **kwargs: {}
     sys.modules["reporting"] = reporting_stub
 
-if "strategy_signals" not in sys.modules:
-    strategy_stub = types.ModuleType("strategy_signals")
+if "portfolio_strategy" not in sys.modules:
+    strategy_stub = types.ModuleType("portfolio_strategy")
 
-    class _DummyBase:
-        def identify_buy_signals(self, data, stock_code=None):
-            return None
-
-        def identify_sell_signals(self, data):
-            return None
-
-    class BuyStrategy(_DummyBase):
-        pass
-
-    class SellStrategy(_DummyBase):
-        pass
-
-    class CurrentStrategy(BuyStrategy, SellStrategy):
-        pass
-
-    strategy_stub.BuyStrategy = BuyStrategy
-    strategy_stub.SellStrategy = SellStrategy
-    strategy_stub.CurrentStrategy = CurrentStrategy
     strategy_stub.STRATEGY_SUITE = []
-    sys.modules["strategy_signals"] = strategy_stub
+    sys.modules["portfolio_strategy"] = strategy_stub
 
-from analyzer_core import StockAnalyzer
+from core import StockAnalyzer
 from data.model import normalize_ohlcv_frame
 from data.store import DataLayout, MarketDataWarehouse
 
 
 def test_backtest_portfolio_uses_all_hk_stocks_when_stock_codes_missing():
     original_get_all_stocks = StockAnalyzer.get_all_stocks
-    original_analyze_stock = StockAnalyzer.analyze_stock
+    original_analyze_lightgbm = getattr(StockAnalyzer, "_analyze_lightgbm_market", None)
 
     def stub_get_all_stocks(self):
         return ["00001", "00002", "00003"]
 
-    def stub_analyze_stock(self, stock_code, days=365):
-        return {
-            "stock_code": stock_code,
-            "data": None,
-            "buy_signals": None,
-            "sell_signals": None,
-            "backtest": {"total_return": float(int(stock_code[-1])), "win_rate": 50.0, "total_trades": 1},
-            "latest_price": 10.0,
-            "price_change_30d": 1.0,
-            "latest_expected_3m_score": 60.0 + float(int(stock_code[-1])),
-            "latest_matrix_score": 50.0,
-            "latest_regime_score": 50.0,
-            "latest_entry_type": "demo_entry",
-            "latest_signal_tier": "strong",
-            "latest_signal_date": None,
-            "current_signal_active": True,
-            "current_signal_actionable": True,
-            "current_signal_score": 60.0 + float(int(stock_code[-1])),
-            "avg_forward_return_60_signal": 5.0,
-            "avg_forward_return_60_watch": 0.0,
-        }
+    def stub_analyze_lightgbm(self, stock_codes, days=365, **kwargs):
+        return [
+            {
+                "stock_code": sc,
+                "data": None,
+                "buy_signals": None,
+                "sell_signals": None,
+                "backtest": {"total_return": float(int(sc[-1])), "win_rate": 50.0, "total_trades": 1},
+                "latest_price": 10.0,
+                "price_change_30d": 1.0,
+                "latest_expected_3m_score": 60.0 + float(int(sc[-1])),
+                "latest_matrix_score": 50.0,
+                "latest_regime_score": 50.0,
+                "latest_entry_type": "lightgbm_rank",
+                "latest_signal_tier": "strong",
+                "latest_signal_date": None,
+                "current_signal_active": True,
+                "current_signal_actionable": True,
+                "current_signal_score": 60.0 + float(int(sc[-1])),
+                "avg_forward_return_60_signal": 5.0,
+                "avg_forward_return_60_watch": 0.0,
+            }
+            for sc in stock_codes
+        ]
 
     StockAnalyzer.get_all_stocks = stub_get_all_stocks
-    StockAnalyzer.analyze_stock = stub_analyze_stock
+    StockAnalyzer._analyze_lightgbm_market = stub_analyze_lightgbm
     try:
         analyzer = StockAnalyzer()
         result = analyzer.backtest_portfolio(stock_codes=None, days=120, top_n=2)
     finally:
         StockAnalyzer.get_all_stocks = original_get_all_stocks
-        StockAnalyzer.analyze_stock = original_analyze_stock
+        if original_analyze_lightgbm is not None:
+            StockAnalyzer._analyze_lightgbm_market = original_analyze_lightgbm
 
     assert result is not None
     assert result["stock_pool"] == ["00001", "00002", "00003"]
@@ -129,37 +114,39 @@ def test_backtest_hk_market_delegates_to_portfolio_builder():
 
 
 def test_backtest_portfolio_supports_parallel_analysis():
-    original_analyze_stock = StockAnalyzer.analyze_stock
+    original_analyze_stock_factors = getattr(StockAnalyzer, "analyze_stock_factors", None)
 
     thread_names = []
     lock = threading.Lock()
 
-    def stub_analyze_stock(self, stock_code, days=365):
+    def stub_analyze_stock_factors(self, stock_code, days=365, factor_set="qlib_alpha158", factor_score_config=None, persist_features=False):
         with lock:
             thread_names.append(threading.current_thread().name)
         time.sleep(0.01)
+        score = 60.0 + float(int(stock_code[-1]))
         return {
             "stock_code": stock_code,
             "data": None,
-            "buy_signals": None,
-            "sell_signals": None,
+            "feature_frame": pd.DataFrame(),
+            "factor_scores": {"composite_score": score},
+            "factor_explanation": {"factor_set": factor_set, "component_weights": {}, "component_scores": {}, "top_positive_factors": [], "top_negative_factors": []},
             "backtest": {"total_return": float(int(stock_code[-1])), "win_rate": 50.0, "total_trades": 1},
             "latest_price": 10.0,
             "price_change_30d": 1.0,
-            "latest_expected_3m_score": 60.0 + float(int(stock_code[-1])),
+            "latest_expected_3m_score": score,
             "latest_matrix_score": 50.0,
             "latest_regime_score": 50.0,
-            "latest_entry_type": "demo_entry",
+            "latest_entry_type": "factor_rank",
             "latest_signal_tier": "strong",
             "latest_signal_date": None,
             "current_signal_active": True,
             "current_signal_actionable": True,
-            "current_signal_score": 60.0 + float(int(stock_code[-1])),
+            "current_signal_score": score,
             "avg_forward_return_60_signal": 5.0,
             "avg_forward_return_60_watch": 0.0,
         }
 
-    StockAnalyzer.analyze_stock = stub_analyze_stock
+    StockAnalyzer.analyze_stock_factors = stub_analyze_stock_factors
     try:
         analyzer = StockAnalyzer()
         result = analyzer.backtest_portfolio(
@@ -167,9 +154,11 @@ def test_backtest_portfolio_supports_parallel_analysis():
             days=120,
             top_n=2,
             max_workers=4,
+            analysis_mode="factor",
         )
     finally:
-        StockAnalyzer.analyze_stock = original_analyze_stock
+        if original_analyze_stock_factors is not None:
+            StockAnalyzer.analyze_stock_factors = original_analyze_stock_factors
 
     assert result is not None
     assert len(result["analysis_results"]) == 4
@@ -191,6 +180,7 @@ def test_backtest_portfolio_supports_lightgbm_analysis_mode():
         signal_recipes=None,
         persist_features=False,
         show_progress=False,
+        **kwargs,
     ):
         return [
             {
@@ -275,13 +265,13 @@ def test_backtest_portfolio_supports_lightgbm_analysis_mode():
 
 
 def test_stock_analyzer_reads_from_new_data_architecture_without_legacy_db():
-    original_database_manager = getattr(sys.modules["analyzer_core"], "DatabaseManager", None)
+    original_database_manager = getattr(sys.modules["core"], "DatabaseManager", None)
 
     class ExplodingDatabaseManager:
         def __init__(self, *args, **kwargs):
             raise AssertionError("legacy DatabaseManager should not be initialized")
 
-    sys.modules["analyzer_core"].DatabaseManager = ExplodingDatabaseManager
+    sys.modules["core"].DatabaseManager = ExplodingDatabaseManager
 
     raw_frame = pd.DataFrame(
         {
@@ -311,7 +301,7 @@ def test_stock_analyzer_reads_from_new_data_architecture_without_legacy_db():
             analyzer.close()
         finally:
             if original_database_manager is not None:
-                sys.modules["analyzer_core"].DatabaseManager = original_database_manager
+                sys.modules["core"].DatabaseManager = original_database_manager
 
     assert stocks == ["00700"]
     assert data is not None
@@ -357,12 +347,8 @@ def test_load_stock_data_batch_returns_per_stock_frames():
     assert len(batch_map["00005"]) == 2
 
 
-def test_backtest_hk_market_factor_mode_does_not_require_strategy_signals():
-    original_analyze_stock = StockAnalyzer.analyze_stock
+def test_backtest_hk_market_factor_mode_does_not_require_portfolio_strategy():
     original_analyze_stock_factors = getattr(StockAnalyzer, "analyze_stock_factors", None)
-
-    def exploding_analyze_stock(self, stock_code, days=365):
-        raise AssertionError("strategy-based analyze_stock should not be used in factor mode")
 
     def stub_analyze_stock_factors(self, stock_code, days=365, factor_set="qlib_alpha158", factor_score_config=None, persist_features=False):
         score_map = {"00001": 90.0, "00002": 80.0, "00003": 70.0}
@@ -406,7 +392,6 @@ def test_backtest_hk_market_factor_mode_does_not_require_strategy_signals():
             "selection_source": "factor_engine",
         }
 
-    StockAnalyzer.analyze_stock = exploding_analyze_stock
     StockAnalyzer.analyze_stock_factors = stub_analyze_stock_factors
     try:
         analyzer = StockAnalyzer()
@@ -418,7 +403,6 @@ def test_backtest_hk_market_factor_mode_does_not_require_strategy_signals():
         )
         analyzer.close()
     finally:
-        StockAnalyzer.analyze_stock = original_analyze_stock
         if original_analyze_stock_factors is not None:
             StockAnalyzer.analyze_stock_factors = original_analyze_stock_factors
 
@@ -431,14 +415,10 @@ def test_backtest_hk_market_factor_mode_does_not_require_strategy_signals():
 
 
 def test_backtest_portfolio_factor_mode_supports_parallel_analysis():
-    original_analyze_stock = StockAnalyzer.analyze_stock
     original_analyze_stock_factors = getattr(StockAnalyzer, "analyze_stock_factors", None)
 
     thread_names = []
     lock = threading.Lock()
-
-    def exploding_analyze_stock(self, stock_code, days=365):
-        raise AssertionError("strategy-based analyze_stock should not be used in factor mode")
 
     def stub_analyze_stock_factors(self, stock_code, days=365, factor_set="qlib_alpha158", factor_score_config=None, persist_features=False):
         with lock:
@@ -480,7 +460,6 @@ def test_backtest_portfolio_factor_mode_supports_parallel_analysis():
             "selection_source": "factor_engine",
         }
 
-    StockAnalyzer.analyze_stock = exploding_analyze_stock
     StockAnalyzer.analyze_stock_factors = stub_analyze_stock_factors
     try:
         analyzer = StockAnalyzer()
@@ -493,7 +472,6 @@ def test_backtest_portfolio_factor_mode_supports_parallel_analysis():
         )
         analyzer.close()
     finally:
-        StockAnalyzer.analyze_stock = original_analyze_stock
         if original_analyze_stock_factors is not None:
             StockAnalyzer.analyze_stock_factors = original_analyze_stock_factors
 
@@ -748,7 +726,7 @@ def test_backtest_portfolio_factor_mode_reports_batch_progress_details():
 
 
 def test_backtest_portfolio_lightgbm_mode_reports_progress_details():
-    analyzer_module = sys.modules["analyzer_core"]
+    analyzer_module = sys.modules["core"]
     original_load_stock_data_batch = StockAnalyzer.load_stock_data_batch
     original_create_factor_set = analyzer_module.create_factor_set
     original_ranker_cls = analyzer_module.LightGBMRankerPipeline
@@ -795,7 +773,7 @@ def test_backtest_portfolio_lightgbm_mode_reports_progress_details():
             result.index = feature_index
             return result, metadata
 
-    def stub_load_stock_data_batch(self, stock_codes, days=365):
+    def stub_load_stock_data_batch(self, stock_codes, days=365, **kwargs):
         batch_map = {}
         for idx, stock_code in enumerate(stock_codes, start=1):
             dates = pd.date_range("2024-01-02", periods=80, freq="B")
@@ -918,7 +896,8 @@ def test_build_factor_validation_report_uses_feature_cache_when_fresh():
     def stub_load_stock_data(self, stock_code, days=365):
         call_count["value"] += 1
         dates = pd.date_range("2024-01-02", periods=40, freq="B")
-        close = np.linspace(10, 20, len(dates))
+        rank = int(stock_code[-1])
+        close = np.linspace(10 + rank, 20 + rank * 1.5, len(dates))
         return pd.DataFrame(
             {
                 "Open": close * 0.99,
@@ -935,7 +914,7 @@ def test_build_factor_validation_report_uses_feature_cache_when_fresh():
         with tempfile.TemporaryDirectory() as tmp_dir:
             analyzer = StockAnalyzer(db_dir=tmp_dir)
             kwargs = dict(
-                stock_codes=["00001", "00002"],
+                stock_codes=["00001", "00002", "00003"],
                 days=30,
                 factor_set="qlib_alpha158",
                 horizons=(5,),
@@ -952,7 +931,7 @@ def test_build_factor_validation_report_uses_feature_cache_when_fresh():
 
     assert first is not None
     assert second is not None
-    assert first_calls == 2
+    assert first_calls == 3
     assert call_count["value"] == first_calls
     assert not second["ic_summary"].empty
 
@@ -1129,7 +1108,7 @@ def test_build_factor_validation_report_records_feature_materialization_metadata
 
 
 def test_analyze_factor_batch_handles_duplicate_panel_dates_without_series_truth_error(monkeypatch):
-    analyzer_module = sys.modules["analyzer_core"]
+    analyzer_module = sys.modules["core"]
     original_load_stock_data = StockAnalyzer.load_stock_data
     original_create_factor_set = analyzer_module.create_factor_set
     original_compute_factor_scores = StockAnalyzer._compute_factor_scores
@@ -1224,7 +1203,7 @@ if __name__ == "__main__":
     test_backtest_portfolio_supports_parallel_analysis()
     test_backtest_portfolio_supports_lightgbm_analysis_mode()
     test_stock_analyzer_reads_from_new_data_architecture_without_legacy_db()
-    test_backtest_hk_market_factor_mode_does_not_require_strategy_signals()
+    test_backtest_hk_market_factor_mode_does_not_require_portfolio_strategy()
     test_backtest_portfolio_factor_mode_supports_parallel_analysis()
     test_build_factor_validation_report_uses_cross_sectional_panel()
     test_backtest_portfolio_factor_mode_uses_batch_analysis()

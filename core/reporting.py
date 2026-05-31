@@ -5,82 +5,6 @@ import pandas as pd
 from matplotlib.patches import Rectangle
 
 
-def generate_trading_strategy(analysis_results):
-    """
-    基于分析结果生成交易策略
-
-    Args:
-        analysis_results (list): 所有股票的分析结果
-
-    Returns:
-        dict: 交易策略建议
-    """
-    if not analysis_results:
-        return None
-
-    valid_results = [r for r in analysis_results if r['backtest'] is not None]
-    if not valid_results:
-        return None
-
-    ranked_by_expected_score = sorted(
-        valid_results,
-        key=lambda x: (
-            -((100 if x.get('current_signal_active') and x.get('current_signal_actionable') else 0)
-              + np.nan_to_num(x.get('current_signal_score', np.nan), nan=0) * 0.50
-              + np.nan_to_num(x.get('latest_expected_3m_score', np.nan), nan=0) * 0.20
-              + np.nan_to_num(x.get('latest_matrix_score', np.nan), nan=0) * 0.15
-              + np.nan_to_num(x.get('latest_regime_score', np.nan), nan=0) * 0.15),
-            -np.nan_to_num(x.get('current_signal_score', np.nan), nan=-1),
-            -np.nan_to_num(x.get('latest_matrix_score', np.nan), nan=-1),
-            -x['backtest']['total_return']
-        )
-    )
-
-    strategy = {
-        'ranked_stocks': [
-            {
-                'stock_code': r['stock_code'],
-                'ranking_score': (
-                    (100 if r.get('current_signal_active') and r.get('current_signal_actionable') else 0)
-                    + np.nan_to_num(r.get('current_signal_score', np.nan), nan=0) * 0.50
-                    + np.nan_to_num(r.get('latest_expected_3m_score', np.nan), nan=0) * 0.20
-                    + np.nan_to_num(r.get('latest_matrix_score', np.nan), nan=0) * 0.15
-                    + np.nan_to_num(r.get('latest_regime_score', np.nan), nan=0) * 0.15
-                ),
-                'expected_3m_score': r.get('latest_expected_3m_score'),
-                'matrix_score': r.get('latest_matrix_score'),
-                'regime_score': r.get('latest_regime_score'),
-                'entry_type': r.get('latest_entry_type'),
-                'signal_tier': r.get('latest_signal_tier'),
-                'latest_signal_date': r.get('latest_signal_date'),
-                'current_signal_active': r.get('current_signal_active', False),
-                'current_signal_actionable': r.get('current_signal_actionable', False),
-                'current_signal_score': r.get('current_signal_score'),
-                'avg_forward_return_60_signal': r.get('avg_forward_return_60_signal', 0),
-                'avg_forward_return_60_watch': r.get('avg_forward_return_60_watch', 0),
-                'win_rate': r['backtest']['win_rate'],
-                'total_return': r['backtest']['total_return'],
-                'total_trades': r['backtest']['total_trades']
-            } for r in ranked_by_expected_score
-        ],
-        'recommended_strategy': {
-            'selection_rule': '优先选择最近5个交易日内出现的强信号；同日候选只按当日可见的 expected_3m_score、matrix_score、regime_score、signal_strength 与 risk_score 综合排序。若当前无强信号，再回退到当日评分最高的 Top 2-3',
-            'primary_buy_signals': ['站上MA25且10日内倍量', '趋势回踩', '平台突破'],
-            'supplementary_buy_signals': ['超卖反转'],
-            'exit_rules': ['策略卖点：高位放量阴线', '风控退出：硬止损', '风控退出：移动止盈', '风控退出：持有满60个交易日'],
-            'risk_management': {
-                'max_position_size': '组合等权分配',
-                'stop_loss': '2倍ATR或约8%',
-                'take_profit': '以移动止盈代替固定止盈',
-                'max_daily_trades': 3,
-                'holding_horizon': 60
-            }
-        }
-    }
-
-    return strategy
-
-
 def generate_strategy_comparison_report(strategy_results, stock_codes):
     """生成多策略收益对比报告。"""
     if not strategy_results:
@@ -185,57 +109,61 @@ def format_table_for_console(dataframe):
     return dataframe.to_string(index=False, na_rep='N/A', float_format=lambda value: f"{value:.1f}")
 
 
-def create_visualization_charts(data, buy_signals, sell_signals, stock_code):
-    """
-    创建可视化图表 - 主要显示StochRSI、成交量、CYC、RSI、ATR指标
+def _has_col(data, name):
+    return name in data.columns and not data[name].isna().all()
 
-    Args:
-        data (DataFrame): 股票数据
-        buy_signals (DataFrame): 买入信号
-        sell_signals (DataFrame): 卖出信号
-        stock_code (str): 股票代码
-    """
+
+def create_visualization_charts(data, buy_signals, sell_signals, stock_code):
+    """K线 + 成交量 + 可选指标面板（仅渲染数据中存在的列）。"""
+
+    indicator_panels = []
+    if _has_col(data, "StochRSI_K"):
+        indicator_panels.append(("stochrsi", "StochRSI指标", "StochRSI"))
+    if _has_col(data, "CYC"):
+        indicator_panels.append(("cyc", "CYC周期指标", "CYC"))
+    if _has_col(data, "RSI"):
+        indicator_panels.append(("rsi", "RSI指标", "RSI"))
+    if _has_col(data, "ATR"):
+        indicator_panels.append(("atr", "ATR波动率指标", "ATR/波动率"))
+
+    n_panels = 2 + len(indicator_panels)  # candle + volume + indicators
+    height_ratios = [3, 1] + [1] * len(indicator_panels)
+
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
-    fig, axes = plt.subplots(6, 1, figsize=(16, 24), gridspec_kw={'height_ratios': [3, 1, 1, 1, 1, 1]})
+    fig, axes = plt.subplots(n_panels, 1, figsize=(16, 4 + 3 * n_panels),
+                             gridspec_kw={'height_ratios': height_ratios})
+    if n_panels == 1:
+        axes = [axes]
 
+    # ---- panel 0: candle chart ----
     x_values = mdates.date2num(data.index.to_pydatetime())
     candle_width = 0.6
 
     for idx, (_, row) in enumerate(data.iterrows()):
         x = x_values[idx]
-        open_price = row['Open']
-        close_price = row['Close']
-        high_price = row['High']
-        low_price = row['Low']
-
-        if close_price >= open_price:
-            color = 'red'
-            body_bottom = open_price
-            body_top = close_price
-        else:
-            color = 'green'
-            body_bottom = close_price
-            body_top = open_price
-
-        axes[0].plot([x, x], [low_price, high_price], color=color, linewidth=1.2, solid_capstyle='round', alpha=0.85)
-
+        color = 'red' if row['Close'] >= row['Open'] else 'green'
+        body_bottom = min(row['Open'], row['Close'])
+        body_top = max(row['Open'], row['Close'])
+        axes[0].plot([x, x], [row['Low'], row['High']], color=color, linewidth=1.2,
+                     solid_capstyle='round', alpha=0.85)
         body_height = max(body_top - body_bottom, 0.001)
-        rectangle = Rectangle((x - candle_width / 2, body_bottom), candle_width, body_height,
-                              facecolor=color, edgecolor=color, linewidth=0.8, alpha=0.9)
-        axes[0].add_patch(rectangle)
+        axes[0].add_patch(Rectangle(
+            (x - candle_width / 2, body_bottom), candle_width, body_height,
+            facecolor=color, edgecolor=color, linewidth=0.8, alpha=0.9))
 
-    axes[0].plot(data.index, data['MA5'], label='MA5', color='blue', linewidth=1, alpha=0.9)
-    axes[0].plot(data.index, data['MA20'], label='MA20', color='orange', linewidth=1, alpha=0.9)
+    if _has_col(data, "MA5"):
+        axes[0].plot(data.index, data['MA5'], label='MA5', color='blue', linewidth=1, alpha=0.9)
+    if _has_col(data, "MA20"):
+        axes[0].plot(data.index, data['MA20'], label='MA20', color='orange', linewidth=1, alpha=0.9)
 
     if buy_signals is not None and not buy_signals.empty:
-        axes[0].scatter(buy_signals['date'], buy_signals['close'], marker='^', color='red', s=120,
-                        label='买入信号', zorder=6, edgecolors='black', linewidth=1)
-
+        axes[0].scatter(buy_signals['date'], buy_signals['close'], marker='^', color='red',
+                        s=120, label='买入信号', zorder=6, edgecolors='black', linewidth=1)
     if sell_signals is not None and not sell_signals.empty:
-        axes[0].scatter(sell_signals['date'], sell_signals['close'], marker='v', color='green', s=120,
-                        label='卖出信号', zorder=6, edgecolors='black', linewidth=1)
+        axes[0].scatter(sell_signals['date'], sell_signals['close'], marker='v', color='green',
+                        s=120, label='卖出信号', zorder=6, edgecolors='black', linewidth=1)
 
     axes[0].set_xlim(x_values[0] - 1, x_values[-1] + 1)
     axes[0].xaxis_date()
@@ -244,55 +172,62 @@ def create_visualization_charts(data, buy_signals, sell_signals, stock_code):
     axes[0].grid(True, alpha=0.3)
     axes[0].set_ylabel('价格')
 
-    axes[1].plot(data.index, data['StochRSI_K'], label='StochRSI_K', color='orange', linewidth=1.5)
-    axes[1].plot(data.index, data['StochRSI_D'], label='StochRSI_D', color='blue', linewidth=1, alpha=0.8)
-    axes[1].axhline(y=80, color='red', linestyle='--', alpha=0.7, label='超买线(80)')
-    axes[1].axhline(y=20, color='green', linestyle='--', alpha=0.7, label='超卖线(20)')
-    axes[1].fill_between(data.index, data['StochRSI_K'], 20, where=(data['StochRSI_K'] <= 20), color='green', alpha=0.3, label='超卖区域')
-    axes[1].set_title('StochRSI指标', fontsize=12, fontweight='bold')
-    axes[1].set_ylim(0, 100)
+    # ---- panel 1: volume ----
+    vol_colors = ['red' if data['Close'].iloc[i] > data['Open'].iloc[i] else 'green'
+                  for i in range(len(data))]
+    axes[1].bar(data.index, data['Volume'], color=vol_colors, alpha=0.7, width=1)
+    if _has_col(data, "Volume_MA10"):
+        axes[1].plot(data.index, data['Volume_MA10'], label='Volume_MA10', color='blue', linewidth=1.5)
+    axes[1].set_title('成交量', fontsize=12, fontweight='bold')
     axes[1].legend(loc='upper left')
     axes[1].grid(True, alpha=0.3)
-    axes[1].set_ylabel('StochRSI')
+    axes[1].set_ylabel('成交量')
 
-    volume_colors = ['red' if data['Close'].iloc[i] > data['Open'].iloc[i] else 'green' for i in range(len(data))]
-    axes[2].bar(data.index, data['Volume'], color=volume_colors, alpha=0.7, width=1)
-    axes[2].plot(data.index, data['Volume_MA10'], label='Volume_MA10', color='blue', linewidth=1.5)
-    axes[2].set_title('成交量', fontsize=12, fontweight='bold')
-    axes[2].legend(loc='upper left')
-    axes[2].grid(True, alpha=0.3)
-    axes[2].set_ylabel('成交量')
+    # ---- indicator panels ----
+    for panel_idx, (panel_type, title, ylabel) in enumerate(indicator_panels):
+        ax = axes[2 + panel_idx]
 
-    axes[3].plot(data.index, data['CYC'], label='CYC', color='purple', linewidth=1.5)
-    axes[3].plot(data.index, data['CYC_MA'], label='CYC_MA', color='orange', linewidth=1, alpha=0.8)
-    axes[3].axhline(y=30, color='green', linestyle='--', alpha=0.7, label='低位线(30)')
-    axes[3].axhline(y=70, color='red', linestyle='--', alpha=0.7, label='高位线(70)')
-    axes[3].fill_between(data.index, data['CYC'], 30, where=(data['CYC'] <= 30), color='green', alpha=0.3, label='低位区域')
-    axes[3].set_title('CYC周期指标', fontsize=12, fontweight='bold')
-    axes[3].set_ylim(0, 100)
-    axes[3].legend(loc='upper left')
-    axes[3].grid(True, alpha=0.3)
-    axes[3].set_ylabel('CYC')
+        if panel_type == "stochrsi":
+            ax.plot(data.index, data['StochRSI_K'], label='StochRSI_K', color='orange', linewidth=1.5)
+            ax.plot(data.index, data['StochRSI_D'], label='StochRSI_D', color='blue', linewidth=1, alpha=0.8)
+            ax.axhline(y=80, color='red', linestyle='--', alpha=0.7, label='超买线(80)')
+            ax.axhline(y=20, color='green', linestyle='--', alpha=0.7, label='超卖线(20)')
+            ax.fill_between(data.index, data['StochRSI_K'], 20,
+                            where=(data['StochRSI_K'] <= 20), color='green', alpha=0.3, label='超卖区域')
+            ax.set_ylim(0, 100)
 
-    axes[4].plot(data.index, data['RSI'], label='RSI', color='darkblue', linewidth=1.5)
-    axes[4].axhline(y=70, color='red', linestyle='--', alpha=0.7, label='超买线(70)')
-    axes[4].axhline(y=30, color='green', linestyle='--', alpha=0.7, label='超卖线(30)')
-    axes[4].fill_between(data.index, data['RSI'], 30, where=(data['RSI'] <= 30), color='green', alpha=0.3, label='超卖区域')
-    axes[4].set_title('RSI指标', fontsize=12, fontweight='bold')
-    axes[4].set_ylim(0, 100)
-    axes[4].legend(loc='upper left')
-    axes[4].grid(True, alpha=0.3)
-    axes[4].set_ylabel('RSI')
+        elif panel_type == "cyc":
+            ax.plot(data.index, data['CYC'], label='CYC', color='purple', linewidth=1.5)
+            if _has_col(data, "CYC_MA"):
+                ax.plot(data.index, data['CYC_MA'], label='CYC_MA', color='orange', linewidth=1, alpha=0.8)
+            ax.axhline(y=30, color='green', linestyle='--', alpha=0.7, label='低位线(30)')
+            ax.axhline(y=70, color='red', linestyle='--', alpha=0.7, label='高位线(70)')
+            ax.fill_between(data.index, data['CYC'], 30,
+                            where=(data['CYC'] <= 30), color='green', alpha=0.3, label='低位区域')
+            ax.set_ylim(0, 100)
 
-    axes[5].plot(data.index, data['ATR'], label='ATR', color='brown', linewidth=1.5)
-    axes[5].plot(data.index, data['Volatility'], label='Volatility', color='orange', linewidth=1, alpha=0.8)
-    axes[5].set_title('ATR波动率指标', fontsize=12, fontweight='bold')
-    axes[5].legend(loc='upper left')
-    axes[5].grid(True, alpha=0.3)
-    axes[5].set_ylabel('ATR/波动率')
+        elif panel_type == "rsi":
+            ax.plot(data.index, data['RSI'], label='RSI', color='darkblue', linewidth=1.5)
+            ax.axhline(y=70, color='red', linestyle='--', alpha=0.7, label='超买线(70)')
+            ax.axhline(y=30, color='green', linestyle='--', alpha=0.7, label='超卖线(30)')
+            ax.fill_between(data.index, data['RSI'], 30,
+                            where=(data['RSI'] <= 30), color='green', alpha=0.3, label='超卖区域')
+            ax.set_ylim(0, 100)
+
+        elif panel_type == "atr":
+            ax.plot(data.index, data['ATR'], label='ATR', color='brown', linewidth=1.5)
+            if _has_col(data, "Volatility"):
+                ax.plot(data.index, data['Volatility'], label='Volatility', color='orange', linewidth=1, alpha=0.8)
+
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.legend(loc='upper left')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylabel(ylabel)
 
     plt.tight_layout()
 
+    from pathlib import Path
+    Path("output").mkdir(parents=True, exist_ok=True)
     output_file = f"output/{stock_code}_analysis.png"
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.close()
@@ -330,15 +265,15 @@ def analyze_target_date_alignment(data, buy_signals, target_dates, window=3):
 
         row = data.loc[target_ts]
         blocking_reasons = []
-        if row['StochRSI_K'] >= 20:
+        if _has_col(data, "StochRSI_K") and row.get('StochRSI_K', 0) >= 20:
             blocking_reasons.append('非超卖区')
-        if row['RSI'] > 40:
+        if _has_col(data, "RSI") and row.get('RSI', 50) > 40:
             blocking_reasons.append('RSI偏强')
-        if row['CYC'] > 5:
+        if _has_col(data, "CYC") and row.get('CYC', 10) > 5:
             blocking_reasons.append('CYC未回到低位')
-        if pd.notna(row['BB_Upper']) and row['Close'] > row['BB_Upper']:
+        if _has_col(data, "BB_Upper") and pd.notna(row.get('BB_Upper')) and row['Close'] > row['BB_Upper']:
             blocking_reasons.append('价格已到布林上轨附近')
-        if pd.notna(row['Volume_MA10']) and row['Volume'] > row['Volume_MA10'] * 1.5:
+        if _has_col(data, "Volume_MA10") and pd.notna(row.get('Volume_MA10')) and row['Volume'] > row['Volume_MA10'] * 1.5:
             blocking_reasons.append('成交量已放大突破')
 
         results.append({
@@ -403,7 +338,7 @@ def analyze_buy_points(data, buy_signals):
         # 3. 布林带位置 (最高15分)
         bb_score = 0
         close_price = signal['close']
-        bb_lower = data.loc[signal['date'], 'BB_Lower'] if signal['date'] in data.index else None
+        bb_lower = data.loc[signal['date'], 'BB_Lower'] if signal['date'] in data.index and _has_col(data, 'BB_Lower') else None
         if pd.notna(bb_lower):
             distance_to_lower = (close_price - bb_lower) / close_price
             if distance_to_lower > 0.05:  # 距离下轨5%以上
@@ -419,8 +354,8 @@ def analyze_buy_points(data, buy_signals):
 
         # 4. 波动率评估 (最高15分)
         vol_score = 0
-        volatility = data.loc[signal['date'], 'Volatility'] if signal['date'] in data.index else None
-        atr = data.loc[signal['date'], 'ATR'] if signal['date'] in data.index else None
+        volatility = data.loc[signal['date'], 'Volatility'] if signal['date'] in data.index and _has_col(data, 'Volatility') else None
+        atr = data.loc[signal['date'], 'ATR'] if signal['date'] in data.index and _has_col(data, 'ATR') else None
         if pd.notna(volatility) and pd.notna(atr):
             # 波动率相对较低时给高分
             avg_volatility = data['Volatility'].tail(50).mean()
@@ -438,7 +373,7 @@ def analyze_buy_points(data, buy_signals):
 
         # 5. CYC指标位置 (最高10分)
         cyc_score = 0
-        cyc = data.loc[signal['date'], 'CYC'] if signal['date'] in data.index else None
+        cyc = data.loc[signal['date'], 'CYC'] if signal['date'] in data.index and _has_col(data, 'CYC') else None
         if pd.notna(cyc):
             if cyc < 20:
                 cyc_score = 10

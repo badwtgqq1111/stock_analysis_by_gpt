@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from analyzer_core import StockAnalyzer
+from core import StockAnalyzer
 from cli.formatters import _format_factor_reason_lines, _safe_close_analyzer
 from cli.helpers import (
     _build_validation_cache_key,
@@ -42,7 +42,7 @@ def main_select_stocks(
     model_type="lightgbm",
     backtest_date=None,
     min_market_cap=None,
-    min_daily_turnover=None,
+    min_daily_turnover=100,
     min_ipo_days=None,
     llm_report=False,
     llm_model="deepseek-v4-pro",
@@ -155,6 +155,9 @@ def main_select_stocks(
     print(f"[INFO] 组合估算收益率: {portfolio_result['estimated_portfolio_return']:.1f}%")
     print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
     print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")
+    kelly_ratio = portfolio_result.get('kelly_position_ratio', None)
+    if kelly_ratio is not None:
+        print(f"[INFO] 凯利动态仓位建议: {kelly_ratio*100:.1f}%（半凯利）")
 
     ranking_path = None
     selected_path = None
@@ -252,7 +255,7 @@ def main_select_stocks(
         run_auto_report(
             portfolio_result,
             model=llm_model,
-            formula_version="v11",
+            formula_version="v13-rank",
         )
         print("[LLM] 报告生成完成")
 

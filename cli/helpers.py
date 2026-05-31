@@ -235,7 +235,7 @@ def _sanitize_validation_scorecard(scorecard):
 
     if "component" in working.columns:
         try:
-            from analyzer_core import classify_factor
+            from core import classify_factor
         except ImportError:
             classify_factor = _fallback_classify_factor_name
         missing_mask = working["component"].isna() | (working["component"].astype(str).str.strip() == "")
@@ -373,7 +373,7 @@ def _build_factor_scorecard(report):
 
     # Auto-classify factors if component missing
     if "component" not in base.columns or base["component"].isna().all():
-        from analyzer_core import classify_factor
+        from core import classify_factor
         base["component"] = base["feature_name"].apply(classify_factor)
 
     base.sort_values(["validation_score", "mean_rank_ic", "mean_spread"], ascending=False, inplace=True)
@@ -480,7 +480,7 @@ def _build_factor_scorecard_ridge(report, ridge_alpha=1.0, target_horizon=5):
     scorecard.reset_index(drop=True, inplace=True)
 
     # Auto-classify all factors so every factor gets a component assignment
-    from analyzer_core import classify_factor
+    from core import classify_factor
     scorecard["component"] = scorecard["feature_name"].apply(classify_factor)
 
     configured_weights = _build_current_factor_weight_table(

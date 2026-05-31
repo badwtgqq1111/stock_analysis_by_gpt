@@ -25,7 +25,7 @@ class BacktestMixin:
         slippage_rate=0.0,
         min_commission=0.0,
         max_workers=1,
-        analysis_mode="strategy",
+        analysis_mode="lightgbm",
         factor_set=DEFAULT_FACTOR_SET,
         factor_score_config=None,
         persist_features=False,
@@ -111,8 +111,8 @@ class BacktestMixin:
         pool_results = []
         requested_workers = int(max_workers or 0)
         max_workers = self._resolve_safe_analysis_workers(requested_workers, analysis_mode=analysis_mode)
-        normalized_mode = str(analysis_mode or "strategy").strip().lower()
-        if normalized_mode not in {"strategy", "factor", "lightgbm"}:
+        normalized_mode = str(analysis_mode or "lightgbm").strip().lower()
+        if normalized_mode not in {"factor", "lightgbm"}:
             raise ValueError(f"unsupported analysis_mode: {analysis_mode}")
         if show_progress and requested_workers > 0 and max_workers != requested_workers:
             print(
@@ -147,26 +147,24 @@ class BacktestMixin:
             return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
         def run_analysis(stock_code):
-            if normalized_mode == "factor":
-                factor_kwargs = {
-                    "days": days,
-                    "factor_set": factor_set,
-                    "factor_score_config": factor_score_config,
-                    "persist_features": persist_features,
-                }
-                if ridge_factors is not None:
-                    factor_kwargs["ridge_factors"] = ridge_factors
-                if signal_recipes is not None:
-                    factor_kwargs["signal_recipes"] = signal_recipes
-                return self.analyze_stock_factors(stock_code, **factor_kwargs)
-            return self.analyze_stock(stock_code, days=days)
+            factor_kwargs = {
+                "days": days,
+                "factor_set": factor_set,
+                "factor_score_config": factor_score_config,
+                "persist_features": persist_features,
+            }
+            if ridge_factors is not None:
+                factor_kwargs["ridge_factors"] = ridge_factors
+            if signal_recipes is not None:
+                factor_kwargs["signal_recipes"] = signal_recipes
+            return self.analyze_stock_factors(stock_code, **factor_kwargs)
 
         # Import StockAnalyzer lazily to avoid circular import
         from core.analyzer import StockAnalyzer as _StockAnalyzer
         default_analyze_stock_factors = getattr(_StockAnalyzer, "_default_analyze_stock_factors", None)
         supports_batch_factor_analysis = (
             default_analyze_stock_factors is not None
-            and type(self).__dict__.get("analyze_stock_factors") is default_analyze_stock_factors
+            and getattr(type(self), "analyze_stock_factors", None) is default_analyze_stock_factors
         )
 
         if normalized_mode == "factor" and supports_batch_factor_analysis and max_workers > 1 and len(stock_codes) > 1:
@@ -396,7 +394,7 @@ class BacktestMixin:
         slippage_rate=0.0,
         min_commission=0.0,
         max_workers=1,
-        analysis_mode="strategy",
+        analysis_mode="lightgbm",
         factor_set=DEFAULT_FACTOR_SET,
         factor_score_config=None,
         persist_features=False,
@@ -441,7 +439,7 @@ class BacktestMixin:
         )
 
     def backtest_strategy(self, data, buy_signals, sell_signals, initial_capital=100000, default_holding_days=60):
-        from backtest import backtest_strategy
+        from backtest_engine import backtest_strategy
         return backtest_strategy(
             data,
             buy_signals,
@@ -463,18 +461,14 @@ class BacktestMixin:
         slippage_rate=0.0,
         min_commission=0.0,
     ):
-        from reporting import generate_strategy_comparison_report
-        from strategy_signals import STRATEGY_SUITE
+        from core.reporting import generate_strategy_comparison_report
+        from portfolio_strategy import STRATEGY_SUITE
         # Import lazily to avoid circular import at module level
         from core.analyzer import StockAnalyzer
 
         suite_results = []
         for strategy_config in STRATEGY_SUITE:
-            analyzer = StockAnalyzer(
-                db_dir=db_dir,
-                buy_strategy=strategy_config['buy_strategy'],
-                sell_strategy=strategy_config['sell_strategy']
-            )
+            analyzer = StockAnalyzer(db_dir=db_dir)
             portfolio_result = analyzer.backtest_portfolio(
                 stock_codes,
                 days=days,
@@ -496,8 +490,8 @@ class BacktestMixin:
             suite_results.append({
                 'strategy_code': strategy_config['code'],
                 'strategy_name': strategy_config['name'],
-                'buy_strategy': strategy_config['buy_strategy'].__class__.__name__,
-                'sell_strategy': strategy_config['sell_strategy'].__class__.__name__,
+                'buy_strategy': 'model_driven',
+                'sell_strategy': 'model_driven',
                 'portfolio_result': portfolio_result,
                 'analysis_results': portfolio_result.get('analysis_results', []),
                 'per_stock_returns': per_stock_returns,

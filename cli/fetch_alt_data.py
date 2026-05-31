@@ -1,5 +1,7 @@
 """CLI for alternative data pipeline: fetch news → sentiment → persist to feature layer."""
 
+from __future__ import annotations
+
 import sys
 import time
 

@@ -2,10 +2,6 @@
 
 import argparse
 
-import pandas as pd
-
-from analyzer_core import StockAnalyzer
-from cli.formatters import _safe_close_analyzer
 from cli.generate_factors import main_generate_factors
 from cli.helpers import _parse_horizons, _parse_signal_recipes
 from cli.select_stocks import main_select_stocks
@@ -15,85 +11,6 @@ from cli.review_batch import main_review_batch
 from cli.factor_report import main_factor_report, main_signal_report
 from cli.fetch_alt_data import main_fetch_alt_data
 from cli.strategy_suite import main_strategy_suite, analyze_single_stock_with_visualization
-
-TARGET_STOCKS = ['03633', '02706', '02015', '01860', '02432', '02590', '09866', '00020']
-
-
-def main():
-    """主函数 - 固定8股票池的3个月收益导向策略分析"""
-    print("=" * 80)
-    print("港股技术分析系统 - 8股票池三个月收益优化")
-    print("=" * 80)
-
-    analyzer = StockAnalyzer()
-    try:
-        print(f"[INFO] 固定分析股票池: {', '.join(TARGET_STOCKS)}")
-
-        portfolio_result = analyzer.backtest_portfolio(TARGET_STOCKS, days=365, top_n=3)
-        if portfolio_result is None:
-            print("[ERROR] 组合分析失败")
-            return
-
-        analysis_results = portfolio_result['analysis_results']
-        strategy = analyzer.generate_trading_strategy(analysis_results)
-
-        print(f"\n[INFO] 成功分析 {len(analysis_results)} 只股票")
-        print(f"[INFO] 组合预计持有 Top {portfolio_result['top_n']} 只股票")
-        print(f"[INFO] 组合估算收益率: {portfolio_result['estimated_portfolio_return']:.1f}%")
-        print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
-        print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")
-
-        if strategy:
-            print("\n" + "=" * 80)
-            print("8股票池三个月收益策略报告")
-            print("=" * 80)
-
-            print("\n当前股票排名:")
-            for i, stock in enumerate(strategy['ranked_stocks'], 1):
-                signal_flag = '强买点' if stock.get('current_signal_active') and stock.get('current_signal_actionable') else ('观察名单' if stock.get('current_signal_active') else '无新信号')
-                signal_score = stock.get('current_signal_score')
-                signal_score_text = f"{signal_score:.1f}" if pd.notna(signal_score) else 'None'
-                print(
-                    f"{i:2d}. {stock['stock_code']} - 排名分: {stock['ranking_score']:.1f}, "
-                    f"当前信号: {signal_flag}, 信号评分: {signal_score_text}, "
-                    f"最新预期3月评分: {stock['expected_3m_score']:.1f}, "
-                    f"矩阵评分: {stock['matrix_score']:.1f}, 趋势评分: {stock['regime_score']:.1f}, "
-                    f"回测收益: {stock['total_return']:.1f}%, 入场类型: {stock['entry_type']}, 信号层级: {stock.get('signal_tier')}"
-                )
-
-            print("\n当前建议持有:")
-            for item in portfolio_result['selected']:
-                signal_flag = '强买点' if item.get('current_signal_active') and item.get('current_signal_actionable') else ('观察名单' if item.get('current_signal_active') else '评分候选')
-                signal_score = item.get('current_signal_score')
-                signal_score_text = f"{signal_score:.1f}" if pd.notna(signal_score) else 'None'
-                print(
-                    f"- {item['stock_code']} - {signal_flag}, 排名分 {item['ranking_score']:.1f}, "
-                    f"信号评分 {signal_score_text}, 建议买点 {item['entry_type']}, 信号层级 {item.get('signal_tier')}, "
-                    f"单股回测收益 {item['backtest_return']:.1f}%"
-                )
-
-            if portfolio_result.get('watchlist'):
-                print("\n观察名单:")
-                for item in portfolio_result['watchlist']:
-                    print(
-                        f"- {item['stock_code']} - 入场类型 {item['entry_type']}, 信号层级 {item.get('signal_tier')}, "
-                        f"预期3月评分 {item.get('expected_3m_score', 0):.1f}, 趋势评分 {item.get('regime_score', 0):.1f}"
-                    )
-
-            print("\n风险管理:")
-            risk = strategy['recommended_strategy']['risk_management']
-            print(f"- 仓位: {risk['max_position_size']}")
-            print(f"- 止损: {risk['stop_loss']}")
-            print(f"- 止盈: {risk['take_profit']}")
-            print(f"- 最大日交易数: {risk['max_daily_trades']}")
-            print(f"- 默认持有周期: {risk['holding_horizon']} 个交易日")
-
-        print("\n" + "=" * 80)
-        print("分析完成！")
-        print("=" * 80)
-    finally:
-        _safe_close_analyzer(analyzer)
-
 
 def run_cli(argv=None):
     """CLI 入口，便于脚本调用与测试。"""
@@ -167,8 +84,8 @@ def run_cli(argv=None):
                         help='回测日期: 仅使用指定日期之前的数据选股，格式 YYYY-MM-DD')
     parser.add_argument('--min-market-cap', dest='min_market_cap', type=float, default=None,
                         help='最低市值过滤（亿港元），默认不过滤')
-    parser.add_argument('--min-daily-turnover', dest='min_daily_turnover', type=float, default=None,
-                        help='最低日成交额过滤（万港元），默认不过滤')
+    parser.add_argument('--min-daily-turnover', dest='min_daily_turnover', type=float, default=100,
+                        help='最低日成交额过滤（万港元），默认100万港元')
     parser.add_argument('--min-ipo-days', dest='min_ipo_days', type=int, default=None,
                         help='最低上市天数过滤（交易日），默认不过滤；建议 >= 250')
     parser.add_argument('--refresh-recommended-factor-weights', dest='refresh_recommended_factor_weights', action='store_true',
@@ -177,6 +94,21 @@ def run_cli(argv=None):
                         choices=['scoring_only', 'all'], default=None,
                         help='因子验证范围，默认 all（全部因子），可选 scoring_only（仅评分配置中的因子）')
     args = parser.parse_args(argv)
+
+    # Normalize mode aliases (unified CLI uses shorter names with dashes)
+    _MODE_ALIASES = {
+        "select": "select_stocks",
+        "all": "all_hk",
+        "review": "review_batch",
+        "fetch-alt": "fetch_alt_data",
+        "generate-factors": "generate_factors",
+        "validate-factors": "validate_factors",
+        "signal-report": "signal_report",
+        "factor-report": "factor_report",
+    }
+    if args.mode in _MODE_ALIASES:
+        args.mode = _MODE_ALIASES[args.mode]
+
     horizons = _parse_horizons(args.horizons)
     validation_horizons = _parse_horizons(args.validation_horizons)
     signal_recipes = _parse_signal_recipes(args.signal_recipes)
@@ -308,4 +240,4 @@ def run_cli(argv=None):
     elif args.mode:
         return analyze_single_stock_with_visualization(args.mode, days=args.days)
     else:
-        return main()
+        parser.print_help()

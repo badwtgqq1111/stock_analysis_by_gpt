@@ -7,12 +7,14 @@ import shutil
 from pathlib import Path
 import uuid
 
-import duckdb
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 
 
 class ParquetDataStore:
-    """基于 DuckDB 的分区 Parquet 数据集存储。"""
+    """基于 pyarrow/pandas 的分区 Parquet 数据集存储。"""
 
     DEFAULT_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "year")
 
@@ -29,23 +31,17 @@ class ParquetDataStore:
         if not self.dataset_exists(dataset_name, layer=layer):
             return pd.DataFrame()
 
-        select_sql = ", ".join(columns) if columns else "*"
-        query, params = self._build_query(
+        frame = self._load_dataset_frame(
             dataset_name=dataset_name,
             layer=layer,
-            select_sql=select_sql,
             filters=filters,
-            order_by=order_by,
             range_filters=range_filters,
+            columns=columns,
         )
-        conn = duckdb.connect(database=":memory:")
-        try:
-            frame = conn.execute(query, params).df()
-        finally:
-            conn.close()
-
         if "year" in frame.columns:
             frame.drop(columns=["year"], inplace=True)
+        if order_by and not frame.empty:
+            frame = self._sort_frame(frame, order_by)
         return frame
 
     def scalar_query(self, dataset_name, expression, layer="clean", filters=None, range_filters=None):
@@ -53,40 +49,30 @@ class ParquetDataStore:
         if not self.dataset_exists(dataset_name, layer=layer):
             return None
 
-        query, params = self._build_query(
-            dataset_name=dataset_name,
-            layer=layer,
-            select_sql=f"{expression} AS value",
-            filters=filters,
-            range_filters=range_filters,
-        )
-        conn = duckdb.connect(database=":memory:")
-        try:
-            result = conn.execute(query, params).fetchone()
-        finally:
-            conn.close()
-        return result[0] if result else None
+        frame = self._load_dataset_frame(dataset_name, layer=layer, filters=filters, range_filters=range_filters)
+        return self._evaluate_scalar_expression(frame, expression)
 
     def values_query(self, dataset_name, column, layer="clean", filters=None, distinct=False, order_by=None, range_filters=None):
         """执行单列值查询。"""
         if not self.dataset_exists(dataset_name, layer=layer):
             return []
 
-        prefix = "DISTINCT " if distinct else ""
-        query, params = self._build_query(
+        frame = self._load_dataset_frame(
             dataset_name=dataset_name,
             layer=layer,
-            select_sql=f"{prefix}{column} AS value",
             filters=filters,
-            order_by=order_by,
             range_filters=range_filters,
+            columns=[column],
         )
-        conn = duckdb.connect(database=":memory:")
-        try:
-            result = conn.execute(query, params).fetchall()
-        finally:
-            conn.close()
-        return [row[0] for row in result]
+        if frame.empty or column not in frame.columns:
+            return []
+        values = frame[column].dropna()
+        if distinct:
+            values = values.drop_duplicates()
+        out = pd.DataFrame({"value": values})
+        if order_by:
+            out = self._sort_frame(out, order_by)
+        return out["value"].tolist()
 
     def write_frame(self, dataset_name, frame, layer="clean", date_column="trade_date", partition_columns=None):
         """覆盖写入 parquet 数据集。"""
@@ -144,7 +130,7 @@ class ParquetDataStore:
         layer="clean",
         partition_columns=None,
     ):
-        """使用 DuckDB 对整个数据集去重压实。"""
+        """对整个数据集去重压实。"""
         if not self.dataset_exists(dataset_name, layer=layer):
             return self.layout.dataset_path(dataset_name, layer=layer)
 
@@ -153,39 +139,16 @@ class ParquetDataStore:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
 
-        dataset_glob = self.layout.dataset_glob(dataset_name, layer=layer)
-        dataset_glob_sql = dataset_glob.replace("'", "''")
-        temp_dir_sql = str(temp_dir).replace("'", "''")
-        effective_partition_columns = partition_columns or self.DEFAULT_PARTITION_COLUMNS
-        partition_sql = ", ".join(effective_partition_columns)
-        partition_by_sql = ", ".join(dedupe_keys)
-        order_sql = ", ".join(
-            [f"{column} DESC" for column in (sort_by or [])]
-        ) or ", ".join([f"{column} DESC" for column in dedupe_keys])
-
-        conn = duckdb.connect(database=":memory:")
-        try:
-            conn.execute(
-                f"""
-                COPY (
-                    SELECT * EXCLUDE (rn)
-                    FROM (
-                        SELECT *,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY {partition_by_sql}
-                                   ORDER BY {order_sql}
-                               ) AS rn
-                        FROM read_parquet('{dataset_glob_sql}', hive_partitioning = true)
-                    )
-                    WHERE rn = 1
-                ) TO '{temp_dir_sql}' (
-                    FORMAT PARQUET,
-                    PARTITION_BY ({partition_sql})
-                )
-                """
-            )
-        finally:
-            conn.close()
+        combined = self.read_frame(dataset_name, layer=layer)
+        if sort_by:
+            combined.sort_values(sort_by, inplace=True)
+        combined.drop_duplicates(subset=dedupe_keys, keep="last", inplace=True)
+        self._overwrite_dataset(
+            temp_dir,
+            combined,
+            date_column=self._infer_date_column(combined),
+            partition_columns=partition_columns or self.DEFAULT_PARTITION_COLUMNS,
+        )
 
         backup_dir = dataset_path.parent / f".{dataset_path.name}_backup_{uuid.uuid4().hex}"
         if backup_dir.exists():
@@ -197,43 +160,101 @@ class ParquetDataStore:
             shutil.rmtree(backup_dir)
         return dataset_path
 
-    def _build_query(self, dataset_name, layer, select_sql, filters=None, order_by=None, range_filters=None):
-        dataset_glob = self.layout.dataset_glob(dataset_name, layer=layer)
-        clauses = []
-        params = [dataset_glob]
+    def _load_dataset_frame(self, dataset_name, layer, filters=None, range_filters=None, columns=None):
+        dataset_path = self.layout.dataset_path(dataset_name, layer=layer)
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return pd.DataFrame(columns=columns or None)
+        dataset = ds.dataset(dataset_path, format="parquet", partitioning="hive")
+        requested_columns = list(columns or [])
+        available_columns = set(dataset.schema.names)
+        read_columns = [column for column in requested_columns if column in available_columns] or None
+        frame = dataset.to_table(columns=read_columns).to_pandas()
+        for column in requested_columns:
+            if column not in frame.columns:
+                frame[column] = None
+        if requested_columns:
+            frame = frame[requested_columns]
+        return self._apply_filters(frame, filters=filters, range_filters=range_filters)
 
+    @staticmethod
+    def _apply_filters(frame, filters=None, range_filters=None):
+        if frame is None or frame.empty:
+            return pd.DataFrame() if frame is None else frame
+        working = frame.copy()
+        mask = pd.Series(True, index=working.index)
         for column, value in (filters or {}).items():
-            if value is None:
+            if value is None or column not in working.columns:
                 continue
             if isinstance(value, (list, tuple, set)):
                 values = list(value)
                 if not values:
                     continue
-                placeholders = ", ".join(["?"] * len(values))
-                clauses.append(f"{column} IN ({placeholders})")
-                params.extend(values)
+                mask &= working[column].isin(values)
             else:
-                clauses.append(f"{column} = ?")
-                params.append(value)
+                mask &= working[column] == value
 
         for column, bounds in (range_filters or {}).items():
-            if not bounds:
+            if not bounds or column not in working.columns:
                 continue
-            lower = bounds.get("gte")
+            series = working[column]
+            if pd.api.types.is_datetime64_any_dtype(series):
+                lower = pd.to_datetime(bounds.get("gte")) if bounds.get("gte") is not None else None
+                upper = pd.to_datetime(bounds.get("lte")) if bounds.get("lte") is not None else None
+            else:
+                lower = bounds.get("gte")
+                upper = bounds.get("lte")
             if lower is not None:
-                clauses.append(f"{column} >= ?")
-                params.append(lower)
-            upper = bounds.get("lte")
+                mask &= series >= lower
             if upper is not None:
-                clauses.append(f"{column} <= ?")
-                params.append(upper)
+                mask &= series <= upper
+        return working.loc[mask].reset_index(drop=True)
 
-        query = f"SELECT {select_sql} FROM read_parquet(?, hive_partitioning = true)"
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        if order_by:
-            query += f" ORDER BY {order_by}"
-        return query, params
+    @staticmethod
+    def _sort_frame(frame, order_by):
+        if frame is None or frame.empty or not order_by:
+            return frame
+        columns = []
+        ascending = []
+        for part in str(order_by).split(","):
+            bits = part.strip().split()
+            if not bits:
+                continue
+            column = bits[0]
+            if column not in frame.columns:
+                continue
+            columns.append(column)
+            ascending.append(not (len(bits) > 1 and bits[1].upper() == "DESC"))
+        if not columns:
+            return frame
+        return frame.sort_values(columns, ascending=ascending).reset_index(drop=True)
+
+    @staticmethod
+    def _evaluate_scalar_expression(frame, expression):
+        if frame is None or frame.empty:
+            return None
+        expr = str(expression or "").strip()
+        upper = expr.upper()
+        if upper == "COUNT(*)":
+            return len(frame)
+        for func in ("MAX", "MIN", "COUNT"):
+            prefix = f"{func}("
+            if upper.startswith(prefix) and expr.endswith(")"):
+                column = expr[len(prefix):-1].strip()
+                if column not in frame.columns:
+                    return None
+                if func == "MAX":
+                    return frame[column].max()
+                if func == "MIN":
+                    return frame[column].min()
+                return int(frame[column].count())
+        raise ValueError(f"Unsupported parquet scalar expression: {expression}")
+
+    @staticmethod
+    def _infer_date_column(frame):
+        for column in ("trade_date", "event_date", "date"):
+            if column in frame.columns:
+                return column
+        return "trade_date"
 
     def _overwrite_dataset(self, dataset_dir, frame, date_column="trade_date", partition_columns=None):
         dataset_path = Path(dataset_dir)
@@ -257,23 +278,7 @@ class ParquetDataStore:
         if dataset_path.exists():
             shutil.rmtree(dataset_path)
 
-        conn = duckdb.connect(database=":memory:")
-        try:
-            conn.register("frame_view", prepared)
-            partition_sql = ", ".join(effective_partition_columns)
-            conn.execute(
-                f"""
-                COPY (
-                    SELECT * FROM frame_view
-                ) TO ? (
-                    FORMAT PARQUET,
-                    PARTITION_BY ({partition_sql})
-                )
-                """,
-                [str(temp_dir)],
-            )
-        finally:
-            conn.close()
+        self._write_partitioned_frame(prepared, temp_dir, effective_partition_columns)
 
         temp_dir.rename(dataset_path)
 
@@ -349,23 +354,7 @@ class ParquetDataStore:
             return
 
         temp_dir = dataset_path.parent / f".{dataset_path.name}_append_{uuid.uuid4().hex}"
-        conn = duckdb.connect(database=":memory:")
-        try:
-            conn.register("frame_view", prepared)
-            partition_sql = ", ".join(effective_partition_columns)
-            conn.execute(
-                f"""
-                COPY (
-                    SELECT * FROM frame_view
-                ) TO ? (
-                    FORMAT PARQUET,
-                    PARTITION_BY ({partition_sql})
-                )
-                """,
-                [str(temp_dir)],
-            )
-        finally:
-            conn.close()
+        self._write_partitioned_frame(prepared, temp_dir, effective_partition_columns)
 
         for parquet_file in temp_dir.rglob("*.parquet"):
             rel_path = parquet_file.relative_to(temp_dir)
@@ -375,3 +364,16 @@ class ParquetDataStore:
             parquet_file.rename(target_file)
 
         shutil.rmtree(temp_dir)
+
+    @staticmethod
+    def _write_partitioned_frame(frame, target_dir, partition_columns):
+        target_dir = Path(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        partition_cols = [column for column in (partition_columns or []) if column in frame.columns]
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        pq.write_to_dataset(
+            table,
+            root_path=str(target_dir),
+            partition_cols=partition_cols,
+            basename_template=f"part-{uuid.uuid4().hex}-{{i}}.parquet",
+        )

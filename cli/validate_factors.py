@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from analyzer_core import StockAnalyzer
+from core import StockAnalyzer
 from cli.formatters import _safe_close_analyzer
 from cli.helpers import (
     _build_factor_scorecard_ridge,

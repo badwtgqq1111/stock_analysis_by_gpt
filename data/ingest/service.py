@@ -18,6 +18,7 @@ from data.ingest.cn_stock_loader import CNStockDataLoader
 from data.ingest.hk_stock_loader import HKStockDataLoader
 from data.ingest.providers import HKCorporateActionsFetcher, HKMarketListFetcher, HistoryDataFetcher
 from data.ingest.providers.hk_history import set_akshare_sina_history_concurrency
+from tqdm import tqdm
 from data.ingest.providers.history_utils import normalize_period
 from data.model import (
     get_adjustment_profile,
@@ -26,6 +27,7 @@ from data.model import (
     normalize_feature_frame,
     normalize_ohlcv_frame,
     normalize_signal_frame,
+    normalize_bool,
     normalize_stock_code,
     normalize_stock_info,
     normalize_trade_frame,
@@ -191,6 +193,282 @@ class MarketDataService:
             normalize_stock_code(stock_code, market="HK"),
             market="HK",
         )
+
+    def _load_hk_stock_info_map(self, codes):
+        normalized_codes = [normalize_stock_code(code, market="HK") for code in (codes or [])]
+        frame = self.warehouse.read_stock_info(stock_codes=normalized_codes, market="HK")
+        if frame is None or frame.empty:
+            return {}
+        frame = frame.drop_duplicates(subset=["market", "stock_code"], keep="last")
+        return {
+            str(row.stock_code): row._asdict()
+            for row in frame.itertuples(index=False)
+        }
+
+    def backfill_hk_industry(
+        self,
+        stock_codes=None,
+        limit=None,
+        max_workers=8,
+        data_source=None,
+        force=False,
+        show_progress=False,
+    ):
+        """批量补全港股行业分类字段。"""
+        from data.ingest.providers import HKIndustryFetcher
+
+        if show_progress:
+            print("[INDUSTRY] 正在准备港股代码池与本地 registry...", flush=True, file=sys.stderr)
+
+        if stock_codes:
+            codes = [normalize_stock_code(code, market="HK") for code in stock_codes]
+        else:
+            codes = self.get_all_stock_codes(market="HK", asset_type="equity", frequency="daily", adjust="qfq")
+            if not codes:
+                stocks = HKMarketListFetcher().fetch(limit=limit)
+                codes = [normalize_stock_code(stock["code"], market="HK") for stock in stocks]
+
+        codes = list(dict.fromkeys(codes))
+        if limit:
+            codes = codes[: int(limit)]
+
+        if not codes:
+            return {
+                "status": "completed",
+                "requested": 0,
+                "updated": 0,
+                "skipped_existing": 0,
+                "failed": 0,
+                "coverage": {},
+            }
+
+        info_map = self._load_hk_stock_info_map(codes)
+        pending_codes = []
+        skipped_existing = 0
+        for code in codes:
+            existing = info_map.get(code, {})
+            if not force and existing.get("industry_l1"):
+                skipped_existing += 1
+                continue
+            pending_codes.append(code)
+
+        payloads = []
+        failed = []
+        started_at = time.time()
+        completed = 0
+        workers = max(int(max_workers or 1), 1)
+
+        def fetch_one(code):
+            fetcher = HKIndustryFetcher(code, data_source=data_source or self.data_source)
+            industry_payload = fetcher.fetch()
+            if not industry_payload:
+                return None
+
+            existing = info_map.get(code, {})
+            instrument_type = existing.get("instrument_type")
+            is_fund_like = normalize_bool(existing.get("is_fund_like"), default=False)
+            merged = {
+                "name": existing.get("name"),
+                "current_price": existing.get("current_price"),
+                "close_price": existing.get("close_price"),
+                "open_price": existing.get("open_price"),
+                "high": existing.get("high"),
+                "low": existing.get("low"),
+                "volume": existing.get("volume"),
+                "market_cap": existing.get("market_cap"),
+                "pe_ratio": existing.get("pe_ratio"),
+                "pb_ratio": existing.get("pb_ratio"),
+                "dividend_yield": existing.get("dividend_yield"),
+                "total_shares": existing.get("total_shares"),
+                "circulating_shares": existing.get("circulating_shares"),
+                "week_52_high": existing.get("week_52_high"),
+                "week_52_low": existing.get("week_52_low"),
+                "instrument_type": instrument_type,
+                "is_fund_like": is_fund_like,
+                "tradable_flag": existing.get("tradable_flag", True),
+                "instrument_source": existing.get("instrument_source"),
+                "instrument_updated_at": existing.get("instrument_updated_at"),
+                **industry_payload,
+            }
+            return normalize_stock_info(
+                merged,
+                stock_code=code,
+                market="HK",
+                exchange="HKEX",
+                source=industry_payload.get("industry_source", "hk_industry"),
+            )
+
+        if show_progress:
+            print(f"[INDUSTRY] 开始补全港股行业字段: pending={len(pending_codes)} skipped_existing={skipped_existing}")
+
+        with ThreadPoolExecutor(max_workers=min(workers, max(len(pending_codes), 1))) as executor:
+            future_map = {executor.submit(fetch_one, code): code for code in pending_codes}
+            for future in as_completed(future_map):
+                code = future_map[future]
+                try:
+                    payload = future.result()
+                    if payload:
+                        payloads.append(payload)
+                    else:
+                        failed.append(code)
+                except Exception:
+                    failed.append(code)
+                completed += 1
+                if show_progress:
+                    elapsed = max(time.time() - started_at, 1e-9)
+                    rate = completed / elapsed
+                    remaining = len(pending_codes) - completed
+                    eta = remaining / rate if rate > 0 else 0.0
+                    print(
+                        f"\r[INDUSTRY] {completed}/{len(pending_codes)} "
+                        f"({completed / max(len(pending_codes), 1):.1%}) "
+                        f"updated={len(payloads)} failed={len(failed)} elapsed={elapsed:.1f}s eta={eta:.1f}s",
+                        end="",
+                        flush=True,
+                        file=sys.stderr,
+                    )
+        if show_progress and pending_codes:
+            print(file=sys.stderr)
+
+        if payloads:
+            self.warehouse.upsert_stock_info_batch(payloads)
+
+        info_map = self._load_hk_stock_info_map(codes)
+        coverage_rows = []
+        for code in codes:
+            info = info_map.get(code, {})
+            is_fund_like = normalize_bool(info.get("is_fund_like"), default=False)
+            coverage_rows.append(
+                {
+                    "stock_code": code,
+                    "is_fund_like": is_fund_like,
+                    "instrument_type": info.get("instrument_type"),
+                    "has_industry_l1": bool(info.get("industry_l1")),
+                    "has_industry_l2": bool(info.get("industry_l2")),
+                    "industry_l1": info.get("industry_l1"),
+                    "industry_l2": info.get("industry_l2"),
+                }
+            )
+        coverage_frame = pd.DataFrame(coverage_rows)
+        coverage = {
+            "industry_l1_rate": float(coverage_frame["has_industry_l1"].mean()) if not coverage_frame.empty else 0.0,
+            "industry_l2_rate": float(coverage_frame["has_industry_l2"].mean()) if not coverage_frame.empty else 0.0,
+            "industry_l1_count": int(coverage_frame["has_industry_l1"].sum()) if not coverage_frame.empty else 0,
+            "industry_l2_count": int(coverage_frame["has_industry_l2"].sum()) if not coverage_frame.empty else 0,
+        }
+        ordinary_frame = coverage_frame.loc[~coverage_frame.get("is_fund_like", False).fillna(False)].copy()
+        coverage["ordinary_stock_count"] = int(len(ordinary_frame))
+        coverage["fund_like_count"] = int(coverage_frame.get("is_fund_like", False).fillna(False).sum()) if not coverage_frame.empty else 0
+        coverage["ordinary_industry_l1_rate"] = (
+            float(ordinary_frame["has_industry_l1"].mean()) if not ordinary_frame.empty else 0.0
+        )
+        coverage["ordinary_industry_l2_rate"] = (
+            float(ordinary_frame["has_industry_l2"].mean()) if not ordinary_frame.empty else 0.0
+        )
+
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "pending": len(pending_codes),
+            "updated": len(payloads),
+            "skipped_existing": skipped_existing,
+            "failed": len(failed),
+            "failed_codes": failed,
+            "coverage": coverage,
+        }
+
+    def normalize_existing_hk_industry(self, stock_codes=None, limit=None):
+        """Use the local industry taxonomy to repair already stored HK industry levels."""
+        from data.ingest.providers.hk_industry import HKIndustryFetcher
+
+        if stock_codes:
+            codes = [normalize_stock_code(code, market="HK") for code in stock_codes]
+        else:
+            codes = self.get_all_stock_codes(market="HK", asset_type="equity", frequency="daily", adjust="qfq")
+        codes = list(dict.fromkeys(codes))
+        if limit:
+            codes = codes[: int(limit)]
+
+        info_map = self._load_hk_stock_info_map(codes)
+        payloads = []
+        for code in codes:
+            existing = info_map.get(code, {})
+            current_l1 = existing.get("industry_l1")
+            current_l2 = existing.get("industry_l2")
+            normalized_l1, normalized_l2 = HKIndustryFetcher._normalize_industry_levels(
+                current_l1,
+                current_l2,
+                existing.get("industry_source") or "local_taxonomy",
+            )
+            if normalized_l1 == current_l1 and normalized_l2 == current_l2:
+                continue
+            merged = dict(existing)
+            merged["industry_l1"] = normalized_l1
+            merged["industry_l2"] = normalized_l2
+            merged["industry_source"] = (
+                f"{existing.get('industry_source') or 'unknown'}+local_taxonomy"
+            )
+            payloads.append(
+                normalize_stock_info(
+                    merged,
+                    stock_code=code,
+                    market="HK",
+                    exchange=existing.get("exchange") or "HKEX",
+                    source=merged["industry_source"],
+                )
+            )
+
+        if payloads:
+            self.warehouse.upsert_stock_info_batch(payloads)
+
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "updated": len(payloads),
+        }
+
+    def normalize_existing_hk_instruments(self, stock_codes=None, limit=None):
+        """Infer and persist HK instrument types for existing registry rows."""
+        if stock_codes:
+            codes = [normalize_stock_code(code, market="HK") for code in stock_codes]
+        else:
+            codes = self.get_all_stock_codes(market="HK", asset_type="equity", frequency="daily", adjust="qfq")
+        codes = list(dict.fromkeys(codes))
+        if limit:
+            codes = codes[: int(limit)]
+
+        info_map = self._load_hk_stock_info_map(codes)
+        payloads = []
+        counts = {}
+        for code in codes:
+            existing = info_map.get(code, {})
+            merged = dict(existing)
+            normalized = normalize_stock_info(
+                merged,
+                stock_code=code,
+                market="HK",
+                exchange=existing.get("exchange") or "HKEX",
+                asset_type=existing.get("asset_type") or "equity",
+                source=existing.get("source") or "instrument_normalization",
+            )
+            counts[normalized.get("instrument_type") or "unknown"] = counts.get(normalized.get("instrument_type") or "unknown", 0) + 1
+            changed = any(
+                normalized.get(field) != existing.get(field)
+                for field in ("instrument_type", "is_fund_like", "tradable_flag")
+            )
+            if changed:
+                payloads.append(normalized)
+
+        if payloads:
+            self.warehouse.upsert_stock_info_batch(payloads)
+
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "updated": len(payloads),
+            "instrument_type_counts": counts,
+            "fund_like_count": int(sum(count for key, count in counts.items() if key != "common_stock")),
+        }
 
     def write_feature_frame(
         self,
@@ -406,21 +684,25 @@ class MarketDataService:
         persist=False,
         source="factor_engine",
         config=None,
+        ohlcv_frame=None,
     ):
         """从 clean 层读取 OHLCV，计算指定因子集。"""
         normalized_market = (market or "HK").upper()
         normalized_adjust = normalize_adjust(adjust)
         normalized_code = normalize_stock_code(stock_code, market=normalized_market)
-        ohlcv = self.warehouse.read_ohlcv(
-            stock_code=normalized_code,
-            market=normalized_market,
-            exchange=exchange,
-            asset_type=asset_type,
-            frequency=frequency,
-            adjust=normalized_adjust,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        if ohlcv_frame is not None:
+            ohlcv = ohlcv_frame
+        else:
+            ohlcv = self.warehouse.read_ohlcv(
+                stock_code=normalized_code,
+                market=normalized_market,
+                exchange=exchange,
+                asset_type=asset_type,
+                frequency=frequency,
+                adjust=normalized_adjust,
+                start_date=start_date,
+                end_date=end_date,
+            )
         if ohlcv.empty:
             return {
                 "rows": 0,
@@ -522,7 +804,7 @@ class MarketDataService:
         days=365,
         warmup_days=180,
         max_workers=1,
-        show_progress=False,
+        show_progress=True,
         source="factor_engine",
         config=None,
     ):
@@ -643,6 +925,7 @@ class MarketDataService:
                     persist=False,
                     source=source,
                     config=config,
+                    ohlcv_frame=ohlcv_frame,
                 )
                 feature_frame = compute_result.get("feature_frame")
                 if feature_frame is None or feature_frame.empty:
@@ -668,13 +951,13 @@ class MarketDataService:
                     source=source,
                     feature_columns=list(feature_frame.columns),
                 )
-                write_result = self.warehouse.upsert_features(normalized)
                 return {
                     "stock_code": stock_code,
                     "status": "computed",
                     "rows": int(len(feature_frame)),
-                    "rows_written": int((write_result or {}).get("rows", 0)),
-                    "dataset_path": (write_result or {}).get("dataset_path"),
+                    "rows_written": len(normalized),
+                    "dataset_path": str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature")),
+                    "_feature_frame": normalized,
                 }
             except Exception as exc:
                 import traceback
@@ -692,13 +975,39 @@ class MarketDataService:
 
         total = len(normalized_codes)
         results = []
+        pending_feature_frames = []
+        pending_feature_rows = 0
+        batch_flush_stocks = max(16, max_workers * 4)
+        batch_flush_feature_rows = 500_000
+
+        def _flush_feature_batch():
+            nonlocal pending_feature_frames, pending_feature_rows, total_rows_written
+            if not pending_feature_frames:
+                return
+            batch_frame = pd.concat(pending_feature_frames, ignore_index=True)
+            write_result = self.warehouse.upsert_features(batch_frame)
+            total_rows_written += int((write_result or {}).get("rows", 0))
+            pending_feature_frames = []
+            pending_feature_rows = 0
+
+        pbar = None
         if show_progress:
-            print(
-                f"[PROGRESS] factor_generation phase=features "
-                f"stocks={total} workers={max_workers} factor_set={factor_set} "
-                f"window_days={effective_days} warmup_days={effective_warmup_days}"
+            pbar = tqdm(
+                total=total,
+                desc="factor gen",
+                unit="stock",
+                file=sys.stderr,
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+                "[{elapsed}<{remaining}, {rate_fmt}]",
             )
 
+        def _write(msg):
+            if pbar is not None:
+                pbar.write(msg)
+            else:
+                print(msg)
+
+        total_rows_written = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_code = {
                 executor.submit(_generate_one, stock_code): stock_code
@@ -707,34 +1016,43 @@ class MarketDataService:
             for index, future in enumerate(as_completed(future_to_code), start=1):
                 result = future.result()
                 results.append(result)
-                if show_progress:
-                    computed_n = sum(item['status'] == 'computed' for item in results)
-                    error_n = sum(item['status'] == 'error' for item in results)
-                    written = sum(int(item.get("rows_written", 0) or 0) for item in results)
-                    latest_err = ""
-                    if result["status"] == "error":
-                        latest_err = f" last_err={result['stock_code']}:{result.get('error','?')}"
-                    print(
-                        f"[PROGRESS] factor_generation completed={index}/{total} "
-                        f"computed={computed_n} "
-                        f"skipped={sum(item['status'] == 'skipped' for item in results)} "
-                        f"errors={error_n} "
-                        f"rows={written}{latest_err}"
+
+                if result["status"] == "computed":
+                    pending_feature_frames.append(result.pop("_feature_frame", None))
+                    pending_feature_rows += int(result.get("rows", 0) or 0)
+                    if len(pending_feature_frames) >= batch_flush_stocks or pending_feature_rows >= batch_flush_feature_rows:
+                        _flush_feature_batch()
+
+                if pbar is not None:
+                    pbar.update(1)
+                    computed_n = sum(1 for item in results if item["status"] == "computed")
+                    error_n = sum(1 for item in results if item["status"] == "error")
+                    skipped_n = sum(1 for item in results if item["status"] == "skipped")
+                    pbar.set_postfix_str(
+                        f"computed={computed_n} skipped={skipped_n} errors={error_n} rows={total_rows_written}"
                     )
+                    if result["status"] == "error":
+                        _write(f"[{index:04d}/{total:04d}] {result['stock_code']} [ERR] {result.get('error','?')}")
+
+        # Final flush
+        _flush_feature_batch()
+        if pbar is not None:
+            pbar.close()
+        elif show_progress:
+            print()
 
         results.sort(key=lambda item: item["stock_code"])
 
-        total_rows_written = sum(int(r.get("rows_written", 0) or 0) for r in results)
         dataset_path = str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature"))
 
         computed_n = sum(item["status"] == "computed" for item in results)
         if computed_n > 0:
             if show_progress:
-                print("[PROGRESS] rps computing cross-sectional ranks")
+                _write("[PROGRESS] rps computing cross-sectional ranks")
             n_rps = self.warehouse.compute_rps_features(factor_set=factor_set)
             total_rows_written += n_rps
             if show_progress:
-                print(f"[PROGRESS] rps done features={n_rps}")
+                _write(f"[PROGRESS] rps done features={n_rps}")
 
         return {
             "stock_count": total,
@@ -1079,9 +1397,9 @@ class MarketDataService:
         intraday_years=3,
         persist_raw=True,
         sina_max_concurrency=0,
-        show_progress=False,
         derive_intraday_from_1min=True,
         min_daily_rows_for_intraday=3,
+        show_progress=True,
     ):
         """高并发抓取港股多周期历史数据并批量落库。"""
         normalized_adjust = normalize_adjust(adjust)
@@ -1134,6 +1452,24 @@ class MarketDataService:
                 "dataset_path": str(self.layout.dataset_path("ohlcv", layer="clean")),
             }
 
+        if show_progress:
+            print(
+                f"[INFO] 正在规划同步任务: stocks={len(stocks)} "
+                f"frequencies={','.join(frequency_list)} skip_existing={bool(skip_existing)}",
+                flush=True,
+                file=sys.stderr,
+            )
+
+        all_codes = [normalize_stock_code(stock["code"], market="HK") for stock in stocks]
+        latest_trade_dates = self.warehouse.get_latest_trade_dates(
+            stock_codes=all_codes,
+            market="HK",
+            exchange="HKEX",
+            asset_type="equity",
+            frequencies=frequency_list,
+            adjust=normalized_adjust,
+        )
+
         def _format_fetch_start(value, frequency):
             timestamp = pd.to_datetime(value)
             if frequency == "daily":
@@ -1170,20 +1506,14 @@ class MarketDataService:
 
         stock_fetch_specs = []
         fully_skipped_stocks = 0
+        skipped_stock_info_codes = []
         for stock in stocks:
             code = normalize_stock_code(stock["code"], market="HK")
             period_requests = []
             has_pending_frequency = False
             for plan in period_plans:
                 frequency = plan["frequency"]
-                latest_trade_date = self.warehouse.get_latest_trade_date(
-                    stock_code=code,
-                    market="HK",
-                    exchange="HKEX",
-                    asset_type="equity",
-                    frequency=frequency,
-                    adjust=normalized_adjust,
-                )
+                latest_trade_date = latest_trade_dates.get((code, frequency))
                 is_fresh = _is_frequency_fresh(latest_trade_date, plan["end_date"], frequency)
                 should_fetch = not (skip_existing and is_fresh)
                 if should_fetch:
@@ -1201,6 +1531,7 @@ class MarketDataService:
 
             if skip_existing and not has_pending_frequency:
                 fully_skipped_stocks += 1
+                skipped_stock_info_codes.append((code, stock.get("name", code)))
                 continue
 
             stock_fetch_specs.append(
@@ -1213,6 +1544,30 @@ class MarketDataService:
 
         if skip_existing and fully_skipped_stocks:
             print(f"[INFO] 已按周期增量规则完整跳过 {fully_skipped_stocks} 只股票")
+
+        if skipped_stock_info_codes:
+            print(f"[INFO] 为 {len(skipped_stock_info_codes)} 只跳过股票更新基本面信息...")
+            from data.ingest.providers import StockInfoFetcher as _SIF
+            from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+            info_payloads = []
+            with _TPE(max_workers=20) as _ex:
+                _futures = {_ex.submit(_SIF(c, data_source="tencent").fetch): c for c, _ in skipped_stock_info_codes}
+                for _f in _ac(_futures):
+                    _code = _futures[_f]
+                    try:
+                        _fetched = _f.result()
+                        if _fetched:
+                            info_payloads.append(normalize_stock_info(
+                                _fetched, stock_code=_code, market="HK", exchange="HKEX",
+                                source=_fetched.get("source", "tencent"),
+                            ))
+                    except Exception:
+                        pass
+            if info_payloads:
+                self.warehouse.upsert_stock_info_batch(info_payloads)
+                print(f"[OK] 已更新 {len(info_payloads)} 只股票的基本面信息")
+            skipped_stock_info_codes.clear()
+
         stocks = stock_fetch_specs
 
         if not stocks:
@@ -1284,28 +1639,61 @@ class MarketDataService:
         completed_stocks_progress = 0
         completed_tasks_progress = 0
 
-        def emit_sync_progress():
-            self._emit_sync_progress_line(
-                completed_tasks=completed_tasks_progress,
-                total_tasks=sum(requested_by_frequency.values()),
-                completed_stocks=completed_stocks_progress,
-                total_stocks=len(stocks),
-                started_at=progress_started_at,
-                frequency_list=frequency_list,
-                requested_by_frequency=requested_by_frequency,
-                completed_by_frequency=completed_by_frequency,
+        total_tasks = sum(requested_by_frequency.values())
+        pbar = None
+        if show_progress:
+            pbar = tqdm(
+                total=total_tasks,
+                desc="ohlcv sync",
+                unit="task",
+                file=sys.stderr,
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+                "[{elapsed}<{remaining}, {rate_fmt}]",
             )
 
+        def _write(msg):
+            """Write a message without disrupting the progress bar."""
+            if pbar is not None:
+                pbar.write(msg)
+            else:
+                print(msg)
+
+        def emit_sync_progress(task_delta=0):
+            if pbar is not None:
+                if task_delta:
+                    pbar.update(task_delta)
+                pbar.set_postfix_str(f"stocks={completed_stocks_progress}/{len(stocks)}")
+            else:
+                self._emit_sync_progress_line(
+                    completed_tasks=completed_tasks_progress,
+                    total_tasks=total_tasks,
+                    completed_stocks=completed_stocks_progress,
+                    total_stocks=len(stocks),
+                    started_at=progress_started_at,
+                    frequency_list=frequency_list,
+                    requested_by_frequency=requested_by_frequency,
+                    completed_by_frequency=completed_by_frequency,
+                )
+
         def build_basic_stock_info(stock):
+            enriched = {
+                "name": stock.get("name"),
+                "source": "hk_market_list",
+            }
+            try:
+                from data.ingest.providers import StockInfoFetcher as _StockInfoFetcher
+                fetcher = _StockInfoFetcher(stock["code"], data_source="tencent", verbose=not show_progress)
+                fetched = fetcher.fetch()
+                if fetched:
+                    enriched.update(fetched)
+            except Exception:
+                pass
             return normalize_stock_info(
-                {
-                    "name": stock.get("name"),
-                    "source": "hk_market_list",
-                },
+                enriched,
                 stock_code=stock["code"],
                 market="HK",
                 exchange="HKEX",
-                source="hk_market_list",
+                source=enriched.get("source", "hk_market_list"),
             )
 
         def fetch_single_stock(stock):
@@ -1346,7 +1734,7 @@ class MarketDataService:
                         with progress_lock:
                             completed_by_frequency[frequency] = completed_by_frequency.get(frequency, 0) + 1
                             completed_tasks_progress += 1
-                            emit_sync_progress()
+                            emit_sync_progress(task_delta=1)
                     continue
                 raw_frame = None
                 derived_from_1min = False
@@ -1448,7 +1836,7 @@ class MarketDataService:
                     with progress_lock:
                         completed_by_frequency[frequency] = completed_by_frequency.get(frequency, 0) + 1
                         completed_tasks_progress += 1
-                        emit_sync_progress()
+                        emit_sync_progress(task_delta=1)
 
             merged_frame = (
                 pd.concat(normalized_frames, ignore_index=True)
@@ -1513,7 +1901,7 @@ class MarketDataService:
                     if frame is None or frame.empty:
                         skipped_count += 1
                         if not show_progress:
-                            print(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [SKIP] 无有效历史数据")
+                            _write(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [SKIP] 无有效历史数据")
                         continue
 
                     stock_quality_summary = {}
@@ -1589,35 +1977,46 @@ class MarketDataService:
                         for frequency, source in sorted(result["sources"].items())
                     ) or effective_data_source
                     if not show_progress or missing_frequencies or stock_quality_summary:
-                        print(
+                        _write(
                             f"[{idx:04d}/{total:04d}] {code} - {name:<20} [{status_label}] "
                             f"{len(frame)} 行 ({min_date} -> {max_date}) "
                             f"周期={frequency_stats} 源={source_stats}"
                         )
                         if missing_frequencies:
-                            print(f"                 缺失周期={', '.join(missing_frequencies)}")
+                            _write(f"                 缺失周期={', '.join(missing_frequencies)}")
                         if stock_quality_summary:
                             quality_stats = ", ".join(
                                 f"{frequency}(E{item['error_count']}/W{item['warning_count']})"
                                 for frequency, item in stock_quality_summary.items()
                             )
-                            print(f"                 质量提示={quality_stats}")
+                            _write(f"                 质量提示={quality_stats}")
 
                     if pending_stocks >= flush_stock_count or pending_rows >= flush_row_count:
                         flush_batch()
                         if not show_progress:
-                            print(f"[FLUSH] 已批量写入，累计 {rows_written} 行")
+                            _write(f"[FLUSH] 已批量写入，累计 {rows_written} 行")
                 except Exception as exc:
                     failed.append({"code": code, "name": name, "error": str(exc)})
                     if show_progress:
                         with progress_lock:
                             completed_stocks_progress += 1
                             emit_sync_progress()
-                    print(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [FAIL] {str(exc)[:120]}")
+                    # Clear accumulated buffers on flush failure to prevent cascading errors
+                    if history_frames:
+                        history_frames = []
+                        pending_rows = 0
+                    if stock_info_payloads:
+                        stock_info_payloads = []
+                    pending_stocks = 0
+                    _write(f"[{idx:04d}/{total:04d}] {code} - {name:<20} [FAIL] {str(exc)[:120]}")
 
-        flush_batch()
-        if show_progress:
-            print(file=sys.stderr)
+        try:
+            flush_batch()
+        finally:
+            if pbar is not None:
+                pbar.close()
+            elif show_progress:
+                print(file=sys.stderr)
 
         compact_result = None
         if compact_after:

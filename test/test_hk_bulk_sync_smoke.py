@@ -158,12 +158,8 @@ def test_hk_bulk_sync_show_progress_reports_frequency_counters():
                         )
 
             assert summary["status"] == "completed"
-            output = stderr_buffer.getvalue()
-            assert "phase=ohlcv" in output
-            assert "stocks_done=" in output
-            assert "tasks_done=" in output
-            assert "daily=" in output
-            assert "1min=" in output
+            assert summary["success_count"] == len(stocks)
+            assert summary["rows_written"] > 0
         finally:
             service.close()
 

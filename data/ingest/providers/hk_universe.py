@@ -167,12 +167,13 @@ class HKMarketListFetcher:
         print("[INFO] 扫描范围：00001-09999，使用多线程加速...")
 
         db_manager = DatabaseManager()
-        cache_available = db_manager.conn is not None
-        scanned_stocks = db_manager.get_scanned_stocks("active") if cache_available else []
-        scanned_codes = {stock["code"] for stock in scanned_stocks}
+        scanned_stocks = db_manager.get_scanned_stocks("active")
+        scanned_codes = {
+            str(stock.get("code") or stock.get("stock_code") or "").zfill(5)
+            for stock in scanned_stocks
+        }
+        scanned_codes.discard("00000")
         print(f"[INFO] 数据库中已有 {len(scanned_codes)} 只已扫描股票，将跳过...")
-        if not cache_available:
-            print("[WARNING] 扫描缓存数据库不可用，本次仅做内存扫描，不写入 scanned_stocks 缓存")
 
         stats = {"tested": 0, "found": 0, "skipped": len(scanned_codes), "lock": threading.Lock()}
 
@@ -196,8 +197,7 @@ class HKMarketListFetcher:
                     if len(parts) > 1 and parts[1] and parts[1] != "N/A":
                         name = parts[1].strip()
                         if name and self._is_supported_security(code, name):
-                            if cache_available:
-                                db_manager.save_scanned_stock(code, name, "active")
+                            db_manager.save_scanned_stock(code, name, "active")
                             return {"code": code, "name": name}
             except requests.exceptions.Timeout:
                 pass

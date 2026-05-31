@@ -11,12 +11,13 @@ from data.ingest.providers.hk_common import ak, build_source_priority, normalize
 class StockInfoFetcher:
     """获取港股基本信息。"""
 
-    def __init__(self, stock_code, data_source=None, source_priority=None):
+    def __init__(self, stock_code, data_source=None, source_priority=None, verbose=True):
         self.stock_code = normalize_hk_stock_code(stock_code)
         self.ticker_symbol = f"hk{self.stock_code}"
         self.info = None
         self.source_priority = build_source_priority(data_source, source_priority)
         self.last_successful_source = None
+        self.verbose = bool(verbose)
 
     def _select_row_by_code(self, df, code_columns):
         if df is None or df.empty:
@@ -49,6 +50,10 @@ class StockInfoFetcher:
             "volume": safe_float(row.get(mapping.get("volume"))),
             "market_cap": safe_float(row.get(mapping.get("market_cap"))),
             "pe_ratio": safe_float(row.get(mapping.get("pe_ratio"))),
+            "pb_ratio": safe_float(row.get(mapping.get("pb_ratio"))),
+            "dividend_yield": safe_float(row.get(mapping.get("dividend_yield"))),
+            "total_shares": safe_float(row.get(mapping.get("total_shares"))),
+            "circulating_shares": safe_float(row.get(mapping.get("circulating_shares"))),
             "52_week_high": safe_float(row.get(mapping.get("week_52_high"))),
             "52_week_low": safe_float(row.get(mapping.get("week_52_low"))),
         }
@@ -115,7 +120,7 @@ class StockInfoFetcher:
             raise ValueError("腾讯返回格式异常")
 
         parts = content.split("~")
-        if len(parts) < 50:
+        if len(parts) < 71:
             raise ValueError("腾讯返回字段不完整")
 
         return {
@@ -127,14 +132,19 @@ class StockInfoFetcher:
             "high": safe_float(parts[33] if len(parts) > 33 else None),
             "low": safe_float(parts[34] if len(parts) > 34 else None),
             "volume": safe_float(parts[6] if len(parts) > 6 else None),
-            "market_cap": safe_float(parts[43] if len(parts) > 43 else None),
-            "pe_ratio": safe_float(parts[39] if len(parts) > 39 else None),
-            "52_week_high": safe_float(parts[47] if len(parts) > 47 else None),
-            "52_week_low": safe_float(parts[48] if len(parts) > 48 else None),
+            "market_cap": safe_float(parts[44] if len(parts) > 44 else None),
+            "pe_ratio": safe_float(parts[40] if len(parts) > 40 else None),
+            "pb_ratio": safe_float(parts[57] if len(parts) > 57 else None),
+            "dividend_yield": safe_float(parts[59] if len(parts) > 59 else None),
+            "total_shares": safe_float(parts[69] if len(parts) > 69 else None),
+            "circulating_shares": safe_float(parts[70] if len(parts) > 70 else None),
+            "52_week_high": safe_float(parts[48] if len(parts) > 48 else None),
+            "52_week_low": safe_float(parts[49] if len(parts) > 49 else None),
         }
 
     def fetch(self):
-        print(f"[INFO] 正在获取 {self.ticker_symbol} 的基本信息...")
+        if self.verbose:
+            print(f"[INFO] 正在获取 {self.ticker_symbol} 的基本信息...")
 
         fetchers = {
             "akshare_sina": self._fetch_akshare_sina_info,
@@ -152,12 +162,15 @@ class StockInfoFetcher:
                 if info:
                     self.info = info
                     self.last_successful_source = source_name
-                    print(f"[OK] 基本信息获取成功，来源：{source_name}")
+                    if self.verbose:
+                        print(f"[OK] 基本信息获取成功，来源：{source_name}")
                     return info
             except Exception as exc:
-                print(f"[WARNING] {source_name} 获取基本信息失败：{exc}")
+                if self.verbose:
+                    print(f"[WARNING] {source_name} 获取基本信息失败：{exc}")
 
-        print(f"[ERROR] 未能获取 {self.ticker_symbol} 的基本信息")
+        if self.verbose:
+            print(f"[ERROR] 未能获取 {self.ticker_symbol} 的基本信息")
         return None
 
     def get_info(self):

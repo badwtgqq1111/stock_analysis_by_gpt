@@ -1,7 +1,7 @@
 [project]
 name = "stock-analysis-by-gpt"
 version = "0.1.0"
-description = "Local quant research and backtesting toolkit for HK/CN stocks based on Parquet and DuckDB."
+description = "Local quant research and backtesting toolkit for HK/CN stocks based on ClickHouse and Parquet."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,7 +12,6 @@ dependencies = [
     "dash>=4.1.0",
     "dash-bootstrap-components>=1.6.0",
     "demjson3",
-    "duckdb",
     "fastapi>=0.136.1",
     "lightgbm",
     "matplotlib",
@@ -28,6 +27,7 @@ dependencies = [
     "scipy",
     "shap>=0.49.1",
     "TA-Lib",
+    "tqdm",
     "urllib3",
     "uvicorn>=0.47.0",
     "transformers>=5.9.0",

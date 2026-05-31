@@ -61,7 +61,7 @@ def test_alpha158_default_feature_count_and_values():
     normalized = normalize_ohlcv_frame(_make_ohlcv_frame(), stock_code="00700", market="HK")
     feature_frame = factor_set.transform(normalized)
 
-    assert feature_frame.shape[1] == 158
+    assert feature_frame.shape[1] == 193
     latest_row = feature_frame.iloc[-1]
     close = normalized["close"].iloc[-1]
     open_price = normalized["open"].iloc[-1]
@@ -87,7 +87,7 @@ def test_service_can_compute_and_persist_factor_set():
             )
             assert result["rows"] == len(normalized)
             assert result["write_result"] is not None
-            assert result["metadata"]["extra"]["feature_count"] == 158
+            assert result["metadata"]["extra"]["feature_count"] == 193
 
             loaded = service.get_feature_frame(
                 stock_code="00700",

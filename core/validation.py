@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from core.constants import (
     DEFAULT_FACTOR_SET,
@@ -137,8 +138,10 @@ class ValidationMixin:
         batch_size=None,
         max_workers=1,
         show_progress=False,
+        horizons=(1, 5, 10, 20),
     ):
         from factor_engine import FactorContext, create_factor_set
+        from factor_validation import FactorValidator
         from data.model import normalize_feature_frame, normalize_ohlcv_frame
 
         stock_codes = list(stock_codes or [])
@@ -170,6 +173,13 @@ class ValidationMixin:
                 if self._is_validation_feature_cache_fresh(cache_path):
                     cached_result = self._load_validation_feature_cache(cache_path)
                     if cached_result is not None:
+                        # Migrate old caches that stored ohlcv_frame
+                        if "returns_frame" not in cached_result and "ohlcv_frame" in cached_result:
+                            cached_result["returns_frame"] = (
+                                FactorValidator.compute_forward_returns(
+                                    cached_result.pop("ohlcv_frame"), horizons=horizons,
+                                )
+                            )
                         return cached_result
 
                 warmup_days = max(days + 180, days)
@@ -181,6 +191,15 @@ class ValidationMixin:
                     full_data.reset_index(),
                     stock_code=stock_code,
                     market="HK",
+                )
+                stock_info = self.market_warehouse.get_stock_info(stock_code)
+                if stock_info and stock_info.get("total_shares"):
+                    ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
+                # Compute forward returns here (in the worker thread) so we
+                # never need to pass the full OHLCV frame through the batch
+                # pipeline — only the compact returns frame goes downstream.
+                returns_frame = FactorValidator.compute_forward_returns(
+                    ohlcv_frame, horizons=horizons,
                 )
                 feature_long = self._load_materialized_validation_features(
                     stock_code=stock_code,
@@ -215,14 +234,20 @@ class ValidationMixin:
                         feature_columns=list(feature_frame.columns),
                     )
                     if not feature_long.empty:
-                        with persist_lock:
-                            self.market_warehouse.upsert_features(feature_long)
+                        if not getattr(self.market_warehouse, "read_only", False):
+                            with persist_lock:
+                                self.market_warehouse.upsert_features(feature_long)
                 feature_long = self._trim_validation_feature_frame(feature_long)
-                ohlcv_frame = self._trim_validation_ohlcv_frame(ohlcv_frame)
+                # Trim returns to match feature date range
+                if not returns_frame.empty and not feature_long.empty:
+                    feat_dates = set(feature_long["trade_date"].dropna().unique())
+                    returns_frame = returns_frame[
+                        returns_frame["trade_date"].isin(feat_dates)
+                    ]
                 result = {
                     "stock_code": stock_code,
                     "feature_frame": feature_long,
-                    "ohlcv_frame": ohlcv_frame,
+                    "returns_frame": returns_frame,
                     "feature_rows": len(feature_long),
                     "feature_names": feature_long["feature_name"].nunique() if not feature_long.empty else 0,
                     "date_count": feature_long["trade_date"].nunique() if not feature_long.empty else 0,
@@ -234,7 +259,7 @@ class ValidationMixin:
                     {
                         "stock_code": stock_code,
                         "feature_frame": feature_long,
-                        "ohlcv_frame": ohlcv_frame,
+                        "returns_frame": returns_frame,
                         "feature_rows": result["feature_rows"],
                         "feature_names": result["feature_names"],
                         "date_count": result["date_count"],
@@ -259,11 +284,27 @@ class ValidationMixin:
             nonlocal pending_results
             if not pending_results:
                 return None
-            batch_feature_frames = [item["feature_frame"] for item in pending_results if item.get("feature_frame") is not None and not item["feature_frame"].empty]
-            batch_ohlcv_frames = [item["ohlcv_frame"] for item in pending_results if item.get("ohlcv_frame") is not None and not item["ohlcv_frame"].empty]
+            batch_feature_frames = [
+                item["feature_frame"]
+                for item in pending_results
+                if item.get("feature_frame") is not None and not item["feature_frame"].empty
+            ]
+            batch_returns_frames = [
+                item["returns_frame"]
+                for item in pending_results
+                if item.get("returns_frame") is not None and not item["returns_frame"].empty
+            ]
             batch_payload = {
-                "feature_frame": pd.concat(batch_feature_frames, ignore_index=True) if batch_feature_frames else pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS),
-                "ohlcv_frame": pd.concat(batch_ohlcv_frames, ignore_index=True) if batch_ohlcv_frames else pd.DataFrame(columns=VALIDATION_OHLCV_BASE_COLUMNS),
+                "feature_frame": (
+                    pd.concat(batch_feature_frames, ignore_index=True)
+                    if batch_feature_frames
+                    else pd.DataFrame(columns=VALIDATION_FEATURE_BASE_COLUMNS)
+                ),
+                "returns_frame": (
+                    pd.concat(batch_returns_frames, ignore_index=True)
+                    if batch_returns_frames
+                    else pd.DataFrame()
+                ),
                 "stock_results": [
                     {
                         "stock_code": item.get("stock_code"),
@@ -279,70 +320,65 @@ class ValidationMixin:
             pending_results = []
             return batch_payload
 
+        pbar = None
+        if show_progress:
+            pbar = tqdm(
+                total=len(stock_codes),
+                desc="validation",
+                unit="stock",
+                file=sys.stderr,
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+                "[{elapsed}<{remaining}, {rate_fmt}]",
+            )
+
+        def _write(msg):
+            if pbar is not None:
+                pbar.write(msg)
+            else:
+                print(msg)
+
+        def _on_stock_done(result, error=None):
+            nonlocal completed, success_count
+            completed += 1
+            if result is not None:
+                pending_results.append(result)
+                success_count += 1
+            if pbar is not None:
+                pbar.update(1)
+                pbar.set_postfix_str(f"ok={success_count}")
+            if error:
+                _write(f"[ERR] {error}")
+
         if max_workers == 1 or len(stock_codes) <= 1:
             for stock_code in stock_codes:
                 result = run_analysis(stock_code)
-                completed += 1
-                if result is not None:
-                    pending_results.append(result)
-                    success_count += 1
-                if show_progress:
-                    elapsed = max(time.time() - started_at, 1e-9)
-                    rate = completed / elapsed
-                    remaining = len(stock_codes) - completed
-                    eta = remaining / rate if rate > 0 else 0.0
-                    print(
-                        f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
-                        f"({completed / len(stock_codes):.1%}) success={success_count} "
-                        f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                    , end="", flush=True, file=sys.stderr)
+                _on_stock_done(result)
                 if len(pending_results) >= batch_size:
                     batch_payload = flush_pending()
                     if batch_payload is not None:
                         yield batch_payload
-            if show_progress:
-                print(file=sys.stderr)
         else:
             with ThreadPoolExecutor(max_workers=min(max_workers, len(stock_codes))) as executor:
-                future_map = {executor.submit(run_analysis, stock_code): stock_code for stock_code in stock_codes}
+                future_map = {
+                    executor.submit(run_analysis, stock_code): stock_code
+                    for stock_code in stock_codes
+                }
                 for future in as_completed(future_map):
                     stock_code = future_map[future]
                     try:
                         result = future.result()
+                        _on_stock_done(result)
                     except Exception as exc:
-                        print(f"\n[ERROR] 因子验证 {stock_code} 失败: {exc}")
-                        completed += 1
-                        if show_progress:
-                            elapsed = max(time.time() - started_at, 1e-9)
-                            rate = completed / elapsed
-                            remaining = len(stock_codes) - completed
-                            eta = remaining / rate if rate > 0 else 0.0
-                            print(
-                                f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
-                                f"({completed / len(stock_codes):.1%}) success={success_count} "
-                                f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                            , end="", flush=True, file=sys.stderr)
-                        continue
-                    completed += 1
-                    if result is not None:
-                        pending_results.append(result)
-                        success_count += 1
-                    if show_progress:
-                        elapsed = max(time.time() - started_at, 1e-9)
-                        rate = completed / elapsed
-                        remaining = len(stock_codes) - completed
-                        eta = remaining / rate if rate > 0 else 0.0
-                        print(
-                            f"\r[PROGRESS] validation {completed}/{len(stock_codes)} "
-                            f"({completed / len(stock_codes):.1%}) success={success_count} "
-                            f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
-                        , end="", flush=True, file=sys.stderr)
+                        _on_stock_done(None, error=f"{stock_code}: {exc}")
                     if len(pending_results) >= batch_size:
                         batch_payload = flush_pending()
                         if batch_payload is not None:
                             yield batch_payload
-            if show_progress:
-                print(file=sys.stderr)
+
+        if pbar is not None:
+            pbar.close()
+        elif show_progress:
+            print(file=sys.stderr)
 
         batch_payload = flush_pending()
         if batch_payload is not None:
@@ -413,6 +449,7 @@ class ValidationMixin:
             batch_size=batch_size,
             max_workers=max_workers,
             show_progress=show_progress,
+            horizons=horizons,
         )
 
         factor_coverage_rows = []
@@ -460,8 +497,10 @@ class ValidationMixin:
             if not show_progress:
                 return
             detail = ""
-            if isinstance(_total, int) and _total > 1 and isinstance(_done, int) and _done > 0:
+            if isinstance(_total, int) and _total > 1 and isinstance(_done, int):
                 detail = f" {_done}/{_total}"
+            elif isinstance(_total, int) and _total <= 1:
+                detail = " ..." if _done == 0 else " done"
             print(f"[PROGRESS] validation stream {stage}{detail} stocks={success_count}")
 
         validation_result = validator.validate_streaming(

@@ -11,7 +11,7 @@ import pandas as pd
 
 sys.path.insert(0, "/Users/ccs/code/quant/stock_analysis_by_gpt")
 
-from analyzer_core import StockAnalyzer
+from core import StockAnalyzer
 from factor_engine.ml import LightGBMRankerPipeline
 
 

@@ -39,8 +39,8 @@ class Alpha158HKFactorSet(BaseFactorSet):
     """
 
     name = "alpha158_hk"
-    description = "Alpha158 extended with 5 IC-validated HK manual factors"
-    version = "2.0.0"
+    description = "Alpha158 extended with 9 HK-specific manual factors"
+    version = "2.2.0"
 
     def transform(self, frame, context=None):
         alpha158 = create_factor_set("qlib_alpha158", config=self.config)
@@ -58,9 +58,7 @@ class Alpha158HKFactorSet(BaseFactorSet):
         n_bars = len(close)
         columns = {}
 
-        # Determine window: use 252 if enough data, else fall back to 120
         window_52w = 252 if n_bars >= 252 else 120
-        window_fallback = 120 if n_bars >= 120 else 60
 
         # 1. price_position_52w_high — close / N-d high * 100
         high_period = ts_max(high, window_52w)
@@ -86,6 +84,23 @@ class Alpha158HKFactorSet(BaseFactorSet):
         up_day = (delta(close, 1) > 0).astype(float)
         columns["consecutive_up_days_5d"] = ts_sum(up_day, 5)
 
+        # 6. momentum_12m_skip_1m — t-12 to t-1 month return (skip last month)
+        columns["momentum_12m_skip_1m"] = safe_divide(close.shift(21), close.shift(252)) - 1.0
+
+        # 7. short_term_reversal_1m — last month return (reversal signal)
+        columns["short_term_reversal_1m"] = safe_divide(close, close.shift(21)) - 1.0
+
+        # 8. turnover_rate — volume / total_shares * 100 (liquidity normalized by float)
+        if "total_shares" in qlib_frame.columns and not qlib_frame["total_shares"].isna().all():
+            total_shares = qlib_frame["total_shares"]
+            columns["turnover_rate"] = safe_divide(volume, total_shares) * 100.0
+        else:
+            columns["turnover_rate"] = np.nan
+
+        # 9. buying_pressure — intraday buy pressure proxy (bid/ask ratio substitute)
+        hl_range = high - low
+        columns["buying_pressure"] = np.clip(safe_divide(close - low, hl_range), 0.0, 1.0)
+
         custom_df = pd.DataFrame(columns, index=qlib_frame.index)
 
         if base.empty:
@@ -97,5 +112,5 @@ class Alpha158HKFactorSet(BaseFactorSet):
             name=self.name,
             description=self.description,
             version=self.version,
-            extra={"feature_count": 198},
+            extra={"feature_count": 202},
         )

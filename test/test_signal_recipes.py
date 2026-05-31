@@ -23,7 +23,7 @@ from factor_engine.signals import (
     list_signal_recipes,
     summarize_low_price_setup,
 )
-from analyzer_core import StockAnalyzer
+from core import StockAnalyzer
 
 
 def _make_setup_frames():

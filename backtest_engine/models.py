@@ -3,6 +3,8 @@
 
 """回测引擎数据结构。"""
 
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass, field
 
 
@@ -196,6 +198,7 @@ class PortfolioBuildResult:
     daily_candidate_counts: dict = field(default_factory=dict)
     contributions: list[dict] = field(default_factory=list)
     analysis_results: list = field(default_factory=list)
+    kelly_position_ratio: float = 0.1
 
     def to_dict(self):
         return {
@@ -224,4 +227,5 @@ class PortfolioBuildResult:
             "daily_candidate_counts": dict(self.daily_candidate_counts),
             "contributions": list(self.contributions),
             "analysis_results": list(self.analysis_results),
+            "kelly_position_ratio": self.kelly_position_ratio,
         }

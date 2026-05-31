@@ -131,7 +131,7 @@ def compute_cross_sectional_ic(panel: pd.DataFrame, factor_col: str, horizon: in
 
 
 def main(stocks: int = 100, days: int = 365):
-    from analyzer_core import StockAnalyzer
+    from core import StockAnalyzer
 
     print(f"单因子 IC 分析 — {len(CUSTOM_FACTORS)} 个因子, {stocks} 只股票, {days} 天")
     print("=" * 70)

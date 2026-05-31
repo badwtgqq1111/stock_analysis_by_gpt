@@ -140,6 +140,33 @@ class TopNPortfolioBuilder:
             eligibility = self._compute_selection_eligibility(item)
             item.update(eligibility)
 
+        # Industry-aware enrichment: add industry_rank, industry_score,
+        # eligibility_pass_industry to every ranking row without changing
+        # the existing selection flow.
+        try:
+            from backtest_engine.industry_selector import IndustryCandidateSelector
+
+            ind_selector = IndustryCandidateSelector(
+                top_n=self.top_n,
+                max_per_industry=max(1, int(np.ceil(self.top_n / 2))),
+                require_actionable=False,   # existing logic already handles this
+                require_liquidity=False,     # existing logic already handles this
+                require_fresh_signal=False,  # existing logic already handles this
+            )
+            industry_map = {
+                r.get("stock_code", ""): r.get("industry_l2") or r.get("industry_l1", "")
+                for r in ranking
+            }
+            ranking = ind_selector.select(ranking, industry_map)
+        except Exception:
+            # Non-breaking: industry selector is optional enrichment
+            for item in ranking:
+                item.setdefault("industry_rank", 0)
+                item.setdefault("industry_score", 50.0)
+                item.setdefault("eligibility_pass", item.get("selection_eligible", True))
+                item.setdefault("eligibility_reasons", item.get("eligibility_reasons", []))
+                item.setdefault("selected", False)
+
         cross_sectional_picks = []
         grouped_candidates = {}
         contributions = []

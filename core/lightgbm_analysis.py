@@ -183,6 +183,15 @@ class LightGBMAnalysisMixin:
             return pd.DataFrame()
 
     @staticmethod
+    def _compute_industry_features(batch_data_map, stock_info_map):
+        """从 batch OHLCV 数据计算真实行业特征。"""
+        try:
+            from core.industry_features import compute_industry_features
+            return compute_industry_features(batch_data_map, stock_info_map, level="l2")
+        except Exception:
+            return pd.DataFrame()
+
+    @staticmethod
     def _merge_alt_sentiment_features(panel_features, stock_codes, show_progress=False):
         """Merge alternative sentiment features into the LightGBM feature panel.
 
@@ -345,6 +354,22 @@ class LightGBMAnalysisMixin:
 
         sector_features = self._compute_sector_features(batch_data_map)
 
+        # Compute real-industry features (parallel to correlation-cluster features)
+        stock_info_map = {}
+        try:
+            stock_info_map = self.market_warehouse.read_stock_info(
+                stock_codes=stock_codes, market="HK",
+                columns=["stock_code", "industry_l1", "industry_l2"],
+            )
+            if not isinstance(stock_info_map, dict):
+                stock_info_map = {
+                    row.get("stock_code", ""): row
+                    for row in (stock_info_map or [])
+                }
+        except Exception:
+            stock_info_map = {}
+        industry_features = self._compute_industry_features(batch_data_map, stock_info_map)
+
         batch_results = []
         feature_frames = []
         target_frames = []
@@ -414,6 +439,12 @@ class LightGBMAnalysisMixin:
                     for col in stock_sector.columns:
                         if col != "stock_code":
                             feature_frame[col] = stock_sector[col].iloc[0]
+            if not industry_features.empty:
+                stock_ind = industry_features[industry_features["stock_code"] == stock_code]
+                if not stock_ind.empty:
+                    for col in stock_ind.columns:
+                        if col not in ("stock_code", "industry_l1", "industry_l2"):
+                            feature_frame[col] = stock_ind[col].iloc[0]
             feature_frame["stock_code"] = stock_code
             feature_frames.append(feature_frame)
 

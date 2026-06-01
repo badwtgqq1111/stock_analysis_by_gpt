@@ -732,6 +732,144 @@ class LightGBMRankerPipeline:
             "ic_positive_rate": round(float((ic_series > 0).mean()), 4) if not ic_series.empty else np.nan,
         }
 
+    def evaluate_oos_by_industry(
+        self,
+        predictions: pd.DataFrame,
+        full_frame: pd.DataFrame,
+        target_col: str,
+        industry_map: dict[str, str | None],
+        *,
+        min_stocks_per_industry: int = 3,
+    ) -> dict:
+        """Compute OOS IC/RankIC broken down by industry.
+
+        Parameters
+        ----------
+        predictions : DataFrame with trade_date, stock_code, model_score_raw.
+        full_frame : DataFrame with trade_date, stock_code, target_col.
+        target_col : str, e.g. 'forward_return_20'.
+        industry_map : {stock_code: industry_l2}.
+        min_stocks_per_industry : minimum stocks per industry-date group.
+
+        Returns
+        -------
+        dict with keys:
+        - ``global``: dict of overall metrics (same as ``_evaluate_oos``).
+        - ``by_industry``: dict of {industry: {metrics}} sorted by IC mean desc.
+        - ``industry_count``: number of industries evaluated.
+        - ``attribution``: {within_industry_ic, between_industry_ic} for
+          decomposing model skill into stock-picking vs industry-selection.
+        """
+        eval_frame = predictions.merge(
+            full_frame[["trade_date", "stock_code", target_col]],
+            on=["trade_date", "stock_code"],
+            how="inner",
+        )
+        eval_frame = eval_frame.dropna(subset=["model_score_raw", target_col])
+        if eval_frame.empty:
+            return {"global": {}, "by_industry": {}, "industry_count": 0, "attribution": {}}
+
+        # Map industry onto eval frame
+        eval_frame["industry"] = eval_frame["stock_code"].map(industry_map).fillna("__unclassified__")
+
+        # --- Global metrics ---
+        global_metrics = self._evaluate_oos(predictions, full_frame, target_col)
+
+        # --- Per-industry daily IC ---
+        ind_daily_ics: dict[str, list[float]] = {}
+        ind_daily_rank_ics: dict[str, list[float]] = {}
+
+        for (_date, ind), group in eval_frame.groupby(["trade_date", "industry"]):
+            if len(group) < min_stocks_per_industry:
+                continue
+            ic = group["model_score_raw"].corr(group[target_col])
+            rank_ic = group["model_score_raw"].corr(group[target_col], method="spearman")
+            if np.isfinite(ic):
+                ind_daily_ics.setdefault(ind, []).append(ic)
+            if np.isfinite(rank_ic):
+                ind_daily_rank_ics.setdefault(ind, []).append(rank_ic)
+
+        by_industry = {}
+        for ind in sorted(ind_daily_ics.keys()):
+            ic_s = pd.Series(ind_daily_ics[ind])
+            ric_s = pd.Series(ind_daily_rank_ics.get(ind, []))
+            ic_mean = float(ic_s.mean()) if not ic_s.empty else np.nan
+            ic_std = float(ic_s.std()) if len(ic_s) > 1 else np.nan
+            icir = ic_mean / ic_std if ic_std and ic_std > 1e-12 else np.nan
+            ric_mean = float(ric_s.mean()) if not ric_s.empty else np.nan
+            ric_std = float(ric_s.std()) if len(ric_s) > 1 else np.nan
+            ricir = ric_mean / ric_std if ric_std and ric_std > 1e-12 else np.nan
+            by_industry[ind] = {
+                "ic_mean": round(ic_mean, 6) if np.isfinite(ic_mean) else None,
+                "ic_std": round(ic_std, 6) if np.isfinite(ic_std) else None,
+                "icir": round(icir, 4) if np.isfinite(icir) else None,
+                "rank_ic_mean": round(ric_mean, 6) if np.isfinite(ric_mean) else None,
+                "rank_ic_std": round(ric_std, 6) if np.isfinite(ric_std) else None,
+                "rank_icir": round(ricir, 4) if np.isfinite(ricir) else None,
+                "eval_dates": len(ic_s),
+                "n_stocks": int(eval_frame[eval_frame["industry"] == ind]["stock_code"].nunique()),
+            }
+
+        # Sort by IC mean descending
+        by_industry = dict(
+            sorted(by_industry.items(), key=lambda kv: kv[1].get("ic_mean") or -999, reverse=True)
+        )
+
+        # --- Attribution: within-industry vs between-industry IC ----
+        attribution = {}
+        try:
+            # Within-industry: demean predictions AND targets by industry×date mean
+            ind_date_means = eval_frame.groupby(["trade_date", "industry"])[
+                ["model_score_raw", target_col]
+            ].transform("mean")
+            eval_frame["score_within"] = eval_frame["model_score_raw"] - ind_date_means["model_score_raw"]
+            eval_frame["target_within"] = eval_frame[target_col] - ind_date_means[target_col]
+
+            within_ics = []
+            for _date, group in eval_frame.groupby("trade_date"):
+                if len(group) < 5:
+                    continue
+                ic = group["score_within"].corr(group["target_within"])
+                if np.isfinite(ic):
+                    within_ics.append(ic)
+
+            # Between-industry: use industry mean scores and targets
+            ind_agg = eval_frame.groupby(["trade_date", "industry"]).agg(
+                score_mean=("model_score_raw", "mean"),
+                target_mean=(target_col, "mean"),
+            ).reset_index()
+            between_ics = []
+            for _date, group in ind_agg.groupby("trade_date"):
+                if len(group) < 3:
+                    continue
+                ic = group["score_mean"].corr(group["target_mean"])
+                if np.isfinite(ic):
+                    between_ics.append(ic)
+
+            within_s = pd.Series(within_ics)
+            between_s = pd.Series(between_ics)
+            attribution = {
+                "within_industry_ic_mean": round(float(within_s.mean()), 6) if not within_s.empty else None,
+                "within_industry_icir": round(
+                    float(within_s.mean() / within_s.std()), 4
+                ) if len(within_s) > 1 and within_s.std() > 1e-12 else None,
+                "between_industry_ic_mean": round(float(between_s.mean()), 6) if not between_s.empty else None,
+                "between_industry_icir": round(
+                    float(between_s.mean() / between_s.std()), 4
+                ) if len(between_s) > 1 and between_s.std() > 1e-12 else None,
+                "within_eval_dates": len(within_s),
+                "between_eval_dates": len(between_s),
+            }
+        except Exception:
+            pass
+
+        return {
+            "global": global_metrics,
+            "by_industry": by_industry,
+            "industry_count": len(by_industry),
+            "attribution": attribution,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Utilities

@@ -167,14 +167,57 @@ class ParquetDataStore:
         dataset = ds.dataset(dataset_path, format="parquet", partitioning="hive")
         requested_columns = list(columns or [])
         available_columns = set(dataset.schema.names)
-        read_columns = [column for column in requested_columns if column in available_columns] or None
-        frame = dataset.to_table(columns=read_columns).to_pandas()
+        read_columns = [c for c in requested_columns if c in available_columns] or None
+
+        # ---- PyArrow predicate pushdown ----
+        # Build a pyarrow Expression so that only matching row groups
+        # are read from disk.  This avoids loading the entire dataset
+        # into memory and then filtering in pandas.
+        import pyarrow.compute as pc
+
+        pyarrow_expr = None
+        for column, value in (filters or {}).items():
+            if value is None or column not in available_columns:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                vals = [v for v in value if v is not None]
+                if not vals:
+                    continue
+                cond = pc.field(column).isin(vals)
+                pyarrow_expr = cond if pyarrow_expr is None else pyarrow_expr & cond
+            else:
+                cond = pc.field(column) == value
+                pyarrow_expr = cond if pyarrow_expr is None else pyarrow_expr & cond
+
+        # Range filters (e.g. trade_date between start and end).
+        # Use pd.to_datetime for date strings so comparisons work across
+        # timestamp columns without type errors.
+        for column, rng in (range_filters or {}).items():
+            if rng is None or column not in available_columns:
+                continue
+            gte = rng.get("gte")
+            lte = rng.get("lte")
+            if gte is not None:
+                gte_ts = pd.to_datetime(gte)
+                cond = pc.field(column) >= pc.scalar(gte_ts)
+                pyarrow_expr = cond if pyarrow_expr is None else pyarrow_expr & cond
+            if lte is not None:
+                lte_ts = pd.to_datetime(lte)
+                cond = pc.field(column) <= pc.scalar(lte_ts)
+                pyarrow_expr = cond if pyarrow_expr is None else pyarrow_expr & cond
+
+        if pyarrow_expr is not None:
+            table = dataset.to_table(columns=read_columns, filter=pyarrow_expr)
+        else:
+            table = dataset.to_table(columns=read_columns)
+
+        frame = table.to_pandas()
         for column in requested_columns:
             if column not in frame.columns:
                 frame[column] = None
         if requested_columns:
             frame = frame[requested_columns]
-        return self._apply_filters(frame, filters=filters, range_filters=range_filters)
+        return frame
 
     @staticmethod
     def _apply_filters(frame, filters=None, range_filters=None):

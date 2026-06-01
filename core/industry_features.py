@@ -150,7 +150,14 @@ def compute_industry_features(
         - ``dip_buy_signal_industry``
         - ``industry_leader``
     """
-    price_matrix = _build_price_matrix(price_data)
+    normalized_price_data = {}
+    for code, data in (price_data or {}).items():
+        if isinstance(data, pd.Series):
+            normalized_price_data[code] = pd.DataFrame({"close": data})
+        elif data is not None:
+            normalized_price_data[code] = pd.DataFrame(data).copy()
+
+    price_matrix = _build_price_matrix(normalized_price_data)
     if price_matrix is None or price_matrix.shape[1] < 3:
         return pd.DataFrame()
 

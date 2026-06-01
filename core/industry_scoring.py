@@ -264,6 +264,10 @@ def compute_industry_quality_scores(
             "stock_code": code,
             "quality_score": float(np.clip(quality_score, 0.0, 100.0)),
             "quality_data_coverage": float(comp_coverage),
+            "quality_missing_fields": [
+                n for n in sorted(component_names)
+                if component_dicts.get(code, {}).get(n) is None
+            ],
             "quality_peer_group": peer_group,
         })
 

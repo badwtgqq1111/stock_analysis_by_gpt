@@ -52,14 +52,17 @@ class IndustryCandidateSelector:
         min_market_cap: float = 0.0,
         min_daily_turnover: float = 0.0,
         max_overheat: float = 85.0,
-        max_drawdown_pct: float = 0.35,
-        max_downtrend_penalty: float = 80.0,
+        max_drawdown_pct: float = 0.30,
+        max_downtrend_penalty: float = 50.0,
         require_liquidity: bool = True,
         require_actionable: bool = True,
         require_non_sideways: bool = True,
         require_fresh_signal: bool = True,
         min_signal_freshness: float = 35.0,
         min_data_coverage: float = 0.5,
+        min_quality_coverage: float = 0.3,
+        min_signal_tier: str = "medium",
+        max_pe_ratio: float = 300.0,
         industry_level: str = "l2",
     ):
         self.top_n = int(top_n)
@@ -81,6 +84,9 @@ class IndustryCandidateSelector:
         self.require_fresh_signal = bool(require_fresh_signal)
         self.min_signal_freshness = float(min_signal_freshness)
         self.min_data_coverage = float(min_data_coverage)
+        self.min_quality_coverage = float(min_quality_coverage)
+        self.min_signal_tier = str(min_signal_tier).strip().lower()
+        self.max_pe_ratio = float(max_pe_ratio)
         self.industry_level = str(industry_level)
 
     # ------------------------------------------------------------------
@@ -123,8 +129,9 @@ class IndustryCandidateSelector:
 
         # ---- Phase 1: Hard filter ----
         for row in ranking_rows:
-            reasons = []
+            reasons = list(row.get("eligibility_reasons") or [])
             self._check_eligibility(row, reasons)
+            reasons = self._normalize_reasons(reasons)
             row["eligibility_pass"] = len(reasons) == 0
             row["eligibility_reasons"] = reasons
 
@@ -141,8 +148,7 @@ class IndustryCandidateSelector:
             for i, row in enumerate(members):
                 row["industry_rank"] = i + 1
                 row["industry_score"] = self._compute_industry_score(row, i, len(members))
-
-            row["industry_candidate_count"] = len(members)
+                row["industry_candidate_count"] = len(members)
 
         # ---- Phase 3: Per-industry Top-N candidate selection ----
         for ind, members in industries.items():
@@ -157,7 +163,7 @@ class IndustryCandidateSelector:
 
         # ---- Phase 4: Cross-industry final ranking ----
         selected = [r for r in eligible if r.get("selected")]
-        selected.sort(key=lambda r: -float(r.get("ranking_score", 0)))
+        selected.sort(key=lambda r: -float(r.get("industry_score", r.get("ranking_score", 0))))
 
         # Apply industry concentration penalty to final ranking
         industry_pick_counts: dict[str, int] = {}
@@ -174,10 +180,15 @@ class IndustryCandidateSelector:
                 penalty = 8
             row["industry_concentration_penalty"] = penalty
             row["ranking_score_adjusted"] = float(row.get("ranking_score", 0)) - penalty
+            row["final_score"] = (
+                float(row.get("ranking_score", 0)) * 0.65
+                + float(row.get("industry_score", 50.0)) * 0.35
+                - penalty
+            )
             industry_pick_counts[ind] = count + 1
 
         # Re-sort after penalty and take top_n
-        selected.sort(key=lambda r: -float(r.get("ranking_score_adjusted", 0)))
+        selected.sort(key=lambda r: -float(r.get("final_score", r.get("ranking_score_adjusted", 0))))
         final_pool = selected[: self.top_n]
 
         # Mark final selection
@@ -212,7 +223,7 @@ class IndustryCandidateSelector:
         if self.require_liquidity:
             liq = row.get("liquidity_ok")
             if liq is False:
-                reasons.append("low_liquidity")
+                reasons.append("liquidity_not_ok")
 
         if self.require_non_sideways:
             setup = row.get("setup_type", "")
@@ -220,23 +231,38 @@ class IndustryCandidateSelector:
                 reasons.append("sideways_setup")
 
         if self.require_fresh_signal:
-            freshness = float(row.get("signal_freshness_score", 100) or 100)
+            freshness = self._float_or_default(row.get("signal_freshness_score"), 100.0)
             if freshness < self.min_signal_freshness:
                 reasons.append(f"stale_signal(freshness={freshness:.0f})")
 
-        overheat = float(row.get("overheat_penalty_score", 0) or 0)
+        # Ai, Liu & Lin (2024): weak signals degrade model performance
+        signal_tier = str(row.get("signal_tier", "")).strip().lower()
+        tier_order = {"strong": 0, "medium": 1, "weak": 2}
+        min_tier_val = tier_order.get(self.min_signal_tier, 1)
+        actual_tier_val = tier_order.get(signal_tier, 2)
+        if actual_tier_val > min_tier_val:
+            reasons.append(f"weak_signal_tier(tier={signal_tier})")
+
+        # Bryzgalova et al. (2022): missing data is not random — hard floor
+        quality_cov = self._float_or_default(row.get("quality_data_coverage"), 1.0)
+        if quality_cov < self.min_quality_coverage:
+            reasons.append(f"low_quality_coverage({quality_cov:.0%})")
+
+        overheat = self._float_or_default(row.get("overheat_penalty_score"), 0.0)
         if overheat >= self.max_overheat:
             reasons.append(f"overheated(score={overheat:.0f})")
 
-        drawdown = float(row.get("drawdown_penalty_score", 0) or 0)
+        # Chekhlov, Uryasev & Zabarankin (2005): drawdown >30% implies
+        # near-certain long-run underperformance for long-only portfolios.
+        drawdown = self._float_or_default(row.get("drawdown_penalty_score"), 0.0)
         if drawdown >= 100 * self.max_drawdown_pct:
             reasons.append(f"excessive_drawdown(score={drawdown:.0f})")
 
-        downtrend = float(row.get("downtrend_penalty_score", 0) or 0)
+        downtrend = self._float_or_default(row.get("downtrend_penalty_score"), 0.0)
         if downtrend >= self.max_downtrend_penalty:
-            reasons.append(f"downtrend(score={downtrend:.0f})")
+            reasons.append(f"severe_downtrend(score={downtrend:.0f})")
 
-        data_cov = float(row.get("data_coverage_score", 100) or 100) / 100.0
+        data_cov = self._float_or_default(row.get("data_coverage_score"), 100.0) / 100.0
         if data_cov < self.min_data_coverage:
             reasons.append(f"low_data_coverage({data_cov:.0%})")
 
@@ -246,7 +272,7 @@ class IndustryCandidateSelector:
             pe_val = float(pe)
             if pe_val <= 0:
                 reasons.append(f"negative_pe({pe_val:.1f})")
-            elif pe_val > 500:
+            elif pe_val > self.max_pe_ratio:
                 reasons.append(f"extreme_pe({pe_val:.0f})")
 
         # PB sanity check
@@ -257,6 +283,51 @@ class IndustryCandidateSelector:
                 reasons.append(f"negative_pb({pb_val:.1f})")
             elif pb_val > 50:
                 reasons.append(f"extreme_pb({pb_val:.0f})")
+
+    @staticmethod
+    def _float_or_default(value: Any, default: float) -> float:
+        if value is None:
+            return float(default)
+        try:
+            if np.isnan(value):
+                return float(default)
+        except (TypeError, ValueError):
+            pass
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    @staticmethod
+    def _normalize_reasons(reasons: list[str]) -> list[str]:
+        normalized: list[str] = []
+        key_to_index: dict[str, int] = {}
+        aliases = {
+            "weak_signal_tier": "weak_signal_tier",
+            "excessive_drawdown": "excessive_drawdown",
+            "severe_downtrend": "severe_downtrend",
+            "downtrend": "severe_downtrend",
+            "low_quality_coverage": "low_quality_coverage",
+            "low_data_coverage": "low_data_coverage",
+            "stale_signal": "stale_signal",
+            "overheated": "overheated",
+            "negative_pe": "negative_pe",
+            "extreme_pe": "extreme_pe",
+            "negative_pb": "negative_pb",
+            "extreme_pb": "extreme_pb",
+        }
+        for reason in reasons:
+            reason_text = str(reason)
+            base = reason_text.split("(", 1)[0]
+            key = aliases.get(base, base)
+            if key in key_to_index:
+                index = key_to_index[key]
+                if "(" in reason_text and "(" not in normalized[index]:
+                    normalized[index] = reason_text
+                continue
+            normalized.append(reason_text)
+            key_to_index[key] = len(normalized) - 1
+        return normalized
 
     @staticmethod
     def _group_by_industry(

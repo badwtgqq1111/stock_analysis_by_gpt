@@ -140,24 +140,36 @@ class TopNPortfolioBuilder:
             eligibility = self._compute_selection_eligibility(item)
             item.update(eligibility)
 
-        # Industry-aware enrichment: add industry_rank, industry_score,
-        # eligibility_pass_industry to every ranking row without changing
-        # the existing selection flow.
+        industry_candidate_codes = set()
+        industry_selected_codes = []
+        industry_candidate_ranking = []
+
+        # Industry-aware candidate pool: every final holding should come from
+        # an eligible per-industry shortlist unless that shortlist is empty.
         try:
             from backtest_engine.industry_selector import IndustryCandidateSelector
 
             ind_selector = IndustryCandidateSelector(
                 top_n=self.top_n,
                 max_per_industry=max(1, int(np.ceil(self.top_n / 2))),
-                require_actionable=False,   # existing logic already handles this
-                require_liquidity=False,     # existing logic already handles this
-                require_fresh_signal=False,  # existing logic already handles this
+                require_actionable=True,
+                require_liquidity=True,
+                require_fresh_signal=False,
             )
             industry_map = {
                 r.get("stock_code", ""): r.get("industry_l2") or r.get("industry_l1", "")
                 for r in ranking
             }
             ranking = ind_selector.select(ranking, industry_map)
+            industry_candidate_ranking = [
+                item for item in ranking
+                if item.get("eligibility_pass") and item.get("industry_rank", 0) <= item.get("industry_cap", 0)
+            ]
+            industry_candidate_codes = {item.get("stock_code") for item in industry_candidate_ranking}
+            industry_selected_codes = [
+                item.get("stock_code") for item in ranking
+                if item.get("selected") and item.get("eligibility_pass")
+            ]
         except Exception:
             # Non-breaking: industry selector is optional enrichment
             for item in ranking:
@@ -241,32 +253,60 @@ class TopNPortfolioBuilder:
         else:
             kelly_position_ratio = 1.0 / self.top_n if self.top_n > 0 else 0.1
 
+        # Build ranking filtered to eligible candidates (used by sector
+        # concentration logic below)
         eligible_ranking = [item for item in ranking if item.get("selection_eligible")]
+        lightgbm_candidates = [item for item in ranking if item.get("selection_source") == "lightgbm_ranker"]
 
-        preferred_actionable = [
-            item for item in ranking
-            if item.get("selection_eligible")
-            and item.get("current_signal_active")
-            and item.get("current_signal_actionable")
-            and item.get("low_price_candidate", True)
-            and item.get("signal_freshness_score", 100) >= 40
-            and item.get("setup_type") in {"pre_breakout", "bottom_rebound"}
-        ]
-        active_actionable = [
-            item for item in ranking
-            if item.get("selection_eligible")
-            and item.get("current_signal_active")
-            and item.get("current_signal_actionable")
-            and item.get("signal_freshness_score", 100) >= 35
-            and item.get("setup_type") != "sideways"
-        ]
-        fallback_candidates = [
-            item for item in ranking
-            if item.get("selection_eligible")
-            and item.get("signal_tier") != "weak"
-            and item.get("signal_freshness_score", 100) >= 30
-            and item.get("setup_type") != "sideways"
-        ]
+        # When IndustryCandidateSelector produced selections, use them as the
+        # primary selected list — the selector already applied all hard filters.
+        # Fall back to tiered selection only when no industry selections exist.
+        if industry_selected_codes:
+            selected_by_code = {item.get("stock_code"): item for item in ranking}
+            selected = [
+                selected_by_code[code]
+                for code in industry_selected_codes
+                if code in selected_by_code
+            ]
+            selected.sort(
+                key=lambda item: -float(
+                    item.get("final_score", item.get("ranking_score_adjusted", item.get("ranking_score", 0)))
+                )
+            )
+            selected = [dict(item) for item in selected[: self.top_n]]
+        else:
+            # Legacy tiered selection (when IndustryCandidateSelector is not active)
+            selection_universe = {item.get("stock_code") for item in eligible_ranking}
+            preferred = [
+                item for item in ranking
+                if item.get("stock_code") in selection_universe and item.get("selection_eligible")
+                and item.get("current_signal_actionable") and item.get("low_price_candidate", True)
+                and item.get("signal_freshness_score", 100) >= 40
+                and item.get("setup_type") in {"pre_breakout", "bottom_rebound"}
+            ]
+            active = [
+                item for item in ranking
+                if item.get("stock_code") in selection_universe and item.get("selection_eligible")
+                and item.get("current_signal_actionable")
+                and item.get("signal_freshness_score", 100) >= 35
+                and item.get("setup_type") != "sideways"
+            ]
+            fallback = [
+                item for item in ranking
+                if item.get("stock_code") in selection_universe and item.get("selection_eligible")
+                and item.get("signal_tier") != "weak"
+                and item.get("signal_freshness_score", 100) >= 30
+                and item.get("setup_type") != "sideways"
+            ]
+            if lightgbm_candidates:
+                min_wr = 35.0
+                preferred = [i for i in preferred if i.get("win_rate", 0) >= min_wr]
+                active = [i for i in active if i.get("win_rate", 0) >= min_wr]
+                fallback = [i for i in fallback if i.get("win_rate", 0) >= min_wr]
+            selected = preferred[:self.top_n] or active[:self.top_n] or fallback[:self.top_n] or eligible_ranking[:self.top_n]
+            selected = [dict(item) for item in selected]
+
+        # Watchlist: weak-tier stocks with good setups
         watchlist = [
             dict(item) for item in ranking
             if item.get("setup_type") in {"pre_breakout", "bottom_rebound"} and item.get("signal_tier") == "weak"
@@ -274,51 +314,22 @@ class TopNPortfolioBuilder:
         if not watchlist:
             watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak"][: self.top_n]
 
-        ranking_filtered = list(eligible_ranking)
-        lightgbm_candidates = [item for item in ranking if item.get("selection_source") == "lightgbm_ranker"]
-        if lightgbm_candidates:
-            # Win-rate quality gate: filter out proven losers (backtest wr < 35%)
-            min_win_rate = 35.0
-            preferred_actionable = [item for item in preferred_actionable if item.get("win_rate", 0) >= min_win_rate]
-            active_actionable = [item for item in active_actionable if item.get("win_rate", 0) >= min_win_rate]
-            fallback_candidates = [item for item in fallback_candidates if item.get("win_rate", 0) >= min_win_rate]
-            # Build watchlist from ranking (all setup types allowed)
-            watchlist = [dict(item) for item in ranking if item.get("signal_tier") == "weak" and item.get("win_rate", 0) >= min_win_rate][: self.top_n]
-            if not watchlist:
-                watchlist = [dict(item) for item in ranking if item.get("win_rate", 0) >= min_win_rate][: self.top_n]
-            # Final ranking fallback also respects quality and eligibility gates
-            ranking_filtered = [item for item in eligible_ranking if item.get("win_rate", 0) >= min_win_rate]
+        # Ranking filtered for sector concentration logic below
+        selection_universe_codes = {item.get("stock_code") for item in selected}
+        ranking_filtered = [
+            item for item in eligible_ranking
+            if item.get("stock_code") in selection_universe_codes or item.get("selection_eligible")
+        ]
 
-        # Build final fallback: QMJ double sort if enough data, else score-based
-        _final_fallback = None
-        if lightgbm_candidates and ranking_filtered:
-            _final_fallback = TopNPortfolioBuilder._double_sort_select(ranking_filtered, self.top_n)
-        if not _final_fallback:
-            _final_fallback = ranking_filtered[: self.top_n] if lightgbm_candidates and ranking_filtered else eligible_ranking[: self.top_n]
-
-        selected = (
-            preferred_actionable[: self.top_n]
-            if preferred_actionable
-            else (
-                active_actionable[: self.top_n]
-                if active_actionable
-                else (
-                    fallback_candidates[: self.top_n]
-                    if fallback_candidates
-                    else _final_fallback
-                )
-            )
-        )
-        selected = [dict(item) for item in selected]
-
-        # --- Data quality filter: demote PE ≤ 0 or PE > 500 to watchlist ---
-        selected, data_quality_watch = [], list(selected)
-        for item in data_quality_watch[:]:
+        # --- Data quality: demote extreme PE to watchlist ---
+        kept = []
+        for item in selected:
             pe = item.get("pe_ratio")
             if pe is not None and np.isfinite(pe) and (pe <= 0 or pe > 500):
-                watchlist.insert(0, item)
-                data_quality_watch.remove(item)
-        selected = data_quality_watch
+                watchlist.insert(0, dict(item))
+            else:
+                kept.append(item)
+        selected = kept
 
         # --- Sector concentration: progressive penalty (soft constraint) ---
         # Reference: Ehsani, Harvey & Li (2023) — long-only investors should avoid hard
@@ -373,6 +384,7 @@ class TopNPortfolioBuilder:
 
         self.kelly_position_ratio = kelly_position_ratio
         self._apply_weights(selected)
+        self._sync_final_selection_flags(ranking, selected)
 
         synthetic_portfolio_equity_curve = self._build_synthetic_portfolio_equity_curve(cross_sectional_picks)
         portfolio_replay = (
@@ -417,76 +429,182 @@ class TopNPortfolioBuilder:
         )
         return result.to_dict()
 
-    def _apply_weights(self, selected):
-        """对选中的标的分配权重与资金（Kelly 动态仓位缩放 + 波动率缩放）。
+    @staticmethod
+    def _sync_final_selection_flags(ranking, selected):
+        """Align ranking selected flags with the final exported holdings."""
+        selected_codes = {str(item.get("stock_code", "")).zfill(5) for item in selected}
+        selected_by_code = {
+            str(item.get("stock_code", "")).zfill(5): item
+            for item in selected
+        }
+        for row in ranking:
+            code = str(row.get("stock_code", "")).zfill(5)
+            is_selected = code in selected_codes
+            row["selected"] = is_selected
+            if is_selected:
+                final_item = selected_by_code[code]
+                for field in (
+                    "portfolio_weight",
+                    "allocated_capital",
+                    "kelly_scale",
+                    "vol_scale",
+                    "weight_reason",
+                    "portfolio_industry_hhi",
+                ):
+                    if field in final_item:
+                        row[field] = final_item[field]
+            else:
+                for field in (
+                    "portfolio_weight",
+                    "allocated_capital",
+                    "kelly_scale",
+                    "vol_scale",
+                    "weight_reason",
+                    "portfolio_industry_hhi",
+                ):
+                    row.pop(field, None)
 
-        P4c: Volatility-managed position sizing (Barroso & Santa-Clara 2015).
-        Inverse-volatility scaling reduces exposure to high-volatility stocks
-        and increases exposure to low-volatility stocks, nearly doubling the
-        Sharpe ratio of momentum portfolios.
+    def _apply_weights(self, selected):
+        """工业级权重分配：Kelly 仓位缩放 + 波动率缩放 + 流动性容量上限。
+
+        Weight pipeline (顺序执行):
+        1. Base weight: equal-weight 或 ranking_score 加权
+        2. Volatility scaling: 低波加仓 / 高波减仓 (Barroso & Santa-Clara 2015)
+        3. Kelly scaling: 全局半凯利仓位比例
+        4. Liquidity cap: 单票不超过 20 日均成交额的 5%
+        5. Floor / re-normalize: 保证总和不超过 kelly_scale
+
+        Each stock receives a ``weight_reason`` dict explaining every adjustment.
         """
         if not selected:
             return
 
-        kelly_scale = getattr(self, 'kelly_position_ratio', 1.0 / max(len(selected), 1))
-        effective_capital = self.initial_capital * kelly_scale
+        n = len(selected)
+        kelly_scale = getattr(self, "kelly_position_ratio", 1.0 / max(n, 1))
+        max_single_weight = 0.08          # hard cap: no single stock > 8%
+        min_single_weight = 0.01          # floor: stocks below 1% get trimmed
+        liquidity_capacity_frac = 0.05    # max 5% of 20d median daily turnover
 
-        # Compute volatility scaling factors
+        # ---- Step 1: base weight ----
+        if self.weighting_mode == "equal_weight":
+            base_weights = [1.0 / n] * n
+            weight_method = "equal"
+        else:
+            scores = [max(float(item.get("ranking_score", 0) or 0), 0.0) for item in selected]
+            total_score = sum(scores)
+            if total_score <= 0:
+                base_weights = [1.0 / n] * n
+                weight_method = "equal(fallback)"
+            else:
+                base_weights = [s / total_score for s in scores]
+                weight_method = "score_weighted"
+
+        # ---- Step 2: volatility scaling ----
         vols = []
         for item in selected:
-            vol = item.get("recent_volatility")
-            if vol is None or not np.isfinite(vol) or vol <= 0:
-                vol = np.nan
-            vols.append(vol)
+            v = item.get("recent_volatility")
+            if v is None or not np.isfinite(v) or v <= 0:
+                v = np.nan
+            vols.append(v)
 
-        median_vol = np.nanmedian(vols) if not all(np.isnan(v) for v in vols) else 0.25
+        median_vol = float(np.nanmedian(vols)) if not all(np.isnan(v) for v in vols) else 0.25
         if median_vol <= 0:
             median_vol = 0.25
 
         vol_scales = []
-        for vol in vols:
-            if np.isnan(vol) or vol <= 0:
+        for v in vols:
+            if np.isnan(v) or v <= 0:
                 vol_scales.append(1.0)
             else:
-                # Inverse-vol: scale by median/vol, capped at [0.5, 2.0]
-                scale = median_vol / vol
-                vol_scales.append(float(np.clip(scale, 0.5, 2.0)))
+                vol_scales.append(float(np.clip(median_vol / v, 0.5, 2.0)))
 
-        if self.weighting_mode == "equal_weight":
-            base_weight = 1.0 / len(selected)
-            total_scale = sum(vol_scales)
-            for item, vs in zip(selected, vol_scales):
-                adj_weight = base_weight * (vs / (total_scale / len(selected))) * kelly_scale
-                item["portfolio_weight"] = adj_weight
-                item["allocated_capital"] = self.initial_capital * adj_weight
-                item["kelly_scale"] = kelly_scale
-                item["vol_scale"] = vs
-            return
+        # ---- Step 3: Kelly scaling ----
+        # ---- Step 4: liquidity capacity cap ----
+        weights = []
+        for i, item in enumerate(selected):
+            # Kelly-adjusted base
+            w = base_weights[i] * kelly_scale
+            # Volatility adjustment
+            w_vol = w * vol_scales[i]
+            # Liquidity cap: max position = 5% of 20d median daily turnover
+            liq_cap = 1.0  # no cap by default
+            turnover_20d = item.get("median_turnover_amount_20d")
+            if turnover_20d is not None and np.isfinite(turnover_20d) and turnover_20d > 0:
+                max_position_value = float(turnover_20d) * liquidity_capacity_frac
+                if max_position_value > 0:
+                    liq_cap = max_position_value / self.initial_capital
+            w_liq = min(w_vol, liq_cap) if liq_cap < 1.0 else w_vol
+            # Hard cap
+            w_capped = min(w_liq, max_single_weight)
+            weights.append(max(w_capped, 0.0))
 
-        scores = []
-        for item in selected:
-            score = float(item.get("ranking_score", 0) or 0)
-            scores.append(max(score, 0.0))
+        # ---- Step 5: re-normalize ----
+        total_w = sum(weights)
+        target_total = kelly_scale  # total portfolio exposure ≤ kelly_scale
 
-        total_score = sum(scores)
-        if total_score <= 0:
-            equal_weight = 1.0 / len(selected)
-            total_scale = sum(vol_scales)
-            for item, vs in zip(selected, vol_scales):
-                adj_weight = equal_weight * (vs / (total_scale / len(selected))) * kelly_scale
-                item["portfolio_weight"] = adj_weight
-                item["allocated_capital"] = self.initial_capital * adj_weight
-                item["kelly_scale"] = kelly_scale
-                item["vol_scale"] = vs
-            return
+        if total_w > 0:
+            if total_w > target_total:
+                scale = target_total / total_w
+                weights = [w * scale for w in weights]
+            # Remove stocks that fall below floor after scaling
+            for i in range(len(weights)):
+                if 0 < weights[i] < min_single_weight:
+                    weights[i] = 0.0
+            # Re-normalize again
+            total_w = sum(weights)
+            if total_w > target_total and total_w > 0:
+                scale = target_total / total_w
+                weights = [w * scale for w in weights]
+        else:
+            weights = [target_total / n] * n
 
-        for item, score, vs in zip(selected, scores, vol_scales):
-            base_weight = (score / total_score)
-            adj_weight = base_weight * vs * kelly_scale
-            item["portfolio_weight"] = adj_weight
-            item["allocated_capital"] = self.initial_capital * adj_weight
+        # ---- Step 6: assign weights + build weight_reason ----
+        for i, item in enumerate(selected):
+            w = weights[i]
+            reasons = {
+                "method": weight_method,
+                "base_weight": round(base_weights[i], 6),
+                "kelly_scale": round(kelly_scale, 4),
+                "vol_scale": round(vol_scales[i], 4),
+                "vol_input": round(float(vols[i]), 4) if vols[i] is not None and np.isfinite(vols[i]) else None,
+                "median_vol": round(median_vol, 4),
+            }
+            # Record if liquidity cap was binding
+            turnover_20d = item.get("median_turnover_amount_20d")
+            if turnover_20d is not None and np.isfinite(turnover_20d) and turnover_20d > 0:
+                max_pos = float(turnover_20d) * liquidity_capacity_frac
+                reasons["liquidity_cap"] = round(min(max_pos / self.initial_capital, 1.0), 6)
+                reasons["liquidity_cap_binding"] = reasons["liquidity_cap"] < base_weights[i]
+                reasons["median_turnover_20d"] = round(float(turnover_20d), 0)
+            else:
+                reasons["liquidity_cap"] = None
+                reasons["liquidity_cap_binding"] = False
+
+            reasons["hard_cap_binding"] = base_weights[i] > max_single_weight
+            reasons["floor_triggered"] = 0 < base_weights[i] * kelly_scale < min_single_weight
+            reasons["final_weight"] = round(w, 6)
+
+            item["portfolio_weight"] = w
+            item["allocated_capital"] = self.initial_capital * w
             item["kelly_scale"] = kelly_scale
-            item["vol_scale"] = vs
+            item["vol_scale"] = vol_scales[i]
+            item["weight_reason"] = reasons
+
+        # ---- Step 7: compute industry HHI for the selected portfolio ----
+        try:
+            from backtest_engine.industry_selector import compute_industry_hhi
+
+            codes = [item.get("stock_code", "") for item in selected]
+            ind_map = {
+                item.get("stock_code", ""): item.get("industry_l2") or item.get("industry_l1", "")
+                for item in selected
+            }
+            portfolio_hhi = compute_industry_hhi(codes, ind_map, weights)
+            for item in selected:
+                item["portfolio_industry_hhi"] = round(portfolio_hhi, 1)
+        except Exception:
+            for item in selected:
+                item["portfolio_industry_hhi"] = None
 
     def _build_pick_record(self, item, signal_date, selected_group):
         """构建单个横截面入选记录，并附带当日权重。"""
@@ -874,7 +992,11 @@ class TopNPortfolioBuilder:
 
             signal_age = int(r.get("signal_age_days",
                 TopNPortfolioBuilder._compute_signal_age_days(r.get("latest_signal_date"))) or 0)
-            signal_freshness = max(0.0, 100.0 - max(signal_age, 0) * 8.0)
+            explicit_freshness = r.get("signal_freshness_score")
+            if explicit_freshness is not None and np.isfinite(explicit_freshness):
+                signal_freshness = float(explicit_freshness)
+            else:
+                signal_freshness = max(0.0, 100.0 - max(signal_age, 0) * 8.0)
 
             pb_ratio = np.nan_to_num(r.get("pb_ratio", 0), nan=0.0)
             pb_value_score = float(np.clip(12.0 - pb_ratio, 0, 12)) / 12.0 * 100.0
@@ -971,6 +1093,9 @@ class TopNPortfolioBuilder:
                 "matrix_score": r["latest_matrix_score"],
                 "regime_score": r.get("latest_regime_score"),
                 "quality_score": r.get("quality_score"),
+                "quality_data_coverage": r.get("quality_data_coverage"),
+                "quality_missing_fields": r.get("quality_missing_fields"),
+                "quality_peer_group": r.get("quality_peer_group"),
                 "entry_type": r["latest_entry_type"],
                 "signal_tier": r.get("latest_signal_tier"),
                 "latest_signal_date": r.get("latest_signal_date"),
@@ -1018,6 +1143,10 @@ class TopNPortfolioBuilder:
                 "is_fund_like": normalize_bool(r.get("is_fund_like"), default=False),
                 "tradable_flag": normalize_bool(r.get("tradable_flag"), default=True),
                 "value_score": r.get("value_score"),
+                "valuation_score": r.get("valuation_score"),
+                "valuation_metric_used": r.get("valuation_metric_used"),
+                "valuation_data_coverage": r.get("valuation_data_coverage"),
+                "valuation_peer_group": r.get("valuation_peer_group"),
                 "data_coverage_score": r.get("data_coverage_score"),
                 "data_missing_fields": r.get("data_missing_fields"),
                 "require_complete_data_for_selection": bool(r.get("require_complete_data_for_selection", False)),
@@ -1027,7 +1156,13 @@ class TopNPortfolioBuilder:
 
     @staticmethod
     def _compute_selection_eligibility(item):
-        """Compute hard selection eligibility and data coverage for final holdings."""
+        """Compute hard selection eligibility and data coverage for final holdings.
+
+        Incorporates findings from:
+        - Chekhlov, Uryasev & Zabarankin (2005): drawdown >30% → hard filter
+        - Ai, Liu & Lin (2024): weak signals degrade model performance
+        - Bryzgalova et al. (2022): missing financial data is non-random bias
+        """
         reasons = []
         coverage_fields = {
             "current_signal_actionable": item.get("current_signal_actionable"),
@@ -1061,12 +1196,60 @@ class TopNPortfolioBuilder:
             reasons.append("not_tradable")
         if item.get("setup_type") == "sideways":
             reasons.append("sideways_setup")
-        if item.get("require_complete_data_for_selection", False) and data_coverage_score < 70:
-            reasons.append("insufficient_data_coverage")
-
         explicit_coverage = item.get("data_coverage_score")
         if explicit_coverage is not None and np.isfinite(explicit_coverage):
             data_coverage_score = float(explicit_coverage)
+
+        if data_coverage_score < 50:
+            reasons.append(f"low_data_coverage({data_coverage_score / 100.0:.0%})")
+        if item.get("require_complete_data_for_selection", False) and data_coverage_score < 70:
+            reasons.append("insufficient_data_coverage")
+
+        freshness = TopNPortfolioBuilder._float_or_default(item.get("signal_freshness_score"), 100.0)
+        if freshness < 35:
+            reasons.append(f"stale_signal(freshness={freshness:.0f})")
+
+        # Ai, Liu & Lin (2024): weak signal tier → exclude from selected
+        signal_tier = str(item.get("signal_tier", "")).strip().lower()
+        if signal_tier == "weak":
+            reasons.append("weak_signal_tier")
+
+        overheat = TopNPortfolioBuilder._float_or_default(item.get("overheat_penalty_score"), 0.0)
+        if overheat >= 85:
+            reasons.append(f"overheated({overheat:.0f})")
+
+        # Chekhlov et al. (2005): CDaR — extreme drawdown → near-certain underperformance
+        drawdown = TopNPortfolioBuilder._float_or_default(item.get("drawdown_penalty_score"), 0.0)
+        if drawdown >= 30:
+            reasons.append(f"excessive_drawdown({drawdown:.0f})")
+
+        downtrend = TopNPortfolioBuilder._float_or_default(item.get("downtrend_penalty_score"), 0.0)
+        if downtrend >= 50:
+            reasons.append(f"severe_downtrend({downtrend:.0f})")
+
+        # Bryzgalova et al. (2022): missing financials → use with caution
+        quality_cov = TopNPortfolioBuilder._float_or_default(item.get("quality_data_coverage"), 1.0)
+        if quality_cov < 0.3:
+            reasons.append(f"low_quality_coverage({quality_cov:.0%})")
+
+        # PE sanity (PE > 300 = near-zero earnings → unreliable valuation)
+        pe_val = item.get("pe_ratio")
+        if pe_val is not None and np.isfinite(pe_val):
+            pe_float = float(pe_val)
+            if pe_float <= 0:
+                reasons.append(f"negative_pe({pe_float:.1f})")
+            elif pe_float > 300:
+                reasons.append(f"extreme_pe({pe_float:.0f})")
+
+        pb_val = item.get("pb_ratio")
+        if pb_val is not None and np.isfinite(pb_val):
+            pb_float = float(pb_val)
+            if pb_float <= 0:
+                reasons.append(f"negative_pb({pb_float:.1f})")
+            elif pb_float > 50:
+                reasons.append(f"extreme_pb({pb_float:.0f})")
+
+        reasons = list(dict.fromkeys(reasons))
 
         return {
             "selection_eligible": not reasons,
@@ -1074,6 +1257,20 @@ class TopNPortfolioBuilder:
             "data_coverage_score": float(data_coverage_score),
             "data_missing_fields": item.get("data_missing_fields") or missing_fields,
         }
+
+    @staticmethod
+    def _float_or_default(value, default):
+        if value is None:
+            return float(default)
+        try:
+            if np.isnan(value):
+                return float(default)
+        except (TypeError, ValueError):
+            pass
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
 
     @staticmethod
     def _build_factor_rank_rows(results):
@@ -1085,7 +1282,11 @@ class TopNPortfolioBuilder:
 
             signal_age = int(r.get("signal_age_days",
                 TopNPortfolioBuilder._compute_signal_age_days(r.get("latest_signal_date"))) or 0)
-            signal_freshness = max(0.0, 100.0 - max(signal_age, 0) * 8.0)
+            explicit_freshness = r.get("signal_freshness_score")
+            if explicit_freshness is not None and np.isfinite(explicit_freshness):
+                signal_freshness = float(explicit_freshness)
+            else:
+                signal_freshness = max(0.0, 100.0 - max(signal_age, 0) * 8.0)
 
             sideways_penalty = float(r.get("sideways_penalty", 0.0) or 0.0)
             active = r.get("current_signal_active") and r.get("current_signal_actionable")
@@ -1165,15 +1366,28 @@ class TopNPortfolioBuilder:
                 "industry_l3": r.get("industry_l3"),
                 "industry_source": r.get("industry_source"),
                 "industry_updated_at": r.get("industry_updated_at"),
+                "instrument_type": r.get("instrument_type"),
+                "is_fund_like": normalize_bool(r.get("is_fund_like"), default=False),
+                "tradable_flag": normalize_bool(r.get("tradable_flag"), default=True),
                 "liquidity_ok": bool(r.get("liquidity_ok", True)),
                 "market_cap": r.get("market_cap"),
                 "pe_ratio": r.get("pe_ratio"),
                 "pb_ratio": r.get("pb_ratio"),
                 "quality_score": r.get("quality_score"),
+                "quality_data_coverage": r.get("quality_data_coverage"),
+                "quality_missing_fields": r.get("quality_missing_fields"),
+                "quality_peer_group": r.get("quality_peer_group"),
                 "value_score": r.get("value_score"),
+                "valuation_score": r.get("valuation_score"),
+                "valuation_metric_used": r.get("valuation_metric_used"),
+                "valuation_data_coverage": r.get("valuation_data_coverage"),
+                "valuation_peer_group": r.get("valuation_peer_group"),
                 "risk_adjusted_score": r.get("risk_adjusted_score"),
                 "latest_risk_score": r.get("latest_risk_score"),
                 "drawdown_penalty_score": r.get("drawdown_penalty_score"),
+                "overheat_penalty_score": r.get("overheat_penalty_score"),
+                "downtrend_penalty_score": r.get("downtrend_penalty_score"),
+                "trend_state": r.get("trend_state"),
                 "recent_drawdown": r.get("recent_drawdown"),
                 "recent_volatility": r.get("recent_volatility"),
                 "data_coverage_score": r.get("data_coverage_score"),

@@ -470,6 +470,141 @@ class MarketDataService:
             "fund_like_count": int(sum(count for key, count in counts.items() if key != "common_stock")),
         }
 
+    def get_industry_coverage_report(self, stock_codes=None, limit=None):
+        """Generate a detailed industry coverage report for HK stocks.
+
+        Returns a dict with:
+        - overall: total, l1_rate, l2_rate, ordinary_l1_rate, ordinary_l2_rate
+        - by_industry_l1: {industry: count}
+        - by_industry_l2: {industry: count}
+        - missing_l1: list of stock_codes without industry_l1
+        - missing_l2: list of stock_codes without industry_l2
+        - fund_like_count: number flagged as fund-like
+        """
+        if stock_codes:
+            codes = [normalize_stock_code(code, market="HK") for code in stock_codes]
+        else:
+            codes = self.get_all_stock_codes(market="HK", asset_type="equity", frequency="daily", adjust="qfq")
+        codes = list(dict.fromkeys(codes))
+        if limit:
+            codes = codes[: int(limit)]
+
+        info_frame = self.warehouse.read_stock_info(
+            stock_codes=codes, market="HK",
+            columns=["stock_code", "market", "name", "industry_l1", "industry_l2",
+                     "industry_l3", "industry_source", "industry_updated_at",
+                     "is_fund_like", "tradable_flag", "instrument_type",
+                     "market_cap", "pe_ratio", "pb_ratio"],
+        )
+
+        if info_frame is None or info_frame.empty:
+            return {"status": "error", "message": "No stock info found in registry"}
+
+        info_frame = info_frame.drop_duplicates(subset=["market", "stock_code"], keep="last")
+        info_map = {
+            str(row.stock_code): row._asdict()
+            for row in info_frame.itertuples(index=False)
+        }
+
+        total = 0
+        ordinary_total = 0
+        l1_present = 0
+        l2_present = 0
+        l3_present = 0
+        ordinary_l1 = 0
+        ordinary_l2 = 0
+        fund_like_count = 0
+        by_l1: dict[str, int] = {}
+        by_l2: dict[str, int] = {}
+        missing_l1: list[dict] = []
+        missing_l2: list[dict] = []
+        missing_l1_ordinary: list[str] = []
+
+        for code in codes:
+            total += 1
+            info = info_map.get(code) or {}
+            is_fund = bool(info.get("is_fund_like"))
+            if is_fund:
+                fund_like_count += 1
+            else:
+                ordinary_total += 1
+
+            l1 = info.get("industry_l1")
+            l2 = info.get("industry_l2")
+            l3 = info.get("industry_l3")
+
+            if l1 and str(l1).strip():
+                l1_present += 1
+                l1_val = str(l1).strip()
+                by_l1[l1_val] = by_l1.get(l1_val, 0) + 1
+                if not is_fund:
+                    ordinary_l1 += 1
+            else:
+                missing_l1.append({
+                    "stock_code": code,
+                    "name": info.get("name", ""),
+                    "is_fund_like": is_fund,
+                })
+                if not is_fund:
+                    missing_l1_ordinary.append(code)
+
+            if l2 and str(l2).strip():
+                l2_present += 1
+                l2_val = str(l2).strip()
+                by_l2[l2_val] = by_l2.get(l2_val, 0) + 1
+                if not is_fund:
+                    ordinary_l2 += 1
+            else:
+                missing_l2.append({
+                    "stock_code": code,
+                    "name": info.get("name", ""),
+                    "l1": str(l1).strip() if l1 else "",
+                    "is_fund_like": is_fund,
+                })
+
+            if l3 and str(l3).strip():
+                l3_present += 1
+
+        # Industry source breakdown
+        source_counts: dict[str, int] = {}
+        for code in codes:
+            info = info_map.get(code) or {}
+            src = info.get("industry_source") or "none"
+            source_counts[src] = source_counts.get(src, 0) + 1
+
+        # Industry with member counts for reporting
+        top_l2 = sorted(by_l2.items(), key=lambda x: -x[1])[:20]
+        top_l1 = sorted(by_l1.items(), key=lambda x: -x[1])[:20]
+
+        return {
+            "status": "completed",
+            "total_stocks": total,
+            "ordinary_stocks": ordinary_total,
+            "fund_like_stocks": fund_like_count,
+            "coverage": {
+                "industry_l1_rate": round(l1_present / total, 4) if total else 0,
+                "industry_l2_rate": round(l2_present / total, 4) if total else 0,
+                "industry_l3_rate": round(l3_present / total, 4) if total else 0,
+                "industry_l1_count": l1_present,
+                "industry_l2_count": l2_present,
+                "industry_l3_count": l3_present,
+                "ordinary_l1_rate": round(ordinary_l1 / ordinary_total, 4) if ordinary_total else 0,
+                "ordinary_l2_rate": round(ordinary_l2 / ordinary_total, 4) if ordinary_total else 0,
+            },
+            "by_industry_l1": dict(top_l1),
+            "by_industry_l2": dict(top_l2),
+            "missing_l1_count": len(missing_l1),
+            "missing_l2_count": len(missing_l2),
+            "missing_l1_ordinary_count": len(missing_l1_ordinary),
+            "missing_l1_ordinary_codes": missing_l1_ordinary[:50],
+            "source_breakdown": source_counts,
+            "targets": {
+                "l1_90pct": l1_present / total >= 0.90 if total else False,
+                "l2_80pct": l2_present / total >= 0.80 if total else False,
+                "ordinary_l1_95pct": ordinary_l1 / ordinary_total >= 0.95 if ordinary_total else False,
+            },
+        }
+
     def write_feature_frame(
         self,
         frame,
@@ -841,7 +976,7 @@ class MarketDataService:
         start_ts = end_ts - pd.Timedelta(days=history_window_days)
         start_date = start_ts.strftime("%Y-%m-%d")
         end_date = end_ts.strftime("%Y-%m-%d")
-        max_workers = max(int(max_workers or 0), 1)
+        max_workers = max(int(max_workers or 0), 8)
 
         def _read_existing_features(stock_code, latest_trade_date):
             try:
@@ -871,8 +1006,71 @@ class MarketDataService:
                 return False
             return True
 
+        # ---- Phase 0: pre-check existing feature coverage in batch (metadata only, low memory) ----
+        skip_codes: set[str] = set()
+        if expected_feature_count > 0:
+            try:
+                latest_dates = self.warehouse.get_latest_trade_dates(
+                    stock_codes=normalized_codes,
+                    market=normalized_market,
+                    exchange=exchange,
+                    asset_type=asset_type,
+                    frequencies=[frequency],
+                    adjust=normalized_adjust,
+                )
+                # latest_dates is {(code, freq): timestamp}
+                codes_with_data = [c for c in normalized_codes if (c, frequency) in latest_dates]
+                if codes_with_data:
+                    max_date = max(
+                        ts for (c, f), ts in latest_dates.items()
+                        if f == frequency and c in latest_dates
+                    )
+                    existing_features_map = self.warehouse.read_features(
+                        stock_code=codes_with_data,
+                        market=normalized_market,
+                        exchange=exchange,
+                        asset_type=asset_type,
+                        frequency=frequency,
+                        adjust=normalized_adjust,
+                        feature_set=factor_set,
+                        feature_version=materialization["feature_version"],
+                        feature_config_hash=materialization["feature_config_hash"],
+                        start_date=start_date,
+                        end_date=str(pd.Timestamp(max_date).date()),
+                    )
+                    if not existing_features_map.empty:
+                        existing_features_map["trade_date"] = pd.to_datetime(
+                            existing_features_map["trade_date"], errors="coerce"
+                        )
+                        for code, group in existing_features_map.groupby("stock_code"):
+                            if (code, frequency) in latest_dates:
+                                last_date = group["trade_date"].max()
+                                n_features = group["feature_name"].nunique()
+                                ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
+                                if (last_date.normalize() >= ohlcv_latest.normalize()
+                                        and n_features >= expected_feature_count):
+                                    skip_codes.add(code)
+            except Exception:
+                skip_codes.clear()
+
+        if show_progress and skip_codes:
+            print(
+                f"[INFO] 已有完整特征可跳过: {len(skip_codes)} 只, "
+                f"需计算: {max(0, len(normalized_codes) - len(skip_codes))} 只",
+                flush=True,
+            )
+
         def _generate_one(stock_code):
             try:
+                if stock_code in skip_codes:
+                    return {
+                        "stock_code": stock_code,
+                        "status": "skipped",
+                        "rows": int(expected_feature_count),
+                        "rows_written": 0,
+                        "dataset_path": str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature")),
+                    }
+
                 ohlcv_frame = self.warehouse.read_ohlcv(
                     stock_code=stock_code,
                     market=normalized_market,

@@ -38,8 +38,23 @@ if "portfolio_strategy" not in sys.modules:
     sys.modules["portfolio_strategy"] = strategy_stub
 
 from core import StockAnalyzer
+from core.lightgbm_analysis import LightGBMAnalysisMixin
 from data.model import normalize_ohlcv_frame
 from data.store import DataLayout, MarketDataWarehouse
+
+
+def test_lightgbm_stock_info_frame_to_map_handles_dataframe():
+    info_frame = pd.DataFrame(
+        [
+            {"stock_code": "00700", "industry_l1": "资讯科技业", "industry_l2": "软件服务"},
+            {"stock_code": "00005", "industry_l1": "金融业", "industry_l2": "银行"},
+        ]
+    )
+
+    info_map = LightGBMAnalysisMixin._stock_info_frame_to_map(info_frame)
+
+    assert info_map["00700"]["industry_l2"] == "软件服务"
+    assert info_map["00005"]["industry_l1"] == "金融业"
 
 
 def test_backtest_portfolio_uses_all_hk_stocks_when_stock_codes_missing():

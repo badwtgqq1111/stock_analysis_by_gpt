@@ -192,6 +192,43 @@ class LightGBMAnalysisMixin:
             return pd.DataFrame()
 
     @staticmethod
+    def _compute_industry_feature_panel(batch_data_map, stock_info_map):
+        """从 batch OHLCV 数据计算按日期对齐的真实行业特征面板。"""
+        try:
+            from core.industry_features import compute_industry_feature_panel
+            return compute_industry_feature_panel(batch_data_map, stock_info_map, level="l2")
+        except Exception:
+            return pd.DataFrame()
+
+    @staticmethod
+    def _stock_info_frame_to_map(info_frame):
+        """Convert stock_info rows/DataFrame into {stock_code: dict}."""
+        if info_frame is None:
+            return {}
+        if isinstance(info_frame, dict):
+            return {
+                str(code): dict(info or {})
+                for code, info in info_frame.items()
+            }
+        if isinstance(info_frame, pd.DataFrame):
+            if info_frame.empty or "stock_code" not in info_frame.columns:
+                return {}
+            deduped = info_frame.drop_duplicates(subset=["stock_code"], keep="last")
+            return {
+                str(row.get("stock_code", "")): row.to_dict()
+                for _, row in deduped.iterrows()
+                if row.get("stock_code") is not None
+            }
+        try:
+            return {
+                str(row.get("stock_code", "")): dict(row)
+                for row in info_frame
+                if row and row.get("stock_code") is not None
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
     def _merge_alt_sentiment_features(panel_features, stock_codes, show_progress=False):
         """Merge alternative sentiment features into the LightGBM feature panel.
 
@@ -350,25 +387,38 @@ class LightGBMAnalysisMixin:
         execution_delay = int(getattr(ranker, "execution_delay", 1))
         drawdown_horizon = int(getattr(ranker, "drawdown_horizon", 60))
         warmup_days = max(days + 180, days + label_horizon + 60)
+        if show_progress:
+            print(
+                f"[INFO] 正在批量加载 {len(stock_codes)} 只股票的 OHLCV 数据 "
+                f"(window={warmup_days}d)...",
+                flush=True,
+            )
+        t_load = time.time()
         batch_data_map = self.load_stock_data_batch(stock_codes, warmup_days, end_date=backtest_date)
+        if show_progress:
+            print(
+                f"[INFO] OHLCV 加载完成: {len(batch_data_map)} 只, "
+                f"耗时 {time.time() - t_load:.1f}s",
+                flush=True,
+            )
 
+        if show_progress:
+            print("[INFO] 正在计算聚类 + 行业特征...", flush=True)
         sector_features = self._compute_sector_features(batch_data_map)
 
         # Compute real-industry features (parallel to correlation-cluster features)
         stock_info_map = {}
         try:
-            stock_info_map = self.market_warehouse.read_stock_info(
+            stock_info_frame = self.market_warehouse.read_stock_info(
                 stock_codes=stock_codes, market="HK",
                 columns=["stock_code", "industry_l1", "industry_l2"],
             )
-            if not isinstance(stock_info_map, dict):
-                stock_info_map = {
-                    row.get("stock_code", ""): row
-                    for row in (stock_info_map or [])
-                }
+            stock_info_map = self._stock_info_frame_to_map(stock_info_frame)
         except Exception:
             stock_info_map = {}
         industry_features = self._compute_industry_features(batch_data_map, stock_info_map)
+        if show_progress:
+            print("[INFO] 特征计算完成，开始逐股构建特征面板...", flush=True)
 
         batch_results = []
         feature_frames = []
@@ -555,15 +605,26 @@ class LightGBMAnalysisMixin:
                 print(f"  预估年化超额:  ~{est_annual_excess:.0f}% (粗略估计, 实际取决于换手和成本)")
             print(f"{'='*60}\n")
 
+        batch_codes = [item["stock_code"] for item in batch_results]
+        industry_l2_map = {
+            code: (stock_info_map.get(code) or {}).get("industry_l2")
+            for code in batch_codes
+        }
+        industry_l1_map = {
+            code: (stock_info_map.get(code) or {}).get("industry_l1")
+            for code in batch_codes
+        }
+
         # Fetch fundamental quality scores for all stocks in batch
         quality_scores: dict[str, float] = {}
+        quality_details: dict[str, dict] = {}
         try:
-            batch_codes = [item["stock_code"] for item in batch_results]
-            from core.quality import enrich_with_quality, fetch_quality_scores
+            from core.industry_scoring import compute_industry_quality_scores
+            from core.quality import enrich_with_quality, fetch_quality_components_batch
 
             if show_progress:
                 print("[QUALITY] 正在获取基本面质量评分...")
-            quality_raw = fetch_quality_scores(
+            quality_components = fetch_quality_components_batch(
                 batch_codes,
                 max_workers=8,
                 progress_callback=(
@@ -576,14 +637,37 @@ class LightGBMAnalysisMixin:
             )
             if show_progress:
                 print(file=sys.stderr)
-            quality_scores = enrich_with_quality(batch_codes, quality_raw, show_progress=show_progress)
+            industry_quality = compute_industry_quality_scores(
+                quality_components,
+                industry_l2_map,
+                industry_l1_map,
+            )
+            if not industry_quality.empty:
+                quality_details = {
+                    str(row["stock_code"]): row.to_dict()
+                    for _, row in industry_quality.iterrows()
+                }
+                quality_raw = {
+                    code: details.get("quality_score", np.nan)
+                    for code, details in quality_details.items()
+                }
+            else:
+                quality_raw = {}
+            quality_scores = enrich_with_quality(
+                batch_codes,
+                quality_raw,
+                quality_details=quality_details,
+                show_progress=show_progress,
+            )
         except Exception as exc:
             if show_progress:
                 print(f"[QUALITY] 质量评分获取失败，使用默认值: {exc}")
 
         # Fetch hot-sector + relative valuation scores
         valuation_scores: dict[str, dict] = {}
+        industry_valuation_details: dict[str, dict] = {}
         try:
+            from core.industry_scoring import compute_industry_valuation_scores
             from core.sector_valuation import compute_sector_valuation, fetch_valuation_batch
 
             if show_progress:
@@ -602,8 +686,40 @@ class LightGBMAnalysisMixin:
             if show_progress:
                 print(file=sys.stderr)
             valuation_df = compute_sector_valuation(batch_data_map, pe_pb_data, sector_features)
+            valuation_payload = {
+                code: {
+                    "pe_ratio": values[0] if isinstance(values, tuple) and len(values) > 0 else np.nan,
+                    "pb_ratio": values[1] if isinstance(values, tuple) and len(values) > 1 else np.nan,
+                }
+                for code, values in pe_pb_data.items()
+            }
+            industry_valuation_df = compute_industry_valuation_scores(
+                valuation_payload,
+                industry_l2_map,
+                industry_l1_map,
+            )
+            if not industry_valuation_df.empty:
+                industry_valuation_details = {
+                    str(row["stock_code"]): row.to_dict()
+                    for _, row in industry_valuation_df.iterrows()
+                }
             for _, row in valuation_df.iterrows():
-                valuation_scores[row["stock_code"]] = row.to_dict()
+                row_dict = row.to_dict()
+                ind_val = industry_valuation_details.get(str(row["stock_code"]), {})
+                if ind_val:
+                    row_dict.update(
+                        {
+                            "value_score": ind_val.get("valuation_score", row_dict.get("value_score")),
+                            "valuation_score": ind_val.get("valuation_score"),
+                            "valuation_metric_used": ind_val.get("valuation_metric_used"),
+                            "valuation_data_coverage": ind_val.get("valuation_data_coverage"),
+                            "valuation_peer_group": ind_val.get("valuation_peer_group"),
+                            "industry_pe_percentile": ind_val.get("pe_percentile"),
+                            "industry_pb_percentile": ind_val.get("pb_percentile"),
+                            "industry_ps_percentile": ind_val.get("ps_percentile"),
+                        }
+                    )
+                valuation_scores[row["stock_code"]] = row_dict
             valid_pe = sum(1 for v in valuation_scores.values() if pd.notna(v.get("pe_ratio")))
             valid_pb = sum(1 for v in valuation_scores.values() if pd.notna(v.get("pb_ratio")))
             if show_progress:
@@ -805,6 +921,11 @@ class LightGBMAnalysisMixin:
             _hsv_score = _val.get("hot_sector_value_score", 50.0)
             _pe = _val.get("pe_ratio", np.nan)
             _pb = _val.get("pb_ratio", np.nan)
+            _value_score = _val.get("value_score", _val.get("valuation_score", 50.0))
+            _valuation_metric_used = _val.get("valuation_metric_used")
+            _valuation_data_coverage = _val.get("valuation_data_coverage")
+            _valuation_peer_group = _val.get("valuation_peer_group")
+            _quality_detail = quality_details.get(stock_code, {})
             _info = self.market_warehouse.get_stock_info(stock_code) or {}
             _industry_l1 = _info.get("industry_l1")
             _industry_l2 = _info.get("industry_l2")
@@ -849,6 +970,9 @@ class LightGBMAnalysisMixin:
                     "latest_matrix_score": latest_model_score,
                     "latest_regime_score": q_score,
                     "quality_score": q_score,
+                    "quality_data_coverage": _quality_detail.get("quality_data_coverage"),
+                    "quality_peer_group": _quality_detail.get("quality_peer_group"),
+                    "quality_missing_fields": _quality_detail.get("quality_missing_fields", []),
                     "latest_entry_type": "lightgbm_rank",
                     "latest_signal_tier": latest_signal["signal_tier"] if latest_signal is not None else None,
                     "latest_signal_date": latest_signal_date,
@@ -895,6 +1019,11 @@ class LightGBMAnalysisMixin:
                     "hot_sector_leader": _hot_sector_leader,
                     # Valuation scores
                     "hot_sector_value_score": _hsv_score,
+                    "value_score": _value_score,
+                    "valuation_score": _val.get("valuation_score", _value_score),
+                    "valuation_metric_used": _valuation_metric_used,
+                    "valuation_data_coverage": _valuation_data_coverage,
+                    "valuation_peer_group": _valuation_peer_group,
                     "pe_ratio": _pe,
                     "pb_ratio": _pb,
                     # Industry metadata and data quality

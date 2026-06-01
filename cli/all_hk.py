@@ -210,6 +210,35 @@ def main_all_hk(
         pd.DataFrame(portfolio_result.get("selected", [])).to_csv(selected_path, index=False, encoding="utf-8-sig")
         pd.DataFrame(portfolio_result.get("watchlist", [])).to_csv(watchlist_path, index=False, encoding="utf-8-sig")
 
+        # Industry weight table
+        selected_rows = portfolio_result.get("selected", [])
+        if selected_rows:
+            try:
+                from backtest_engine.industry_selector import (
+                    compute_industry_hhi,
+                    compute_industry_weight_table,
+                )
+                ind_map = {
+                    r.get("stock_code", ""): r.get("industry_l2") or r.get("industry_l1", "")
+                    for r in selected_rows
+                }
+                wts = [float(r.get("portfolio_weight", 1.0 / len(selected_rows))) for r in selected_rows]
+                portfolio_result["industry_weight_table"] = compute_industry_weight_table(
+                    [r.get("stock_code", "") for r in selected_rows], ind_map, wts,
+                )
+                portfolio_result["industry_hhi"] = compute_industry_hhi(
+                    [r.get("stock_code", "") for r in selected_rows], ind_map, wts,
+                )
+                if export_csv:
+                    ind_table_path = export_path.with_name(f"{export_path.stem}_industry_weights.csv")
+                    pd.DataFrame(portfolio_result["industry_weight_table"]).to_csv(
+                        ind_table_path, index=False, encoding="utf-8-sig",
+                    )
+                    print(f"[OK] 已导出行业权重表: {ind_table_path}")
+                    print(f"[INFO] 组合行业 HHI: {portfolio_result['industry_hhi']:.0f}")
+            except Exception:
+                pass
+
         print(f"[OK] 已导出全市场排名: {ranking_path}")
         print(f"[OK] 已导出当前持有: {selected_path}")
         print(f"[OK] 已导出观察名单: {watchlist_path}")

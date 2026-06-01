@@ -92,7 +92,27 @@ def fetch_quality_scores(
     Cross-sectional normalization is done in a second pass via
     compute_qmj_quality_scores().
     """
-    # Phase 1: fetch raw components per stock
+    raw_components = fetch_quality_components_batch(
+        stock_codes,
+        max_workers=max_workers,
+        progress_callback=progress_callback,
+    )
+
+    # Phase 2: cross-sectional normalization & QMJ scoring
+    # Without cluster info, do global normalization.
+    return _compute_qmj_scores(raw_components, cluster_map=None)
+
+
+def fetch_quality_components_batch(
+    stock_codes: list[str],
+    max_workers: int = 8,
+    progress_callback=None,
+) -> dict[str, dict[str, float | None]]:
+    """Fetch raw QMJ component metrics for HK stocks.
+
+    This keeps the raw financial fields available for industry-relative
+    standardization before the final quality score is computed.
+    """
     raw_components: dict[str, dict[str, float | None]] = {}
     lock = threading.Lock()
     completed = 0
@@ -122,9 +142,7 @@ def fetch_quality_scores(
                 if progress_callback:
                     progress_callback(completed, total)
 
-    # Phase 2: cross-sectional normalization & QMJ scoring
-    # Without cluster info, do global normalization.
-    return _compute_qmj_scores(raw_components, cluster_map=None)
+    return raw_components
 
 
 def compute_qmj_quality_scores(
@@ -263,6 +281,7 @@ def _component_to_zscore(df: pd.DataFrame, comp: str, direction: int) -> pd.Seri
 def enrich_with_quality(
     stock_codes: list[str],
     quality_scores: dict[str, float],
+    quality_details: dict[str, dict] | None = None,
     show_progress: bool = False,
 ) -> dict[str, float]:
     """Fill missing quality scores with neutral default (50.0)."""
@@ -280,5 +299,24 @@ def enrich_with_quality(
 
     if show_progress:
         print(f"[QUALITY] 质量评分 (QMJ): {valid} 只有效数据, {missing} 只用默认值(50)")
+        if quality_details:
+            coverage_values = []
+            for code in stock_codes:
+                detail = quality_details.get(code) or {}
+                coverage = detail.get("quality_data_coverage")
+                if coverage is None or pd.isna(coverage):
+                    continue
+                coverage_values.append(float(coverage))
+            low_coverage = sum(1 for v in coverage_values if v < 0.3)
+            partial_coverage = sum(1 for v in coverage_values if 0.3 <= v < 1.0)
+            full_coverage = sum(1 for v in coverage_values if v >= 1.0)
+            unknown_coverage = len(stock_codes) - len(coverage_values)
+            print(
+                "[QUALITY] QMJ组件覆盖率: "
+                f"{full_coverage} 只完整, "
+                f"{partial_coverage} 只部分, "
+                f"{low_coverage} 只低覆盖(<30%), "
+                f"{unknown_coverage} 只未知"
+            )
 
     return enriched

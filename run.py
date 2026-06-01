@@ -161,6 +161,68 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_sync(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "industry-coverage":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py industry-coverage", description="查看港股行业分类覆盖率报告"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源")
+        parser.add_argument("--limit", type=int, default=None, help="限制股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码")
+        parser.add_argument("--json", dest="output_json", action="store_true", help="JSON 格式输出")
+        parser.add_argument("--show-missing", action="store_true", help="同时列出缺失行业的普通股票代码")
+
+        args = parser.parse_args(sys.argv[2:])
+        from data.ingest.service import MarketDataService
+        service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+        try:
+            report = service.get_industry_coverage_report(
+                stock_codes=args.stock_codes, limit=args.limit,
+            )
+            if args.output_json:
+                import json as _json
+                print(_json.dumps(report, indent=2, ensure_ascii=False, default=str))
+            else:
+                cov = report["coverage"]
+                targets = report["targets"]
+                print("=" * 60)
+                print("港股行业分类覆盖率报告")
+                print("=" * 60)
+                print(f"  总股票数:        {report['total_stocks']}")
+                print(f"  普通股:          {report['ordinary_stocks']}")
+                print(f"  基金/衍生品:     {report['fund_like_stocks']}")
+                print()
+                print(f"  industry_l1 覆盖率: {cov['industry_l1_rate']:.1%} ({cov['industry_l1_count']}/{report['total_stocks']})  {'✅' if targets['l1_90pct'] else '❌ 目标90%'}")
+                print(f"  industry_l2 覆盖率: {cov['industry_l2_rate']:.1%} ({cov['industry_l2_count']}/{report['total_stocks']})  {'✅' if targets['l2_80pct'] else '❌ 目标80%'}")
+                print(f"  industry_l3 覆盖率: {cov['industry_l3_rate']:.1%} ({cov['industry_l3_count']}/{report['total_stocks']})")
+                print(f"  普通股 l1 覆盖率:  {cov['ordinary_l1_rate']:.1%}  {'✅' if targets['ordinary_l1_95pct'] else '❌ 目标95%'}")
+                print(f"  普通股 l2 覆盖率:  {cov['ordinary_l2_rate']:.1%}")
+                print()
+                print(f"  缺失 l1: {report['missing_l1_count']} 只 (其中普通股 {report['missing_l1_ordinary_count']} 只)")
+                print(f"  缺失 l2: {report['missing_l2_count']} 只")
+                print()
+                print("  数据源分布:")
+                for src, cnt in sorted(report["source_breakdown"].items(), key=lambda x: -x[1]):
+                    print(f"    {src}: {cnt}")
+                print()
+                print("  Top 一级行业:")
+                for ind, cnt in report["by_industry_l1"].items():
+                    print(f"    {ind}: {cnt}")
+                print()
+                print("  Top 二级行业:")
+                for ind, cnt in report["by_industry_l2"].items():
+                    print(f"    {ind}: {cnt}")
+                if args.show_missing and report["missing_l1_ordinary_codes"]:
+                    print()
+                    print(f"  缺失 l1 的普通股代码 (前50):")
+                    for code in report["missing_l1_ordinary_codes"]:
+                        print(f"    {code}")
+                print("=" * 60)
+        finally:
+            service.close()
+
     elif len(sys.argv) > 1 and sys.argv[1] == "backfill-industry":
         import argparse
 

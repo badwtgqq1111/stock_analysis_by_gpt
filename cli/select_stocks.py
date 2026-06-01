@@ -192,6 +192,37 @@ def main_select_stocks(
                 buy_signals_df.to_csv(sig_path, index=False, encoding="utf-8-sig")
         print(f"[OK] 已导出信号时序: {signals_dir}/")
 
+        # Industry weight table
+        selected_rows = portfolio_result.get("selected", [])
+        if selected_rows:
+            try:
+                from backtest_engine.industry_selector import (
+                    compute_industry_hhi,
+                    compute_industry_weight_table,
+                )
+                ind_map = {
+                    r.get("stock_code", ""): r.get("industry_l2") or r.get("industry_l1", "")
+                    for r in selected_rows
+                }
+                wts = [float(r.get("portfolio_weight", 1.0 / len(selected_rows))) for r in selected_rows]
+                ind_table = compute_industry_weight_table(
+                    [r.get("stock_code", "") for r in selected_rows], ind_map, wts,
+                )
+                portfolio_hhi = compute_industry_hhi(
+                    [r.get("stock_code", "") for r in selected_rows], ind_map, wts,
+                )
+                # Attach to portfolio result
+                portfolio_result["industry_weight_table"] = ind_table
+                portfolio_result["industry_hhi"] = portfolio_hhi
+
+                if export_csv:
+                    ind_table_path = export_path.with_name(f"{export_path.stem}{suffix}_industry_weights.csv")
+                    pd.DataFrame(ind_table).to_csv(ind_table_path, index=False, encoding="utf-8-sig")
+                    print(f"[OK] 已导出行业权重表: {ind_table_path}")
+                    print(f"[INFO] 组合行业 HHI: {portfolio_hhi:.0f} (0=完全分散, 10000=单一行业)")
+            except Exception:
+                pass
+
         print(f"[OK] 已导出全市场排名: {ranking_path}")
         print(f"[OK] 已导出当前持有: {selected_path}")
         print(f"[OK] 已导出观察名单: {watchlist_path}")

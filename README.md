@@ -82,21 +82,30 @@ uv run python run.py select \
 | 股票元数据 | `assets/data/meta/stock_info_registry` |
 | 信号批次 | `assets/data/signal` |
 | 回测交易 | `assets/data/trade` |
+| ClickHouse 数据卷 | `assets/clickhouse` |
 
 ClickHouse 可选。设置环境变量后，features 与 stock info registry 优先写入 ClickHouse；不可用时自动回退到 Parquet。
 
 ```bash
+mkdir -p assets/clickhouse
+
 docker run -d --name clickhouse \
+  --restart unless-stopped \
   -p 8123:8123 -p 9000:9000 \
+  -v "$(pwd)/assets/clickhouse:/var/lib/clickhouse" \
   -e CLICKHOUSE_USER=default \
   -e CLICKHOUSE_PASSWORD=quant2024 \
+  -e CLICKHOUSE_DB=quant \
   clickhouse/clickhouse-server
 
 export CLICKHOUSE_HOST=localhost
 export CLICKHOUSE_PORT=8123
 export CLICKHOUSE_USER=default
 export CLICKHOUSE_PASSWORD=quant2024
+export CLICKHOUSE_DATABASE=quant
 ```
+
+`--restart unless-stopped` 会让 Docker 服务启动后自动拉起 ClickHouse 容器；`-v "$(pwd)/assets/clickhouse:/var/lib/clickhouse"` 将 ClickHouse 数据文件保存在项目的 `assets/clickhouse` 下，删除或重建容器时数据不会丢。`/var/lib/clickhouse` 是必须持久化的数据目录，应用侧数据库名使用 `CLICKHOUSE_DATABASE`，默认建议为 `quant`。
 
 ## 行业分层选股
 

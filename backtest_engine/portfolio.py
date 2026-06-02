@@ -331,6 +331,15 @@ class TopNPortfolioBuilder:
                 kept.append(item)
         selected = kept
 
+        if lightgbm_candidates:
+            kept = []
+            for item in selected:
+                if item.get("selection_source") == "lightgbm_ranker" and item.get("win_rate", 0) < 35.0:
+                    watchlist.insert(0, dict(item))
+                else:
+                    kept.append(item)
+            selected = kept
+
         # --- Sector concentration: progressive penalty (soft constraint) ---
         # Reference: Ehsani, Harvey & Li (2023) — long-only investors should avoid hard
         # sector neutralization. Instead, apply a progressive concentration penalty that
@@ -342,8 +351,17 @@ class TopNPortfolioBuilder:
             sector_demoted = []
 
             # Build a working copy of the ranking with adjusted scores
-            remaining = [dict(item) for item in ranking_filtered
-                         if item["stock_code"] not in {s["stock_code"] for s in selected}]
+            allowed_fill_codes = set(industry_candidate_codes) if industry_candidate_codes else None
+            remaining = [
+                dict(item) for item in ranking_filtered
+                if item["stock_code"] not in {s["stock_code"] for s in selected}
+                and (allowed_fill_codes is None or item["stock_code"] in allowed_fill_codes)
+                and not (
+                    lightgbm_candidates
+                    and item.get("selection_source") == "lightgbm_ranker"
+                    and item.get("win_rate", 0) < 35.0
+                )
+            ]
 
             for item in selected:
                 cid = int(item.get("cluster_id", -1) or -1)

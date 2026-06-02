@@ -168,7 +168,10 @@ class IndustryCandidateSelector:
         # Apply industry concentration penalty to final ranking
         industry_pick_counts: dict[str, int] = {}
         for row in selected:
-            ind = industry_map.get(row["stock_code"]) or row.get("industry_l2", "")
+            ind = self._industry_group_key(
+                row["stock_code"],
+                industry_map.get(row["stock_code"]) or row.get("industry_l2", "") or row.get("industry_l1", ""),
+            )
             count = industry_pick_counts.get(ind, 0)
             # Progressive penalty: 0 for 1st, -8 for 2nd, -18 for 3rd, -35 for 4th+
             penalty = 0
@@ -206,8 +209,9 @@ class IndustryCandidateSelector:
     ) -> dict[str, str | None]:
         level = self.industry_level
         return {
-            r["stock_code"]: (
-                r.get(f"industry_{level}") or r.get("industry_l1", "")
+            r["stock_code"]: self._industry_group_key(
+                r["stock_code"],
+                r.get(f"industry_{level}") or r.get("industry_l1", ""),
             )
             for r in rows
         }
@@ -337,11 +341,19 @@ class IndustryCandidateSelector:
         groups: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             code = row["stock_code"]
-            ind = industry_map.get(code) or row.get("industry_l2") or row.get("industry_l1", "")
-            if not ind:
-                ind = "__unclassified__"
+            ind = IndustryCandidateSelector._industry_group_key(
+                code,
+                industry_map.get(code) or row.get("industry_l2") or row.get("industry_l1", ""),
+            )
             groups.setdefault(ind, []).append(row)
         return groups
+
+    @staticmethod
+    def _industry_group_key(stock_code: str, industry_label: Any) -> str:
+        label = str(industry_label or "").strip()
+        if label:
+            return label
+        return f"__unclassified__:{stock_code}"
 
     @staticmethod
     def _compute_industry_score(
@@ -411,7 +423,7 @@ def compute_industry_hhi(
 
     ind_weights: dict[str, float] = {}
     for code, w in zip(selected_codes, weights):
-        ind = industry_map.get(code) or "unknown"
+        ind = IndustryCandidateSelector._industry_group_key(code, industry_map.get(code))
         ind_weights[ind] = ind_weights.get(ind, 0.0) + w
 
     hhi = sum(v ** 2 for v in ind_weights.values()) * 10000.0
@@ -431,12 +443,13 @@ def compute_industry_weight_table(
     """
     ind_data: dict[str, dict[str, Any]] = {}
     for code, w in zip(selected_codes, weights):
-        ind = industry_map.get(code) or "unknown"
-        if ind not in ind_data:
-            ind_data[ind] = {"industry": ind, "stock_count": 0, "weight_pct": 0.0, "stocks": []}
-        ind_data[ind]["stock_count"] += 1
-        ind_data[ind]["weight_pct"] += w * 100.0
-        ind_data[ind]["stocks"].append(code)
+        raw_label = str(industry_map.get(code) or "").strip()
+        ind_key = IndustryCandidateSelector._industry_group_key(code, raw_label)
+        if ind_key not in ind_data:
+            ind_data[ind_key] = {"industry": raw_label or "unknown", "stock_count": 0, "weight_pct": 0.0, "stocks": []}
+        ind_data[ind_key]["stock_count"] += 1
+        ind_data[ind_key]["weight_pct"] += w * 100.0
+        ind_data[ind_key]["stocks"].append(code)
 
     result = sorted(ind_data.values(), key=lambda x: -x["weight_pct"])
     for item in result:

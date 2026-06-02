@@ -17,7 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.ingest.service import MarketDataService
-from data.model import normalize_ohlcv_frame
+from data.model import FEATURE_COLUMNS, normalize_ohlcv_frame
+from data.store.layout import DataLayout
+from data.store.warehouse import MarketDataWarehouse
 from factor_engine import create_factor_set, list_factor_sets
 from factor_engine.ml.lightgbm_ranker import LightGBMRankerPipeline, _load_lightgbm_regressor_class
 
@@ -151,6 +153,155 @@ def test_service_can_persist_multiple_factor_materializations_for_same_factor_se
             assert set(loaded_rsi_only["feature_config_hash"]) == {rsi_only_meta["extra"]["feature_config_hash"]}
         finally:
             service.close()
+
+
+def test_factor_generation_resource_plan_scales_down_on_low_memory():
+    original_available_memory_bytes = MarketDataService._available_memory_bytes
+
+    try:
+        MarketDataService._available_memory_bytes = staticmethod(lambda: 1 * 1024 ** 3)
+        low_memory_plan = MarketDataService._resolve_factor_generation_resource_plan(
+            requested_workers=8,
+            total_stocks=100,
+            expected_feature_count=193,
+            days=365,
+        )
+
+        MarketDataService._available_memory_bytes = staticmethod(lambda: 32 * 1024 ** 3)
+        high_memory_plan = MarketDataService._resolve_factor_generation_resource_plan(
+            requested_workers=8,
+            total_stocks=100,
+            expected_feature_count=193,
+            days=365,
+        )
+    finally:
+        MarketDataService._available_memory_bytes = original_available_memory_bytes
+
+    assert 1 <= low_memory_plan["max_workers"] < high_memory_plan["max_workers"] <= 8
+    assert low_memory_plan["batch_flush_feature_rows"] < high_memory_plan["batch_flush_feature_rows"]
+    assert low_memory_plan["max_pending_futures"] <= high_memory_plan["max_pending_futures"]
+
+
+def test_warehouse_disables_clickhouse_after_feature_read_failure():
+    class FailingClickHouseStore:
+        def read_frame(self, *args, **kwargs):
+            raise RuntimeError("Unexpected Http Driver Exception")
+
+    class FallbackParquetStore:
+        def __init__(self):
+            self.calls = 0
+
+        def read_frame(self, *args, **kwargs):
+            self.calls += 1
+            return pd.DataFrame()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        fallback = FallbackParquetStore()
+        warehouse = MarketDataWarehouse(
+            DataLayout(base_dir=tmp_dir),
+            clickhouse_store=FailingClickHouseStore(),
+        )
+        warehouse.parquet_store = fallback
+
+        frame = warehouse.read_features(
+            stock_code="00700",
+            market="HK",
+            feature_set="qlib_alpha158",
+            feature_version="0.1.0",
+            feature_config_hash="unit",
+        )
+
+        assert frame.empty
+        assert "Unexpected Http Driver Exception" in warehouse._clickhouse_disabled_reason
+        assert fallback.calls == 1
+
+
+def test_warehouse_append_features_uses_append_only_store_path():
+    class AppendOnlyStore:
+        def __init__(self):
+            self.append_calls = 0
+
+        def append_frame(self, *args, **kwargs):
+            self.append_calls += 1
+            return "/tmp/features"
+
+        def upsert_frame(self, *args, **kwargs):
+            raise AssertionError("append feature batches must not upsert the full dataset")
+
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2026-01-01"),
+                "stock_code": "00700",
+                "market": "HK",
+                "exchange": None,
+                "asset_type": "equity",
+                "frequency": "daily",
+                "adjust": "qfq",
+                "feature_set": "qlib_alpha158",
+                "feature_version": "0.1.0",
+                "feature_config_hash": "unit",
+                "feature_name": "KMID",
+                "feature_value": 1.0,
+                "source": "unit_test",
+                "ingest_time": pd.Timestamp("2026-01-01"),
+            }
+        ],
+        columns=FEATURE_COLUMNS,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        store = AppendOnlyStore()
+        warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+        warehouse.parquet_store = store
+
+        result = warehouse.append_features(frame)
+
+    assert result["rows"] == 1
+    assert store.append_calls == 1
+
+
+def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_feature_reads():
+    with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = MarketDataService(base_dir=tmp_dir)
+            try:
+                for code in ["00700", "00005"]:
+                    raw_frame = _make_ohlcv_frame(rows=40)
+                    raw_frame["date"] = pd.date_range(
+                        pd.Timestamp.utcnow().tz_localize(None).normalize() - pd.Timedelta(days=39),
+                        periods=40,
+                        freq="D",
+                    )
+                    normalized = normalize_ohlcv_frame(
+                        raw_frame,
+                        stock_code=code,
+                        market="HK",
+                        source="unit_test",
+                    )
+                    service.warehouse.upsert_ohlcv(normalized)
+
+                read_feature_calls = []
+
+                def fake_read_features(**kwargs):
+                    read_feature_calls.append(kwargs.get("stock_code"))
+                    return pd.DataFrame()
+
+                service.warehouse.read_features = fake_read_features
+
+                result = service.generate_factor_set(
+                    stock_codes=["00700", "00005"],
+                    factor_set="qlib_alpha158",
+                    days=5,
+                    warmup_days=5,
+                    max_workers=2,
+                    show_progress=False,
+                )
+            finally:
+                service.close()
+
+    assert result["success_count"] == 2
+    assert read_feature_calls == [["00700", "00005"]]
 
 
 def test_lightgbm_ranker_loader_reports_missing_libomp_on_macos():

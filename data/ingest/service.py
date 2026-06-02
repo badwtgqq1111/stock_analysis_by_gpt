@@ -3,7 +3,7 @@
 
 """统一的数据服务入口。"""
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
 import os
 import platform
@@ -108,6 +108,66 @@ class MarketDataService:
         # warmed MiniRacer context pool, which preserves macOS throughput while
         # avoiding concurrent context initialization crashes.
         return 0
+
+    @staticmethod
+    def _available_memory_bytes():
+        try:
+            meminfo_path = "/proc/meminfo"
+            if os.path.exists(meminfo_path):
+                with open(meminfo_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.startswith("MemAvailable:"):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                return int(parts[1]) * 1024
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _resolve_factor_generation_resource_plan(
+        cls,
+        requested_workers,
+        total_stocks,
+        expected_feature_count,
+        days,
+    ):
+        requested = int(requested_workers or 0)
+        cpu_count = max(int(os.cpu_count() or 1), 1)
+        cpu_cap = max(1, min(cpu_count - 1, 12))
+        if requested <= 0:
+            requested = min(cpu_cap, 8)
+
+        feature_count = max(int(expected_feature_count or 0), 1)
+        history_days = max(int(days or 0), 1)
+        estimated_rows_per_stock = max(feature_count * history_days, 1)
+        available_bytes = cls._available_memory_bytes()
+        available_gb = (available_bytes / (1024 ** 3)) if available_bytes else None
+
+        if available_gb is None:
+            memory_worker_cap = cpu_cap
+            batch_flush_feature_rows = 500_000
+        else:
+            per_worker_gb = 0.75 if feature_count >= 150 else 0.5
+            memory_worker_cap = max(1, int(available_gb / per_worker_gb))
+            target_pending_bytes = max(available_bytes * 0.03, 64 * 1024 ** 2)
+            batch_flush_feature_rows = int(target_pending_bytes / 320)
+            batch_flush_feature_rows = max(75_000, min(batch_flush_feature_rows, 1_000_000))
+
+        max_workers = max(1, min(requested, cpu_cap, memory_worker_cap, max(int(total_stocks or 1), 1)))
+        batch_flush_stocks = max(1, min(max_workers * 2, int(batch_flush_feature_rows / estimated_rows_per_stock) or 1))
+        max_pending_futures = max(1, min(max_workers * 2, batch_flush_stocks * 2, max(int(total_stocks or 1), 1)))
+        coverage_check_batch_size = max(1, min(max_pending_futures, batch_flush_stocks))
+
+        return {
+            "max_workers": max_workers,
+            "max_pending_futures": max_pending_futures,
+            "batch_flush_stocks": batch_flush_stocks,
+            "batch_flush_feature_rows": batch_flush_feature_rows,
+            "coverage_check_batch_size": coverage_check_batch_size,
+            "memory_available_gb": available_gb,
+            "estimated_rows_per_stock": estimated_rows_per_stock,
+        }
 
     def __init__(self, base_dir="./assets/data", data_source="akshare"):
         self.layout = DataLayout(base_dir=base_dir)
@@ -976,7 +1036,30 @@ class MarketDataService:
         start_ts = end_ts - pd.Timedelta(days=history_window_days)
         start_date = start_ts.strftime("%Y-%m-%d")
         end_date = end_ts.strftime("%Y-%m-%d")
-        max_workers = max(int(max_workers or 0), 8)
+        requested_workers = int(max_workers or 0)
+        resource_plan = self._resolve_factor_generation_resource_plan(
+            requested_workers=requested_workers,
+            total_stocks=len(normalized_codes),
+            expected_feature_count=expected_feature_count,
+            days=history_window_days,
+        )
+        max_workers = resource_plan["max_workers"]
+
+        if show_progress:
+            memory_text = (
+                f"{resource_plan['memory_available_gb']:.1f}"
+                if resource_plan.get("memory_available_gb") is not None
+                else "unknown"
+            )
+            print(
+                "[INFO] factor generation resource plan: "
+                f"requested_workers={requested_workers or 'auto'} workers={max_workers} "
+                f"max_pending={resource_plan['max_pending_futures']} "
+                f"flush_stocks={resource_plan['batch_flush_stocks']} "
+                f"flush_feature_rows={resource_plan['batch_flush_feature_rows']} "
+                f"memory_available_gb={memory_text}",
+                flush=True,
+            )
 
         def _read_existing_features(stock_code, latest_trade_date):
             try:
@@ -1008,6 +1091,7 @@ class MarketDataService:
 
         # ---- Phase 0: pre-check existing feature coverage in batch (metadata only, low memory) ----
         skip_codes: set[str] = set()
+        coverage_prechecked_codes: set[str] = set()
         if expected_feature_count > 0:
             try:
                 latest_dates = self.warehouse.get_latest_trade_dates(
@@ -1021,37 +1105,43 @@ class MarketDataService:
                 # latest_dates is {(code, freq): timestamp}
                 codes_with_data = [c for c in normalized_codes if (c, frequency) in latest_dates]
                 if codes_with_data:
-                    max_date = max(
-                        ts for (c, f), ts in latest_dates.items()
-                        if f == frequency and c in latest_dates
-                    )
-                    existing_features_map = self.warehouse.read_features(
-                        stock_code=codes_with_data,
-                        market=normalized_market,
-                        exchange=exchange,
-                        asset_type=asset_type,
-                        frequency=frequency,
-                        adjust=normalized_adjust,
-                        feature_set=factor_set,
-                        feature_version=materialization["feature_version"],
-                        feature_config_hash=materialization["feature_config_hash"],
-                        start_date=start_date,
-                        end_date=str(pd.Timestamp(max_date).date()),
-                    )
-                    if not existing_features_map.empty:
-                        existing_features_map["trade_date"] = pd.to_datetime(
-                            existing_features_map["trade_date"], errors="coerce"
+                    coverage_batch_size = max(int(resource_plan["coverage_check_batch_size"]), 1)
+                    for offset in range(0, len(codes_with_data), coverage_batch_size):
+                        code_batch = codes_with_data[offset:offset + coverage_batch_size]
+                        coverage_prechecked_codes.update(code_batch)
+                        max_date = max(
+                            latest_dates[(c, frequency)]
+                            for c in code_batch
+                            if (c, frequency) in latest_dates
                         )
-                        for code, group in existing_features_map.groupby("stock_code"):
-                            if (code, frequency) in latest_dates:
-                                last_date = group["trade_date"].max()
-                                n_features = group["feature_name"].nunique()
-                                ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
-                                if (last_date.normalize() >= ohlcv_latest.normalize()
-                                        and n_features >= expected_feature_count):
-                                    skip_codes.add(code)
+                        existing_features_map = self.warehouse.read_features(
+                            stock_code=code_batch,
+                            market=normalized_market,
+                            exchange=exchange,
+                            asset_type=asset_type,
+                            frequency=frequency,
+                            adjust=normalized_adjust,
+                            feature_set=factor_set,
+                            feature_version=materialization["feature_version"],
+                            feature_config_hash=materialization["feature_config_hash"],
+                            start_date=start_date,
+                            end_date=str(pd.Timestamp(max_date).date()),
+                        )
+                        if not existing_features_map.empty:
+                            existing_features_map["trade_date"] = pd.to_datetime(
+                                existing_features_map["trade_date"], errors="coerce"
+                            )
+                            for code, group in existing_features_map.groupby("stock_code"):
+                                if (code, frequency) in latest_dates:
+                                    last_date = group["trade_date"].max()
+                                    n_features = group["feature_name"].nunique()
+                                    ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
+                                    if (last_date.normalize() >= ohlcv_latest.normalize()
+                                            and n_features >= expected_feature_count):
+                                        skip_codes.add(code)
             except Exception:
                 skip_codes.clear()
+                coverage_prechecked_codes.clear()
 
         if show_progress and skip_codes:
             print(
@@ -1100,15 +1190,16 @@ class MarketDataService:
                         "dataset_path": None,
                     }
 
-                existing_features = _read_existing_features(stock_code, latest_trade_date)
-                if _has_complete_coverage(existing_features, latest_trade_date):
-                    return {
-                        "stock_code": stock_code,
-                        "status": "skipped",
-                        "rows": int(existing_features["trade_date"].nunique()),
-                        "rows_written": 0,
-                        "dataset_path": str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature")),
-                    }
+                if stock_code not in coverage_prechecked_codes:
+                    existing_features = _read_existing_features(stock_code, latest_trade_date)
+                    if _has_complete_coverage(existing_features, latest_trade_date):
+                        return {
+                            "stock_code": stock_code,
+                            "status": "skipped",
+                            "rows": int(existing_features["trade_date"].nunique()),
+                            "rows_written": 0,
+                            "dataset_path": str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature")),
+                        }
 
                 compute_result = self.compute_factor_set(
                     stock_code=stock_code,
@@ -1175,8 +1266,8 @@ class MarketDataService:
         results = []
         pending_feature_frames = []
         pending_feature_rows = 0
-        batch_flush_stocks = max(16, max_workers * 4)
-        batch_flush_feature_rows = 500_000
+        batch_flush_stocks = resource_plan["batch_flush_stocks"]
+        batch_flush_feature_rows = resource_plan["batch_flush_feature_rows"]
 
         def _flush_feature_batch():
             nonlocal pending_feature_frames, pending_feature_rows, total_rows_written
@@ -1206,31 +1297,59 @@ class MarketDataService:
                 print(msg)
 
         total_rows_written = 0
+        completed_count = 0
+        next_code_index = 0
+        pending_futures = {}
+
+        def _submit_pending(executor):
+            nonlocal next_code_index, resource_plan, batch_flush_stocks, batch_flush_feature_rows
+            resource_plan = self._resolve_factor_generation_resource_plan(
+                requested_workers=max_workers,
+                total_stocks=total,
+                expected_feature_count=expected_feature_count,
+                days=history_window_days,
+            )
+            batch_flush_stocks = resource_plan["batch_flush_stocks"]
+            batch_flush_feature_rows = resource_plan["batch_flush_feature_rows"]
+            max_pending = max(1, int(resource_plan["max_pending_futures"]))
+            while next_code_index < total and len(pending_futures) < max_pending:
+                stock_code = normalized_codes[next_code_index]
+                pending_futures[executor.submit(_generate_one, stock_code)] = stock_code
+                next_code_index += 1
+
+        def _handle_result(result, index):
+            nonlocal pending_feature_rows
+            results.append(result)
+
+            if result["status"] == "computed":
+                feature_frame = result.pop("_feature_frame", None)
+                if feature_frame is not None and not feature_frame.empty:
+                    pending_feature_frames.append(feature_frame)
+                    pending_feature_rows += int(result.get("rows_written", 0) or 0)
+                if len(pending_feature_frames) >= batch_flush_stocks or pending_feature_rows >= batch_flush_feature_rows:
+                    _flush_feature_batch()
+
+            if pbar is not None:
+                pbar.update(1)
+                computed_n = sum(1 for item in results if item["status"] == "computed")
+                error_n = sum(1 for item in results if item["status"] == "error")
+                skipped_n = sum(1 for item in results if item["status"] == "skipped")
+                pbar.set_postfix_str(
+                    f"computed={computed_n} skipped={skipped_n} errors={error_n} rows={total_rows_written}"
+                )
+                if result["status"] == "error":
+                    _write(f"[{index:04d}/{total:04d}] {result['stock_code']} [ERR] {result.get('error','?')}")
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_code = {
-                executor.submit(_generate_one, stock_code): stock_code
-                for stock_code in normalized_codes
-            }
-            for index, future in enumerate(as_completed(future_to_code), start=1):
-                result = future.result()
-                results.append(result)
-
-                if result["status"] == "computed":
-                    pending_feature_frames.append(result.pop("_feature_frame", None))
-                    pending_feature_rows += int(result.get("rows", 0) or 0)
-                    if len(pending_feature_frames) >= batch_flush_stocks or pending_feature_rows >= batch_flush_feature_rows:
-                        _flush_feature_batch()
-
-                if pbar is not None:
-                    pbar.update(1)
-                    computed_n = sum(1 for item in results if item["status"] == "computed")
-                    error_n = sum(1 for item in results if item["status"] == "error")
-                    skipped_n = sum(1 for item in results if item["status"] == "skipped")
-                    pbar.set_postfix_str(
-                        f"computed={computed_n} skipped={skipped_n} errors={error_n} rows={total_rows_written}"
-                    )
-                    if result["status"] == "error":
-                        _write(f"[{index:04d}/{total:04d}] {result['stock_code']} [ERR] {result.get('error','?')}")
+            _submit_pending(executor)
+            while pending_futures:
+                done, _pending = wait(pending_futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    pending_futures.pop(future, None)
+                    completed_count += 1
+                    result = future.result()
+                    _handle_result(result, completed_count)
+                _submit_pending(executor)
 
         # Final flush
         _flush_feature_batch()

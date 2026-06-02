@@ -532,6 +532,37 @@ def test_industry_selector_applies_documented_hard_filters_and_preserves_zero_co
     assert by_code["09003"]["selected"] is True
 
 
+def test_industry_selector_treats_missing_industry_as_independent_unknown_groups():
+    rows = []
+    for idx, score in enumerate([90.0, 80.0, 70.0, 60.0], start=1):
+        rows.append(
+            {
+                "stock_code": f"0910{idx}",
+                "ranking_score": score,
+                "current_signal_actionable": True,
+                "liquidity_ok": True,
+                "setup_type": "pre_breakout",
+                "signal_freshness_score": 90.0,
+                "signal_tier": "medium",
+                "quality_data_coverage": 1.0,
+                "drawdown_penalty_score": 0.0,
+                "downtrend_penalty_score": 0.0,
+                "overheat_penalty_score": 0.0,
+                "data_coverage_score": 100.0,
+                "pe_ratio": 15.0,
+                "pb_ratio": 1.0,
+                "industry_l1": "",
+                "industry_l2": None,
+            }
+        )
+
+    selected = IndustryCandidateSelector(top_n=3).select(rows)
+    final_selected = [row for row in selected if row.get("selected")]
+
+    assert [row["stock_code"] for row in final_selected] == ["09101", "09102", "09103"]
+    assert all(row["industry_rank"] == 1 for row in final_selected)
+
+
 def test_portfolio_builder_compounds_portfolio_equity_curve_over_dates():
     builder = TopNPortfolioBuilder(top_n=1, initial_capital=100000, weighting_mode="equal_weight")
     result_a = _make_analysis_result(

@@ -70,7 +70,9 @@ class MarketDataWarehouse:
     @property
     def _feature_store(self):
         """返回 features 数据集的后端存储，优先使用 ClickHouse。"""
-        return self.clickhouse_store or self.parquet_store
+        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+            return self.clickhouse_store
+        return self.parquet_store
 
     def _feature_store_candidates(self):
         """返回 features 可用后端，ClickHouse 不可用时允许降级到 parquet。"""
@@ -321,6 +323,35 @@ class MarketDataWarehouse:
             raise last_error
         return {"rows": len(payload), "dataset_path": str(target)}
 
+    def append_features(self, frame, dataset_name=FEATURES_DATASET):
+        """Append feature batches without reading and rewriting the full dataset."""
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="feature"))}
+
+        payload = frame[FEATURE_COLUMNS].copy()
+        last_error = None
+        for store in self._feature_store_candidates():
+            try:
+                target = store.append_frame(
+                    dataset_name=dataset_name,
+                    frame=payload,
+                    layer="feature",
+                    date_column="trade_date",
+                    partition_columns=self.FEATURES_PARTITION_COLUMNS,
+                )
+                return {"rows": len(payload), "dataset_path": str(target)}
+            except Exception as exc:
+                last_error = exc
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                if store is self.parquet_store:
+                    raise
+                continue
+        if last_error is not None:
+            raise last_error
+        return {"rows": len(payload), "dataset_path": str(target)}
+
     def read_features(
         self,
         stock_code=None,
@@ -362,7 +393,9 @@ class MarketDataWarehouse:
                         "feature_version, feature_config_hash, feature_name"
                     ),
                 )
-            except Exception:
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
                 if feature_version is not None or feature_config_hash is not None:
                     frame = pd.DataFrame(columns=FEATURE_COLUMNS)
                 else:

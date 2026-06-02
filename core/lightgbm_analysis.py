@@ -917,6 +917,28 @@ class LightGBMAnalysisMixin:
             _cluster_breadth20 = float(_stock_sec["cluster_breadth20"].iloc[0]) if not _stock_sec.empty and "cluster_breadth20" in _stock_sec.columns else 0.5
             _hot_sector_leader = float(_stock_sec["hot_sector_leader"].iloc[0]) if not _stock_sec.empty and "hot_sector_leader" in _stock_sec.columns else 0.5
             _cluster_id = int(_stock_sec["cluster_id"].iloc[0]) if not _stock_sec.empty and "cluster_id" in _stock_sec.columns else -1
+            _stock_ind = industry_features[industry_features["stock_code"] == stock_code] if not industry_features.empty else pd.DataFrame()
+            _industry_feature_payload = {}
+            if not _stock_ind.empty:
+                for _col in (
+                    "industry_member_count",
+                    "industry_ret_5d",
+                    "industry_ret_20d",
+                    "industry_ret_60d",
+                    "industry_rps_20d",
+                    "industry_rps_60d",
+                    "industry_breadth_5d",
+                    "industry_breadth_20d",
+                    "industry_vol_20d",
+                    "industry_vol_60d",
+                    "stock_vs_industry_ret_5d",
+                    "stock_vs_industry_ret_20d",
+                    "stock_vs_industry_rank",
+                    "dip_buy_signal_industry",
+                    "industry_leader",
+                ):
+                    if _col in _stock_ind.columns:
+                        _industry_feature_payload[_col] = _stock_ind[_col].iloc[0]
             _val = valuation_scores.get(stock_code, {})
             _hsv_score = _val.get("hot_sector_value_score", 50.0)
             _pe = _val.get("pe_ratio", np.nan)
@@ -1030,6 +1052,7 @@ class LightGBMAnalysisMixin:
                     "industry_l1": _industry_l1,
                     "industry_l2": _industry_l2,
                     "industry_l3": _industry_l3,
+                    **_industry_feature_payload,
                     "industry_source": _industry_source,
                     "industry_updated_at": _industry_updated_at,
                     "instrument_type": _instrument_type,

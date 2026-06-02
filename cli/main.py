@@ -93,6 +93,15 @@ def run_cli(argv=None):
     parser.add_argument('--validation-factor-scope', dest='validation_factor_scope',
                         choices=['scoring_only', 'all'], default=None,
                         help='因子验证范围，默认 all（全部因子），可选 scoring_only（仅评分配置中的因子）')
+    parser.add_argument('--industry-selection-mode', dest='industry_selection_mode',
+                        choices=['core', 'core_overlay', 'timing_only'], default='core_overlay',
+                        help='行业选股模式：core=行业内选股，core_overlay=行业内选股+行业预算叠加，timing_only=研究用纯行业择时')
+    parser.add_argument('--industry-overlay-strength', dest='industry_overlay_strength', type=float, default=0.0,
+                        help='行业择时 Overlay 权重，默认 0（仅输出字段，不改变候选预算）')
+    parser.add_argument('--max-industry-weight', dest='max_industry_weight', type=float, default=0.35,
+                        help='单行业权重预算上限，默认 0.35')
+    parser.add_argument('--hot-industry-weight-multiplier', dest='hot_industry_weight_multiplier', type=float, default=1.3,
+                        help='Hot 行业预算倍率，默认 1.3')
     args = parser.parse_args(argv)
 
     # Normalize mode aliases (unified CLI uses shorter names with dashes)
@@ -171,6 +180,10 @@ def run_cli(argv=None):
             min_market_cap=args.min_market_cap,
             min_daily_turnover=args.min_daily_turnover,
             min_ipo_days=args.min_ipo_days,
+            industry_selection_mode=args.industry_selection_mode,
+            industry_overlay_strength=args.industry_overlay_strength,
+            max_industry_weight=args.max_industry_weight,
+            hot_industry_weight_multiplier=args.hot_industry_weight_multiplier,
             llm_report=args.llm_report,
             llm_model=args.llm_model,
         )
@@ -199,6 +212,10 @@ def run_cli(argv=None):
             min_market_cap=args.min_market_cap,
             min_daily_turnover=args.min_daily_turnover,
             min_ipo_days=args.min_ipo_days,
+            industry_selection_mode=args.industry_selection_mode,
+            industry_overlay_strength=args.industry_overlay_strength,
+            max_industry_weight=args.max_industry_weight,
+            hot_industry_weight_multiplier=args.hot_industry_weight_multiplier,
         )
     elif args.mode == "factor_report":
         return main_factor_report(

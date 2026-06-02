@@ -104,6 +104,10 @@ class TopNPortfolioBuilder:
         slippage_rate=0.0,
         min_commission=0.0,
         enable_portfolio_replay=True,
+        industry_selection_mode="core_overlay",
+        industry_overlay_strength=0.0,
+        max_industry_weight=0.35,
+        hot_industry_weight_multiplier=1.3,
     ):
         self.top_n = int(top_n)
         self.initial_capital = float(initial_capital)
@@ -113,6 +117,10 @@ class TopNPortfolioBuilder:
         self.slippage_rate = float(slippage_rate)
         self.min_commission = float(min_commission)
         self.enable_portfolio_replay = bool(enable_portfolio_replay)
+        self.industry_selection_mode = str(industry_selection_mode or "core_overlay").strip().lower()
+        self.industry_overlay_strength = float(industry_overlay_strength or 0.0)
+        self.max_industry_weight = float(max_industry_weight or 0.35)
+        self.hot_industry_weight_multiplier = float(hot_industry_weight_multiplier or 1.3)
         if self.weighting_mode not in {"equal_weight", "score_weight"}:
             raise ValueError(f"unsupported weighting_mode: {self.weighting_mode}")
 
@@ -155,6 +163,10 @@ class TopNPortfolioBuilder:
                 require_actionable=True,
                 require_liquidity=True,
                 require_fresh_signal=False,
+                mode=self.industry_selection_mode,
+                overlay_strength=self.industry_overlay_strength,
+                max_industry_weight=self.max_industry_weight,
+                hot_industry_weight_multiplier=self.hot_industry_weight_multiplier,
             )
             industry_map = {
                 r.get("stock_code", ""): r.get("industry_l2") or r.get("industry_l1", "")
@@ -164,11 +176,13 @@ class TopNPortfolioBuilder:
             industry_candidate_ranking = [
                 item for item in ranking
                 if item.get("eligibility_pass") and item.get("industry_rank", 0) <= item.get("industry_cap", 0)
+                and item.get("industry_timing_bucket") != "Broken"
             ]
             industry_candidate_codes = {item.get("stock_code") for item in industry_candidate_ranking}
             industry_selected_codes = [
                 item.get("stock_code") for item in ranking
                 if item.get("selected") and item.get("eligibility_pass")
+                and item.get("industry_timing_bucket") != "Broken"
             ]
         except Exception:
             # Non-breaking: industry selector is optional enrichment
@@ -331,6 +345,20 @@ class TopNPortfolioBuilder:
                 kept.append(item)
         selected = kept
 
+        # Industry timing hard stop: Broken industries can stay on watchlist
+        # for transparency, but must not be reintroduced by later fill logic.
+        kept = []
+        for item in selected:
+            if item.get("industry_timing_bucket") == "Broken":
+                demoted = dict(item)
+                reasons = list(demoted.get("eligibility_reasons") or [])
+                reasons.append("broken_industry_timing_bucket")
+                demoted["eligibility_reasons"] = list(dict.fromkeys(reasons))
+                watchlist.insert(0, demoted)
+            else:
+                kept.append(item)
+        selected = kept
+
         if lightgbm_candidates:
             kept = []
             for item in selected:
@@ -356,6 +384,7 @@ class TopNPortfolioBuilder:
                 dict(item) for item in ranking_filtered
                 if item["stock_code"] not in {s["stock_code"] for s in selected}
                 and (allowed_fill_codes is None or item["stock_code"] in allowed_fill_codes)
+                and item.get("industry_timing_bucket") != "Broken"
                 and not (
                     lightgbm_candidates
                     and item.get("selection_source") == "lightgbm_ranker"
@@ -399,6 +428,11 @@ class TopNPortfolioBuilder:
             if sector_demoted:
                 watchlist.extend(sector_demoted)
             selected = capped_selected
+
+        selected = [
+            item for item in selected
+            if item.get("industry_timing_bucket") != "Broken"
+        ]
 
         self.kelly_position_ratio = kelly_position_ratio
         self._apply_weights(selected)
@@ -468,6 +502,7 @@ class TopNPortfolioBuilder:
                     "vol_scale",
                     "weight_reason",
                     "portfolio_industry_hhi",
+                    "portfolio_industry_hhi_invested",
                 ):
                     if field in final_item:
                         row[field] = final_item[field]
@@ -479,6 +514,7 @@ class TopNPortfolioBuilder:
                     "vol_scale",
                     "weight_reason",
                     "portfolio_industry_hhi",
+                    "portfolio_industry_hhi_invested",
                 ):
                     row.pop(field, None)
 
@@ -618,11 +654,14 @@ class TopNPortfolioBuilder:
                 for item in selected
             }
             portfolio_hhi = compute_industry_hhi(codes, ind_map, weights)
+            invested_hhi = compute_industry_hhi(codes, ind_map, weights, normalize_weights=True)
             for item in selected:
                 item["portfolio_industry_hhi"] = round(portfolio_hhi, 1)
+                item["portfolio_industry_hhi_invested"] = round(invested_hhi, 1)
         except Exception:
             for item in selected:
                 item["portfolio_industry_hhi"] = None
+                item["portfolio_industry_hhi_invested"] = None
 
     def _build_pick_record(self, item, signal_date, selected_group):
         """构建单个横截面入选记录，并附带当日权重。"""
@@ -1155,6 +1194,21 @@ class TopNPortfolioBuilder:
                 "industry_l1": r.get("industry_l1"),
                 "industry_l2": r.get("industry_l2"),
                 "industry_l3": r.get("industry_l3"),
+                "industry_member_count": r.get("industry_member_count"),
+                "industry_ret_5d": r.get("industry_ret_5d"),
+                "industry_ret_20d": r.get("industry_ret_20d"),
+                "industry_ret_60d": r.get("industry_ret_60d"),
+                "industry_rps_20d": r.get("industry_rps_20d"),
+                "industry_rps_60d": r.get("industry_rps_60d"),
+                "industry_breadth_5d": r.get("industry_breadth_5d"),
+                "industry_breadth_20d": r.get("industry_breadth_20d"),
+                "industry_vol_20d": r.get("industry_vol_20d"),
+                "industry_vol_60d": r.get("industry_vol_60d"),
+                "stock_vs_industry_ret_5d": r.get("stock_vs_industry_ret_5d"),
+                "stock_vs_industry_ret_20d": r.get("stock_vs_industry_ret_20d"),
+                "stock_vs_industry_rank": r.get("stock_vs_industry_rank"),
+                "dip_buy_signal_industry": r.get("dip_buy_signal_industry"),
+                "industry_leader": r.get("industry_leader"),
                 "industry_source": r.get("industry_source"),
                 "industry_updated_at": r.get("industry_updated_at"),
                 "instrument_type": r.get("instrument_type"),
@@ -1382,6 +1436,21 @@ class TopNPortfolioBuilder:
                 "industry_l1": r.get("industry_l1"),
                 "industry_l2": r.get("industry_l2"),
                 "industry_l3": r.get("industry_l3"),
+                "industry_member_count": r.get("industry_member_count"),
+                "industry_ret_5d": r.get("industry_ret_5d"),
+                "industry_ret_20d": r.get("industry_ret_20d"),
+                "industry_ret_60d": r.get("industry_ret_60d"),
+                "industry_rps_20d": r.get("industry_rps_20d"),
+                "industry_rps_60d": r.get("industry_rps_60d"),
+                "industry_breadth_5d": r.get("industry_breadth_5d"),
+                "industry_breadth_20d": r.get("industry_breadth_20d"),
+                "industry_vol_20d": r.get("industry_vol_20d"),
+                "industry_vol_60d": r.get("industry_vol_60d"),
+                "stock_vs_industry_ret_5d": r.get("stock_vs_industry_ret_5d"),
+                "stock_vs_industry_ret_20d": r.get("stock_vs_industry_ret_20d"),
+                "stock_vs_industry_rank": r.get("stock_vs_industry_rank"),
+                "dip_buy_signal_industry": r.get("dip_buy_signal_industry"),
+                "industry_leader": r.get("industry_leader"),
                 "industry_source": r.get("industry_source"),
                 "industry_updated_at": r.get("industry_updated_at"),
                 "instrument_type": r.get("instrument_type"),

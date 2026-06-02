@@ -157,20 +157,28 @@ uv run python run.py select \
   --show-progress
 
 # 5. 检查 selected 必须来自行业候选池，且无硬过滤失败标的
-python - <<'PY'
+uv run python - <<'PY'
 import pandas as pd
 
 selected = pd.read_csv("output/industry_smoke_alpha158_hk_selected.csv")
 required = [
     "industry_l1", "industry_l2", "industry_rank", "industry_score",
     "industry_cap", "selection_eligible", "eligibility_reasons",
+    "industry_alpha_score", "industry_opportunity_score",
+    "combined_selection_score", "selection_layer",
+    "industry_timing_bucket", "candidate_cap_base", "candidate_cap_overlay",
+    "industry_timing_oos_win_rate", "industry_timing_oos_ir",
     "valuation_metric_used", "quality_data_coverage",
 ]
 missing = [column for column in required if column not in selected.columns]
 assert not missing, f"missing columns: {missing}"
 assert selected["selection_eligible"].fillna(False).all()
 assert (selected["industry_rank"] <= selected["industry_cap"]).all()
-print(selected[["stock_code", "industry_l1", "industry_l2", "industry_rank", "industry_score", "portfolio_weight"]])
+print(selected[[
+    "stock_code", "industry_l1", "industry_l2", "industry_rank",
+    "industry_alpha_score", "industry_opportunity_score",
+    "selection_layer", "portfolio_weight",
+]])
 PY
 ```
 
@@ -204,8 +212,48 @@ uv run python run.py select \
 |---|---|
 | `output/results_alpha158_hk_ranking.csv` | 包含 `selection_eligible`、`eligibility_reasons`、`industry_rank`、`industry_score`、`industry_cap` |
 | `output/results_alpha158_hk_selected.csv` | 全部 `selection_eligible=True` 且 `industry_rank <= industry_cap` |
-| `output/results_alpha158_hk_industry_weights.csv` | 行业权重和 HHI 是否过度集中 |
+| `output/results_alpha158_hk_industry_weights.csv` | 行业权重、预算和 HHI 是否过度集中 |
+| `output/results_alpha158_hk_industry_attribution.csv` | 行业内 Alpha、行业机会分、Hot/Cold bucket、OOS gate |
 | `docs/report/{日期}_llm.md` | 入选/剔除理由是否能解释行业、质量、估值、流动性 |
+
+行业 Core/Overlay AB test：
+
+```bash
+# Core：只做行业内选股，推荐作为基准
+uv run python run.py select \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --industry-selection-mode core \
+  --export-csv output/ab_core \
+  --llm-report \
+  --show-progress
+
+# Core + Overlay：OOS gate 胜率达标后才加行业预算
+uv run python run.py select \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --industry-selection-mode core_overlay \
+  --industry-overlay-strength 0.2 \
+  --export-csv output/ab_core_overlay \
+  --llm-report \
+  --show-progress
+
+# Timing only：研究/压力测试用，不建议作为默认实盘模式
+uv run python run.py select \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --industry-selection-mode timing_only \
+  --industry-overlay-strength 1.0 \
+  --export-csv output/ab_timing_only \
+  --llm-report \
+  --show-progress
+```
 
 ## 命令速查
 
@@ -243,6 +291,7 @@ uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progre
 | `{base}_{factor_set}_selected.csv` | 最终持仓 |
 | `{base}_{factor_set}_watchlist.csv` | 观察名单 |
 | `{base}_{factor_set}_industry_weights.csv` | 组合行业权重 |
+| `{base}_{factor_set}_industry_attribution.csv` | 行业 Core/Overlay 归因 |
 
 行业分层字段：
 
@@ -251,10 +300,20 @@ uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progre
 | `industry_l1/l2/l3` | 真实行业分类 |
 | `selection_eligible` / `eligibility_reasons` | 硬过滤结果与剔除原因 |
 | `industry_rank` / `industry_score` / `industry_cap` | 行业内候选排名、分数和候选上限 |
+| `industry_alpha_score` | 行业内个股 Alpha 分，Core 选股底座 |
+| `industry_opportunity_score` | 行业 RPS、breadth、波动率合成的 Overlay 机会分 |
+| `combined_selection_score` / `selection_layer` | Core+Overlay 后候选分，以及 `core`/`overlay_boosted`/`fallback` |
+| `industry_timing_bucket` | `Hot` / `Neutral` / `Cold` / `Broken` |
+| `industry_timing_oos_win_rate` / `industry_timing_oos_ir` | 行业机会分相对 OOS/forward-return 代理收益的胜率与 IR |
+| `candidate_cap_base` / `candidate_cap_overlay` | 基础候选名额与 Overlay 后候选名额 |
+| `industry_weight_budget` / `industry_budget_reason` | 行业权重预算与预算原因 |
 | `industry_concentration_penalty` / `final_score` | 行业集中度惩罚和最终分 |
 | `quality_data_coverage` / `quality_missing_fields` | 财务质量数据覆盖 |
 | `valuation_metric_used` / `valuation_data_coverage` | 行业内估值指标与覆盖 |
 | `portfolio_industry_hhi` | selected 组合行业集中度 |
+| `portfolio_industry_hhi_invested` | 已投资仓位归一化后的行业集中度，避免现金仓位稀释 HHI |
+
+`Broken` 行业不会进入 selected；如个股本身信号强，会被放入 watchlist 供观察。Overlay 的 OOS gate 当前使用本次可得的 OOS/forward-return 汇总做代理检验，后续如接入完整历史行业轮动 panel，可替换为严格 walk-forward 口径。
 
 ## 辅助功能
 

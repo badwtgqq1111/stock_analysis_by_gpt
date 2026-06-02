@@ -45,6 +45,10 @@ def main_all_hk(
     min_market_cap=None,
     min_daily_turnover=None,
     min_ipo_days=None,
+    industry_selection_mode="core_overlay",
+    industry_overlay_strength=0.0,
+    max_industry_weight=0.35,
+    hot_industry_weight_multiplier=1.3,
 ):
     """对本地已同步的全部港股执行 TopN 组合分析（兼容旧接口：验证+选股一次完成）。"""
     print("=" * 80)
@@ -177,6 +181,10 @@ def main_all_hk(
             "min_market_cap": min_market_cap,
             "min_daily_turnover": min_daily_turnover,
             "min_ipo_days": min_ipo_days,
+            "industry_selection_mode": industry_selection_mode,
+            "industry_overlay_strength": industry_overlay_strength,
+            "max_industry_weight": max_industry_weight,
+            "hot_industry_weight_multiplier": hot_industry_weight_multiplier,
         }
         if signal_recipes is not None:
             backtest_kwargs["signal_recipes"] = signal_recipes
@@ -199,6 +207,43 @@ def main_all_hk(
     ranking_path = None
     selected_path = None
     watchlist_path = None
+    selected_rows_for_industry = portfolio_result.get("selected", [])
+    if selected_rows_for_industry:
+        try:
+            from backtest_engine.industry_selector import (
+                compute_industry_attribution_table,
+                compute_industry_hhi,
+                compute_industry_weight_table,
+            )
+            ind_map = {
+                r.get("stock_code", ""): r.get("industry_l2") or r.get("industry_l1", "")
+                for r in selected_rows_for_industry
+            }
+            wts = [
+                float(r.get("portfolio_weight", 1.0 / len(selected_rows_for_industry)))
+                for r in selected_rows_for_industry
+            ]
+            portfolio_result["industry_weight_table"] = compute_industry_weight_table(
+                [r.get("stock_code", "") for r in selected_rows_for_industry],
+                ind_map,
+                wts,
+                selected_rows=selected_rows_for_industry,
+            )
+            portfolio_result["industry_hhi"] = compute_industry_hhi(
+                [r.get("stock_code", "") for r in selected_rows_for_industry], ind_map, wts,
+            )
+            portfolio_result["industry_hhi_invested"] = compute_industry_hhi(
+                [r.get("stock_code", "") for r in selected_rows_for_industry],
+                ind_map,
+                wts,
+                normalize_weights=True,
+            )
+            portfolio_result["industry_attribution_table"] = compute_industry_attribution_table(
+                portfolio_result.get("ranking", []),
+                selected_rows_for_industry,
+            )
+        except Exception:
+            pass
     if export_csv:
         export_path = Path(export_csv)
         export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,28 +259,19 @@ def main_all_hk(
         selected_rows = portfolio_result.get("selected", [])
         if selected_rows:
             try:
-                from backtest_engine.industry_selector import (
-                    compute_industry_hhi,
-                    compute_industry_weight_table,
-                )
-                ind_map = {
-                    r.get("stock_code", ""): r.get("industry_l2") or r.get("industry_l1", "")
-                    for r in selected_rows
-                }
-                wts = [float(r.get("portfolio_weight", 1.0 / len(selected_rows))) for r in selected_rows]
-                portfolio_result["industry_weight_table"] = compute_industry_weight_table(
-                    [r.get("stock_code", "") for r in selected_rows], ind_map, wts,
-                )
-                portfolio_result["industry_hhi"] = compute_industry_hhi(
-                    [r.get("stock_code", "") for r in selected_rows], ind_map, wts,
-                )
                 if export_csv:
                     ind_table_path = export_path.with_name(f"{export_path.stem}_industry_weights.csv")
+                    attribution_path = export_path.with_name(f"{export_path.stem}_industry_attribution.csv")
                     pd.DataFrame(portfolio_result["industry_weight_table"]).to_csv(
                         ind_table_path, index=False, encoding="utf-8-sig",
                     )
+                    pd.DataFrame(portfolio_result["industry_attribution_table"]).to_csv(
+                        attribution_path, index=False, encoding="utf-8-sig",
+                    )
                     print(f"[OK] 已导出行业权重表: {ind_table_path}")
+                    print(f"[OK] 已导出行业归因表: {attribution_path}")
                     print(f"[INFO] 组合行业 HHI: {portfolio_result['industry_hhi']:.0f}")
+                    print(f"[INFO] 已投资仓位归一化 HHI: {portfolio_result['industry_hhi_invested']:.0f}")
             except Exception:
                 pass
 
@@ -284,6 +320,10 @@ def main_all_hk(
             "validation_stock_limit": None if validation_stock_limit is None else int(validation_stock_limit),
             "validation_factor_scope": effective_validation_factor_scope,
             "signal_recipes": list(signal_recipes or []),
+            "industry_selection_mode": str(industry_selection_mode),
+            "industry_overlay_strength": float(industry_overlay_strength or 0.0),
+            "max_industry_weight": float(max_industry_weight or 0.35),
+            "hot_industry_weight_multiplier": float(hot_industry_weight_multiplier or 1.3),
         },
         artifacts={
             "ranking_csv_path": str(ranking_path) if ranking_path is not None else None,

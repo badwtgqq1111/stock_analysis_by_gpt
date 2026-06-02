@@ -39,6 +39,10 @@ class BacktestMixin:
         min_market_cap=None,
         min_daily_turnover=None,
         min_ipo_days=None,
+        industry_selection_mode="core_overlay",
+        industry_overlay_strength=0.0,
+        max_industry_weight=0.35,
+        hot_industry_weight_multiplier=1.3,
     ):
         """固定股票池组合回测：按日期横向比较评分，只持有当日最优的 Top N 信号。"""
         from backtest_engine import TopNPortfolioBuilder
@@ -143,6 +147,10 @@ class BacktestMixin:
                 slippage_rate=slippage_rate,
                 min_commission=min_commission,
                 enable_portfolio_replay=enable_portfolio_replay,
+                industry_selection_mode=industry_selection_mode,
+                industry_overlay_strength=industry_overlay_strength,
+                max_industry_weight=max_industry_weight,
+                hot_industry_weight_multiplier=hot_industry_weight_multiplier,
             )
             return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
@@ -298,6 +306,10 @@ class BacktestMixin:
                 slippage_rate=slippage_rate,
                 min_commission=min_commission,
                 enable_portfolio_replay=enable_portfolio_replay,
+                industry_selection_mode=industry_selection_mode,
+                industry_overlay_strength=industry_overlay_strength,
+                max_industry_weight=max_industry_weight,
+                hot_industry_weight_multiplier=hot_industry_weight_multiplier,
             )
             return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
@@ -380,6 +392,10 @@ class BacktestMixin:
             slippage_rate=slippage_rate,
             min_commission=min_commission,
             enable_portfolio_replay=enable_portfolio_replay,
+            industry_selection_mode=industry_selection_mode,
+            industry_overlay_strength=industry_overlay_strength,
+            max_industry_weight=max_industry_weight,
+            hot_industry_weight_multiplier=hot_industry_weight_multiplier,
         )
         return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
@@ -409,6 +425,10 @@ class BacktestMixin:
         min_market_cap=None,
         min_daily_turnover=None,
         min_ipo_days=None,
+        industry_selection_mode="core_overlay",
+        industry_overlay_strength=0.0,
+        max_industry_weight=0.35,
+        hot_industry_weight_multiplier=1.3,
     ):
         """对本地已同步的全部港股执行 TopN 组合回测。"""
         return self.backtest_portfolio(
@@ -436,6 +456,10 @@ class BacktestMixin:
             max_features=max_features,
             model_type=model_type,
             backtest_date=backtest_date,
+            industry_selection_mode=industry_selection_mode,
+            industry_overlay_strength=industry_overlay_strength,
+            max_industry_weight=max_industry_weight,
+            hot_industry_weight_multiplier=hot_industry_weight_multiplier,
         )
 
     def backtest_strategy(self, data, buy_signals, sell_signals, initial_capital=100000, default_holding_days=60):

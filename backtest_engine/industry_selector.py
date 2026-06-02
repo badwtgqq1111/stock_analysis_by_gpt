@@ -64,6 +64,12 @@ class IndustryCandidateSelector:
         min_signal_tier: str = "medium",
         max_pe_ratio: float = 300.0,
         industry_level: str = "l2",
+        mode: str = "core_overlay",
+        overlay_strength: float = 0.0,
+        hot_industry_weight_multiplier: float = 1.3,
+        max_industry_weight: float = 0.35,
+        timing_oos_win_rate: float | None = None,
+        timing_oos_ir: float | None = None,
     ):
         self.top_n = int(top_n)
         # dynamic max_per_industry if not set: ceil(top_n / 2)
@@ -88,6 +94,14 @@ class IndustryCandidateSelector:
         self.min_signal_tier = str(min_signal_tier).strip().lower()
         self.max_pe_ratio = float(max_pe_ratio)
         self.industry_level = str(industry_level)
+        self.mode = str(mode or "core_overlay").strip().lower()
+        if self.mode not in {"core", "core_overlay", "timing_only"}:
+            self.mode = "core_overlay"
+        self.overlay_strength = float(np.clip(overlay_strength, 0.0, 1.0))
+        self.hot_industry_weight_multiplier = float(max(hot_industry_weight_multiplier, 1.0))
+        self.max_industry_weight = float(np.clip(max_industry_weight, 0.05, 1.0))
+        self.timing_oos_win_rate = timing_oos_win_rate
+        self.timing_oos_ir = timing_oos_ir
 
     # ------------------------------------------------------------------
     # Public API
@@ -139,31 +153,50 @@ class IndustryCandidateSelector:
 
         # ---- Phase 2: Within-industry scoring ----
         industries = self._group_by_industry(eligible, industry_map)
+        self._assign_industry_opportunity_ranks(eligible)
+        self._assign_industry_scores(eligible)
+        if self.timing_oos_win_rate is None or self.timing_oos_ir is None:
+            gate = compute_industry_timing_oos_gate(eligible)
+            if self.timing_oos_win_rate is None:
+                self.timing_oos_win_rate = gate.get("industry_timing_oos_win_rate")
+            if self.timing_oos_ir is None:
+                self.timing_oos_ir = gate.get("industry_timing_oos_ir")
+            for row in eligible:
+                row["industry_timing_oos_win_rate"] = self.timing_oos_win_rate
+                row["industry_timing_oos_ir"] = self.timing_oos_ir
+                row["industry_timing_oos_observations"] = gate.get("industry_timing_oos_observations", 0)
+                row["industry_timing_oos_method"] = gate.get("industry_timing_oos_method")
+            if self.mode == "core_overlay":
+                self._recompute_combined_scores(eligible)
 
         for ind, members in industries.items():
-            # Sort by ranking_score within industry
-            members.sort(key=lambda r: -float(r.get("ranking_score", 0)))
-
-            # Compute within-industry rank
+            members.sort(key=lambda r: -float(r.get("industry_alpha_score", r.get("industry_score", 0))))
             for i, row in enumerate(members):
                 row["industry_rank"] = i + 1
-                row["industry_score"] = self._compute_industry_score(row, i, len(members))
                 row["industry_candidate_count"] = len(members)
 
         # ---- Phase 3: Per-industry Top-N candidate selection ----
         for ind, members in industries.items():
             # Dynamic cap: min(max_per_industry, ceil(industry_size * 15%))
-            cap = min(
+            base_cap = min(
                 self.max_per_industry,
                 max(self.min_industry_candidates, int(np.ceil(len(members) * 0.15))),
             )
+            bucket = self._industry_timing_bucket(members[0]) if members else "Neutral"
+            overlay_cap = self._candidate_cap_with_overlay(base_cap, bucket)
             for i, row in enumerate(members):
-                row["industry_cap"] = cap
-                row["selected"] = i < cap
+                row["candidate_cap_base"] = base_cap
+                row["candidate_cap_overlay"] = overlay_cap
+                row["industry_cap"] = overlay_cap
+                row["industry_timing_bucket"] = bucket
+                row["industry_weight_budget"] = self._industry_weight_budget(bucket)
+                row["industry_budget_reason"] = self._industry_budget_reason(bucket)
+                row["selection_layer"] = self._selection_layer(i, base_cap, overlay_cap)
+                row["selected"] = i < overlay_cap and bucket != "Broken"
 
         # ---- Phase 4: Cross-industry final ranking ----
         selected = [r for r in eligible if r.get("selected")]
-        selected.sort(key=lambda r: -float(r.get("industry_score", r.get("ranking_score", 0))))
+        selected.sort(key=lambda r: -float(r.get("combined_selection_score", r.get("industry_score", 0))))
 
         # Apply industry concentration penalty to final ranking
         industry_pick_counts: dict[str, int] = {}
@@ -184,8 +217,9 @@ class IndustryCandidateSelector:
             row["industry_concentration_penalty"] = penalty
             row["ranking_score_adjusted"] = float(row.get("ranking_score", 0)) - penalty
             row["final_score"] = (
-                float(row.get("ranking_score", 0)) * 0.65
-                + float(row.get("industry_score", 50.0)) * 0.35
+                float(row.get("industry_alpha_score", row.get("industry_score", 50.0))) * 0.70
+                + float(row.get("industry_opportunity_score", 50.0)) * self._effective_overlay_strength()
+                + float(row.get("ranking_score", 0)) * 0.10
                 - penalty
             )
             industry_pick_counts[ind] = count + 1
@@ -197,6 +231,19 @@ class IndustryCandidateSelector:
         # Mark final selection
         for row in ranking_rows:
             row["selected"] = row in final_pool
+            row.setdefault("selection_layer", "fallback" if not row.get("eligibility_pass") else "core")
+            row.setdefault("industry_alpha_score", row.get("industry_score", 50.0))
+            row.setdefault("industry_opportunity_score", 50.0)
+            row.setdefault("combined_selection_score", row.get("final_score", row.get("ranking_score", 0)))
+            row.setdefault("industry_timing_bucket", "Neutral")
+            row.setdefault("industry_timing_oos_win_rate", self.timing_oos_win_rate)
+            row.setdefault("industry_timing_oos_ir", self.timing_oos_ir)
+            row.setdefault("industry_timing_oos_observations", 0)
+            row.setdefault("industry_timing_oos_method", None)
+            row.setdefault("candidate_cap_base", row.get("industry_cap", 0))
+            row.setdefault("candidate_cap_overlay", row.get("industry_cap", 0))
+            row.setdefault("industry_weight_budget", self._industry_weight_budget("Neutral"))
+            row.setdefault("industry_budget_reason", "neutral:base_budget")
 
         return ranking_rows
 
@@ -356,47 +403,330 @@ class IndustryCandidateSelector:
         return f"__unclassified__:{stock_code}"
 
     @staticmethod
-    def _compute_industry_score(
-        row: dict[str, Any],
-        rank_index: int,
-        industry_size: int,
-    ) -> float:
-        """Composite within-industry score (0–100).
+    def _safe_rank(values: list[float], *, higher_is_better: bool = True) -> list[float]:
+        n = len(values)
+        if n <= 1:
+            return [50.0] * n
+        arr = np.asarray(values, dtype=float)
+        if np.isnan(arr).all():
+            return [50.0] * n
+        median = float(np.nanmedian(arr))
+        arr = np.where(np.isnan(arr), median, arr)
+        if float(np.nanstd(arr)) < 1e-12:
+            return [50.0] * n
+        order = np.argsort(np.argsort(arr, kind="mergesort"), kind="mergesort")
+        ranks = order.astype(float) / max(n - 1, 1) * 100.0
+        if not higher_is_better:
+            ranks = 100.0 - ranks
+        return ranks.tolist()
 
-        Components:
-        - ranking_score (model): 35%
-        - latest_risk_score: -20% (risk penalty)
-        - win_rate: 15%
-        - quality_score: 10%
-        - value_score: 10%
-        - recent_drawdown: -10%
-        """
-        ranking = float(row.get("ranking_score", 50) or 50) / 100.0
-        risk = float(row.get("latest_risk_score", 100) or 100) / 100.0
-        win_rate = float(row.get("win_rate", 50) or 50) / 100.0
-        quality = float(row.get("quality_score", 50) or 50) / 100.0
-        value = float(row.get("value_score", 50) or 50) / 100.0
-        drawdown = abs(float(row.get("recent_drawdown", 0) or 0))
+    def _assign_industry_opportunity_ranks(self, rows: list[dict[str, Any]]) -> None:
+        """Rank industry return/volatility once per real industry."""
+        by_industry: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            key = self._industry_group_key(
+                str(row.get("stock_code", "")),
+                row.get("industry_l2") or row.get("industry_l1") or "",
+            )
+            by_industry.setdefault(key, row)
 
+        keys = list(by_industry.keys())
+        ret_ranks = self._safe_rank([
+            self._float_or_default(by_industry[k].get("industry_ret_20d"), 0.0)
+            for k in keys
+        ])
+        vol_ranks = self._safe_rank([
+            self._float_or_default(by_industry[k].get("industry_vol_60d"), 0.0)
+            for k in keys
+        ])
+        rank_payload = {
+            key: {
+                "industry_ret_20d_rank": ret_ranks[i],
+                "industry_vol_60d_rank": vol_ranks[i],
+            }
+            for i, key in enumerate(keys)
+        }
+        for row in rows:
+            key = self._industry_group_key(
+                str(row.get("stock_code", "")),
+                row.get("industry_l2") or row.get("industry_l1") or "",
+            )
+            row.update(rank_payload.get(key, {}))
+
+    def _assign_industry_scores(self, rows: list[dict[str, Any]]) -> None:
+        """Assign Core/Overlay fields using peer-group percentile ranks."""
+        peer_groups = self._build_peer_groups(rows)
+        for peer_key, members in peer_groups.items():
+            ranks = {
+                "model_score_within_industry": self._safe_rank([
+                    self._float_or_default(r.get("ranking_score"), 50.0) for r in members
+                ]),
+                "quality_score_within_industry": self._safe_rank([
+                    self._float_or_default(r.get("quality_score"), 50.0) for r in members
+                ]),
+                "valuation_score_within_industry": self._safe_rank([
+                    self._float_or_default(
+                        r.get("valuation_score", r.get("value_score")),
+                        50.0,
+                    ) for r in members
+                ]),
+                "risk_adjusted_score_within_industry": self._safe_rank([
+                    self._float_or_default(r.get("risk_adjusted_score"), r.get("ranking_score", 50.0))
+                    for r in members
+                ]),
+                "liquidity_score_within_industry": self._safe_rank([
+                    self._float_or_default(r.get("median_turnover_amount_20d"), 0.0)
+                    for r in members
+                ]),
+                "stock_vs_industry_rank": self._safe_rank([
+                    self._float_or_default(r.get("stock_vs_industry_rank"), 50.0)
+                    for r in members
+                ]),
+            }
+            for idx, row in enumerate(members):
+                for name, values in ranks.items():
+                    row[name] = float(values[idx])
+                row["industry_peer_group_used"] = peer_key
+                row["industry_peer_count"] = len(members)
+
+                alpha = (
+                    row["model_score_within_industry"] * 0.35
+                    + row["quality_score_within_industry"] * 0.20
+                    + row["valuation_score_within_industry"] * 0.15
+                    + row["risk_adjusted_score_within_industry"] * 0.15
+                    + row["liquidity_score_within_industry"] * 0.10
+                    + row["stock_vs_industry_rank"] * 0.05
+                )
+                opportunity = self._compute_industry_opportunity_score(row)
+                overlay_strength = self._effective_overlay_strength()
+                combined = alpha
+                if self.mode == "timing_only":
+                    combined = opportunity
+                elif self.mode == "core_overlay":
+                    combined = alpha * (1.0 - overlay_strength) + opportunity * overlay_strength
+
+                row["industry_alpha_score"] = float(np.clip(alpha, 0.0, 100.0))
+                row["industry_score"] = row["industry_alpha_score"]
+                row["industry_opportunity_score"] = float(np.clip(opportunity, 0.0, 100.0))
+                row["combined_selection_score"] = float(np.clip(combined, 0.0, 100.0))
+                row["industry_timing_oos_win_rate"] = self.timing_oos_win_rate
+                row["industry_timing_oos_ir"] = self.timing_oos_ir
+
+    def _recompute_combined_scores(self, rows: list[dict[str, Any]]) -> None:
+        overlay_strength = self._effective_overlay_strength()
+        for row in rows:
+            alpha = self._float_or_default(row.get("industry_alpha_score"), 50.0)
+            opportunity = self._float_or_default(row.get("industry_opportunity_score"), 50.0)
+            if self.mode == "timing_only":
+                combined = opportunity
+            elif self.mode == "core_overlay":
+                combined = alpha * (1.0 - overlay_strength) + opportunity * overlay_strength
+            else:
+                combined = alpha
+            row["combined_selection_score"] = float(np.clip(combined, 0.0, 100.0))
+
+    def _build_peer_groups(self, rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        l2_groups: dict[str, list[dict[str, Any]]] = {}
+        l1_groups: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            l2 = str(row.get("industry_l2") or "").strip()
+            l1 = str(row.get("industry_l1") or "").strip()
+            if l2:
+                l2_groups.setdefault(f"l2:{l2}", []).append(row)
+            if l1:
+                l1_groups.setdefault(f"l1:{l1}", []).append(row)
+
+        peer_groups: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            l2 = str(row.get("industry_l2") or "").strip()
+            l1 = str(row.get("industry_l1") or "").strip()
+            l2_key = f"l2:{l2}" if l2 else ""
+            l1_key = f"l1:{l1}" if l1 else ""
+            if l2_key and len(l2_groups.get(l2_key, [])) >= 8:
+                key = l2_key
+            elif l1_key and len(l1_groups.get(l1_key, [])) >= 15:
+                key = l1_key
+            else:
+                key = "global_fallback"
+            peer_groups.setdefault(key, []).append(row)
+        return peer_groups
+
+    def _compute_industry_opportunity_score(self, row: dict[str, Any]) -> float:
+        rps20 = self._float_or_default(row.get("industry_rps_20d"), 50.0)
+        rps60 = self._float_or_default(row.get("industry_rps_60d"), 50.0)
+        breadth20 = self._float_or_default(row.get("industry_breadth_20d"), 0.5) * 100.0
+        ret20_rank = self._float_or_default(row.get("industry_ret_20d_rank"), rps20)
+        vol60_rank = self._float_or_default(row.get("industry_vol_60d_rank"), 50.0)
         score = (
-            ranking * 35.0
-            + risk * 20.0
-            + win_rate * 15.0
-            + quality * 10.0
-            + value * 10.0
-            - drawdown * 10.0
+            rps20 * 0.35
+            + rps60 * 0.25
+            + breadth20 * 0.20
+            + ret20_rank * 0.10
+            - vol60_rank * 0.10
         )
         return float(np.clip(score, 0.0, 100.0))
+
+    def _effective_overlay_strength(self) -> float:
+        if self.mode == "core":
+            return 0.0
+        if self.mode == "timing_only":
+            return 1.0
+        configured = self.overlay_strength
+        if self.timing_oos_win_rate is None:
+            return 0.0
+        win_rate = float(self.timing_oos_win_rate)
+        if win_rate < 0.60:
+            return 0.0
+        if win_rate < 0.65:
+            return min(configured, 0.10)
+        if win_rate < 0.70:
+            return min(configured, 0.20)
+        return min(configured, 0.30)
+
+    def _industry_timing_bucket(self, row: dict[str, Any]) -> str:
+        opp = self._float_or_default(row.get("industry_opportunity_score"), 50.0)
+        rps20 = self._float_or_default(row.get("industry_rps_20d"), 50.0)
+        rps60 = self._float_or_default(row.get("industry_rps_60d"), 50.0)
+        breadth20 = self._float_or_default(row.get("industry_breadth_20d"), 0.5)
+        vol60 = self._float_or_default(row.get("industry_vol_60d"), 0.0)
+        ret20 = self._float_or_default(row.get("industry_ret_20d"), 0.0)
+        if ret20 < -0.18 or (rps20 < 20 and rps60 < 30 and breadth20 < 0.35):
+            return "Broken"
+        if opp >= 70 and rps20 >= 65 and rps60 >= 55 and breadth20 >= 0.55 and vol60 <= 0.80:
+            return "Hot"
+        if opp <= 35 or (rps20 < 35 and breadth20 < 0.45):
+            return "Cold"
+        return "Neutral"
+
+    def _candidate_cap_with_overlay(self, base_cap: int, bucket: str) -> int:
+        if self.mode == "core":
+            return int(base_cap)
+        strength = self._effective_overlay_strength()
+        if bucket == "Hot" and strength >= 0.20:
+            return int(min(self.max_per_industry, base_cap + 1))
+        if bucket == "Cold" and strength > 0:
+            return int(max(self.min_industry_candidates, base_cap - 1))
+        if bucket == "Broken":
+            return int(max(0, min(base_cap, self.min_industry_candidates)))
+        return int(base_cap)
+
+    def _industry_weight_budget(self, bucket: str) -> float:
+        base = min(0.30, self.max_industry_weight)
+        strength = self._effective_overlay_strength()
+        if bucket == "Hot" and strength > 0:
+            return float(min(self.max_industry_weight, base * self.hot_industry_weight_multiplier))
+        if bucket == "Cold" and strength > 0:
+            return 0.15
+        if bucket == "Broken":
+            return 0.05
+        return float(base)
+
+    def _industry_budget_reason(self, bucket: str) -> str:
+        strength = self._effective_overlay_strength()
+        if self.mode == "core":
+            return "core:overlay_disabled"
+        if self.timing_oos_win_rate is None:
+            return "overlay_report_only:no_oos_gate"
+        if strength <= 0:
+            return "overlay_disabled:oos_win_rate_below_60pct"
+        return f"{bucket.lower()}:overlay_strength={strength:.2f}"
+
+    @staticmethod
+    def _selection_layer(index: int, base_cap: int, overlay_cap: int) -> str:
+        if index < base_cap:
+            return "core"
+        if index < overlay_cap:
+            return "overlay_boosted"
+        return "fallback"
 
 
 # ---------------------------------------------------------------------------
 # Portfolio-level industry soft constraints
 # ---------------------------------------------------------------------------
 
+def compute_industry_timing_oos_gate(
+    ranking_rows: list[dict[str, Any]],
+    *,
+    top_quantile: float = 0.30,
+) -> dict[str, Any]:
+    """Estimate an OOS-style gate for the industry timing overlay.
+
+    The selector only has the current run's point-in-time ranking rows, not a
+    full historical industry panel.  This gate therefore uses each stock's
+    already out-of-sample backtest/forward-return summary as a proxy and tests
+    whether high opportunity industries beat the industry median.
+
+    It is intentionally conservative: if there are fewer than five industry
+    observations, the gate returns ``None`` and Overlay remains report-only.
+    """
+    industry_rows: dict[str, list[dict[str, Any]]] = {}
+    for row in ranking_rows or []:
+        industry = str(row.get("industry_l2") or row.get("industry_l1") or "").strip()
+        if not industry:
+            continue
+        industry_rows.setdefault(industry, []).append(row)
+
+    observations = []
+    for industry, members in industry_rows.items():
+        returns = []
+        opportunities = []
+        for row in members:
+            ret = row.get("avg_forward_return_60_signal")
+            if ret is None or not np.isfinite(ret):
+                ret = row.get("backtest_return")
+            if ret is None or not np.isfinite(ret):
+                continue
+            returns.append(float(ret))
+            opportunities.append(IndustryCandidateSelector._float_or_default(
+                row.get("industry_opportunity_score"), 50.0,
+            ))
+        if not returns:
+            continue
+        observations.append(
+            {
+                "industry": industry,
+                "opportunity": float(np.nanmean(opportunities)) if opportunities else 50.0,
+                "return": float(np.nanmean(returns)),
+            }
+        )
+
+    n = len(observations)
+    if n < 5:
+        return {
+            "industry_timing_oos_win_rate": None,
+            "industry_timing_oos_ir": None,
+            "industry_timing_oos_observations": n,
+            "industry_timing_oos_method": "insufficient_industry_observations",
+        }
+
+    opp_values = np.asarray([item["opportunity"] for item in observations], dtype=float)
+    threshold = float(np.nanquantile(opp_values, max(0.0, min(1.0, 1.0 - top_quantile))))
+    selected = [item for item in observations if item["opportunity"] >= threshold]
+    if not selected:
+        selected = sorted(observations, key=lambda item: item["opportunity"], reverse=True)[:1]
+
+    median_return = float(np.nanmedian([item["return"] for item in observations]))
+    excess = np.asarray([item["return"] - median_return for item in selected], dtype=float)
+    win_rate = float(np.mean(excess > 0.0)) if len(excess) else None
+    if len(excess) > 1 and float(np.nanstd(excess, ddof=1)) > 1e-12:
+        ir = float(np.nanmean(excess) / np.nanstd(excess, ddof=1))
+    else:
+        ir = 0.0 if len(excess) else None
+
+    return {
+        "industry_timing_oos_win_rate": win_rate,
+        "industry_timing_oos_ir": ir,
+        "industry_timing_oos_observations": n,
+        "industry_timing_oos_method": "industry_opportunity_vs_forward_return_proxy",
+    }
+
+
 def compute_industry_hhi(
     selected_codes: list[str],
     industry_map: dict[str, str | None],
     weights: list[float] | None = None,
+    *,
+    normalize_weights: bool = False,
 ) -> float:
     """Compute Herfindahl-Hirschman Index for industry concentration.
 
@@ -420,6 +750,10 @@ def compute_industry_hhi(
 
     if weights is None:
         weights = [1.0 / n] * n
+    elif normalize_weights:
+        total_weight = float(sum(float(w or 0.0) for w in weights))
+        if total_weight > 0:
+            weights = [float(w or 0.0) / total_weight for w in weights]
 
     ind_weights: dict[str, float] = {}
     for code, w in zip(selected_codes, weights):
@@ -434,6 +768,7 @@ def compute_industry_weight_table(
     selected_codes: list[str],
     industry_map: dict[str, str | None],
     weights: list[float],
+    selected_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build an industry weight breakdown table.
 
@@ -441,17 +776,109 @@ def compute_industry_weight_table(
     -------
     list[dict] with keys: industry, stock_count, weight_pct, stocks.
     """
+    row_by_code = {
+        str(row.get("stock_code", "")).zfill(5): row
+        for row in (selected_rows or [])
+    }
     ind_data: dict[str, dict[str, Any]] = {}
     for code, w in zip(selected_codes, weights):
         raw_label = str(industry_map.get(code) or "").strip()
         ind_key = IndustryCandidateSelector._industry_group_key(code, raw_label)
         if ind_key not in ind_data:
-            ind_data[ind_key] = {"industry": raw_label or "unknown", "stock_count": 0, "weight_pct": 0.0, "stocks": []}
+            ind_data[ind_key] = {
+                "industry": raw_label or "unknown",
+                "stock_count": 0,
+                "weight_pct": 0.0,
+                "stocks": [],
+                "industry_timing_bucket": None,
+                "industry_weight_budget_pct": None,
+                "industry_budget_reason": None,
+            }
         ind_data[ind_key]["stock_count"] += 1
         ind_data[ind_key]["weight_pct"] += w * 100.0
         ind_data[ind_key]["stocks"].append(code)
+        row = row_by_code.get(str(code).zfill(5), {})
+        if row:
+            ind_data[ind_key]["industry_timing_bucket"] = (
+                ind_data[ind_key]["industry_timing_bucket"]
+                or row.get("industry_timing_bucket")
+            )
+            budget = row.get("industry_weight_budget")
+            if budget is not None and ind_data[ind_key]["industry_weight_budget_pct"] is None:
+                ind_data[ind_key]["industry_weight_budget_pct"] = float(budget) * 100.0
+            ind_data[ind_key]["industry_budget_reason"] = (
+                ind_data[ind_key]["industry_budget_reason"]
+                or row.get("industry_budget_reason")
+            )
 
     result = sorted(ind_data.values(), key=lambda x: -x["weight_pct"])
     for item in result:
         item["weight_pct"] = round(item["weight_pct"], 2)
+        if item["industry_weight_budget_pct"] is not None:
+            item["industry_weight_budget_pct"] = round(item["industry_weight_budget_pct"], 2)
+    return result
+
+
+def compute_industry_attribution_table(
+    ranking_rows: list[dict[str, Any]],
+    selected_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Summarize Core/Overlay diagnostics by industry.
+
+    This is a point-in-time attribution scaffold for CSV/LLM reporting.  It
+    does not claim realized alpha; it explains the current selection pressure
+    by separating within-industry alpha from industry opportunity.
+    """
+    selected_codes = {
+        str(row.get("stock_code", "")).zfill(5)
+        for row in (selected_rows or [])
+    }
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in ranking_rows or []:
+        if not row.get("eligibility_pass", row.get("selection_eligible", True)):
+            continue
+        industry = str(row.get("industry_l2") or row.get("industry_l1") or "unknown").strip() or "unknown"
+        groups.setdefault(industry, []).append(row)
+
+    result = []
+    for industry, members in groups.items():
+        selected_count = sum(
+            1 for row in members
+            if str(row.get("stock_code", "")).zfill(5) in selected_codes
+        )
+        alpha_scores = [
+            IndustryCandidateSelector._float_or_default(row.get("industry_alpha_score"), 50.0)
+            for row in members
+        ]
+        opp_scores = [
+            IndustryCandidateSelector._float_or_default(row.get("industry_opportunity_score"), 50.0)
+            for row in members
+        ]
+        final_scores = [
+            IndustryCandidateSelector._float_or_default(row.get("final_score"), row.get("ranking_score", 50.0))
+            for row in members
+        ]
+        first = members[0]
+        result.append(
+            {
+                "industry": industry,
+                "eligible_count": len(members),
+                "selected_count": selected_count,
+                "avg_industry_alpha_score": round(float(np.mean(alpha_scores)), 4),
+                "avg_industry_opportunity_score": round(float(np.mean(opp_scores)), 4),
+                "avg_final_score": round(float(np.mean(final_scores)), 4),
+                "industry_timing_bucket": first.get("industry_timing_bucket", "Neutral"),
+                "industry_weight_budget_pct": (
+                    round(float(first.get("industry_weight_budget")) * 100.0, 4)
+                    if first.get("industry_weight_budget") is not None else None
+                ),
+                "industry_budget_reason": first.get("industry_budget_reason"),
+                "industry_rps_20d": first.get("industry_rps_20d"),
+                "industry_rps_60d": first.get("industry_rps_60d"),
+                "industry_breadth_20d": first.get("industry_breadth_20d"),
+                "industry_vol_60d": first.get("industry_vol_60d"),
+            }
+        )
+
+    result.sort(key=lambda item: (-item["selected_count"], -item["avg_final_score"]))
     return result

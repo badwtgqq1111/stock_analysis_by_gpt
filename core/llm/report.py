@@ -117,6 +117,52 @@ def build_stock_table(
     return "\n".join(lines)
 
 
+def build_industry_attribution_prompt(portfolio_result: dict[str, Any]) -> str:
+    """Build a compact Core/Overlay attribution section for the LLM prompt."""
+    selected = portfolio_result.get("selected", [])
+    attribution = portfolio_result.get("industry_attribution_table", [])
+    if not selected and not attribution:
+        return ""
+
+    lines = [
+        "## 行业内 Alpha / 行业机会归因",
+        "",
+        f"- 组合行业 HHI: {portfolio_result.get('industry_hhi', 'N/A')}",
+        f"- 已投资仓位归一化 HHI: {portfolio_result.get('industry_hhi_invested', 'N/A')}",
+        "",
+        "| 代码 | 行业 | Core Alpha | Overlay机会 | Bucket | 入选层 | 行业预算原因 |",
+        "|------|------|------------|-------------|--------|--------|--------------|",
+    ]
+    for item in selected:
+        code = _pad_code(item.get("stock_code", ""))
+        lines.append(
+            f"| {code} | {item.get('industry_l2') or item.get('industry_l1') or '?'} | "
+            f"{float(item.get('industry_alpha_score', 0) or 0):.1f} | "
+            f"{float(item.get('industry_opportunity_score', 0) or 0):.1f} | "
+            f"{item.get('industry_timing_bucket', '?')} | "
+            f"{item.get('selection_layer', '?')} | "
+            f"{item.get('industry_budget_reason', '?')} |"
+        )
+
+    if attribution:
+        lines.extend([
+            "",
+            "行业归因摘要：",
+            "",
+            "| 行业 | 候选 | 入选 | 平均Alpha | 平均机会 | Bucket |",
+            "|------|------|------|----------|----------|--------|",
+        ])
+        for item in attribution[:10]:
+            lines.append(
+                f"| {item.get('industry', '?')} | {item.get('eligible_count', 0)} | "
+                f"{item.get('selected_count', 0)} | "
+                f"{float(item.get('avg_industry_alpha_score', 0) or 0):.1f} | "
+                f"{float(item.get('avg_industry_opportunity_score', 0) or 0):.1f} | "
+                f"{item.get('industry_timing_bucket', '?')} |"
+            )
+    return "\n".join(lines)
+
+
 def generate_selection_report(
     portfolio_result: dict[str, Any],
     *,
@@ -150,6 +196,7 @@ def generate_selection_report(
 
     selected_table = build_stock_table(selected, stock_info)
     watchlist_table = build_stock_table(watchlist, stock_info)
+    industry_attribution_section = build_industry_attribution_prompt(portfolio_result)
 
     params = portfolio_result.get("params", {})
     est_return = portfolio_result.get("estimated_portfolio_return", "N/A")
@@ -170,6 +217,8 @@ def generate_selection_report(
 ## 观察名单
 
 {watchlist_table}
+
+{industry_attribution_section}
 
 {extra_context}
 

@@ -448,9 +448,21 @@ if timing_only has high return but drawdown/turnover unstable:
 
 ## 完成标准
 
-- [ ] `ranking.csv` 中每行都有 Core 分、Overlay 分、行业层级、行业 peer group。
-- [ ] `selected.csv` 中每只股票都有 `selection_layer` 和可解释入选理由。
-- [ ] 行业权重表输出基础权重、overlay 后预算、实际权重、HHI。
-- [ ] Overlay 有最近 OOS 胜率/IR；胜率低于 60% 时自动降级。
-- [ ] 回测能比较 `core`、`core_overlay`、`timing_only` 三种模式。
-- [ ] LLM 报告明确说明本期收益预期来自行业内 Alpha 还是行业机会叠加。
+- [x] `ranking.csv` 中每行都有 Core 分、Overlay 分、行业层级、行业 peer group。
+- [x] `selected.csv` 中每只股票都有 `selection_layer` 和可解释入选理由。
+- [x] 行业权重表输出基础权重、overlay 后预算、实际权重、HHI。
+- [x] Overlay 有最近 OOS 胜率/IR；胜率低于 60% 时自动降级。
+- [x] 回测能比较 `core`、`core_overlay`、`timing_only` 三种模式。
+- [x] LLM 报告明确说明本期收益预期来自行业内 Alpha 还是行业机会叠加。
+
+当前落地状态：
+
+- 已实现 `industry_alpha_score`、`industry_opportunity_score`、`combined_selection_score`、`selection_layer`、`industry_peer_group_used`、`industry_peer_count`。
+- 已实现 `industry_timing_bucket`、`candidate_cap_base`、`candidate_cap_overlay`、`industry_weight_budget`、`industry_budget_reason`。
+- 已新增 `--industry-selection-mode`、`--industry-overlay-strength`、`--max-industry-weight`、`--hot-industry-weight-multiplier`。
+- 已新增 `{base}_{factor_set}_industry_attribution.csv`，用于观察行业内 Alpha 与行业机会分。
+- 已实现行业择时 OOS gate 的当前版本：用每个行业的 `industry_opportunity_score` 与已有 OOS/forward-return 汇总做横截面代理检验，输出 `industry_timing_oos_win_rate`、`industry_timing_oos_ir`、`industry_timing_oos_observations`、`industry_timing_oos_method`。
+- 若 OOS gate 不足 5 个行业观察，Overlay 自动保持 report-only；若胜率低于 60%，`core_overlay` 自动退化为近似 `core`。
+- 已修复 `Broken` 行业被后续 fill 逻辑重新选入的问题；Broken 行业可进入 watchlist，但不能进入 selected。
+- 已新增双口径 HHI：`portfolio_industry_hhi` 为实际仓位口径，`portfolio_industry_hhi_invested` 为已投资仓位归一化口径。
+- LLM 报告 prompt 已新增“行业内 Alpha / 行业机会归因”段落。

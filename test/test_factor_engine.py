@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.ingest.service import MarketDataService
+from data.ingest.service import MarketDataService, _factor_compute_worker
 from data.model import FEATURE_COLUMNS, normalize_ohlcv_frame
 from data.store.layout import DataLayout
 from data.store.warehouse import MarketDataWarehouse
@@ -71,6 +71,32 @@ def test_alpha158_default_feature_count_and_values():
     assert abs(latest_row["KMID"] - ((close - open_price) / open_price)) < 1e-9
     assert abs(latest_row["MA5"] - ma5) < 1e-9
     assert pd.notna(latest_row["RSQR60"])
+
+
+def test_factor_compute_worker_uses_trade_date_payload_with_range_index():
+    normalized = normalize_ohlcv_frame(_make_ohlcv_frame(), stock_code="00700", market="HK")
+    range_index_frame = normalized.reset_index(drop=True)
+    payload = {
+        "stock_code": "00700",
+        "ohlcv_data": range_index_frame.to_dict("list"),
+        "ohlcv_columns": list(range_index_frame.columns),
+        "ohlcv_trade_dates": list(range_index_frame["trade_date"].dt.strftime("%Y-%m-%d")),
+        "factor_set": "qlib_alpha158",
+        "config": None,
+        "market": "HK",
+        "frequency": "daily",
+        "adjust": "qfq",
+        "exchange": None,
+        "asset_type": "equity",
+    }
+
+    result = _factor_compute_worker(payload)
+
+    assert result["stock_code"] == "00700"
+    assert "feature_data" in result
+    assert len(result["feature_index"]) == len(range_index_frame)
+    assert result["feature_index"][0].startswith("2024-")
+    assert "KMID" in result["feature_columns"]
 
 
 def test_service_can_compute_and_persist_factor_set():
@@ -261,6 +287,51 @@ def test_warehouse_append_features_uses_append_only_store_path():
     assert store.append_calls == 1
 
 
+def test_parquet_rps_feature_count_returns_written_rows():
+    trade_date = pd.Timestamp("2026-01-01")
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": trade_date,
+                "stock_code": code,
+                "market": "HK",
+                "exchange": "HKEX",
+                "asset_type": "equity",
+                "frequency": "daily",
+                "adjust": "qfq",
+                "feature_set": "unit_alpha",
+                "feature_version": "0.1.0",
+                "feature_config_hash": "unit",
+                "feature_name": "ROC5",
+                "feature_value": value,
+                "source": "unit_test",
+                "ingest_time": trade_date,
+            }
+            for code, value in [("00001", 0.9), ("00002", 1.1)]
+        ],
+        columns=FEATURE_COLUMNS,
+    )
+
+    with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+            warehouse.append_features(frame)
+
+            rows_written = warehouse.compute_rps_features(
+                factor_set="unit_alpha",
+                windows=(5,),
+            )
+            rps = warehouse.read_features(
+                market="HK",
+                feature_set="unit_alpha",
+                feature_name="RPS_5",
+            )
+
+    assert rows_written == 2
+    assert len(rps) == 2
+    assert set(rps["feature_name"]) == {"RPS_5"}
+
+
 def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_feature_reads():
     with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -288,6 +359,17 @@ def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_fe
                     return pd.DataFrame()
 
                 service.warehouse.read_features = fake_read_features
+                append_feature_calls = []
+
+                def fake_append_features(frame):
+                    append_feature_calls.append(len(frame))
+                    return {"rows": len(frame), "dataset_path": "/tmp/features"}
+
+                def fake_upsert_features(frame):
+                    raise AssertionError("batch factor generation should append feature batches")
+
+                service.warehouse.append_features = fake_append_features
+                service.warehouse.upsert_features = fake_upsert_features
 
                 result = service.generate_factor_set(
                     stock_codes=["00700", "00005"],
@@ -300,8 +382,10 @@ def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_fe
             finally:
                 service.close()
 
-    assert result["success_count"] == 2
-    assert read_feature_calls == [["00700", "00005"]]
+        assert result["success_count"] == 2
+        assert read_feature_calls == [["00700", "00005"]]
+        assert append_feature_calls
+        assert result["rows_written"] == sum(append_feature_calls)
 
 
 def test_lightgbm_ranker_loader_reports_missing_libomp_on_macos():

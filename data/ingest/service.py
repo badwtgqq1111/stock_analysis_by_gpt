@@ -3,7 +3,7 @@
 
 """统一的数据服务入口。"""
 
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
 import os
 import platform
@@ -43,6 +43,56 @@ from factor_engine import (
     list_factor_sets as list_registered_factor_sets,
 )
 from factor_validation import FactorValidator
+
+
+# ---------------------------------------------------------------------------
+# ProcessPoolExecutor worker for CPU-bound factor computation
+# ---------------------------------------------------------------------------
+
+def _factor_compute_worker(payload: dict) -> dict:
+    """Pure-function worker: compute Alpha158 factors from OHLCV data.
+
+    Runs in a subprocess so the GIL doesn't limit CPU parallelism.
+    Accepts and returns dicts (not DataFrames) to keep pickle overhead low.
+    """
+    stock_code = payload["stock_code"]
+    ohlcv = pd.DataFrame(
+        payload["ohlcv_data"],
+        columns=payload["ohlcv_columns"],
+    )
+    trade_dates = payload.get("ohlcv_trade_dates") or payload.get("ohlcv_index")
+    if "trade_date" in ohlcv.columns:
+        ohlcv["trade_date"] = pd.to_datetime(ohlcv["trade_date"], errors="coerce")
+        if ohlcv["trade_date"].isna().any():
+            raise ValueError(f"{stock_code}: invalid OHLCV trade_date in worker payload")
+    elif trade_dates is not None:
+        index = pd.to_datetime(trade_dates, errors="coerce")
+        if pd.isna(index).any():
+            raise ValueError(f"{stock_code}: invalid OHLCV trade_date in worker payload")
+        ohlcv.index = pd.DatetimeIndex(index)
+        ohlcv.index.name = "trade_date"
+    factor_set_name = payload["factor_set"]
+    config = payload.get("config")
+
+    factor = create_factor_set(factor_set_name, config=config)
+    context = FactorContext(
+        stock_code=stock_code,
+        market=payload.get("market", "HK"),
+        frequency=payload.get("frequency", "daily"),
+        adjust=payload.get("adjust", "qfq"),
+        exchange=payload.get("exchange"),
+        asset_type=payload.get("asset_type", "equity"),
+    )
+    feature_frame = factor.transform(ohlcv, context=context)
+    feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
+
+    # Serialize result as dict for efficient pickling
+    return {
+        "stock_code": stock_code,
+        "feature_data": feature_frame.to_dict("list"),
+        "feature_index": list(feature_frame.index.astype(str)),
+        "feature_columns": list(feature_frame.columns),
+    }
 
 
 class MarketDataService:
@@ -111,15 +161,38 @@ class MarketDataService:
 
     @staticmethod
     def _available_memory_bytes():
+        # Linux
         try:
-            meminfo_path = "/proc/meminfo"
-            if os.path.exists(meminfo_path):
-                with open(meminfo_path, "r", encoding="utf-8") as handle:
+            if os.path.exists("/proc/meminfo"):
+                with open("/proc/meminfo", "r", encoding="utf-8") as handle:
                     for line in handle:
                         if line.startswith("MemAvailable:"):
                             parts = line.split()
                             if len(parts) >= 2:
                                 return int(parts[1]) * 1024
+        except Exception:
+            pass
+        # macOS
+        try:
+            import subprocess
+            # vm_stat shows pages; page size is 4096 on Apple Silicon / x86
+            result = subprocess.run(
+                ["vm_stat"], capture_output=True, text=True, timeout=5,
+            )
+            page_size = 4096  # default; confirmed via `pagesize` command if needed
+            free_pages = 0
+            for line in result.stdout.splitlines():
+                # "Pages free:" + speculative + inactive + purgeable = available
+                if "Pages free:" in line:
+                    free_pages += int(line.split(":")[-1].strip().rstrip("."))
+                elif "Pages speculative:" in line:
+                    free_pages += int(line.split(":")[-1].strip().rstrip("."))
+                elif "Pages inactive:" in line:
+                    free_pages += int(line.split(":")[-1].strip().rstrip("."))
+                elif "Pages purgeable:" in line:
+                    free_pages += int(line.split(":")[-1].strip().rstrip("."))
+            if free_pages > 0:
+                return free_pages * page_size
         except Exception:
             pass
         return None
@@ -1092,6 +1165,8 @@ class MarketDataService:
         # ---- Phase 0: pre-check existing feature coverage in batch (metadata only, low memory) ----
         skip_codes: set[str] = set()
         coverage_prechecked_codes: set[str] = set()
+        if show_progress:
+            print("[INFO] 正在批量检查已有特征覆盖...", flush=True)
         if expected_feature_count > 0:
             try:
                 latest_dates = self.warehouse.get_latest_trade_dates(
@@ -1105,48 +1180,47 @@ class MarketDataService:
                 # latest_dates is {(code, freq): timestamp}
                 codes_with_data = [c for c in normalized_codes if (c, frequency) in latest_dates]
                 if codes_with_data:
-                    coverage_batch_size = max(int(resource_plan["coverage_check_batch_size"]), 1)
-                    for offset in range(0, len(codes_with_data), coverage_batch_size):
-                        code_batch = codes_with_data[offset:offset + coverage_batch_size]
-                        coverage_prechecked_codes.update(code_batch)
-                        max_date = max(
-                            latest_dates[(c, frequency)]
-                            for c in code_batch
-                            if (c, frequency) in latest_dates
+                    # One query for all stocks — feature dataset is partitioned
+                    # only by market=HK, so individual batch queries would each
+                    # trigger a full table scan.  One query is dramatically faster.
+                    max_date = max(
+                        latest_dates[(c, frequency)]
+                        for c in codes_with_data
+                    )
+                    existing_features_map = self.warehouse.read_features(
+                        stock_code=codes_with_data,
+                        market=normalized_market,
+                        exchange=exchange,
+                        asset_type=asset_type,
+                        frequency=frequency,
+                        adjust=normalized_adjust,
+                        feature_set=factor_set,
+                        feature_version=materialization["feature_version"],
+                        feature_config_hash=materialization["feature_config_hash"],
+                        start_date=start_date,
+                        end_date=str(pd.Timestamp(max_date).date()),
+                    )
+                    coverage_prechecked_codes.update(codes_with_data)
+                    if not existing_features_map.empty:
+                        existing_features_map["trade_date"] = pd.to_datetime(
+                            existing_features_map["trade_date"], errors="coerce"
                         )
-                        existing_features_map = self.warehouse.read_features(
-                            stock_code=code_batch,
-                            market=normalized_market,
-                            exchange=exchange,
-                            asset_type=asset_type,
-                            frequency=frequency,
-                            adjust=normalized_adjust,
-                            feature_set=factor_set,
-                            feature_version=materialization["feature_version"],
-                            feature_config_hash=materialization["feature_config_hash"],
-                            start_date=start_date,
-                            end_date=str(pd.Timestamp(max_date).date()),
-                        )
-                        if not existing_features_map.empty:
-                            existing_features_map["trade_date"] = pd.to_datetime(
-                                existing_features_map["trade_date"], errors="coerce"
-                            )
-                            for code, group in existing_features_map.groupby("stock_code"):
-                                if (code, frequency) in latest_dates:
-                                    last_date = group["trade_date"].max()
-                                    n_features = group["feature_name"].nunique()
-                                    ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
-                                    if (last_date.normalize() >= ohlcv_latest.normalize()
-                                            and n_features >= expected_feature_count):
-                                        skip_codes.add(code)
+                        for code, group in existing_features_map.groupby("stock_code"):
+                            if (code, frequency) in latest_dates:
+                                last_date = group["trade_date"].max()
+                                n_features = group["feature_name"].nunique()
+                                ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
+                                if (last_date.normalize() >= ohlcv_latest.normalize()
+                                        and n_features >= expected_feature_count):
+                                    skip_codes.add(code)
             except Exception:
                 skip_codes.clear()
                 coverage_prechecked_codes.clear()
 
-        if show_progress and skip_codes:
+        if show_progress:
             print(
-                f"[INFO] 已有完整特征可跳过: {len(skip_codes)} 只, "
-                f"需计算: {max(0, len(normalized_codes) - len(skip_codes))} 只",
+                f"[INFO] 特征覆盖检查完成: 可跳过 {len(skip_codes)} 只, "
+                f"需计算 {max(0, len(normalized_codes) - len(skip_codes))} 只",
                 flush=True,
             )
 
@@ -1274,7 +1348,10 @@ class MarketDataService:
             if not pending_feature_frames:
                 return
             batch_frame = pd.concat(pending_feature_frames, ignore_index=True)
-            write_result = self.warehouse.upsert_features(batch_frame)
+            # Batch materialization writes new feature-version partitions.  The
+            # pre-check above prevents complete stocks from being recomputed;
+            # append avoids repeatedly reading and rewriting the full dataset.
+            write_result = self.warehouse.append_features(batch_frame)
             total_rows_written += int((write_result or {}).get("rows", 0))
             pending_feature_frames = []
             pending_feature_rows = 0
@@ -1298,58 +1375,169 @@ class MarketDataService:
 
         total_rows_written = 0
         completed_count = 0
-        next_code_index = 0
-        pending_futures = {}
+        results = []
 
-        def _submit_pending(executor):
-            nonlocal next_code_index, resource_plan, batch_flush_stocks, batch_flush_feature_rows
-            resource_plan = self._resolve_factor_generation_resource_plan(
-                requested_workers=max_workers,
-                total_stocks=total,
-                expected_feature_count=expected_feature_count,
-                days=history_window_days,
-            )
-            batch_flush_stocks = resource_plan["batch_flush_stocks"]
-            batch_flush_feature_rows = resource_plan["batch_flush_feature_rows"]
-            max_pending = max(1, int(resource_plan["max_pending_futures"]))
-            while next_code_index < total and len(pending_futures) < max_pending:
-                stock_code = normalized_codes[next_code_index]
-                pending_futures[executor.submit(_generate_one, stock_code)] = stock_code
-                next_code_index += 1
+        # I/O workers for reading OHLCV (lightweight, GIL released by parquet)
+        io_workers = max(2, int(max_workers * 0.5))
+        # CPU workers for factor computation (heavy, bypass GIL via processes)
+        cpu_workers = max_workers
+        chunk_size = max(20, int(batch_flush_stocks * 4))
 
-        def _handle_result(result, index):
-            nonlocal pending_feature_rows
-            results.append(result)
+        def _build_compute_payload(stock_code):
+            """Read OHLCV, return serializable dict for the process-pool worker."""
+            try:
+                if stock_code in skip_codes:
+                    return {"stock_code": stock_code, "status": "skipped", "payload": None}
+                ohlcv = self.warehouse.read_ohlcv(
+                    stock_code=stock_code, market=normalized_market,
+                    exchange=exchange, asset_type=asset_type,
+                    frequency=frequency, adjust=normalized_adjust,
+                    start_date=start_date, end_date=end_date,
+                )
+                if ohlcv is None or ohlcv.empty:
+                    return {"stock_code": stock_code, "status": "missing_ohlcv", "payload": None}
+                latest = pd.to_datetime(ohlcv["trade_date"], errors="coerce").dropna().max()
+                if pd.isna(latest):
+                    return {"stock_code": stock_code, "status": "missing_ohlcv", "payload": None}
+                if (stock_code not in coverage_prechecked_codes
+                        and _has_complete_coverage(
+                            _read_existing_features(stock_code, latest), latest)):
+                    return {"stock_code": stock_code, "status": "skipped", "payload": None}
+                return {
+                    "stock_code": stock_code, "status": "compute",
+                    "payload": {
+                        "stock_code": stock_code,
+                        "ohlcv_data": ohlcv.to_dict("list"),
+                        "ohlcv_columns": list(ohlcv.columns),
+                        "ohlcv_trade_dates": list(
+                            pd.to_datetime(ohlcv["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                        ),
+                        "factor_set": factor_set,
+                        "config": config,
+                        "market": normalized_market,
+                        "frequency": frequency,
+                        "adjust": normalized_adjust,
+                        "exchange": exchange,
+                        "asset_type": asset_type,
+                    },
+                }
+            except Exception as exc:
+                import traceback
+                return {
+                    "stock_code": stock_code, "status": "error",
+                    "payload": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc(),
+                }
 
-            if result["status"] == "computed":
-                feature_frame = result.pop("_feature_frame", None)
-                if feature_frame is not None and not feature_frame.empty:
-                    pending_feature_frames.append(feature_frame)
-                    pending_feature_rows += int(result.get("rows_written", 0) or 0)
+        with ProcessPoolExecutor(max_workers=cpu_workers) as cpu_ex:
+          for chunk_start in range(0, total, chunk_size):
+            chunk_codes = normalized_codes[chunk_start:chunk_start + chunk_size]
+
+            # Phase A: read OHLCV in parallel (I/O bound, threads OK)
+            io_results = {}
+            with ThreadPoolExecutor(max_workers=io_workers) as io_ex:
+                io_futures = {io_ex.submit(_build_compute_payload, c): c for c in chunk_codes}
+                for f in as_completed(io_futures):
+                    r = f.result()
+                    io_results[r["stock_code"]] = r
+
+            # Phase B: compute factors in parallel (CPU bound, use processes)
+            cpu_payloads = [
+                r["payload"] for r in io_results.values()
+                if r["status"] == "compute" and r["payload"] is not None
+            ]
+            cpu_results = {}
+            if cpu_payloads:
+                cpu_futures = {cpu_ex.submit(_factor_compute_worker, p): p["stock_code"] for p in cpu_payloads}
+                for f in as_completed(cpu_futures):
+                    try:
+                        cr = f.result()
+                        cpu_results[cr["stock_code"]] = cr
+                    except Exception as exc:
+                        code = cpu_futures[f]
+                        cpu_results[code] = {
+                            "stock_code": code, "status": "error",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+
+            # Phase C: normalize results & handle all statuses
+            for r in io_results.values():
+                completed_count += 1
+                code = r["stock_code"]
+                status = r["status"]
+
+                if status == "skipped":
+                    results.append({
+                        "stock_code": code, "status": "skipped",
+                        "rows": int(expected_feature_count), "rows_written": 0,
+                        "dataset_path": str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature")),
+                    })
+                elif status in ("missing_ohlcv", "error") and "error" in r:
+                    results.append({
+                        "stock_code": code, "status": "error",
+                        "rows": 0, "rows_written": 0, "dataset_path": None,
+                        "error": r.get("error", "unknown"),
+                    })
+                elif status in ("missing_ohlcv",):
+                    results.append({
+                        "stock_code": code, "status": "missing_ohlcv",
+                        "rows": 0, "rows_written": 0, "dataset_path": None,
+                    })
+                elif status == "compute":
+                    cr = cpu_results.get(code, {})
+                    if cr.get("status") == "error" or "error" in cr:
+                        results.append({
+                            "stock_code": code, "status": "error",
+                            "rows": 0, "rows_written": 0, "dataset_path": None,
+                            "error": cr.get("error", "unknown"),
+                        })
+                    elif "feature_data" in cr:
+                        feature_frame = pd.DataFrame(
+                            cr["feature_data"],
+                            index=pd.DatetimeIndex(cr["feature_index"]),
+                            columns=cr["feature_columns"],
+                        )
+                        normalized = normalize_feature_frame(
+                            feature_frame.reset_index().rename(columns={"index": "trade_date"}),
+                            stock_code=code, market=normalized_market,
+                            exchange=exchange, asset_type=asset_type,
+                            frequency=frequency, adjust=normalized_adjust,
+                            feature_set=factor_set,
+                            feature_version=materialization["feature_version"],
+                            feature_config_hash=materialization["feature_config_hash"],
+                            source=source, feature_columns=list(feature_frame.columns),
+                        )
+                        pending_feature_frames.append(normalized)
+                        pending_feature_rows += len(normalized)
+                        results.append({
+                            "stock_code": code, "status": "computed",
+                            "rows": len(feature_frame),
+                            "rows_written": len(normalized),
+                            "dataset_path": str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature")),
+                        })
+                    else:
+                        results.append({
+                            "stock_code": code, "status": "empty",
+                            "rows": 0, "rows_written": 0, "dataset_path": None,
+                        })
+                else:
+                    results.append({
+                        "stock_code": code, "status": "missing_ohlcv",
+                        "rows": 0, "rows_written": 0, "dataset_path": None,
+                    })
+
                 if len(pending_feature_frames) >= batch_flush_stocks or pending_feature_rows >= batch_flush_feature_rows:
                     _flush_feature_batch()
 
-            if pbar is not None:
-                pbar.update(1)
-                computed_n = sum(1 for item in results if item["status"] == "computed")
-                error_n = sum(1 for item in results if item["status"] == "error")
-                skipped_n = sum(1 for item in results if item["status"] == "skipped")
-                pbar.set_postfix_str(
-                    f"computed={computed_n} skipped={skipped_n} errors={error_n} rows={total_rows_written}"
-                )
-                if result["status"] == "error":
-                    _write(f"[{index:04d}/{total:04d}] {result['stock_code']} [ERR] {result.get('error','?')}")
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            _submit_pending(executor)
-            while pending_futures:
-                done, _pending = wait(pending_futures, return_when=FIRST_COMPLETED)
-                for future in done:
-                    pending_futures.pop(future, None)
-                    completed_count += 1
-                    result = future.result()
-                    _handle_result(result, completed_count)
-                _submit_pending(executor)
+                if pbar is not None:
+                    pbar.update(1)
+                    comp_n = sum(1 for item in results if item["status"] == "computed")
+                    err_n = sum(1 for item in results if item["status"] == "error")
+                    skip_n = sum(1 for item in results if item["status"] == "skipped")
+                    pbar.set_postfix_str(
+                        f"computed={comp_n} skipped={skip_n} errors={err_n} rows={total_rows_written}"
+                    )
 
         # Final flush
         _flush_feature_batch()
@@ -1369,7 +1557,7 @@ class MarketDataService:
             n_rps = self.warehouse.compute_rps_features(factor_set=factor_set)
             total_rows_written += n_rps
             if show_progress:
-                _write(f"[PROGRESS] rps done features={n_rps}")
+                _write(f"[PROGRESS] rps done rows={n_rps}")
 
         return {
             "stock_count": total,

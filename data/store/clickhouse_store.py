@@ -387,6 +387,7 @@ class ClickHouseStore:
         """
         table = self._table_name("features", layer=layer)
         client = self._connect()
+        rows_written = 0
         try:
             self._ensure_table(client, "features", layer)
             for w in windows:
@@ -443,9 +444,10 @@ class ClickHouseStore:
                 rps_df["trade_date"] = pd.to_datetime(rps_df["trade_date"])
 
                 client.insert_df(table, rps_df)
+                rows_written += len(rps_df)
         finally:
             client.close()
-        return len(windows)
+        return rows_written
 
     # ---- internal helpers ----
 

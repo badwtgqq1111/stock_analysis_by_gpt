@@ -379,7 +379,7 @@ class ParquetDataStore:
             layer=layer,
             date_column="trade_date",
         )
-        return len(rows)
+        return len(result)
 
     def _append_dataset(self, dataset_dir, frame, date_column="trade_date", partition_columns=None):
         dataset_path = Path(dataset_dir)

@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from data.ingest.service import MarketDataService, _factor_compute_worker
 from data.model import FEATURE_COLUMNS, normalize_ohlcv_frame
+from data.store.clickhouse_store import ClickHouseStore
 from data.store.layout import DataLayout
 from data.store.warehouse import MarketDataWarehouse
 from factor_engine import create_factor_set, list_factor_sets
@@ -240,6 +241,55 @@ def test_warehouse_disables_clickhouse_after_feature_read_failure():
         assert frame.empty
         assert "Unexpected Http Driver Exception" in warehouse._clickhouse_disabled_reason
         assert fallback.calls == 1
+
+
+def test_warehouse_skips_clickhouse_when_configured_endpoint_is_unreachable():
+    with patch.dict("os.environ", {"CLICKHOUSE_HOST": "localhost", "CLICKHOUSE_PORT": "8123"}):
+        with patch("socket.create_connection", side_effect=OSError("connection refused")):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+
+    assert warehouse.clickhouse_store is None
+    assert "connection refused" in warehouse._clickhouse_disabled_reason
+
+
+def test_clickhouse_insert_frame_chunks_large_stock_info_batches():
+    class RecordingClient:
+        def __init__(self):
+            self.chunk_sizes = []
+
+        def insert_df(self, table, frame):
+            self.chunk_sizes.append(len(frame))
+
+    frame = pd.DataFrame(
+        [
+            {
+                "stock_code": f"{code:05d}",
+                "market": "HK",
+                "exchange": "HKEX",
+                "asset_type": "equity",
+                "industry_l1": "资讯科技业",
+                "industry_l2": "软件服务",
+                "industry_source": "manual_csv",
+                "is_fund_like": False,
+                "tradable_flag": True,
+                "ingest_time": pd.Timestamp("2026-06-03"),
+            }
+            for code in range(1, 4)
+        ]
+    )
+    client = RecordingClient()
+
+    with patch.dict("os.environ", {"CLICKHOUSE_INSERT_CHUNK_ROWS": "2"}):
+        ClickHouseStore()._insert_frame(
+            client,
+            "stock_info_registry_meta",
+            "stock_info_registry",
+            frame,
+            date_column="ingest_time",
+        )
+
+    assert client.chunk_sizes == [2, 1]
 
 
 def test_warehouse_append_features_uses_append_only_store_path():

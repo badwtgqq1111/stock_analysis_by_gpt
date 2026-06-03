@@ -6,7 +6,9 @@
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
 import os
+from pathlib import Path
 import platform
+import signal
 import sys
 import threading
 import time
@@ -508,6 +510,685 @@ class MarketDataService:
             "failed": len(failed),
             "failed_codes": failed,
             "coverage": coverage,
+        }
+
+    def import_hk_industry_registry_csv(
+        self,
+        csv_path,
+        stock_codes=None,
+        limit=None,
+        source="manual_csv",
+    ):
+        """Import HK industry metadata from a local CSV into stock_info_registry."""
+        path = Path(csv_path)
+        if not path.exists():
+            raise FileNotFoundError(f"industry registry csv not found: {path}")
+
+        frame = pd.read_csv(path, encoding="utf-8-sig", dtype=str).fillna("")
+        if frame.empty:
+            return {
+                "status": "completed",
+                "source": str(path),
+                "requested": 0,
+                "updated": 0,
+                "skipped": 0,
+            }
+
+        code_column = "stock_code" if "stock_code" in frame.columns else "code" if "code" in frame.columns else None
+        if code_column is None:
+            raise ValueError("industry registry csv must contain stock_code or code column")
+
+        requested_codes = None
+        if stock_codes:
+            requested_codes = {
+                normalize_stock_code(code, market="HK")
+                for code in stock_codes
+                if str(code).strip()
+            }
+
+        selected_rows = []
+        selected_codes = []
+        skipped = 0
+        for _, row in frame.iterrows():
+            raw_code = row.get(code_column)
+            if not str(raw_code).strip():
+                skipped += 1
+                continue
+            code = normalize_stock_code(raw_code, market="HK")
+            if requested_codes is not None and code not in requested_codes:
+                skipped += 1
+                continue
+            selected_rows.append((code, row))
+            selected_codes.append(code)
+            if limit and len(selected_rows) >= int(limit):
+                break
+
+        existing_map = {}
+        if selected_codes:
+            chunk_rows = max(1, int(os.environ.get("STOCK_INFO_LOOKUP_CHUNK_ROWS", "100")))
+            for start in range(0, len(selected_codes), chunk_rows):
+                existing_map.update(self._load_hk_stock_info_map(selected_codes[start:start + chunk_rows]))
+
+        payloads = []
+        for code, row in selected_rows:
+            row_payload = {
+                column: row.get(column)
+                for column in frame.columns
+                if column not in {"", code_column}
+            }
+            row_payload["stock_code"] = code
+            row_payload["industry_source"] = row_payload.get("industry_source") or source
+            existing = existing_map.get(code, {})
+            merged = dict(existing)
+            for key, value in row_payload.items():
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                merged[key] = value
+            payloads.append(
+                normalize_stock_info(
+                    merged,
+                    stock_code=code,
+                    market=row_payload.get("market") or "HK",
+                    exchange=row_payload.get("exchange") or existing.get("exchange") or "HKEX",
+                    asset_type=row_payload.get("asset_type") or existing.get("asset_type") or "equity",
+                    source=merged.get("industry_source") or source,
+                )
+            )
+
+        if payloads:
+            self.warehouse.upsert_stock_info_batch(payloads)
+
+        return {
+            "status": "completed",
+            "source": str(path),
+            "requested": len(frame),
+            "updated": len(payloads),
+            "skipped": skipped,
+        }
+
+    def build_stock_tag_csvs(
+        self,
+        industry_registry_csv,
+        tag_dictionary_csv="docs/hk_tag_dictionary.csv",
+        output_csv="docs/hk_stock_tag_registry.csv",
+        candidate_output_csv="docs/hk_stock_tag_candidate.csv",
+        evidence_csv=None,
+        llm_tag_csv=None,
+        llm_candidate_csv=None,
+    ):
+        """Build tag dictionary, formal stock tags, and candidate tag CSVs."""
+        from data.ingest.stock_tags import (
+            build_default_tag_dictionary,
+            build_stock_tags_from_industry_registry,
+            merge_research_tags,
+        )
+
+        industry = pd.read_csv(industry_registry_csv, dtype=str).fillna("")
+        dictionary = build_default_tag_dictionary()
+        formal, candidates = build_stock_tags_from_industry_registry(industry)
+        if evidence_csv and Path(evidence_csv).exists():
+            evidence = pd.read_csv(evidence_csv, dtype=str).fillna("")
+            formal, candidates = merge_research_tags(formal, candidates, evidence)
+        if llm_tag_csv and Path(llm_tag_csv).exists():
+            llm_formal = pd.read_csv(llm_tag_csv, dtype=str).fillna("")
+            if not llm_formal.empty:
+                formal = pd.concat([formal, llm_formal], ignore_index=True)
+        if llm_candidate_csv and Path(llm_candidate_csv).exists():
+            llm_candidates = pd.read_csv(llm_candidate_csv, dtype=str).fillna("")
+            if not llm_candidates.empty:
+                candidates = pd.concat([candidates, llm_candidates], ignore_index=True)
+        if not formal.empty:
+            formal = formal.drop_duplicates(
+                subset=["stock_code", "market", "tag", "tag_type"],
+                keep="last",
+            ).reset_index(drop=True)
+        if not candidates.empty:
+            candidates = candidates.drop_duplicates(
+                subset=["stock_code", "market", "tag", "tag_type"],
+                keep="last",
+            ).reset_index(drop=True)
+
+        for target in (tag_dictionary_csv, output_csv, candidate_output_csv):
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+        dictionary.to_csv(tag_dictionary_csv, index=False, encoding="utf-8-sig")
+        formal.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        candidates.to_csv(candidate_output_csv, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "dictionary_rows": len(dictionary),
+            "stock_tag_rows": len(formal),
+            "candidate_rows": len(candidates),
+            "tag_dictionary_csv": str(tag_dictionary_csv),
+            "stock_tag_csv": str(output_csv),
+            "candidate_csv": str(candidate_output_csv),
+        }
+
+    def browser_research_stock_tags(
+        self,
+        industry_registry_csv="docs/hk_industry_registry.csv",
+        evidence_csv="docs/hk_company_browser_evidence.csv",
+        stock_codes=None,
+        limit=None,
+        skip_existing=True,
+        max_results_per_query=5,
+        max_pages_per_stock=8,
+        per_page_timeout=12,
+        search_engine="bing",
+        show_progress=False,
+    ):
+        """Collect browser-search evidence for stock tag enrichment."""
+        from data.model import COMPANY_RESEARCH_EVIDENCE_FIELDS
+
+        industry = pd.read_csv(industry_registry_csv, dtype=str).fillna("")
+        if "stock_code" not in industry.columns:
+            raise ValueError(f"{industry_registry_csv} missing stock_code column")
+        code_name_rows = []
+        for _, row in industry.iterrows():
+            code = normalize_stock_code(row.get("stock_code"), market="HK")
+            name = str(row.get("name") or row.get("stock_name") or "").strip()
+            code_name_rows.append((code, name))
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            code_name_rows = [(code, name) for code, name in code_name_rows if code in allowed]
+        seen_codes = set()
+        deduped_rows = []
+        for code, name in code_name_rows:
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            deduped_rows.append((code, name))
+        code_name_rows = deduped_rows
+        if limit:
+            code_name_rows = code_name_rows[: int(limit)]
+
+        path = Path(evidence_csv)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        if path.exists():
+            existing = pd.read_csv(path, dtype=str).fillna("")
+            for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+                if column not in existing.columns:
+                    existing[column] = ""
+            existing = existing[COMPANY_RESEARCH_EVIDENCE_FIELDS]
+        existing_codes = set()
+        if skip_existing and not existing.empty and "source" in existing.columns:
+            existing_titles = existing["title"].astype(str) if "title" in existing.columns else pd.Series("", index=existing.index)
+            successful_existing = (
+                existing["source"].astype(str).eq("playwright_search")
+                & ~existing_titles.str.contains("title=search_error", na=False)
+                & ~existing_titles.str.contains("title=search_page_snapshot", na=False)
+                & ~existing_titles.str.contains("rank=0", na=False)
+            )
+            existing_codes = set(
+                existing.loc[successful_existing, "stock_code"].astype(str)
+            )
+
+        fetcher_cls = globals().get("BrowserCompanySearchFetcher")
+        if fetcher_cls is None:
+            from data.ingest.providers.browser_company_search import BrowserCompanySearchFetcher as fetcher_cls
+
+        rows = []
+        errors = []
+        iterator = code_name_rows
+        if show_progress:
+            iterator = tqdm(code_name_rows, desc="browser research", unit="stock")
+        for code, name in iterator:
+            if code in existing_codes:
+                continue
+            try:
+                fetched = fetcher_cls(
+                    code,
+                    company_name=name,
+                    max_results_per_query=max_results_per_query,
+                    max_pages_per_stock=max_pages_per_stock,
+                    per_page_timeout=per_page_timeout,
+                    search_engine=search_engine,
+                ).fetch()
+                if isinstance(fetched, pd.DataFrame):
+                    rows.extend(fetched.to_dict("records"))
+                else:
+                    rows.extend(list(fetched or []))
+            except Exception as exc:
+                errors.append({"stock_code": code, "error": str(exc)})
+
+        new_frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        combined = pd.concat([existing, new_frame], ignore_index=True) if not existing.empty else new_frame
+        if combined is None or combined.empty:
+            combined = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+            if column not in combined.columns:
+                combined[column] = ""
+        combined = combined[COMPANY_RESEARCH_EVIDENCE_FIELDS].fillna("")
+        if not combined.empty:
+            combined = combined.drop_duplicates(
+                subset=["market", "stock_code", "source", "title"],
+                keep="last",
+            ).reset_index(drop=True)
+        combined.to_csv(path, index=False, encoding="utf-8-sig")
+        upsert_summary = self.warehouse.upsert_company_research_evidence(combined)
+        return {
+            "status": "completed",
+            "requested": len(code_name_rows),
+            "fetched": len(rows),
+            "evidence_rows": len(combined),
+            "errors": len(errors),
+            "error_samples": errors[:10],
+            "evidence_csv": str(path),
+            "warehouse": upsert_summary,
+        }
+
+    def tavily_research_stock_tags(
+        self,
+        industry_registry_csv="docs/hk_industry_registry.csv",
+        evidence_csv="docs/hk_company_tavily_evidence.csv",
+        stock_codes=None,
+        limit=None,
+        skip_existing=True,
+        tavily_api_key=None,
+        max_results_per_query=5,
+        max_queries_per_stock=3,
+        search_depth="basic",
+        topic="finance",
+        include_raw_content=False,
+        show_progress=False,
+    ):
+        """Collect Tavily Search API evidence for stock tag enrichment."""
+        from data.model import COMPANY_RESEARCH_EVIDENCE_FIELDS
+
+        industry = pd.read_csv(industry_registry_csv, dtype=str).fillna("")
+        if "stock_code" not in industry.columns:
+            raise ValueError(f"{industry_registry_csv} missing stock_code column")
+
+        code_name_rows = []
+        for _, row in industry.iterrows():
+            code = normalize_stock_code(row.get("stock_code"), market="HK")
+            name = str(row.get("name") or row.get("stock_name") or "").strip()
+            code_name_rows.append((code, name))
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            code_name_rows = [(code, name) for code, name in code_name_rows if code in allowed]
+
+        seen_codes = set()
+        deduped_rows = []
+        for code, name in code_name_rows:
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            deduped_rows.append((code, name))
+        code_name_rows = deduped_rows
+        if limit:
+            code_name_rows = code_name_rows[: int(limit)]
+
+        path = Path(evidence_csv)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        if path.exists():
+            existing = pd.read_csv(path, dtype=str).fillna("")
+            for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+                if column not in existing.columns:
+                    existing[column] = ""
+            existing = existing[COMPANY_RESEARCH_EVIDENCE_FIELDS]
+
+        existing_codes = set()
+        if skip_existing and not existing.empty and "source" in existing.columns:
+            existing_titles = existing["title"].astype(str) if "title" in existing.columns else pd.Series("", index=existing.index)
+            successful_existing = (
+                existing["source"].astype(str).eq("tavily_search")
+                & ~existing_titles.str.contains("title=search_error", na=False)
+                & ~existing_titles.str.contains("title=no_results", na=False)
+                & ~existing_titles.str.contains("rank=0", na=False)
+            )
+            existing_codes = set(existing.loc[successful_existing, "stock_code"].astype(str))
+
+        fetcher_cls = globals().get("TavilyCompanySearchFetcher")
+        if fetcher_cls is None:
+            from data.ingest.providers.tavily_company_search import TavilyCompanySearchFetcher as fetcher_cls
+
+        rows = []
+        errors = []
+        iterator = code_name_rows
+        if show_progress:
+            iterator = tqdm(code_name_rows, desc="tavily research", unit="stock")
+        for code, name in iterator:
+            if code in existing_codes:
+                continue
+            try:
+                fetched = fetcher_cls(
+                    code,
+                    company_name=name,
+                    api_key=tavily_api_key,
+                    max_results_per_query=max_results_per_query,
+                    max_queries_per_stock=max_queries_per_stock,
+                    search_depth=search_depth,
+                    topic=topic,
+                    include_raw_content=include_raw_content,
+                ).fetch()
+                if isinstance(fetched, pd.DataFrame):
+                    rows.extend(fetched.to_dict("records"))
+                else:
+                    rows.extend(list(fetched or []))
+            except Exception as exc:
+                errors.append({"stock_code": code, "error": str(exc)})
+
+        new_frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        combined = pd.concat([existing, new_frame], ignore_index=True) if not existing.empty else new_frame
+        if combined is None or combined.empty:
+            combined = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+            if column not in combined.columns:
+                combined[column] = ""
+        combined = combined[COMPANY_RESEARCH_EVIDENCE_FIELDS].fillna("")
+        if not combined.empty:
+            combined = combined.drop_duplicates(
+                subset=["market", "stock_code", "source", "title"],
+                keep="last",
+            ).reset_index(drop=True)
+        combined.to_csv(path, index=False, encoding="utf-8-sig")
+        upsert_summary = self.warehouse.upsert_company_research_evidence(combined)
+        return {
+            "status": "completed",
+            "requested": len(code_name_rows),
+            "fetched": len(rows),
+            "evidence_rows": len(combined),
+            "errors": len(errors),
+            "error_samples": errors[:10],
+            "evidence_csv": str(path),
+            "warehouse": upsert_summary,
+        }
+
+    def extract_stock_tags_llm(
+        self,
+        evidence_csv="docs/hk_company_browser_evidence.csv",
+        tag_dictionary_csv="docs/hk_tag_dictionary.csv",
+        output_csv="docs/hk_llm_tag_extraction.csv",
+        candidate_output_csv="docs/hk_stock_tag_candidate_llm.csv",
+        stock_codes=None,
+        limit=None,
+        model=None,
+        temperature=0.1,
+        max_tokens=4096,
+        show_progress=False,
+    ):
+        """Use DeepSeek to extract structured tags from cached evidence."""
+        from core.llm.client import LLMClient
+        from data.ingest.llm_tag_extractor import (
+            build_tag_extraction_prompt,
+            llm_extractions_to_tag_frames,
+            parse_llm_tag_response,
+        )
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("")
+        dictionary = pd.read_csv(tag_dictionary_csv, dtype=str).fillna("")
+        if evidence.empty:
+            codes = []
+        else:
+            codes = list(dict.fromkeys(evidence["stock_code"].astype(str)))
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            codes = [code for code in codes if code in allowed]
+        if limit:
+            codes = codes[: int(limit)]
+
+        client_cls = globals().get("LLMClient", LLMClient)
+        client = client_cls(model=model)
+        extractions = []
+        errors = []
+        iterator = codes
+        if show_progress:
+            iterator = tqdm(codes, desc="llm tag extract", unit="stock")
+        for code in iterator:
+            rows = evidence.loc[evidence["stock_code"].astype(str) == code]
+            try:
+                messages = build_tag_extraction_prompt(code, rows, dictionary)
+                text = client.chat_with_retry(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    model=model,
+                )
+                extractions.append(parse_llm_tag_response(text))
+            except Exception as exc:
+                errors.append({"stock_code": code, "error": str(exc)})
+
+        formal, candidates = llm_extractions_to_tag_frames(extractions)
+        for target in (output_csv, candidate_output_csv):
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+        formal.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        candidates.to_csv(candidate_output_csv, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "formal_rows": len(formal),
+            "candidate_rows": len(candidates),
+            "errors": len(errors),
+            "error_samples": errors[:10],
+            "output_csv": str(output_csv),
+            "candidate_output_csv": str(candidate_output_csv),
+        }
+
+    def review_stock_tag_candidates(
+        self,
+        candidate_csv="docs/hk_stock_tag_candidate.csv",
+        accepted_output_csv="docs/hk_stock_tag_accepted_from_candidates.csv",
+    ):
+        """Export accepted candidate tags as formal tag rows."""
+        from data.model import STOCK_TAG_FIELDS
+
+        candidates = pd.read_csv(candidate_csv, dtype=str).fillna("")
+        accepted = candidates.loc[
+            candidates["review_status"].astype(str).str.lower() == "accepted"
+        ].copy()
+        if not accepted.empty:
+            accepted = accepted[STOCK_TAG_FIELDS]
+        else:
+            accepted = pd.DataFrame(columns=STOCK_TAG_FIELDS)
+        Path(accepted_output_csv).parent.mkdir(parents=True, exist_ok=True)
+        accepted.to_csv(accepted_output_csv, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "candidate_rows": len(candidates),
+            "accepted_rows": len(accepted),
+            "accepted_output_csv": str(accepted_output_csv),
+        }
+
+    def import_stock_tag_csvs(
+        self,
+        tag_dictionary_csv=None,
+        stock_tag_csv=None,
+        candidate_csv=None,
+        evidence_csv=None,
+        replace=False,
+    ):
+        """Import generated tag CSVs into the warehouse."""
+        summary = {"status": "completed"}
+        if tag_dictionary_csv:
+            frame = pd.read_csv(tag_dictionary_csv, dtype=str).fillna("")
+            method = self.warehouse.replace_tag_dictionary if replace else self.warehouse.upsert_tag_dictionary
+            summary["dictionary"] = method(frame)
+        if stock_tag_csv:
+            frame = pd.read_csv(stock_tag_csv, dtype=str).fillna("")
+            method = self.warehouse.replace_stock_tags if replace else self.warehouse.upsert_stock_tags
+            summary["stock_tags"] = method(frame)
+        if candidate_csv:
+            frame = pd.read_csv(candidate_csv, dtype=str).fillna("")
+            method = (
+                self.warehouse.replace_stock_tag_candidates
+                if replace
+                else self.warehouse.upsert_stock_tag_candidates
+            )
+            summary["candidates"] = method(frame)
+        if evidence_csv:
+            frame = pd.read_csv(evidence_csv, dtype=str).fillna("")
+            method = (
+                self.warehouse.replace_company_research_evidence
+                if replace
+                else self.warehouse.upsert_company_research_evidence
+            )
+            summary["evidence"] = method(frame)
+        return summary
+
+    def research_stock_tags(
+        self,
+        industry_registry_csv="docs/hk_industry_registry.csv",
+        evidence_csv="docs/hk_company_research_evidence.csv",
+        stock_codes=None,
+        limit=None,
+        skip_existing=True,
+        show_progress=False,
+        per_stock_timeout=20,
+    ):
+        """Fetch and cache reproducible company evidence for HK stock tag extraction."""
+        from data.model import COMPANY_RESEARCH_EVIDENCE_FIELDS
+
+        path = Path(industry_registry_csv)
+        if path.exists():
+            industry = pd.read_csv(path, dtype=str).fillna("")
+            if "stock_code" in industry.columns:
+                codes = industry["stock_code"].tolist()
+            else:
+                raise ValueError(f"{industry_registry_csv} missing stock_code column")
+        else:
+            codes = self.get_all_stock_codes(market="HK", asset_type="equity", frequency="daily", adjust="qfq")
+
+        if stock_codes:
+            requested = {
+                normalize_stock_code(code, market="HK")
+                for code in stock_codes
+            }
+            codes = [code for code in codes if normalize_stock_code(code, market="HK") in requested]
+        codes = [normalize_stock_code(code, market="HK") for code in codes]
+        codes = list(dict.fromkeys(codes))
+        if limit:
+            codes = codes[: int(limit)]
+
+        evidence_path = Path(evidence_csv)
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        if evidence_path.exists():
+            existing = pd.read_csv(evidence_path, dtype=str).fillna("")
+            for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+                if column not in existing.columns:
+                    existing[column] = ""
+            existing = existing[COMPANY_RESEARCH_EVIDENCE_FIELDS]
+
+        existing_codes = set()
+        if skip_existing and not existing.empty and "stock_code" in existing.columns:
+            successful_existing = existing
+            if "source" in successful_existing.columns:
+                successful_existing = successful_existing.loc[
+                    successful_existing["source"].astype(str) != "research_error"
+                ]
+            existing_codes = set(successful_existing["stock_code"].astype(str))
+        target_codes = [code for code in codes if code not in existing_codes]
+
+        fetcher_cls = globals().get("HKCompanyResearchFetcher")
+        if fetcher_cls is None:
+            from data.ingest.providers.hk_company_research import HKCompanyResearchFetcher as fetcher_cls
+
+        def _fetch_with_timeout(code):
+            timeout = int(per_stock_timeout or 0)
+            can_alarm = (
+                timeout > 0
+                and platform.system() != "Windows"
+                and threading.current_thread() is threading.main_thread()
+            )
+            if not can_alarm:
+                return fetcher_cls(code).fetch()
+
+            def _handle_timeout(_signum, _frame):
+                raise TimeoutError(f"research timeout after {timeout}s")
+
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, _handle_timeout)
+            signal.alarm(timeout)
+            try:
+                return fetcher_cls(code).fetch()
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous_handler)
+
+        rows = []
+        errors = []
+        iterator = target_codes
+        if show_progress:
+            iterator = tqdm(target_codes, desc="stock research", unit="stock")
+        for code in iterator:
+            try:
+                fetched = _fetch_with_timeout(code)
+                if isinstance(fetched, pd.DataFrame):
+                    fetched_rows = fetched.to_dict("records")
+                else:
+                    fetched_rows = list(fetched or [])
+                rows.extend(fetched_rows)
+            except Exception as exc:
+                errors.append({"stock_code": code, "error": str(exc)})
+                rows.append(
+                    {
+                        "stock_code": code,
+                        "market": "HK",
+                        "source": "research_error",
+                        "title": "research_error",
+                        "summary": str(exc)[:500],
+                        "url": "",
+                        "raw_text": "",
+                        "fetched_at": datetime.utcnow().isoformat(),
+                    }
+                )
+
+        new_frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        combined = pd.concat([existing, new_frame], ignore_index=True) if not existing.empty else new_frame
+        if combined is None or combined.empty:
+            combined = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+            if column not in combined.columns:
+                combined[column] = ""
+        combined = combined[COMPANY_RESEARCH_EVIDENCE_FIELDS].fillna("")
+        if not combined.empty:
+            combined = combined.drop_duplicates(
+                subset=["market", "stock_code", "source", "title"],
+                keep="last",
+            ).reset_index(drop=True)
+        combined.to_csv(evidence_path, index=False, encoding="utf-8-sig")
+        upsert_summary = self.warehouse.upsert_company_research_evidence(combined)
+
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "fetched": len(target_codes),
+            "skipped_existing": len(codes) - len(target_codes),
+            "evidence_rows": len(combined),
+            "errors": len(errors),
+            "error_samples": errors[:10],
+            "evidence_csv": str(evidence_path),
+            "warehouse": upsert_summary,
+        }
+
+    def get_stock_tag_coverage(self, market="HK", min_confidence=0.75):
+        """Summarize stock tag registry coverage and tag distributions."""
+        tags = self.warehouse.read_stock_tags(market=market, min_confidence=min_confidence)
+        if tags is None or tags.empty:
+            return {
+                "status": "empty",
+                "market": (market or "HK").upper(),
+                "min_confidence": float(min_confidence),
+                "tagged_stock_count": 0,
+                "tag_rows": 0,
+                "by_tag_type": {},
+                "top_tags": {},
+            }
+        tags = tags.fillna("")
+        by_tag_type = tags.groupby("tag_type")["stock_code"].nunique().sort_values(ascending=False).to_dict()
+        top_tags = tags.groupby("tag")["stock_code"].nunique().sort_values(ascending=False).head(50).to_dict()
+        return {
+            "status": "completed",
+            "market": (market or "HK").upper(),
+            "min_confidence": float(min_confidence),
+            "tagged_stock_count": int(tags["stock_code"].nunique()),
+            "tag_rows": int(len(tags)),
+            "by_tag_type": {str(key): int(value) for key, value in by_tag_type.items()},
+            "top_tags": {str(key): int(value) for key, value in top_tags.items()},
         }
 
     def normalize_existing_hk_industry(self, stock_codes=None, limit=None):

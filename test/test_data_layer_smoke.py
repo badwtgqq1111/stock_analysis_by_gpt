@@ -6,6 +6,7 @@
 import tempfile
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -103,7 +104,7 @@ def test_stock_info_preserves_industry_metadata():
         assert loaded["industry_l1"] == "Communication Services"
         assert loaded["industry_l2"] == "Interactive Media"
         assert loaded["industry_l3"] == "Internet Platforms"
-        assert loaded["theme_tags"] == "platform,gaming"
+        assert loaded["theme_tags"] == "platform;gaming"
         assert loaded["industry_source"] == "unit_test_industry"
         assert pd.Timestamp(loaded["industry_updated_at"]) == pd.Timestamp("2026-05-31T00:00:00")
 
@@ -162,6 +163,112 @@ def test_service_backfills_hk_industry_metadata(monkeypatch):
     assert loaded["current_price"] == 380.0
     assert loaded["industry_l1"] == "Information Technology"
     assert loaded["industry_l2"] == "Internet Services"
+
+
+def test_service_imports_hk_industry_registry_csv_without_network_fetch():
+    with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            csv_path = Path(tmp_dir) / "hk_industry_registry.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "stock_code": "700",
+                        "market": "HK",
+                        "name": "Tencent",
+                        "industry_l1": "资讯科技业",
+                        "industry_l2": "互联网服务",
+                        "industry_source": "manual_csv",
+                        "industry_updated_at": "2026-06-02T00:00:00",
+                        "instrument_type": "common_stock",
+                        "is_fund_like": False,
+                        "tradable_flag": True,
+                    }
+                ]
+            ).to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+            service = MarketDataService(base_dir=tmp_dir)
+            try:
+                base_info = normalize_stock_info(
+                    {"name": "Tencent Holdings", "current_price": 380.0},
+                    stock_code="00700",
+                    source="unit_test",
+                )
+                service.warehouse.upsert_stock_info(base_info)
+
+                summary = service.import_hk_industry_registry_csv(csv_path)
+                loaded = service.get_hk_stock_info("00700")
+            finally:
+                service.close()
+
+    assert summary["updated"] == 1
+    assert summary["skipped"] == 0
+    assert loaded["name"] == "Tencent"
+    assert loaded["current_price"] == 380.0
+    assert loaded["industry_l1"] == "资讯科技业"
+    assert loaded["industry_l2"] == "互联网服务"
+    assert loaded["industry_source"] == "manual_csv"
+
+
+def test_service_imports_hk_industry_registry_csv_loads_existing_registry_once():
+    with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            csv_path = Path(tmp_dir) / "hk_industry_registry.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "stock_code": "700",
+                        "market": "HK",
+                        "industry_l1": "资讯科技业",
+                        "industry_l2": "互联网服务",
+                    },
+                    {
+                        "stock_code": "5",
+                        "market": "HK",
+                        "industry_l1": "金融业",
+                        "industry_l2": "银行",
+                    },
+                ]
+            ).to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+            service = MarketDataService(base_dir=tmp_dir)
+            read_calls = []
+            original_read_stock_info = service.warehouse.read_stock_info
+
+            def counting_read_stock_info(*args, **kwargs):
+                read_calls.append(kwargs.get("stock_codes"))
+                return original_read_stock_info(*args, **kwargs)
+
+            service.warehouse.read_stock_info = counting_read_stock_info
+            try:
+                summary = service.import_hk_industry_registry_csv(csv_path)
+            finally:
+                service.close()
+
+    assert summary["updated"] == 2
+    assert read_calls == [["00700", "00005"]]
+
+
+def test_stock_info_preserve_existing_fields_chunks_large_key_sets():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+        payload = pd.DataFrame(
+            [
+                {"market": "HK", "stock_code": "00001", "industry_l1": "综合企业"},
+                {"market": "HK", "stock_code": "00002", "industry_l1": "公用事业"},
+                {"market": "HK", "stock_code": "00003", "industry_l1": "公用事业"},
+            ]
+        )
+        read_calls = []
+
+        def fake_read_stock_info_registry(filters=None, columns=None, order_by=None):
+            read_calls.append(filters["stock_code"])
+            return pd.DataFrame(columns=columns)
+
+        warehouse._read_stock_info_registry = fake_read_stock_info_registry
+        with patch.dict("os.environ", {"STOCK_INFO_LOOKUP_CHUNK_ROWS": "2"}):
+            warehouse._preserve_existing_stock_info_fields(payload)
+
+    assert read_calls == [["00001", "00002"], ["00003"]]
 
 
 def test_service_normalizes_existing_hk_industry_levels():

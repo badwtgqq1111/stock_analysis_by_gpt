@@ -3,6 +3,8 @@
 
 """ClickHouse 数据存储后端 —— 支持并发写入。"""
 
+import os
+
 import pandas as pd
 from clickhouse_connect import get_client
 
@@ -124,6 +126,98 @@ PARTITION BY market
 ORDER BY ({order_by})
 """
 
+_TAG_DICTIONARY_COLUMNS = [
+    "tag", "tag_type", "canonical_tag", "aliases", "description",
+    "parent_tag", "active", "updated_at",
+]
+
+_TAG_DICTIONARY_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    tag String,
+    tag_type LowCardinality(String),
+    canonical_tag String,
+    aliases String,
+    description String,
+    parent_tag String,
+    active Bool,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY tag_type
+ORDER BY ({order_by})
+"""
+
+_TAG_DICTIONARY_ORDER_BY = ["tag_type", "tag"]
+
+_STOCK_TAG_COLUMNS = [
+    "stock_code", "market", "tag", "tag_type", "confidence", "is_primary",
+    "source", "evidence", "evidence_url", "updated_at",
+]
+
+_STOCK_TAG_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    tag String,
+    tag_type LowCardinality(String),
+    confidence Float64,
+    is_primary Bool,
+    source String,
+    evidence String,
+    evidence_url String,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
+_STOCK_TAG_ORDER_BY = ["market", "stock_code", "tag_type", "tag"]
+
+_STOCK_TAG_CANDIDATE_COLUMNS = [
+    *_STOCK_TAG_COLUMNS,
+    "review_status", "review_note",
+]
+
+_STOCK_TAG_CANDIDATE_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    tag String,
+    tag_type LowCardinality(String),
+    confidence Float64,
+    is_primary Bool,
+    source String,
+    evidence String,
+    evidence_url String,
+    updated_at DateTime,
+    review_status LowCardinality(String),
+    review_note String
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
+_COMPANY_RESEARCH_EVIDENCE_COLUMNS = [
+    "stock_code", "market", "source", "title", "summary", "url",
+    "raw_text", "fetched_at",
+]
+
+_COMPANY_RESEARCH_EVIDENCE_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    source String,
+    title String,
+    summary String,
+    url String,
+    raw_text String,
+    fetched_at DateTime
+) ENGINE = ReplacingMergeTree(fetched_at)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
+_COMPANY_RESEARCH_EVIDENCE_ORDER_BY = ["market", "stock_code", "source", "title"]
+
 DATASET_SCHEMA = {
     "features": {
         "columns": _FEATURES_COLUMNS,
@@ -139,6 +233,26 @@ DATASET_SCHEMA = {
         "columns": _STOCK_INFO_COLUMNS,
         "ddl": _STOCK_INFO_DDL,
         "order_by": _STOCK_INFO_ORDER_BY,
+    },
+    "tag_dictionary": {
+        "columns": _TAG_DICTIONARY_COLUMNS,
+        "ddl": _TAG_DICTIONARY_DDL,
+        "order_by": _TAG_DICTIONARY_ORDER_BY,
+    },
+    "stock_tag_registry": {
+        "columns": _STOCK_TAG_COLUMNS,
+        "ddl": _STOCK_TAG_DDL,
+        "order_by": _STOCK_TAG_ORDER_BY,
+    },
+    "stock_tag_candidate": {
+        "columns": _STOCK_TAG_CANDIDATE_COLUMNS,
+        "ddl": _STOCK_TAG_CANDIDATE_DDL,
+        "order_by": _STOCK_TAG_ORDER_BY,
+    },
+    "company_research_evidence": {
+        "columns": _COMPANY_RESEARCH_EVIDENCE_COLUMNS,
+        "ddl": _COMPANY_RESEARCH_EVIDENCE_DDL,
+        "order_by": _COMPANY_RESEARCH_EVIDENCE_ORDER_BY,
     },
 }
 
@@ -180,15 +294,15 @@ class ClickHouseStore:
 
     def dataset_exists(self, dataset_name, layer="clean"):
         table = self._table_name(dataset_name, layer)
+        client = self._connect()
         try:
-            client = self._connect()
             result = client.query(
                 "SELECT 1 FROM system.tables WHERE database = {db:String} AND name = {tbl:String}",
                 parameters={"db": self.database, "tbl": table},
             )
             return len(result.result_rows) > 0
-        except Exception:
-            return False
+        finally:
+            client.close()
 
     def read_frame(self, dataset_name, layer="clean", filters=None, columns=None,
                    order_by=None, range_filters=None):
@@ -463,15 +577,21 @@ class ClickHouseStore:
         if "ingest_time" not in prepared.columns:
             prepared["ingest_time"] = pd.Timestamp.utcnow()
 
-        for column in ["industry_updated_at", "instrument_updated_at", "ingest_time"]:
+        for column in ["industry_updated_at", "instrument_updated_at", "ingest_time", "updated_at", "fetched_at"]:
             if column in prepared.columns:
                 prepared[column] = pd.to_datetime(prepared[column], errors="coerce")
-        for column in ["is_fund_like", "tradable_flag"]:
+        for column in ["is_fund_like", "tradable_flag", "is_primary", "active"]:
             if column in prepared.columns:
                 prepared[column] = prepared[column].fillna(False).astype(bool)
+        for column in ["confidence"]:
+            if column in prepared.columns:
+                prepared[column] = pd.to_numeric(prepared[column], errors="coerce").fillna(0.0).astype(float)
         for column in [
             "name", "industry_l1", "industry_l2", "industry_l3", "theme_tags",
             "industry_source", "instrument_type", "instrument_source", "source",
+            "tag", "tag_type", "canonical_tag", "aliases", "description", "parent_tag",
+            "evidence", "evidence_url", "review_status", "review_note",
+            "title", "summary", "url", "raw_text",
         ]:
             if column in prepared.columns:
                 prepared[column] = prepared[column].fillna("").astype(str)
@@ -481,4 +601,10 @@ class ClickHouseStore:
             cols = [c for c in schema["columns"] if c in prepared.columns]
             prepared = prepared[cols]
 
-        client.insert_df(table, prepared)
+        configured_chunk_rows = os.environ.get("CLICKHOUSE_INSERT_CHUNK_ROWS")
+        if configured_chunk_rows:
+            chunk_rows = max(1, int(configured_chunk_rows))
+        else:
+            chunk_rows = max(1, 300 // max(len(prepared.columns), 1))
+        for start in range(0, len(prepared), chunk_rows):
+            client.insert_df(table, prepared.iloc[start:start + chunk_rows])

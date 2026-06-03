@@ -691,7 +691,7 @@ def normalize_stock_info(
         )
     theme_tags = payload.get("theme_tags")
     if isinstance(theme_tags, (list, tuple, set)):
-        theme_tags = ",".join(str(tag).strip() for tag in theme_tags if str(tag).strip())
+        theme_tags = ";".join(str(tag).strip() for tag in theme_tags if str(tag).strip())
     return {
         "stock_code": normalized_code,
         "market": normalized_market,

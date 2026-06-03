@@ -50,6 +50,12 @@ uv run python run.py backfill-industry \
   --max-workers 8 \
   --show-progress
 
+# 网络环境拿不到行业接口时，可从手工导出的 CSV 导入同一份 registry
+uv run python run.py backfill-industry \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --normalize-existing \
+  --show-progress
+
 # 3. 生成因子
 uv run python run.py generate-factors \
   --days 365 \
@@ -120,11 +126,126 @@ export CLICKHOUSE_DATABASE=quant
 
 覆盖率优先看普通股口径：
 
+如果当前网络环境无法从公开接口拿到行业信息，可以先准备与 `docs/hk_industry_registry.csv` 同格式的本地 CSV，再导入到同一个 `stock_info_registry`：
+
+```bash
+uv run python run.py backfill-industry \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --normalize-existing \
+  --show-progress
+```
+
+导入模式不会访问网络，CSV 中的 `stock_code`、`industry_l1`、`industry_l2`、`industry_source`、`instrument_type`、`is_fund_like`、`tradable_flag` 等字段会写入 registry；已有价格、市值、估值等非空字段会保留。
+
 ```bash
 uv run python run.py industry-coverage --show-missing
 ```
 
 重点指标是 `ordinary_l1_rate` / `ordinary_l2_rate`。港股 `03/09/28/30/31/34/72/73/75/77` 等代码段大量是 ETF、基金、杠杆反向或结构化产品，会被统计为 fund-like，不应按普通股票要求行业覆盖。
+
+## 股票标签 Registry
+
+行业表用于稳定分层，标签表用于更细的主题、资源、产业链和业务关联。标签设计见 `docs/TAG_REGISTRY_DESIGN.md`，本地生成的 CSV 包括：
+
+| 文件 | 用途 |
+|---|---|
+| `docs/hk_tag_dictionary.csv` | tag 字典、别名、父级 tag |
+| `docs/hk_stock_tag_registry.csv` | 高置信度正式标签，用于选股、新闻和舆情关联 |
+| `docs/hk_stock_tag_candidate.csv` | 低置信度或待人工确认标签，不直接进入正式选股 |
+| `docs/hk_company_research_evidence.csv` | 公司资料证据缓存，支持断点续跑和重建标签 |
+
+### 基础离线模式
+
+这四步仍然需要保留。它们是无浏览器、无 LLM、网络不稳定时的保底流程，主要从 `hk_industry_registry.csv` 和可选公司资料 evidence 生成 tag。
+实际使用上，把它理解成“基础层”：先保证行业/大类/规则 tag 可重建、可导入、可覆盖检查；Playwright + DeepSeek 只是在这个基础层上追加高丰富度 tag，不替代这四步。
+
+```bash
+# 1. 网络可用时先抓公司资料证据；当前网络不通时可跳过，后续再续跑
+uv run python run.py research-stock-tags \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --evidence-csv docs/hk_company_research_evidence.csv \
+  --show-progress
+
+# 2. 从行业 registry 和 evidence 生成正式/候选 tag CSV
+uv run python run.py build-stock-tags \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --evidence-csv docs/hk_company_research_evidence.csv \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --output docs/hk_stock_tag_registry.csv \
+  --candidate-output docs/hk_stock_tag_candidate.csv
+
+# 3. 导入 Parquet/ClickHouse 仓库
+uv run python run.py import-stock-tags \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --stock-tag-csv docs/hk_stock_tag_registry.csv \
+  --candidate-csv docs/hk_stock_tag_candidate.csv \
+  --evidence-csv docs/hk_company_research_evidence.csv \
+  --replace
+
+# 4. 查看覆盖率与 tag 分布
+uv run python run.py tag-coverage
+```
+
+### Playwright + DeepSeek 增强模式
+
+增强模式用于提升 tag 丰富度：先用搜索 API 或 Playwright/Chrome 缓存证据，再用 DeepSeek 输出结构化 JSON tag。建议优先用 Tavily，Playwright 只做兜底；先用 `--stock-codes` 或 `--limit 20` 跑小样本，人工看过候选标签后再全量跑。
+
+```bash
+# 1. 推荐：用 Tavily Search API 抓证据，不需要浏览器
+export TAVILY_API_KEY=...
+uv run python run.py tavily-research-stock-tags \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --evidence-csv docs/hk_company_tavily_evidence.csv \
+  --stock-codes 00700 03690 09988 01208 00883 \
+  --max-results-per-query 5 \
+  --max-queries-per-stock 3 \
+  --show-progress
+
+# 2. 兜底：首次使用 Playwright 需要安装 Chromium 浏览器
+uv run playwright install chromium
+
+# 3. 兜底：浏览器搜索抓证据
+uv run python run.py browser-research-stock-tags \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --evidence-csv docs/hk_company_browser_evidence.csv \
+  --stock-codes 00700 03690 09988 01208 00883 \
+  --search-engine bing \
+  --max-results-per-query 5 \
+  --max-pages-per-stock 8 \
+  --per-page-timeout 12 \
+  --show-progress
+
+# 4. DeepSeek 从证据中抽取结构化 tag
+export DEEPSEEK_API_KEY=...
+uv run python run.py extract-stock-tags-llm \
+  --evidence-csv docs/hk_company_tavily_evidence.csv \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --output docs/hk_llm_tag_extraction.csv \
+  --candidate-output docs/hk_stock_tag_candidate_llm.csv \
+  --llm-model deepseek-chat \
+  --stock-codes 00700 03690 09988 01208 00883 \
+  --show-progress
+
+# 5. 合并行业 registry、基础 evidence 和 LLM tags
+uv run python run.py build-stock-tags \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --evidence-csv docs/hk_company_research_evidence.csv \
+  --llm-tag-csv docs/hk_llm_tag_extraction.csv \
+  --llm-candidate-csv docs/hk_stock_tag_candidate_llm.csv \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --output docs/hk_stock_tag_registry.csv \
+  --candidate-output docs/hk_stock_tag_candidate.csv
+
+# 6. 覆盖导入仓库，避免旧 tag 残留
+uv run python run.py import-stock-tags \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --stock-tag-csv docs/hk_stock_tag_registry.csv \
+  --candidate-csv docs/hk_stock_tag_candidate.csv \
+  --evidence-csv docs/hk_company_browser_evidence.csv \
+  --replace
+```
+
+`theme_tags` 和 tag 字典里的多值字段统一使用分号 `;` 分隔。`research-stock-tags` 默认跳过已成功缓存证据的股票，遇到网络失败会写入错误样本但不会把 `research_error` 当作成功缓存，网络恢复后可以直接续跑。增强模式中，LLM 低置信或新发明的 tag 进入 candidate，不直接污染正式选股。
 
 ## 验证顺序
 

@@ -1,0 +1,13 @@
+﻿stock_code,market,tag,tag_type,confidence,is_primary,source,evidence,evidence_url,updated_at,review_status,review_note
+02926,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-03T10:55:27.277495,pending,
+02943,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-03T10:55:27.277884,pending,
+08276,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-03T10:55:27.336358,pending,
+08598,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-03T10:55:27.347153,pending,
+08600,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-03T10:55:27.347197,pending,
+01208,HK,黄金,resource,0.7,False,deepseek_browser_evidence,公司业务包括勘探、开发和开采金矿床，Rosebery矿也生产金。,https://hk.stockstar.com/hshare/01208,2026-06-03T10:49:17.685996,pending,黄金是公司开采的金属之一，但非核心产品，证据强度中等。
+01208,HK,白银,resource,0.7,False,deepseek_browser_evidence,公司业务包括勘探、开发和开采银矿床，Khoemacau矿也生产银。,https://hk.stockstar.com/hshare/01208,2026-06-03T10:49:17.686006,pending,白银是公司开采的金属之一，但非核心产品，证据强度中等。
+01208,HK,钴,resource,0.6,False,deepseek_browser_evidence,公司业务包括勘探、开发和开采钴矿床。,https://hk.stockstar.com/hshare/01208,2026-06-03T10:49:17.686014,pending,钴是公司开采的金属之一，但非主要产品，证据强度一般。
+01208,HK,铝,resource,0.5,False,deepseek_browser_evidence,公司业务包括生产氧化铝及制造和分销铝产品。,https://xueqiu.com/S/01208/time?page=64,2026-06-03T10:49:17.686022,pending,铝相关业务存在，但非核心采矿业务，证据强度一般。
+01208,HK,高杠杆,style,0.7,False,deepseek_browser_evidence,公司此前处于相对高杠杆状态，近年通过降杠杆转向稳健现金牛。,https://xueqiu.com/S/01208/time?page=64,2026-06-03T10:49:17.686047,pending,历史高杠杆，但当前正在降杠杆，证据强度中等。
+01208,HK,高负债,risk,0.7,False,deepseek_browser_evidence,公司此前处于相对高杠杆状态，近年通过降杠杆改善。,https://xueqiu.com/S/01208/time?page=64,2026-06-03T10:49:17.686068,pending,历史高负债，但当前正在改善，证据强度中等。
+01208,HK,汇率敏感,risk,0.6,False,deepseek_browser_evidence,公司业务涉及多个国家，收入以美元计价，但成本可能涉及其他货币，存在汇率风险。,https://xueqiu.com/S/01208/time?page=64,2026-06-03T10:49:17.686075,pending,公司有海外业务，但证据未明确提及汇率敏感度，强度一般。

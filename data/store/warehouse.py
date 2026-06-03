@@ -9,10 +9,14 @@ import pandas as pd
 
 from data.model import (
     CLEAN_OHLCV_COLUMNS,
+    COMPANY_RESEARCH_EVIDENCE_FIELDS,
     CORPORATE_ACTION_FIELDS,
     FEATURE_COLUMNS,
     SIGNAL_COLUMNS,
+    STOCK_TAG_CANDIDATE_FIELDS,
+    STOCK_TAG_FIELDS,
     STOCK_INFO_FIELDS,
+    TAG_DICTIONARY_FIELDS,
     TRADE_COLUMNS,
 )
 import os
@@ -28,6 +32,10 @@ class MarketDataWarehouse:
     FEATURES_DATASET = "features"
     SIGNALS_DATASET = "signals"
     TRADES_DATASET = "trades"
+    TAG_DICTIONARY_DATASET = "tag_dictionary"
+    STOCK_TAG_DATASET = "stock_tag_registry"
+    STOCK_TAG_CANDIDATE_DATASET = "stock_tag_candidate"
+    COMPANY_RESEARCH_EVIDENCE_DATASET = "company_research_evidence"
     CORPORATE_ACTIONS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "action_type", "year")
     FEATURES_PARTITION_COLUMNS = (
         "market",
@@ -47,25 +55,44 @@ class MarketDataWarehouse:
         self.layout = layout
         self.read_only = bool(read_only)
         self.parquet_store = ParquetDataStore(layout)
+        self._clickhouse_disabled_reason = None
 
         if clickhouse_store is not None:
             self.clickhouse_store = clickhouse_store
         elif os.environ.get("CLICKHOUSE_HOST"):
-            from data.store.clickhouse_store import ClickHouseStore
+            host = os.environ.get("CLICKHOUSE_HOST", "localhost")
+            port = int(os.environ.get("CLICKHOUSE_PORT", "8123"))
+            endpoint_error = self._check_clickhouse_endpoint(host, port)
+            if endpoint_error:
+                self.clickhouse_store = None
+                self._clickhouse_disabled_reason = endpoint_error
+            else:
+                from data.store.clickhouse_store import ClickHouseStore
 
-            self.clickhouse_store = ClickHouseStore(
-                host=os.environ.get("CLICKHOUSE_HOST", "localhost"),
-                port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
-                user=os.environ.get("CLICKHOUSE_USER", "default"),
-                password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
-                database=os.environ.get("CLICKHOUSE_DATABASE", "quant"),
-                layout=layout,
-            )
+                self.clickhouse_store = ClickHouseStore(
+                    host=host,
+                    port=port,
+                    user=os.environ.get("CLICKHOUSE_USER", "default"),
+                    password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
+                    database=os.environ.get("CLICKHOUSE_DATABASE", "quant"),
+                    layout=layout,
+                )
         else:
             self.clickhouse_store = None
 
         self.stock_info_dataset = "stock_info_registry"
-        self._clickhouse_disabled_reason = None
+
+    @staticmethod
+    def _check_clickhouse_endpoint(host, port):
+        """Return an error string when the configured ClickHouse endpoint is unreachable."""
+        import socket
+
+        timeout = float(os.environ.get("CLICKHOUSE_CONNECT_TIMEOUT", "0.5"))
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout):
+                return None
+        except OSError as exc:
+            return str(exc)
 
     @property
     def _feature_store(self):
@@ -152,13 +179,21 @@ class MarketDataWarehouse:
         if keys.empty:
             return payload
 
-        existing = self._read_stock_info_registry(
-            filters={
-                "market": keys["market"].astype(str).unique().tolist(),
-                "stock_code": keys["stock_code"].astype(str).unique().tolist(),
-            },
-            columns=["market", "stock_code", *available_fields],
-        )
+        chunk_rows = max(1, int(os.environ.get("STOCK_INFO_LOOKUP_CHUNK_ROWS", "100")))
+        existing_frames = []
+        key_records = keys.astype(str).to_dict("records")
+        for start in range(0, len(key_records), chunk_rows):
+            chunk = key_records[start:start + chunk_rows]
+            existing_chunk = self._read_stock_info_registry(
+                filters={
+                    "market": list(dict.fromkeys(record["market"] for record in chunk)),
+                    "stock_code": list(dict.fromkeys(record["stock_code"] for record in chunk)),
+                },
+                columns=["market", "stock_code", *available_fields],
+            )
+            if existing_chunk is not None and not existing_chunk.empty:
+                existing_frames.append(existing_chunk)
+        existing = pd.concat(existing_frames, ignore_index=True) if existing_frames else pd.DataFrame()
         if existing.empty:
             return payload
 
@@ -617,6 +652,236 @@ class MarketDataWarehouse:
                 continue
         if last_error is not None:
             raise last_error
+
+    def _meta_store_candidates(self):
+        stores = []
+        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+            stores.append(self.clickhouse_store)
+        stores.append(self.parquet_store)
+        return stores
+
+    def _upsert_meta_frame(
+        self,
+        dataset_name,
+        frame,
+        dedupe_keys,
+        sort_by,
+        date_column,
+        partition_columns=("market",),
+    ):
+        last_error = None
+        for store in self._meta_store_candidates():
+            try:
+                return store.upsert_frame(
+                    dataset_name=dataset_name,
+                    frame=frame,
+                    dedupe_keys=dedupe_keys,
+                    layer="meta",
+                    sort_by=sort_by,
+                    date_column=date_column,
+                    partition_columns=partition_columns,
+                )
+            except Exception as exc:
+                last_error = exc
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                if store is self.parquet_store:
+                    raise
+                continue
+        if last_error is not None:
+            raise last_error
+        return self.layout.dataset_path(dataset_name, layer="meta")
+
+    def _write_meta_frame(
+        self,
+        dataset_name,
+        frame,
+        date_column,
+        partition_columns=("market",),
+    ):
+        last_error = None
+        for store in self._meta_store_candidates():
+            try:
+                return store.write_frame(
+                    dataset_name=dataset_name,
+                    frame=frame,
+                    layer="meta",
+                    date_column=date_column,
+                    partition_columns=partition_columns,
+                )
+            except Exception as exc:
+                last_error = exc
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                if store is self.parquet_store:
+                    raise
+                continue
+        if last_error is not None:
+            raise last_error
+        return self.layout.dataset_path(dataset_name, layer="meta")
+
+    def _read_meta_frame(self, dataset_name, filters=None, columns=None, order_by=None):
+        frame = pd.DataFrame()
+        for store in self._meta_store_candidates():
+            try:
+                frame = store.read_frame(
+                    dataset_name,
+                    layer="meta",
+                    filters=filters,
+                    columns=columns,
+                    order_by=order_by,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                frame = pd.DataFrame(columns=columns)
+            if frame is not None and not frame.empty:
+                break
+        return frame if frame is not None else pd.DataFrame(columns=columns)
+
+    def upsert_tag_dictionary(self, frame, dataset_name=TAG_DICTIONARY_DATASET):
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
+        payload = frame[TAG_DICTIONARY_FIELDS].copy()
+        target = self._upsert_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["tag_type", "tag"],
+            sort_by=["tag_type", "tag", "updated_at"],
+            date_column="updated_at",
+            partition_columns=("tag_type",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def replace_tag_dictionary(self, frame, dataset_name=TAG_DICTIONARY_DATASET):
+        self._ensure_writable()
+        payload = (
+            frame[TAG_DICTIONARY_FIELDS].copy()
+            if frame is not None and not frame.empty
+            else pd.DataFrame(columns=TAG_DICTIONARY_FIELDS)
+        )
+        target = self._write_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            date_column="updated_at",
+            partition_columns=("tag_type",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def upsert_stock_tags(self, frame, dataset_name=STOCK_TAG_DATASET):
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
+        payload = frame[STOCK_TAG_FIELDS].copy()
+        target = self._upsert_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "tag_type", "tag"],
+            sort_by=["market", "stock_code", "tag_type", "tag", "updated_at"],
+            date_column="updated_at",
+            partition_columns=("market",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def replace_stock_tags(self, frame, dataset_name=STOCK_TAG_DATASET):
+        self._ensure_writable()
+        payload = (
+            frame[STOCK_TAG_FIELDS].copy()
+            if frame is not None and not frame.empty
+            else pd.DataFrame(columns=STOCK_TAG_FIELDS)
+        )
+        target = self._write_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            date_column="updated_at",
+            partition_columns=("market",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def upsert_stock_tag_candidates(self, frame, dataset_name=STOCK_TAG_CANDIDATE_DATASET):
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
+        payload = frame[STOCK_TAG_CANDIDATE_FIELDS].copy()
+        target = self._upsert_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "tag_type", "tag"],
+            sort_by=["market", "stock_code", "tag_type", "tag", "updated_at"],
+            date_column="updated_at",
+            partition_columns=("market",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def replace_stock_tag_candidates(self, frame, dataset_name=STOCK_TAG_CANDIDATE_DATASET):
+        self._ensure_writable()
+        payload = (
+            frame[STOCK_TAG_CANDIDATE_FIELDS].copy()
+            if frame is not None and not frame.empty
+            else pd.DataFrame(columns=STOCK_TAG_CANDIDATE_FIELDS)
+        )
+        target = self._write_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            date_column="updated_at",
+            partition_columns=("market",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def upsert_company_research_evidence(self, frame, dataset_name=COMPANY_RESEARCH_EVIDENCE_DATASET):
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
+        payload = frame[COMPANY_RESEARCH_EVIDENCE_FIELDS].copy()
+        target = self._upsert_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "source", "title"],
+            sort_by=["market", "stock_code", "source", "title", "fetched_at"],
+            date_column="fetched_at",
+            partition_columns=("market",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def replace_company_research_evidence(self, frame, dataset_name=COMPANY_RESEARCH_EVIDENCE_DATASET):
+        self._ensure_writable()
+        payload = (
+            frame[COMPANY_RESEARCH_EVIDENCE_FIELDS].copy()
+            if frame is not None and not frame.empty
+            else pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        )
+        target = self._write_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            date_column="fetched_at",
+            partition_columns=("market",),
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def read_stock_tags(self, stock_codes=None, market=None, tag=None, tag_type=None, min_confidence=None):
+        filters = {}
+        if stock_codes:
+            filters["stock_code"] = list(dict.fromkeys(stock_codes))
+        if market:
+            filters["market"] = market
+        if tag:
+            filters["tag"] = tag
+        if tag_type:
+            filters["tag_type"] = tag_type
+        frame = self._read_meta_frame(
+            self.STOCK_TAG_DATASET,
+            filters=filters,
+            columns=STOCK_TAG_FIELDS,
+            order_by="market, stock_code, tag_type, tag",
+        )
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=STOCK_TAG_FIELDS)
+        frame["confidence"] = pd.to_numeric(frame["confidence"], errors="coerce").fillna(0.0)
+        if min_confidence is not None:
+            frame = frame.loc[frame["confidence"] >= float(min_confidence)]
+        frame.reset_index(drop=True, inplace=True)
+        return frame
 
     def read_ohlcv(
         self,

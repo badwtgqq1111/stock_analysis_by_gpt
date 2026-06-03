@@ -18,6 +18,7 @@ dependencies = [
     "numpy",
     "pandas",
     "plotly>=6.7.0",
+    "playwright>=1.45.0",
     "py-mini-racer",
     "pyarrow",
     "requests",

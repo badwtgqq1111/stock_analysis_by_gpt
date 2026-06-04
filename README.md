@@ -152,46 +152,14 @@ uv run python run.py industry-coverage --show-missing
 | `docs/hk_tag_dictionary.csv` | tag 字典、别名、父级 tag |
 | `docs/hk_stock_tag_registry.csv` | 高置信度正式标签，用于选股、新闻和舆情关联 |
 | `docs/hk_stock_tag_candidate.csv` | 低置信度或待人工确认标签，不直接进入正式选股 |
-| `docs/hk_company_research_evidence.csv` | 公司资料证据缓存，支持断点续跑和重建标签 |
+| `docs/hk_company_searxng_evidence.csv` | SearXNG 公司资料证据缓存，支持断点续跑和重建标签 |
 
-### 基础离线模式
+### SearXNG + DeepSeek 主流程
 
-这四步仍然需要保留。它们是无浏览器、无 LLM、网络不稳定时的保底流程，主要从 `hk_industry_registry.csv` 和可选公司资料 evidence 生成 tag。
-实际使用上，把它理解成“基础层”：先保证行业/大类/规则 tag 可重建、可导入、可覆盖检查；Playwright + DeepSeek 只是在这个基础层上追加高丰富度 tag，不替代这四步。
-
-```bash
-# 1. 网络可用时先抓公司资料证据；当前网络不通时可跳过，后续再续跑
-uv run python run.py research-stock-tags \
-  --industry-registry-csv docs/hk_industry_registry.csv \
-  --evidence-csv docs/hk_company_research_evidence.csv \
-  --show-progress
-
-# 2. 从行业 registry 和 evidence 生成正式/候选 tag CSV
-uv run python run.py build-stock-tags \
-  --industry-registry-csv docs/hk_industry_registry.csv \
-  --evidence-csv docs/hk_company_research_evidence.csv \
-  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
-  --output docs/hk_stock_tag_registry.csv \
-  --candidate-output docs/hk_stock_tag_candidate.csv
-
-# 3. 导入 Parquet/ClickHouse 仓库
-uv run python run.py import-stock-tags \
-  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
-  --stock-tag-csv docs/hk_stock_tag_registry.csv \
-  --candidate-csv docs/hk_stock_tag_candidate.csv \
-  --evidence-csv docs/hk_company_research_evidence.csv \
-  --replace
-
-# 4. 查看覆盖率与 tag 分布
-uv run python run.py tag-coverage
-```
-
-### SearXNG / Tavily / Playwright + DeepSeek 增强模式
-
-增强模式用于提升 tag 丰富度：先用搜索服务缓存证据，再用 DeepSeek 输出结构化 JSON tag。建议优先用本地免费的 SearXNG，Tavily 做额度兜底，Playwright 只做小样本诊断。SearXNG 部署见 `docs/SEARXNG_SEARCH_INTEGRATION.md`。
+先用本地 SearXNG 缓存公司资料 evidence，再用 DeepSeek 抽取结构化 tag，最后合并行业 registry、LLM tag 并覆盖导入仓库。SearXNG 部署见 `docs/SEARXNG_SEARCH_INTEGRATION.md`。
 
 ```bash
-# 1. 推荐：用本地 SearXNG 抓证据
+# 1. 用本地 SearXNG 抓 evidence；默认会跳过已有成功证据，可断点续跑
 uv run python run.py searxng-research-stock-tags \
   --industry-registry-csv docs/hk_industry_registry.csv \
   --evidence-csv docs/hk_company_searxng_evidence.csv \
@@ -202,7 +170,57 @@ uv run python run.py searxng-research-stock-tags \
   --max-workers 4 \
   --show-progress
 
-# 2. 可选兜底：用 Tavily Search API 抓证据
+# 2. DeepSeek 从 SearXNG evidence 中抽取正式/候选 tag
+export DEEPSEEK_API_KEY=...
+uv run python run.py extract-stock-tags-llm \
+  --evidence-csv docs/hk_company_searxng_evidence.csv \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --output docs/hk_llm_tag_extraction.csv \
+  --candidate-output docs/hk_stock_tag_candidate_llm.csv \
+  --llm-model deepseek-v4-pro \
+  --max-workers 4 \
+  --batch-size 10 \
+  --checkpoint-every 25 \
+  --show-progress
+
+# 3. 合并行业 registry、SearXNG evidence 和 LLM tags
+uv run python run.py build-stock-tags \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --evidence-csv docs/hk_company_searxng_evidence.csv \
+  --llm-tag-csv docs/hk_llm_tag_extraction.csv \
+  --llm-candidate-csv docs/hk_stock_tag_candidate_llm.csv \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --output docs/hk_stock_tag_registry.csv \
+  --candidate-output docs/hk_stock_tag_candidate.csv
+
+# 4. 覆盖导入 Parquet/ClickHouse 仓库，避免旧 tag 残留
+uv run python run.py import-stock-tags \
+  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
+  --stock-tag-csv docs/hk_stock_tag_registry.csv \
+  --candidate-csv docs/hk_stock_tag_candidate.csv \
+  --evidence-csv docs/hk_company_searxng_evidence.csv \
+  --replace
+
+# 5. 查看覆盖率与 tag 分布
+uv run python run.py tag-coverage
+```
+
+`extract-stock-tags-llm` 默认会跳过输出 CSV 中已有正式/候选标签的股票，并按 `--checkpoint-every` 定期落盘。`--batch-size 10` 会把 10 只股票合并成一次 LLM 请求，显著减少全量抽取的请求数；遇到输出缺失、API 限流或错误率升高时，先把 `--batch-size` 降到 `5`，再降低 `--max-workers`。
+
+如需先人工审核低置信候选 tag，可以编辑 `docs/hk_stock_tag_candidate.csv` 的 `review_status` 后导出已接受项：
+
+```bash
+uv run python run.py review-stock-tag-candidates \
+  --candidate-csv docs/hk_stock_tag_candidate.csv \
+  --accepted-output-csv docs/hk_stock_tag_accepted_from_candidates.csv
+```
+
+### 搜索兜底
+
+主流程优先使用本地免费的 SearXNG。Tavily 仅作为付费/额度兜底，Playwright 仅用于小样本诊断或疑难补查；如果改用这些 evidence 文件，后续 `extract-stock-tags-llm`、`build-stock-tags` 和 `import-stock-tags` 的 `--evidence-csv` 也要换成对应文件。
+
+```bash
+# Tavily Search API 兜底
 export TAVILY_API_KEY=...
 uv run python run.py tavily-research-stock-tags \
   --industry-registry-csv docs/hk_industry_registry.csv \
@@ -212,10 +230,8 @@ uv run python run.py tavily-research-stock-tags \
   --max-queries-per-stock 3 \
   --show-progress
 
-# 3. 小样本诊断：首次使用 Playwright 需要安装 Chromium 浏览器
+# Playwright 小样本诊断；首次使用需要安装 Chromium 浏览器
 uv run playwright install chromium
-
-# 4. 小样本诊断：浏览器搜索抓证据
 uv run python run.py browser-research-stock-tags \
   --industry-registry-csv docs/hk_industry_registry.csv \
   --evidence-csv docs/hk_company_browser_evidence.csv \
@@ -225,38 +241,9 @@ uv run python run.py browser-research-stock-tags \
   --max-pages-per-stock 8 \
   --per-page-timeout 12 \
   --show-progress
-
-# 5. DeepSeek 从证据中抽取结构化 tag
-export DEEPSEEK_API_KEY=...
-uv run python run.py extract-stock-tags-llm \
-  --evidence-csv docs/hk_company_searxng_evidence.csv \
-  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
-  --output docs/hk_llm_tag_extraction.csv \
-  --candidate-output docs/hk_stock_tag_candidate_llm.csv \
-  --llm-model deepseek-chat \
-  --stock-codes 00700 03690 09988 01208 00883 \
-  --show-progress
-
-# 6. 合并行业 registry、基础 evidence 和 LLM tags
-uv run python run.py build-stock-tags \
-  --industry-registry-csv docs/hk_industry_registry.csv \
-  --evidence-csv docs/hk_company_research_evidence.csv \
-  --llm-tag-csv docs/hk_llm_tag_extraction.csv \
-  --llm-candidate-csv docs/hk_stock_tag_candidate_llm.csv \
-  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
-  --output docs/hk_stock_tag_registry.csv \
-  --candidate-output docs/hk_stock_tag_candidate.csv
-
-# 7. 覆盖导入仓库，避免旧 tag 残留
-uv run python run.py import-stock-tags \
-  --tag-dictionary-csv docs/hk_tag_dictionary.csv \
-  --stock-tag-csv docs/hk_stock_tag_registry.csv \
-  --candidate-csv docs/hk_stock_tag_candidate.csv \
-  --evidence-csv docs/hk_company_browser_evidence.csv \
-  --replace
 ```
 
-`theme_tags` 和 tag 字典里的多值字段统一使用分号 `;` 分隔。`research-stock-tags` 默认跳过已成功缓存证据的股票，遇到网络失败会写入错误样本但不会把 `research_error` 当作成功缓存，网络恢复后可以直接续跑。增强模式中，LLM 低置信或新发明的 tag 进入 candidate，不直接污染正式选股。
+`theme_tags` 和 tag 字典里的多值字段统一使用分号 `;` 分隔。`searxng-research-stock-tags` 默认跳过已成功缓存证据的股票，遇到网络失败会写入错误样本但不会把 `search_error` 当作成功缓存，网络恢复后可以直接续跑。LLM 低置信或新发明的 tag 进入 candidate，不直接污染正式选股。
 
 ## 验证顺序
 

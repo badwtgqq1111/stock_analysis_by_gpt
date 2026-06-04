@@ -1091,15 +1091,22 @@ class MarketDataService:
         model=None,
         temperature=0.1,
         max_tokens=4096,
+        max_workers=1,
+        batch_size=1,
+        skip_existing=True,
+        checkpoint_every=25,
         show_progress=False,
     ):
         """Use DeepSeek to extract structured tags from cached evidence."""
         from core.llm.client import LLMClient
         from data.ingest.llm_tag_extractor import (
+            build_tag_batch_extraction_prompt,
             build_tag_extraction_prompt,
             llm_extractions_to_tag_frames,
+            parse_llm_tag_batch_response,
             parse_llm_tag_response,
         )
+        from data.model import STOCK_TAG_CANDIDATE_FIELDS, STOCK_TAG_FIELDS
 
         evidence = pd.read_csv(evidence_csv, dtype=str).fillna("")
         dictionary = pd.read_csv(tag_dictionary_csv, dtype=str).fillna("")
@@ -1114,34 +1121,132 @@ class MarketDataService:
             codes = codes[: int(limit)]
 
         client_cls = globals().get("LLMClient", LLMClient)
-        client = client_cls(model=model)
+
+        def read_existing(path, columns):
+            path = Path(path)
+            if not path.exists():
+                return pd.DataFrame(columns=columns)
+            frame = pd.read_csv(path, dtype=str).fillna("")
+            for column in columns:
+                if column not in frame.columns:
+                    frame[column] = ""
+            return frame[columns]
+
+        existing_formal = read_existing(output_csv, STOCK_TAG_FIELDS)
+        existing_candidates = read_existing(candidate_output_csv, STOCK_TAG_CANDIDATE_FIELDS)
+        existing_codes = set()
+        if skip_existing:
+            for frame in (existing_formal, existing_candidates):
+                if not frame.empty and "stock_code" in frame.columns:
+                    existing_codes.update(frame["stock_code"].astype(str))
+            existing_codes = existing_codes.intersection(set(codes))
+            codes = [code for code in codes if code not in existing_codes]
+
         extractions = []
         errors = []
-        iterator = codes
-        if show_progress:
-            iterator = tqdm(codes, desc="llm tag extract", unit="stock")
-        for code in iterator:
-            rows = evidence.loc[evidence["stock_code"].astype(str) == code]
-            try:
-                messages = build_tag_extraction_prompt(code, rows, dictionary)
-                text = client.chat_with_retry(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    model=model,
-                )
-                extractions.append(parse_llm_tag_response(text))
-            except Exception as exc:
-                errors.append({"stock_code": code, "error": str(exc)})
 
-        formal, candidates = llm_extractions_to_tag_frames(extractions)
-        for target in (output_csv, candidate_output_csv):
-            Path(target).parent.mkdir(parents=True, exist_ok=True)
-        formal.to_csv(output_csv, index=False, encoding="utf-8-sig")
-        candidates.to_csv(candidate_output_csv, index=False, encoding="utf-8-sig")
+        def write_checkpoint():
+            formal, candidates = llm_extractions_to_tag_frames(extractions)
+            if not existing_formal.empty:
+                formal = pd.concat([existing_formal, formal], ignore_index=True)
+            if not existing_candidates.empty:
+                candidates = pd.concat([existing_candidates, candidates], ignore_index=True)
+            if not formal.empty:
+                formal = formal.drop_duplicates(
+                    subset=["stock_code", "market", "tag", "tag_type"],
+                    keep="last",
+                ).reset_index(drop=True)
+            else:
+                formal = pd.DataFrame(columns=STOCK_TAG_FIELDS)
+            if not candidates.empty:
+                candidates = candidates.drop_duplicates(
+                    subset=["stock_code", "market", "tag", "tag_type"],
+                    keep="last",
+                ).reset_index(drop=True)
+            else:
+                candidates = pd.DataFrame(columns=STOCK_TAG_CANDIDATE_FIELDS)
+            for target in (output_csv, candidate_output_csv):
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+            formal.to_csv(output_csv, index=False, encoding="utf-8-sig")
+            candidates.to_csv(candidate_output_csv, index=False, encoding="utf-8-sig")
+            return formal, candidates
+
+        def extract_one(code):
+            rows = evidence.loc[evidence["stock_code"].astype(str) == code]
+            client = client_cls(model=model)
+            messages = build_tag_extraction_prompt(code, rows, dictionary)
+            text = client.chat_with_retry(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model,
+            )
+            return parse_llm_tag_response(text)
+
+        def extract_batch(batch_codes):
+            if len(batch_codes) == 1:
+                return [extract_one(batch_codes[0])]
+            stock_evidence_rows = [
+                (code, evidence.loc[evidence["stock_code"].astype(str) == code])
+                for code in batch_codes
+            ]
+            client = client_cls(model=model)
+            messages = build_tag_batch_extraction_prompt(stock_evidence_rows, dictionary)
+            text = client.chat_with_retry(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model,
+            )
+            parsed = parse_llm_tag_batch_response(text)
+            returned_codes = {item.get("stock_code") for item in parsed}
+            missing_codes = [code for code in batch_codes if code not in returned_codes]
+            if missing_codes:
+                raise ValueError(f"LLM batch response missing stock_code(s): {','.join(missing_codes)}")
+            return parsed
+
+        completed = 0
+        worker_count = max(1, int(max_workers or 1))
+        batch_size = max(1, int(batch_size or 1))
+        checkpoint_every = max(1, int(checkpoint_every or 0))
+        batches = [codes[index:index + batch_size] for index in range(0, len(codes), batch_size)]
+        if worker_count > 1 and len(batches) > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {executor.submit(extract_batch, batch): batch for batch in batches}
+                iterator = as_completed(future_map)
+                if show_progress:
+                    iterator = tqdm(iterator, total=len(future_map), desc="llm tag extract", unit="batch")
+                for future in iterator:
+                    batch = future_map[future]
+                    try:
+                        batch_extractions = future.result()
+                        extractions.extend(batch_extractions)
+                    except Exception as exc:
+                        errors.append({"stock_codes": ",".join(batch), "error": str(exc)})
+                    completed += len(batch)
+                    if completed % checkpoint_every == 0:
+                        write_checkpoint()
+        else:
+            iterator = batches
+            if show_progress:
+                iterator = tqdm(batches, desc="llm tag extract", unit="batch")
+            for batch in iterator:
+                try:
+                    extractions.extend(extract_batch(batch))
+                except Exception as exc:
+                    errors.append({"stock_codes": ",".join(batch), "error": str(exc)})
+                completed += len(batch)
+                if completed % checkpoint_every == 0:
+                    write_checkpoint()
+
+        formal, candidates = write_checkpoint()
         return {
             "status": "completed",
-            "requested": len(codes),
+            "requested": len(codes) + len(existing_codes),
+            "skipped_existing": len(existing_codes),
+            "processed": len(codes),
+            "batch_size": batch_size,
+            "batches": len(batches),
             "formal_rows": len(formal),
             "candidate_rows": len(candidates),
             "errors": len(errors),

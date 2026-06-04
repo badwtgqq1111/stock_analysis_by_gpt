@@ -7,3 +7,6 @@ assets/stock_data.duckdb
 assets/data/meta/validation_feature_cache/
 .venv
 uv.lock
+
+# Generated research/search caches can contain signed URLs or other secrets.
+docs/hk_company_*_evidence.csv

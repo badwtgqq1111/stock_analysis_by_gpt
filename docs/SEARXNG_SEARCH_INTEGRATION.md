@@ -264,8 +264,14 @@ uv run python run.py extract-stock-tags-llm \
   --tag-dictionary-csv docs/hk_tag_dictionary.csv \
   --output docs/hk_llm_tag_extraction.csv \
   --candidate-output docs/hk_stock_tag_candidate_llm.csv \
+  --llm-model deepseek-v4-pro \
+  --max-workers 4 \
+  --batch-size 10 \
+  --checkpoint-every 25 \
   --show-progress
 ```
+
+`extract-stock-tags-llm` 默认跳过输出 CSV 里已有正式/候选标签的股票，并按 checkpoint 定期写出结果。`--batch-size 10` 会把 10 只股票合并成一次 LLM 请求；全量港股抽取建议从 `--max-workers 4 --batch-size 10` 起步，遇到 DeepSeek 输出缺失、限流或错误率升高时先降 batch size，再降并发。
 
 ### 测试计划
 

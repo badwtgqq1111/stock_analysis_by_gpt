@@ -295,6 +295,10 @@ def _run_extract_stock_tags_llm(args):
             model=args.llm_model,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
+            max_workers=args.max_workers,
+            batch_size=args.batch_size,
+            skip_existing=not args.no_skip_existing,
+            checkpoint_every=args.checkpoint_every,
             show_progress=args.show_progress,
         )
         print(f"DeepSeek 股票标签抽取完成: {summary}")
@@ -574,9 +578,13 @@ def main():
         parser.add_argument("--candidate-output", default="docs/hk_stock_tag_candidate_llm.csv", help="输出 DeepSeek 候选标签 CSV")
         parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
         parser.add_argument("--limit", type=int, default=None, help="限制抽取股票数量")
-        parser.add_argument("--llm-model", default=None, help="DeepSeek 模型名，默认使用 DEEPSEEK_MODEL/deepseek-chat")
+        parser.add_argument("--llm-model", default=None, help="DeepSeek 模型名，默认使用 DEEPSEEK_MODEL/deepseek-v4-pro")
         parser.add_argument("--temperature", type=float, default=0.1, help="LLM temperature")
         parser.add_argument("--max-tokens", type=int, default=4096, help="LLM 最大输出 token")
+        parser.add_argument("--max-workers", type=int, default=1, help="并发 LLM 请求数；建议 2-4 起步，视 API 限流调整")
+        parser.add_argument("--batch-size", type=int, default=1, help="每次 LLM 请求处理多少只股票；建议 5-10 起步")
+        parser.add_argument("--no-skip-existing", action="store_true", help="不跳过输出 CSV 中已有正式/候选标签的股票")
+        parser.add_argument("--checkpoint-every", type=int, default=25, help="每完成多少只股票写一次输出 CSV")
         parser.add_argument("--show-progress", action="store_true", help="显示进度")
 
         args = parser.parse_args(sys.argv[2:])

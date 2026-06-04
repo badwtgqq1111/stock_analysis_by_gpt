@@ -39,6 +39,27 @@ def parse_llm_tag_response(text):
     return payload
 
 
+def parse_llm_tag_batch_response(text):
+    payload = json.loads(strip_json_markdown(text))
+    if isinstance(payload, dict) and "stocks" in payload:
+        stocks = payload["stocks"]
+    elif isinstance(payload, list):
+        stocks = payload
+    else:
+        return [parse_llm_tag_response(text)]
+    if not isinstance(stocks, list):
+        raise ValueError("LLM batch response stocks must be a list")
+    parsed = []
+    for stock_payload in stocks:
+        if "stock_code" not in stock_payload:
+            raise ValueError("LLM batch response stock missing stock_code")
+        if "tags" not in stock_payload or not isinstance(stock_payload["tags"], list):
+            raise ValueError("LLM batch response stock missing tags list")
+        stock_payload["stock_code"] = normalize_stock_code(stock_payload["stock_code"], market="HK")
+        parsed.append(stock_payload)
+    return parsed
+
+
 def llm_extractions_to_tag_frames(extractions, source="deepseek_browser_evidence"):
     formal_rows = []
     candidate_rows = []
@@ -107,6 +128,58 @@ def build_tag_extraction_prompt(stock_code, evidence_rows, tag_dictionary_frame)
                             }
                         ],
                         "rejected": [{"tag": "string", "reason": "string"}],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+
+def build_tag_batch_extraction_prompt(stock_evidence_rows, tag_dictionary_frame):
+    dictionary_columns = ["tag", "tag_type", "aliases", "parent_tag", "description"]
+    evidence_columns = ["source", "title", "summary", "url", "raw_text"]
+    dictionary = tag_dictionary_frame.reindex(columns=dictionary_columns).fillna("").to_dict("records")
+    stocks = []
+    for stock_code, evidence_rows in stock_evidence_rows:
+        evidence = evidence_rows.reindex(columns=evidence_columns).fillna("").head(12).to_dict("records")
+        stocks.append({"stock_code": stock_code, "evidence": evidence})
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是港股公司研究标签抽取器。只输出 JSON，不要输出解释。"
+                "标签必须基于证据，不能把客户行业误判成公司自身暴露。"
+                "必须为输入中的每个 stock_code 返回一个结果。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "allowed_tags": dictionary,
+                    "stocks": stocks,
+                    "prompt_version": f"{PROMPT_VERSION}_batch",
+                    "output_schema": {
+                        "stocks": [
+                            {
+                                "stock_code": "string",
+                                "company_name": "string",
+                                "tags": [
+                                    {
+                                        "tag": "string",
+                                        "tag_type": "theme|resource|value_chain|business|risk|geo|style|instrument|industry",
+                                        "confidence": "number 0-1",
+                                        "is_primary": "boolean",
+                                        "evidence": "string",
+                                        "evidence_url": "string",
+                                        "decision": "formal|candidate|reject",
+                                        "reason": "string",
+                                    }
+                                ],
+                                "rejected": [{"tag": "string", "reason": "string"}],
+                            }
+                        ]
                     },
                 },
                 ensure_ascii=False,

@@ -22,3 +22,259 @@
 03690,HK,平台,value_chain,0.95,True,deepseek_browser_evidence,公司核心业务为本地生活服务平台，连接商家和消费者。,https://hk.finance.yahoo.com/news/%E7%BE%8E%E5%9C%98-03690-%E9%A6%96%E5%AD%A3%E7%B6%93%E8%AA%BF%E6%95%B4%E6%BA%A2%E5%88%A9%E6%B7%A8%E9%A1%8D%E5%8D%8736-%E6%94%B6%E5%85%A5%E5%A2%9E25-084912846.html,2026-06-03T10:49:17.686177
 03690,HK,高研发,style,0.8,False,deepseek_browser_evidence,公司持续投入AI研发，发布多款AI产品，表明研发投入较高。,https://hk.finance.yahoo.com/news/美團-03690-發布首款-ai-編程工具-123821527.html,2026-06-03T10:49:17.686183
 03690,HK,蓝筹,style,0.9,True,deepseek_browser_evidence,公司是恒生指数成分股，市值较大，属于蓝筹股。,https://hk.finance.yahoo.com/quote/3690.HK,2026-06-03T10:49:17.686189
+00003,HK,燃气,business,0.95,True,deepseek_browser_evidence,集团主要于香港及中国内地从事燃气生产、输送与销售及相关产品/服务销售,https://basic.10jqka.com.cn/176/HK0003/operate.html,2026-06-04T17:42:59.546693
+00003,HK,供水,business,0.9,False,deepseek_browser_evidence,集团主要于香港及中国内地从事...供水及废物处理,https://basic.10jqka.com.cn/176/HK0003/operate.html,2026-06-04T17:42:59.546717
+00003,HK,环保,business,0.9,False,deepseek_browser_evidence,从事...供水及废物处理,https://basic.10jqka.com.cn/176/HK0003/operate.html,2026-06-04T17:42:59.546728
+00003,HK,氢能,theme,0.85,False,deepseek_browser_evidence,开辟氢能市场,https://basic.10jqka.com.cn/HK0003/,2026-06-04T17:42:59.546736
+00003,HK,香港本地,geo,1.0,False,deepseek_browser_evidence,本港住宅售气量、本港新增客户、香港公用业务等描述,https://basic.10jqka.com.cn/HK0003/,2026-06-04T17:42:59.546756
+00003,HK,中国内地,geo,0.95,False,deepseek_browser_evidence,集团主要于香港及中国内地从事...,https://basic.10jqka.com.cn/176/HK0003/operate.html,2026-06-04T17:42:59.546763
+00001,HK,港口,business,1.0,True,deepseek_browser_evidence,"此部门录得收益港币488亿9,500万元，较2024年增加8%，主要由盐田及上海港口与亚洲及中东重点货柜码头之吞吐量增加3%，连同主要来自墨西哥及欧洲港口之仓储收入较去年上升17%所带动。",https://webcontent.megahubhk.com/Web/MorganFG/sc/Fundamental/CompProfile?stock_id=1,2026-06-04T17:42:59.546785
+00001,HK,美妆,business,1.0,True,deepseek_browser_evidence,欧洲及亚洲保健及美容产品业务有所改善。理想表现因中国保健及美容产品业务之营商环境挑战重重而部分抵销。,https://stockpage.10jqka.com.cn/HK0001/business/,2026-06-04T17:42:59.546794
+00001,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,主要由盐田及上海港口...吞吐量增加...中国保健及美容产品业务...,https://webcontent.megahubhk.com/Web/MorganFG/sc/Fundamental/CompProfile?stock_id=1,2026-06-04T17:42:59.546801
+00001,HK,欧洲,geo,0.9,False,deepseek_browser_evidence,欧洲及亚洲保健及美容产品业务有所改善...连同主要来自墨西哥及欧洲港口之仓储收入...,https://stockpage.10jqka.com.cn/HK0001/business/,2026-06-04T17:42:59.546808
+00005,HK,银行,business,1.0,True,deepseek_browser_evidence,银行业务净利息收益减少1亿美元至18亿美元，减幅为4%，主要由于存款的利率下降,https://basic.10jqka.com.cn/HK0005/,2026-06-04T17:42:59.546826
+00005,HK,利率敏感,risk,0.9,False,deepseek_browser_evidence,银行业务净利息收益减少……主要由于存款的利率下降,https://basic.10jqka.com.cn/HK0005/,2026-06-04T17:42:59.546833
+00005,HK,汇率敏感,risk,0.8,False,deepseek_browser_evidence,按固定汇率基准计算，收入为37亿美元……计及策略交易导致的2亿美元不利影响,https://basic.10jqka.com.cn/HK0005/,2026-06-04T17:42:59.546839
+00005,HK,全球业务,geo,0.9,False,deepseek_browser_evidence,于2024年，须予注意项目包括与出售加拿大及阿根廷业务相关的亏损净额14亿美元,https://webcontent.megahubhk.com/Web/MH/tc/Fundamental/CompProfile?stock_id=5&stock_type=0,2026-06-04T17:42:59.546846
+00005,HK,监管风险,risk,0.7,False,deepseek_browser_evidence,于2025年，须予注意项目包括……法律准备14亿美元,https://webcontent.megahubhk.com/Web/MH/tc/Fundamental/CompProfile?stock_id=5&stock_type=0,2026-06-04T17:42:59.546853
+00007,HK,流动性风险,risk,0.9,False,deepseek_browser_evidence,智富資源投資：內幕消息 (I)進一步延遲刊發全年業績； (II)進一步延期董事會會議； (III)延遲寄發年報；及 (IV)繼續暫停買賣,https://www.futunn.com/hk/stock/00007-HK/news/announcement/earning-report,2026-06-04T17:42:59.546864
+00006,HK,煤电,business,0.9,False,deepseek_browser_evidence,业务包括火电(thermal)发电,https://www.reuters.com/markets/companies/0006.HK/,2026-06-04T17:42:59.546873
+00006,HK,绿色电力,theme,0.9,False,deepseek_browser_evidence,业务包括可再生能源(renewable)发电,https://www.reuters.com/markets/companies/0006.HK/,2026-06-04T17:42:59.546880
+00006,HK,香港本地,geo,0.95,False,deepseek_browser_evidence,投资于香港电灯(HKEI)，从事香港发电和供电业务,https://www.reuters.com/markets/companies/0006.HK/,2026-06-04T17:42:59.546887
+00008,HK,通信运营,business,0.95,True,deepseek_browser_evidence,速度高达800G的光纤和5G-Advanced无线网络覆盖，提升客户在家居内外的工作、娱乐和学习体验。,https://1083.pccw.com/staticfiles/PCCWCorpsite/About%20PCCW/Investor%20Relations/Announcements%20&%20Notices/2025/Apr/c01_PCCW%202024%20Annual%20Report.pdf,2026-06-04T17:42:59.546898
+00008,HK,内容分发,value_chain,0.9,False,deepseek_browser_evidence,拥有全面综合的香港多媒体及娱乐集团，提供over-the-top(OTT)视像服务，亦从事内容创作。,https://www1.hkexnews.hk/listedco/listconews/sehk/2025/0904/2025090400899_c.pdf,2026-06-04T17:42:59.546905
+00008,HK,视频平台,business,0.9,False,deepseek_browser_evidence,在香港通过香港电视娱乐有限公司营运本地免费电视服务，并提供OTT视像服务。,https://www1.hkexnews.hk/listedco/listconews/sehk/2025/0904/2025090400899_c.pdf,2026-06-04T17:42:59.546912
+00008,HK,软件服务,business,0.85,False,deepseek_browser_evidence,电讯盈科企业方案是各行业客户的首选外判合作伙伴，在供应和维护公营机构最重要的资讯科技系统上发挥关键作用。,https://1083.pccw.com/staticfiles/PCCWCorpsite/About%20PCCW/Investor%20Relations/Announcements%20&%20Notices/2025/Apr/c01_PCCW%202024%20Annual%20Report.pdf,2026-06-04T17:42:59.546919
+00008,HK,企业服务,business,0.85,False,deepseek_browser_evidence,运用跨行业专业知识、环球基础设施和数码投资业务，提高企业营运效率。,https://1083.pccw.com/staticfiles/PCCWCorpsite/About%20PCCW/Investor%20Relations/Announcements%20&%20Notices/2025/Apr/c01_PCCW%202024%20Annual%20Report.pdf,2026-06-04T17:42:59.546926
+00008,HK,香港本地,geo,0.95,True,deepseek_browser_evidence,全面综合的香港多媒体及娱乐集团；通过香港电视娱乐营运本地免费电视；光纤网络覆盖主要在香港。,https://www1.hkexnews.hk/listedco/listconews/sehk/2025/0904/2025090400899_c.pdf,2026-06-04T17:42:59.546933
+00010,HK,商业地产,business,0.95,True,deepseek_browser_evidence,"Revenue and operating profit from property leasing were HK$9,853 million (2024: HK$10,033 million)",https://www.hkexnews.hk/listedco/listconews/sehk/2026/0130/2026013000221.pdf,2026-06-04T17:42:59.546948
+00010,HK,酒店,business,0.9,False,deepseek_browser_evidence,Hotel revenue reported HK$297 million (2024: HK$189 million),https://www.hkexnews.hk/listedco/listconews/sehk/2026/0130/2026013000221.pdf,2026-06-04T17:42:59.546955
+00010,HK,物业运营,value_chain,0.8,False,deepseek_browser_evidence,"Revenue and operating profit from property leasing were HK$9,853 million",https://www.hkexnews.hk/listedco/listconews/sehk/2026/0130/2026013000221.pdf,2026-06-04T17:42:59.546961
+00012,HK,住宅开发,business,1.0,True,deepseek_browser_evidence,恒基地產核心業務為物業發展和物業投資,https://www.hld.com/tc/investor-information/interim-annual-sustainability-reports,2026-06-04T17:42:59.546971
+00012,HK,商业地产,business,1.0,True,deepseek_browser_evidence,恒基地產核心業務為物業發展和物業投資,https://www.hld.com/tc/investor-information/interim-annual-sustainability-reports,2026-06-04T17:42:59.546978
+00012,HK,中国内地,geo,0.95,False,deepseek_browser_evidence,恒基地產是於香港和內地均具領導地位的地產發展集團,https://www.hld.com/tc/investor-information/interim-annual-sustainability-reports,2026-06-04T17:42:59.546985
+00012,HK,香港本地,geo,0.95,False,deepseek_browser_evidence,恒基地產是於香港和內地均具領導地位的地產發展集團,https://www.hld.com/tc/investor-information/interim-annual-sustainability-reports,2026-06-04T17:42:59.546992
+00014,HK,商业地产,business,0.98,True,deepseek_browser_evidence,"Hysan is a leading property investment, management and development company in Hong Kong.",https://www.hysan.com.hk/app/uploads/HysanAR2024/eng/,2026-06-04T17:42:59.546999
+00014,HK,物业管理,business,0.95,True,deepseek_browser_evidence,"Hysan is a leading property investment, management and development company in Hong Kong.",https://www.hysan.com.hk/app/uploads/HysanAR2024/eng/,2026-06-04T17:42:59.547006
+00014,HK,物业运营,value_chain,0.95,True,deepseek_browser_evidence,"Hysan is a leading property investment, management and development company in Hong Kong.",https://www.hysan.com.hk/app/uploads/HysanAR2024/eng/,2026-06-04T17:42:59.547013
+00014,HK,香港本地,geo,0.98,True,deepseek_browser_evidence,"Hysan is a leading property investment, management and development company in Hong Kong.",https://www.hysan.com.hk/app/uploads/HysanAR2024/eng/,2026-06-04T17:42:59.547019
+00014,HK,中国内地,geo,0.85,False,deepseek_browser_evidence,在中国内地，上海利园定位为周边写字楼商圈的商业及社交枢纽。商舖业务部分录得租金收入23百万港元。,https://basic.10jqka.com.cn/HK0014/,2026-06-04T17:42:59.547025
+00017,HK,住宅开发,business,0.9,True,deepseek_browser_evidence,主营业务：物业发展与投资，包括香港及中国内地的 房地产 项目开发。,https://xueqiu.com/9587001960/354659702,2026-06-04T17:42:59.547035
+00017,HK,商业地产,business,0.9,False,deepseek_browser_evidence,主营业务包括商业物业运营。,https://xueqiu.com/9587001960/354659702,2026-06-04T17:42:59.547041
+00017,HK,工程建设,business,0.8,False,deepseek_browser_evidence,2025财年收入下降主要由于旧项目接近完工导致建筑业务收入减少。,https://stock.stockstar.com/AN2025092600039420.shtml,2026-06-04T17:42:59.547047
+00017,HK,物业运营,value_chain,0.8,False,deepseek_browser_evidence,公司涉及商业物业运营。,https://xueqiu.com/9587001960/354659702,2026-06-04T17:42:59.547053
+00017,HK,香港本地,geo,0.9,False,deepseek_browser_evidence,物业发展与投资包括香港。,https://xueqiu.com/9587001960/354659702,2026-06-04T17:42:59.547060
+00017,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,物业发展与投资包括中国内地。,https://xueqiu.com/9587001960/354659702,2026-06-04T17:42:59.547067
+00020,HK,AI,theme,1.0,True,deepseek_browser_evidence,公司2025年实现总收入50.1亿元创历史新高，同比增长33%，其中生成式AI业务同比激增51%至36亿元，收入占比提升至72%，标志着向生成式AI的战略转型成效显著。,https://www.gelonghui.com/news/5198436,2026-06-04T17:42:59.547078
+00020,HK,大模型,theme,0.95,False,deepseek_browser_evidence,生成式AI业务收入占比72%，反映大模型/生成式AI（LLM）是公司主要产品方向。,https://www.gelonghui.com/news/5198436,2026-06-04T17:42:59.547085
+00020,HK,AI应用,theme,0.85,False,deepseek_browser_evidence,生成式AI业务通常覆盖各类行业应用，公司作为AI软件服务商，提供智能应用。,https://www.gelonghui.com/news/5198436,2026-06-04T17:42:59.547092
+00018,HK,广告,business,0.95,True,deepseek_browser_evidence,出版报章分部从事报章互联网订阅及广告收入。,https://stockpage.10jqka.com.cn/HK0018/company/,2026-06-04T17:42:59.547101
+00018,HK,广告投放,value_chain,0.9,False,deepseek_browser_evidence,出版报章分部从事报章互联网订阅及广告收入。,https://stockpage.10jqka.com.cn/HK0018/company/,2026-06-04T17:42:59.547109
+00018,HK,酒店,business,0.9,False,deepseek_browser_evidence,其他经营分部从事酒店物业之营运许可费收入及餐厅营运收入。,https://stockpage.10jqka.com.cn/HK0018/company/,2026-06-04T17:42:59.547117
+00018,HK,物业运营,value_chain,0.9,False,deepseek_browser_evidence,其他经营分部从事...投资物业之租金收入。,https://stockpage.10jqka.com.cn/HK0018/company/,2026-06-04T17:42:59.547124
+00018,HK,商业地产,business,0.85,False,deepseek_browser_evidence,公司位于北角的本地商业楼宇物业租金收入约为351.4万港元。,https://reportify.cn/financials/1143283190123859968,2026-06-04T17:42:59.547130
+00018,HK,香港本地,geo,0.95,False,deepseek_browser_evidence,公司主要业务位于香港，包括报纸出版、本地商业物业及贷款业务，年报管理层讨论亦聚焦香港市场。,https://reportify.cn/financials/1143283190123859968,2026-06-04T17:42:59.547138
+00019,HK,商业地产,business,0.9,True,deepseek_browser_evidence,地产收益为港币314.62亿元，太古公司应占太古地产的基本溢利上升,https://hk.stockstar.com/IG2026031200017360.shtml,2026-06-04T17:42:59.547149
+00019,HK,航空,business,0.9,False,deepseek_browser_evidence,航空收益为港币229.95亿元，燃油成本净额港币287.15亿元,https://hk.stockstar.com/IG2026031200017360.shtml,2026-06-04T17:42:59.547157
+00019,HK,商品价格敏感,risk,0.8,False,deepseek_browser_evidence,燃油成本净额为港币287.15亿元，较上年增长11%,https://hk.stockstar.com/IG2026031200017360.shtml,2026-06-04T17:42:59.547171
+00019,HK,高股息,style,0.8,False,deepseek_browser_evidence,全年派息港币51.25亿元，维持较高股息支付水平,https://hk.stockstar.com/IG2026031200017360.shtml,2026-06-04T17:42:59.547185
+00019,HK,香港本地,geo,0.9,False,deepseek_browser_evidence,公司总部位于香港，主要业务之一地产在香港,https://basic.10jqka.com.cn/HK0019/business.html,2026-06-04T17:42:59.547191
+00027,HK,博彩,business,1.0,True,deepseek_browser_evidence,主要业务是在澳门经营娱乐场幸运博彩或其他形式的博彩、提供酒店及有关服务，以及在香港、澳门及中国内地生产、销售及分销建筑材料。,https://basic.10jqka.com.cn/HK0027/operate.html,2026-06-04T17:42:59.547217
+00027,HK,酒店,business,1.0,False,deepseek_browser_evidence,提供酒店及有关服务,https://basic.10jqka.com.cn/HK0027/operate.html,2026-06-04T17:42:59.547224
+00027,HK,建筑材料,business,1.0,False,deepseek_browser_evidence,在香港、澳门及中国内地生产、销售及分销建筑材料,https://basic.10jqka.com.cn/HK0027/operate.html,2026-06-04T17:42:59.547231
+00027,HK,澳门,geo,1.0,False,deepseek_browser_evidence,在澳门经营娱乐场幸运博彩,https://basic.10jqka.com.cn/HK0027/operate.html,2026-06-04T17:42:59.547238
+00027,HK,香港本地,geo,1.0,False,deepseek_browser_evidence,在香港...生产、销售及分销建筑材料,https://basic.10jqka.com.cn/HK0027/operate.html,2026-06-04T17:42:59.547245
+00027,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,在中国内地生产、销售及分销建筑材料,https://basic.10jqka.com.cn/HK0027/operate.html,2026-06-04T17:42:59.547252
+00023,HK,银行,business,1.0,True,deepseek_browser_evidence,银行及其附属公司（'集团'）的主要业务为提供银行及有关的金融服务。,https://basic.10jqka.com.cn/176/HK0023/operate.html,2026-06-04T17:42:59.547261
+00025,HK,工程建设,business,0.9,True,deepseek_browser_evidence,建筑及工程分部从事铝窗及幕墙、楼宇建筑、建筑供应、机电工程、升降机及自动扶梯相关业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547276
+00025,HK,汽车经销,business,0.9,True,deepseek_browser_evidence,汽车代理分部从事汽车销售业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547283
+00025,HK,住宅开发,business,0.8,True,deepseek_browser_evidence,物业发展及营运分部从事物业发展、冷藏仓库及物流业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547291
+00025,HK,银发经济,theme,0.8,False,deepseek_browser_evidence,医疗投资分部从事安老院舍物业投资业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547298
+00025,HK,保险,business,0.8,False,deepseek_browser_evidence,其他部门从事计算机和信息技术、食品和饮料零售、食品贸易、保险和软件开发业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547305
+00025,HK,软件服务,business,0.8,False,deepseek_browser_evidence,其他部门从事计算机和信息技术、食品和饮料零售、食品贸易、保险和软件开发业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547312
+00025,HK,物流网络,value_chain,0.7,False,deepseek_browser_evidence,物业发展及营运分部从事物业发展、冷藏仓库及物流业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547318
+00025,HK,机械设备,business,0.7,False,deepseek_browser_evidence,建筑及工程分部从事升降机及自动扶梯相关业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547324
+00025,HK,物业运营,value_chain,0.7,False,deepseek_browser_evidence,物业投资分部从事住宅及商用物业投资业务。,https://hk.stockstar.com/hshare/00025,2026-06-04T17:42:59.547330
+00028,HK,住宅开发,business,0.9,True,deepseek_browser_evidence,本集团主要经营范围包括:在中国内地开发及投资住宅,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=00028&type=web,2026-06-04T17:42:59.547340
+00028,HK,商业地产,business,0.9,True,deepseek_browser_evidence,开发及投资办公楼及商用物业,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=00028&type=web,2026-06-04T17:42:59.547346
+00028,HK,物业管理,business,0.9,True,deepseek_browser_evidence,物业管理,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=00028&type=web,2026-06-04T17:42:59.547353
+00028,HK,医院服务,value_chain,0.8,False,deepseek_browser_evidence,投资及经营医院,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=00028&type=web,2026-06-04T17:42:59.547359
+00028,HK,银发经济,theme,0.8,False,deepseek_browser_evidence,护老及康养相关业务,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=00028&type=web,2026-06-04T17:42:59.547367
+00028,HK,中国内地,geo,0.9,True,deepseek_browser_evidence,在中国内地...,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=00028&type=web,2026-06-04T17:42:59.547373
+00028,HK,香港本地,geo,0.9,False,deepseek_browser_evidence,在中国香港之物业投资及物业管理,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=00028&type=web,2026-06-04T17:42:59.547380
+00028,HK,高股息,style,0.7,False,deepseek_browser_evidence,董事会建议派发中期股息每股20港仙,https://stock.stockstar.com/AN2026042400062688.shtml,2026-06-04T17:42:59.547387
+00031,HK,红筹,style,0.9,True,deepseek_browser_evidence,中国航天国际控股有限公司发布2025年全年业绩公告,https://wap.stockstar.com/detail/AN2026032700002771,2026-06-04T17:42:59.547397
+00031,HK,央国企,style,0.9,False,deepseek_browser_evidence,中国航天国际控股有限公司发布2025年全年业绩公告,https://wap.stockstar.com/detail/AN2026032700002771,2026-06-04T17:42:59.547404
+00030,HK,分销,value_chain,0.9,True,deepseek_browser_evidence,"货品及商品贸易分部在2023财年录得约569,500,000港元的收入，占主要收入；该分部主要从事贸易。",https://reportify.cn/filings/978384612193603584,2026-06-04T17:42:59.547413
+00029,HK,商业地产,business,1.0,True,deepseek_browser_evidence,主要業務為物業投資及物業發展。本年度收入主要來自中國內地之商業租賃業務。,https://4g.stockstar.com/detail/AN2025102700028660,2026-06-04T17:42:59.547422
+00029,HK,中国内地,geo,1.0,True,deepseek_browser_evidence,本年度收入主要來自中國內地之商業租賃業務。,https://4g.stockstar.com/detail/AN2025102700028660,2026-06-04T17:42:59.547429
+00029,HK,汇率敏感,risk,0.9,False,deepseek_browser_evidence,集團維持低至零資產負債比率，密切監察人民幣匯率波動。,https://4g.stockstar.com/detail/AN2025102700028660,2026-06-04T17:42:59.547435
+00034,HK,住宅开发,business,0.95,True,deepseek_browser_evidence,土地储备约 3.0 百万平方米应占总楼面面积，分布于香港及中国内地，主要从事房地产开发。,https://stockn.xueqiu.com/00034/20250425660399.pdf,2026-06-04T17:42:59.547448
+00034,HK,中国内地,geo,0.9,True,deepseek_browser_evidence,土地储备分布于香港及中国内地。,https://stockn.xueqiu.com/00034/20250425660399.pdf,2026-06-04T17:42:59.547454
+00034,HK,香港本地,geo,0.9,True,deepseek_browser_evidence,土地储备分布于香港及中国内地。,https://stockn.xueqiu.com/00034/20250425660399.pdf,2026-06-04T17:42:59.547461
+00045,HK,酒店,business,1.0,True,deepseek_browser_evidence,公司主要业务为酒店营运，包括半岛酒店等，收入主要来自酒店分部。,https://stockpage.10jqka.com.cn/HK0045/company/,2026-06-04T17:42:59.547502
+00045,HK,商业地产,business,0.8,False,deepseek_browser_evidence,商用物业分部从事办公室物业出租、零售等；酒店分部也包含商场及办公室租赁。,https://stockpage.10jqka.com.cn/HK0045/company/,2026-06-04T17:42:59.547510
+00045,HK,香港本地,geo,0.9,False,deepseek_browser_evidence,公司名称为香港上海大酒店，注册地及主要业务在香港，如半岛酒店及山顶缆车等。,https://stockpage.10jqka.com.cn/HK0045/company/,2026-06-04T17:42:59.547516
+00046,HK,软件服务,business,0.9,True,deepseek_browser_evidence,富途牛牛页面显示科联系统(00046)主营业务数据与分析，明确其收入构成；年报亦表明公司为资讯科技企业。,https://www.futunn.com/stock/00046-HK/financial/main-composition,2026-06-04T17:42:59.547528
+00052,HK,餐饮,business,1.0,True,deepseek_browser_evidence,公司年报显示为香港快餐集团，主营餐饮连锁业务。,https://assets.fairwood.com.hk/assets/public/documents/E00052_AR2023-24_0724_1240.pdf,2026-06-04T17:42:59.547547
+00052,HK,香港本地,geo,0.9,True,deepseek_browser_evidence,大快活为香港老牌快餐连锁，主要收入及经营场所位于香港，业务集中本地市场。,https://assets.fairwood.com.hk/assets/public/documents/E00052_AR2023-24_0724_1240.pdf,2026-06-04T17:42:59.547554
+00048,HK,零部件,value_chain,0.95,True,deepseek_browser_evidence,集团主要从事制造及销售用于汽车内饰件及其他部分的无纺布相关产品,https://basic.10jqka.com.cn/HK0048/,2026-06-04T17:42:59.547562
+00048,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,沧州工厂（内地生产基地）,https://stock.stockstar.com/AN2026050100007498.shtml,2026-06-04T17:42:59.547569
+00048,HK,海外制裁风险,risk,0.85,False,deepseek_browser_evidence,报告期内收入下降主要由于美国上调关税影响沧州工厂产品需求,https://stock.stockstar.com/AN2026050100007498.shtml,2026-06-04T17:42:59.547575
+00048,HK,出海,theme,0.8,False,deepseek_browser_evidence,美国关税影响沧州工厂产品需求，表明公司产品出口至美国,https://stock.stockstar.com/AN2026050100007498.shtml,2026-06-04T17:42:59.547582
+00051,HK,酒店,business,1.0,True,deepseek_browser_evidence,同花顺：集团的主要业务为拥有酒店及投资物业。,https://stockpage.10jqka.com.cn/basicweb/176/HK0051/business.html,2026-06-04T17:42:59.547591
+00051,HK,商业地产,business,0.9,True,deepseek_browser_evidence,同花顺：集团的主要业务为拥有酒店及投资物业。投资物业通常指商业楼宇。,https://stockpage.10jqka.com.cn/basicweb/176/HK0051/business.html,2026-06-04T17:42:59.547598
+00051,HK,香港本地,geo,1.0,False,deepseek_browser_evidence,公司综合收入以港币结算，业务主要在香港。,https://stockpage.10jqka.com.cn/basicweb/176/HK0051/business.html,2026-06-04T17:42:59.547604
+00050,HK,商业地产,business,0.9,True,deepseek_browser_evidence,溢利主要来自商舖及商场租金收入，业务包括地产发展及投资,https://www.sohu.com/a/998693851_362225,2026-06-04T17:42:59.547611
+00050,HK,酒店,business,0.8,False,deepseek_browser_evidence,业务包括旅游及酒店业务,https://xueqiu.com/S/00050/company,2026-06-04T17:42:59.547617
+00050,HK,旅游,business,0.8,False,deepseek_browser_evidence,业务包括旅游及酒店业务,https://xueqiu.com/S/00050/company,2026-06-04T17:42:59.547623
+00050,HK,香港本地,geo,0.9,False,deepseek_browser_evidence,公司主要业务及物业均位于香港,https://xueqiu.com/S/00050/company,2026-06-04T17:42:59.547637
+00055,HK,音乐,business,1.0,True,deepseek_browser_evidence,公司主要業務包括音樂及娛樂,https://wap.stockstar.com/detail/AN2026042500018474,2026-06-04T17:42:59.547710
+00055,HK,住宅开发,business,1.0,True,deepseek_browser_evidence,公司主要業務包括物業發展,https://wap.stockstar.com/detail/AN2026042500018474,2026-06-04T17:42:59.547717
+00055,HK,商业地产,business,1.0,True,deepseek_browser_evidence,公司主要業務包括物業投資,https://wap.stockstar.com/detail/AN2026042500018474,2026-06-04T17:42:59.547725
+00057,HK,机械设备,business,1.0,True,deepseek_browser_evidence,震雄集团主营业务为注塑机研发、生产与销售，属于通用设备/专用设备制造。,https://chenhsong.com.hk/wp-content/uploads/2024/07/e00057_Annual-Report-202324.pdf,2026-06-04T17:42:59.547733
+00057,HK,智能制造,theme,0.9,True,deepseek_browser_evidence,推出“iChen Smart Family”智能生产系统，包括iChen Cloud、iChen Smart Factory和iChen AI Molder，加强智能生产转型。,https://reportify.cn/financials/1145800253333704704,2026-06-04T17:42:59.547740
+00057,HK,出海,theme,0.8,True,deepseek_browser_evidence,海外市场营业额增长37%至7.16亿港元；在巴西、印度、印尼、越南等新兴市场布局初见成效。,https://reportify.cn/financials/1145800253333704704,2026-06-04T17:42:59.547747
+00057,HK,中国内地,geo,1.0,True,deepseek_browser_evidence,中国内地及香港市场营业额18.40亿港元，占总营业额约71%，且深圳设有创新研发中心和生产基地。,https://reportify.cn/financials/1145800253333704704,2026-06-04T17:42:59.547754
+00057,HK,设备,value_chain,1.0,True,deepseek_browser_evidence,公司生产注塑机，为比亚迪等客户提供高端注塑机，属于制造设备商。,https://reportify.cn/financials/1145800253333704704,2026-06-04T17:42:59.547761
+00181,HK,酒店,business,0.9,True,deepseek_browser_evidence,星级酒店营业额为2006万港元，同比下降35.95%；客房销售收入为1010万港元，占总收入50%；平均入住率为44%，平均每日房价为327元人民币。,https://reportify.cn/financials/1114995527335940096,2026-06-04T19:00:48.768584
+00181,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,酒店业务平均每日房价为327元人民币，显示主要经营地点在内地。,https://reportify.cn/financials/1114995527335940096,2026-06-04T19:00:48.768625
+00186,HK,住宅开发,business,0.9,True,deepseek_browser_evidence,"中国物业发展业务收入由393百万港元增加至2,087百万港元，交付面积由约70,300平方米增加至约282,200平方米。",https://reportify.cn/filings/1015912645779394560,2026-06-04T19:00:48.768654
+00186,HK,分销,value_chain,0.8,False,deepseek_browser_evidence,Emerson美国分销家庭用品及影音产品业务收入由55百万港元增加至71百万港元。,https://reportify.cn/filings/1015912645779394560,2026-06-04T19:00:48.768672
+00186,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,"中国物业发展业务收入为2,087百万港元，交付面积集中在内地。",https://reportify.cn/filings/1015912645779394560,2026-06-04T19:00:48.768687
+00186,HK,北美,geo,0.8,False,deepseek_browser_evidence,Emerson在美国开展家庭用品及影音产品的分销业务。,https://reportify.cn/filings/1015912645779394560,2026-06-04T19:00:48.768702
+00392,HK,燃气,business,0.9,True,deepseek_browser_evidence,"Beijing Enterprises Holdings ... business segments: the piped gas operation segment, the brewery operation segment, the sewage and water treatment operations segment, the expressway and toll road operations segment",http://www.researchinchina.com/Htmls/Company/3459.html,2026-06-04T19:00:48.768938
+00392,HK,啤酒,business,0.8,False,deepseek_browser_evidence,Beijing Enterprises Holdings ... business segments: ... the brewery operation segment,http://www.researchinchina.com/Htmls/Company/3459.html,2026-06-04T19:00:48.768953
+00392,HK,供水,business,0.8,False,deepseek_browser_evidence,the sewage and water treatment operations segment,http://www.researchinchina.com/Htmls/Company/3459.html,2026-06-04T19:00:48.768967
+00392,HK,公路,business,0.8,False,deepseek_browser_evidence,the expressway and toll road operations segment,http://www.researchinchina.com/Htmls/Company/3459.html,2026-06-04T19:00:48.768980
+00392,HK,央国企,style,0.9,False,deepseek_browser_evidence,北京控股为北京市国资委下属企业,,2026-06-04T19:00:48.769015
+00392,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,业务分部均位于中国内地,,2026-06-04T19:00:48.769028
+01903,HK,家电,business,0.9,True,deepseek_browser_evidence,稳固白色家电行业领先优势的基础上，在机器人、新能源、建筑科技、工业零部件、医疗、物流等领域，美的集团已建构强劲的第二增长曲线,https://www.news.cn/finance/20260331/df0253a05aca4a56a14cfd751a1331e3/c.html,2026-06-04T19:00:48.771321
+01903,HK,机器人,theme,0.8,False,deepseek_browser_evidence,稳固白色家电行业领先优势的基础上，在机器人、新能源、建筑科技、工业零部件、医疗、物流等领域，美的集团已建构强劲的第二增长曲线,https://www.news.cn/finance/20260331/df0253a05aca4a56a14cfd751a1331e3/c.html,2026-06-04T19:00:48.771331
+02325,HK,AI医疗,theme,0.8,True,deepseek_browser_evidence,云康集团：数智赋能医疗 筑就有温度的健康生,https://stock.finance.sina.com.cn/hkstock/quotes/02325.html,2026-06-04T19:00:48.771825
+02325,HK,医疗服务,business,0.7,True,deepseek_browser_evidence,公司名称为'云康集团'，新闻内容围绕'医疗'与'健康'，且出现在港股医疗相关板块。,https://stock.finance.sina.com.cn/hkstock/quotes/02325.html,2026-06-04T19:00:48.771835
+02565,HK,创新药,theme,0.95,True,deepseek_browser_evidence,公司名称为派格生物医药-B，后缀-B表明为未盈利生物科技公司，聚焦创新药研发。,https://quote.eastmoney.com/hk/02565.html,2026-06-04T19:00:48.771997
+02565,HK,创新药研发,value_chain,0.9,False,deepseek_browser_evidence,作为生物医药-B股，处于新药研发与临床阶段。,https://quote.eastmoney.com/hk/02565.html,2026-06-04T19:00:48.772006
+02572,HK,钢铁,resource,0.95,True,deepseek_browser_evidence,公司名称为“找钢网”，经营钢铁交易平台。,https://stock.finance.sina.com.cn/hkstock/info/02572.html,2026-06-04T19:00:48.772036
+02572,HK,平台,value_chain,0.9,True,deepseek_browser_evidence,其业务模式为在线钢铁交易平台，连接上下游。,https://stock.finance.sina.com.cn/hkstock/info/02572.html,2026-06-04T19:00:48.772045
+02575,HK,创新药,theme,0.95,True,deepseek_browser_evidence,公司为生物医药-B，已获得三款创新药上市批准，管线覆盖消化、肿瘤、代谢疾病。,https://www.hibor.com.cn/report/a69ae24d7ba212a5daa9851f6b4812b8.html,2026-06-04T19:00:48.772088
+02575,HK,创新药研发,value_chain,0.9,False,deepseek_browser_evidence,拥有十余个候选药物，持续进行临床开发。,https://www.hibor.com.cn/report/a69ae24d7ba212a5daa9851f6b4812b8.html,2026-06-04T19:00:48.772098
+02576,HK,AI医疗,theme,0.95,True,deepseek_browser_evidence,公司拥有Wiz.AI平台，将AI体应用于临床研究生命周期的核心阶段。,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=02576&type=web,2026-06-04T19:00:48.772129
+02576,HK,AI应用,theme,0.9,False,deepseek_browser_evidence,多个AI驱动模块已商业化，推出AI体解决方案组合。,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=02576&type=web,2026-06-04T19:00:48.772138
+02841,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"新浪财经-港股频道为您提供GX中国医疗科技 (02841)股票股价,实时行情,新闻,财报,研究报告...",https://stock.finance.sina.com.cn/hkstock/quotes/02841.html,2026-06-04T19:00:48.772178
+02841,HK,医疗器械,theme,0.9,False,deepseek_browser_evidence,GLOBAL X中国医疗科技ETF（上市类别）,https://www.etnet.com.hk/www/sc/stocks/realtime/quote_ci_brief.php?code=2841,2026-06-04T19:00:48.772187
+02841,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,GX中国医疗科技 (02841) 为中国医疗科技ETF，投资标的为中国内地医疗科技公司,https://stock.finance.sina.com.cn/hkstock/quotes/02841.html,2026-06-04T19:00:48.772194
+02843,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"新浪财经-港股频道为您提供东汇A50 (02843)股票股价,实时行情...",https://stock.finance.sina.com.cn/hkstock/quotes/02843.html,2026-06-04T19:00:48.772204
+02843,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,东汇A50 跟踪富时中国A50指数，主要投资中国内地大盘股,https://stock.finance.sina.com.cn/hkstock/quotes/02843.html,2026-06-04T19:00:48.772211
+02843,HK,蓝筹,style,0.8,False,deepseek_browser_evidence,A50指数成分股为沪深两市市值最大、流动性最好的50家公司,https://stock.finance.sina.com.cn/hkstock/quotes/02843.html,2026-06-04T19:00:48.772219
+02845,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,新浪财经为您提供GX中国电车 (02845)免费实时港股行情...,https://stock.finance.sina.com.cn/hkstock/info/02845.html,2026-06-04T19:00:48.772228
+02845,HK,新能源车,theme,0.9,False,deepseek_browser_evidence,GX中国电车跟踪中国电动汽车相关公司,https://stock.finance.sina.com.cn/hkstock/info/02845.html,2026-06-04T19:00:48.772236
+02845,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,基金投资于中国内地电动汽车产业链公司,https://stock.finance.sina.com.cn/hkstock/info/02845.html,2026-06-04T19:00:48.772243
+02846,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,新浪财经为您提供安硕沪深三百 (02846)免费实时港股行情...,https://stock.finance.sina.com.cn/hkstock/info/02846.html,2026-06-04T19:00:48.772253
+02846,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,跟踪沪深300指数，覆盖沪深两市A股,https://stock.finance.sina.com.cn/hkstock/info/02846.html,2026-06-04T19:00:48.772260
+02846,HK,蓝筹,style,0.8,False,deepseek_browser_evidence,沪深300指数由沪深市场中规模大、流动性好的300只证券组成，代表大盘蓝筹,https://stock.finance.sina.com.cn/hkstock/info/02846.html,2026-06-04T19:00:48.772268
+02950,HK,券商,business,0.9,True,deepseek_browser_evidence,雪球简介：威华达控股有限公司是一家主要从事金融业务的香港投资控股公司。该公司通过三大分部运营：金融服务分部提供证券经纪服务以及金融、谘询及机构融资顾问服务；证券分部从事证券的买卖及投资业务；其主要投资于从事金融业务及医药业务的公司。,https://xueqiu.com/S/02950,2026-06-04T19:00:48.772288
+02956,HK,电池材料,value_chain,0.7,True,deepseek_browser_evidence,富途牛牛提供烯石电车新材料 (02956)主营业务数据与分析页面，公司名称及业务分类指向电车新材料领域。,https://www.futunn.com/stock/02956-HK/financial/main-composition,2026-06-04T19:00:48.772314
+03024,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,东方财富网页面显示标智上证50 (03024)为交易型开放式指数基金,https://quote.eastmoney.com/hk/03024.html,2026-06-04T19:00:48.772325
+03029,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,新浪财经页面及富途牛牛页面显示GX恒生ESG (03029)为ETF,https://stock.finance.sina.com.cn/hkstock/finance/03029.html,2026-06-04T19:00:48.772337
+03030,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,富途牛牛页面显示惠理EMQQ (03030)为ETF产品,https://www.futunn.com/hk/stock/03030-HK/news/announcement/earning-report,2026-06-04T19:00:48.772347
+03451,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"AGX纳指兑 (03451)股票股价,实时行情,新闻,财报数据_新浪 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03451.html,2026-06-04T19:00:48.772433
+03448,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,Global X 中国核心科技 ETF(03448)财报日期、财务报告及 ...,https://www.itiger.com/hans/stock/03448/filings,2026-06-04T19:00:48.772444
+03453,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,Pp台湾50 (03453)财报日期、财务报告及业绩会详情 - 老虎证券,https://www.itiger.com/hans/stock/03453/filings,2026-06-04T19:00:48.772455
+03457,HK,货币基金,instrument,1.0,True,deepseek_browser_evidence,"A泰康港元 (03457)股票股价,实时行情,新闻,财报数据_新浪 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03457.html,2026-06-04T19:00:48.772464
+03454,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"南方美股七巨头 (03454)股票股价,实时行情,新闻,财报数据 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03454.html,2026-06-04T19:00:48.772473
+03455,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"景顺qqq (03455)股票股价,实时行情,新闻,财报数据_新浪 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03455.html,2026-06-04T19:00:48.772483
+03460,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,华夏sol (03460)_财务指标_新浪港股免费实时行情_新浪财经,https://stock.finance.sina.com.cn/hkstock/finance/03460.html,2026-06-04T19:00:48.772492
+03460,HK,token,theme,1.0,False,deepseek_browser_evidence,华夏sol (03460)财报日期、财务报告及业绩会详情 - 老虎证券,https://www.itiger.com/hans/stock/03460/filings,2026-06-04T19:00:48.772500
+03461,HK,货币基金,instrument,1.0,True,deepseek_browser_evidence,A华夏人币数 (03461)_财务指标_新浪港股免费实时行情 ...,https://stock.finance.sina.com.cn/hkstock/finance/03461.html,2026-06-04T19:00:48.772511
+03466,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"恒生高息股 (03466)股票股价,实时行情,新闻,财报数据_新浪 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03466.html,2026-06-04T19:00:48.772520
+03466,HK,高股息,style,1.0,False,deepseek_browser_evidence,"恒生高息股 (03466)股票股价,实时行情,新闻,财报数据_新浪 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03466.html,2026-06-04T19:00:48.772528
+03469,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"南方港股通红利 (03469)股票股价,实时行情,新闻,财报数据 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03469.html,2026-06-04T19:00:48.772536
+03469,HK,高股息,style,1.0,False,deepseek_browser_evidence,"南方港股通红利 (03469)股票股价,实时行情,新闻,财报数据 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03469.html,2026-06-04T19:00:48.772545
+03477,HK,AI,theme,0.9,True,deepseek_browser_evidence,管理层已明确决策：比特币挖矿业务暂停扩张，重点投入AI云服务领域。 AI云服务 是公司的战略增长业务，IREN利用其为高密度计算而设计的数据中心基础设施，部署高端GPU，为AI和机器学习领域的客户提供大规模算力租赁服务。,https://www.sohu.com/a/940720072_122362510,2026-06-04T19:00:48.772564
+03477,HK,云服务,value_chain,0.9,False,deepseek_browser_evidence,管理层已明确决策：比特币挖矿业务暂停扩张，重点投入AI云服务领域。 AI云服务 是公司的战略增长业务，IREN利用其为高密度计算而设计的数据中心基础设施，部署高端GPU，为AI和机器学习领域的客户提供大规模算力租赁服务。,https://www.sohu.com/a/940720072_122362510,2026-06-04T19:00:48.772574
+03477,HK,算力,value_chain,0.85,False,deepseek_browser_evidence,IREN利用其为高密度计算而设计的数据中心基础设施，部署高端GPU，为AI和机器学习领域的客户提供大规模算力租赁服务。,https://www.sohu.com/a/940720072_122362510,2026-06-04T19:00:48.772583
+03480,HK,货币基金,instrument,0.95,True,deepseek_browser_evidence,A惠理美元 (03480)_公司资料_新浪港股免费实时行情,https://stock.finance.sina.com.cn/hkstock/info/03480.html,2026-06-04T19:00:48.772595
+03483,HK,高股息,style,0.95,True,deepseek_browser_evidence,易方达高股息 (03483)最新价格_行情_走势图—东方财富网,https://quote.eastmoney.com/hk/03483.html,2026-06-04T19:00:48.772605
+03483,HK,ETF,instrument,0.9,False,deepseek_browser_evidence,易方达高股息 (03483)为港交所上市交易产品,https://quote.eastmoney.com/hk/03483.html,2026-06-04T19:00:48.772613
+03486,HK,半导体,theme,0.95,True,deepseek_browser_evidence,"易方达亚洲半导体 (03486)股票股价,实时行情,新闻,财报数据 ...",https://stock.finance.sina.com.cn/hkstock/quotes/03486.html,2026-06-04T19:00:48.772623
+03486,HK,ETF,instrument,0.9,False,deepseek_browser_evidence,易方达亚洲半导体 (03486)为交易所上市产品,https://stock.finance.sina.com.cn/hkstock/quotes/03486.html,2026-06-04T19:00:48.772631
+03692,HK,创新药,theme,0.95,True,deepseek_browser_evidence,集团的收入主要来自于药品的销售，主要产品集中在集团策略性专注的主要治疗领域，包括抗肿瘤、抗感染、中枢神经系统(CNS)、代谢及其他疾病。报告期内的收入增加，主要是由于创新药与合作产品销售收入增加所致。,https://basic.10jqka.com.cn/HK3692/,2026-06-04T19:00:48.772654
+03692,HK,医药制造,business,0.95,True,deepseek_browser_evidence,集团的收入主要来自于药品的销售，主要产品集中在集团策略性专注的主要治疗领域...,https://basic.10jqka.com.cn/HK3692/,2026-06-04T19:00:48.772662
+03692,HK,创新药研发,value_chain,0.9,False,deepseek_browser_evidence,翰森制药集团有限公司 ... 为在中国规模最大、增长最快、临床需求缺口巨大的部分治疗领域均排名前列的少数几家研发驱动型中国制药公司之一。,https://caibaobang.cn/sanpk/mh-company?code=03692,2026-06-04T19:00:48.772672
+03696,HK,AI医疗,theme,0.95,True,deepseek_browser_evidence,英矽智能（03696.HK）发布了截至2025年12月31日的年度财报。... 显示出公司在人工智能药物研发领域的持续投入和战略布局。,https://hk.stockstar.com/IG2026032900010639.shtml,2026-06-04T19:00:48.772683
+03696,HK,创新药研发,value_chain,0.9,False,deepseek_browser_evidence,2025年药物发现收入为2495.2万美元，占总收入44.4%；2024年仅为314.4万美元...,https://reportify.cn/financials/1246598139935330304,2026-06-04T19:00:48.772691
+03698,HK,银行,business,0.95,True,deepseek_browser_evidence,徽商银行是经前中国银监会批准，由城市商业银行和城市信用社合并重组而成的中国第一家区域性股份制商业银行，总部设在安徽省合肥市。,http://media-hsbank.todayir.com/20240418182402628111165178_en.pdf,2026-06-04T19:00:48.772701
+03699,HK,物业管理,business,0.95,True,deepseek_browser_evidence,集团的主要业务为物业租赁及提供物业管理服务。,https://basic.10jqka.com.cn/HK3699/,2026-06-04T19:00:48.772710
+03699,HK,商业地产,business,0.85,False,deepseek_browser_evidence,"集团的主要业务为物业租赁及提供物业管理服务。... 集团全年收益为49,929万元人民币...",https://wap.stockstar.com/detail/AN2026042400062401,2026-06-04T19:00:48.772717
+03878,HK,工程建设,business,0.9,True,deepseek_browser_evidence,The Company is an investment holding company and its subsidiaries provide foundation works and ancillary services and leasing of construction machinery in Hong Kong.,https://stock.finance.sina.com.cn/hkstock/go.php/CompanyNoticeDetail/code/03878/aid/1178172/.phtml,2026-06-04T19:00:48.772735
+03878,HK,机械设备,business,0.8,False,deepseek_browser_evidence,provide foundation works and ancillary services and leasing of construction machinery in Hong Kong.,https://stock.finance.sina.com.cn/hkstock/go.php/CompanyNoticeDetail/code/03878/aid/1178172/.phtml,2026-06-04T19:00:48.772742
+03878,HK,香港本地,geo,0.7,False,deepseek_browser_evidence,provide foundation works and ancillary services and leasing of construction machinery in Hong Kong.  The principal place of business ... Kowloon Hong Kong.,https://stock.finance.sina.com.cn/hkstock/go.php/CompanyNoticeDetail/code/03878/aid/1178172/.phtml,2026-06-04T19:00:48.772749
+03882,HK,消费电子,business,0.9,True,deepseek_browser_evidence,家用监控摄像机：主要产品包括智能门铃、网路监视器及婴儿监视器。2025财政年度的收入约为1.97亿港元。,https://news.futunn.com/post/70913027/tiancai-holdings-03882-released-its-annual-results-reporting-a-gross,2026-06-04T19:00:48.772763
+03886,HK,医疗服务,business,0.95,True,deepseek_browser_evidence,本集團遍佈全港、規模最大、服務範圍最廣之一的連鎖醫務中心...涵蓋從基層醫療到高端跨專科的多層次、多樣化醫療服務...集團香港醫療網絡管理覆蓋逾380個醫療服務點及匯聚約600名網絡醫生,https://reportify.cn/filings/1018170519482142720,2026-06-04T19:00:48.772773
+03886,HK,香港本地,geo,0.85,False,deepseek_browser_evidence,本集團遍佈全港...香港醫療網絡管理...計劃與機構合作發展醫療旅遊,https://reportify.cn/filings/1018170519482142720,2026-06-04T19:00:48.772780
+06123,HK,物流网络,value_chain,1.0,True,deepseek_browser_evidence,圓通國際快遞供應鏈科技有限公司（YTO International Express and Supply Chain Technology Limited）發布2025年度報告，涵蓋截至2025年12月31日 ...,https://stock.stockstar.com/AN2026043000006799.shtml,2026-06-04T19:00:48.772799
+06127,HK,CXO,theme,1.0,True,deepseek_browser_evidence,公司持续推进战略转型，加强AI技术应用，布局类器官等新方法学技术平台，并拓展药物发现、临床检测等上下游服务。,https://stock.stockstar.com/AN2026050100009216.shtml,2026-06-04T19:00:48.772811
+06127,HK,AI应用,theme,0.85,False,deepseek_browser_evidence,公司持续推进战略转型，加强AI技术应用，布局类器官等新方法学技术平台,https://stock.stockstar.com/AN2026050100009216.shtml,2026-06-04T19:00:48.772819
+06127,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,北京昭衍新药研究中心股份有限公司（股票代码：6127.HK）,https://stock.stockstar.com/AN2026050100009216.shtml,2026-06-04T19:00:48.772828
+06138,HK,银行,business,1.0,True,deepseek_browser_evidence,哈尔滨银行 (06138)发布2025年年度业绩，该集团取得营业收入人民币145.46亿元...,https://hk.stockstar.com/IG2026032700050616.shtml,2026-06-04T19:00:48.772842
+06138,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,哈尔滨银行...分支机构遍布天津、重庆、大连、沈阳、成都、哈尔滨等,https://www1.hkexnews.hk/listedco/listconews/sehk/2025/0428/2025042803210.pdf,2026-06-04T19:00:48.772850
+06136,HK,环保,business,1.0,True,deepseek_browser_evidence,康达国际环保有限公司（股份代号：6136）发布2025年度报告，...主要从事污水处理等环保业务,https://stock.stockstar.com/RB2026033100052538.shtml,2026-06-04T19:00:48.772861
+06136,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,康达国际环保有限公司...业务主要分布于中国内地,https://stock.stockstar.com/RB2026033100052538.shtml,2026-06-04T19:00:48.772868
+06158,HK,住宅开发,business,1.0,True,deepseek_browser_evidence,"正荣地产集团有限公司发布2025年年度报告，集团实现收益人民币97.92亿元，...于2024年实现约26,900套新房交付",https://wap.stockstar.com/detail/AN2026043000005878,2026-06-04T19:00:48.772879
+06158,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,正荣地产...在中国内地多个城市开展住宅开发业务,https://www.hkexnews.hk/listedco/listconews/sehk/2025/0429/2025042902055_c.pdf,2026-06-04T19:00:48.772887
+06919,HK,企业服务,business,1.0,True,deepseek_browser_evidence,集团是中国一家具有自主开发O2O招聘平台的灵活用工服务提供商，并专注新经济、新興行業及中國獨角獸。通用服务外包收入达到30.1亿，同比增长约25%。,https://renruicms.oss-cn-beijing.aliyuncs.com/upload/202505/6919_Renrui%20HR_CN_20250430.pdf,2026-06-04T19:00:48.772905
+06919,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,集團是中國一家具有自主开发O2O招聘平台的灵活用工服务提供商。,https://renruicms.oss-cn-beijing.aliyuncs.com/upload/202505/6919_Renrui%20HR_CN_20250430.pdf,2026-06-04T19:00:48.772912
+06922,HK,医疗器械,theme,1.0,True,deepseek_browser_evidence,康沣生物发布2025年年报，主要得益于呼吸介入产品线的商业化进展。恶性狭窄冷冻消融系统、冷冻粘连治疗系统一次性使用冷冻探头及抗胃食管反流系统相继获批。,https://wap.stockstar.com/detail/AN2026042900043925,2026-06-04T19:00:48.772923
+06922,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,"收入达95,268万元人民币。",https://wap.stockstar.com/detail/AN2026042900043925,2026-06-04T19:00:48.772931
+06929,HK,医疗器械,theme,1.0,True,deepseek_browser_evidence,集团主要以「OrbusNeich」及「業聚」品牌从事设计、开发、制造及销售用于治疗冠状动脉及外周血管疾病的器械。,http://corpsv.etnet.com.hk/webservice/jsp/ETNET/COMPANY/BIG5/CoInfoDetail.jsp?STOCKCODE=06929,2026-06-04T19:00:48.772941
+06929,HK,全球业务,geo,1.0,False,deepseek_browser_evidence,营收毛利创历史新高，显示全球化销售。,https://www.gelonghui.com/news/5182932,2026-06-04T19:00:48.772949
+06936,HK,物流网络,value_chain,1.0,True,deepseek_browser_evidence,顺丰服务於超过235万企業客戶及超過8亿个人消費者，提供包括时效快递、经济快递、快运、冷运及医药、同城即时配送、供应链及国际等物流服务。,https://ir.sf-express.com/hk/,2026-06-04T19:00:48.772962
+06936,HK,出海,theme,1.0,False,deepseek_browser_evidence,积极拓展全球市场，国际快递、货代及供应链业务覆盖95个国家和地区。,https://ir.sf-express.com/hk/,2026-06-04T19:00:48.772971
+06936,HK,中国内地,geo,1.0,False,deepseek_browser_evidence,国内业务覆盖所有城市。,https://ir.sf-express.com/hk/,2026-06-04T19:00:48.772979
+06936,HK,全球业务,geo,1.0,False,deepseek_browser_evidence,国际业务覆盖95个国家和地区，国际小包业务覆盖200个国家和地区。,https://ir.sf-express.com/hk/,2026-06-04T19:00:48.772986
+08072,HK,券商,business,0.9,True,deepseek_browser_evidence,主营业务: 公司之主要业务为投资控股，及集团主要从事提供评估及顾问服务、融资服务及证券经纪、配售及包销与投资顾问及资产管理服务。,https://basic.10jqka.com.cn/HK8072/,2026-06-04T19:00:48.772997
+08076,HK,软件服务,business,0.9,True,deepseek_browser_evidence,"商业模式方面,本集团持续探索更具可持续性的收入模式,推动收入结构由项目型向产品化及平台化转型。",https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=08076&type=web,2026-06-04T19:00:48.773008
+08137,HK,动力电池,value_chain,0.85,True,deepseek_browser_evidence,"锂离子电池业务截至二零二五年十二月三十一日止年度，锂离子电池分部录得收益约25,700,000港元...",https://basic.10jqka.com.cn/HK8137/,2026-06-04T19:00:48.773039
+08147,HK,电子制造,business,0.9,True,deepseek_browser_evidence,公司业务包括研发、制造及销售电子设备，制造产品销售收入占比约70%,https://reportify.cn/financials/1247115450102452224,2026-06-04T19:00:48.773057
+08152,HK,机械设备,business,0.9,True,deepseek_browser_evidence,收购东莞盘形滚刀生产厂房，盘形滚刀为隧道掘进机关键部件,https://4g.stockstar.com/detail/AN2026042300036565,2026-06-04T19:00:48.773069
+08152,HK,出海,theme,0.8,False,deepseek_browser_evidence,海外市场订单增加、扩展新加坡市场业务,https://4g.stockstar.com/detail/AN2026042300036565,2026-06-04T19:00:48.773077
+08148,HK,软件服务,business,0.9,True,deepseek_browser_evidence,软件平台业务为集团主要分部之一，服务政府及商业客户,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=08148&type=web,2026-06-04T19:00:48.773088
+08148,HK,广告,business,0.85,False,deepseek_browser_evidence,"广告电子商务及供应链管理服务业务为本年度新增分部收入12,841,000港元",https://reportify.cn/financials/1141089285622075392,2026-06-04T19:00:48.773095
+08148,HK,电商,business,0.8,False,deepseek_browser_evidence,广告电子商务及供应链管理服务业务包含电商元素,https://reportify.cn/financials/1141089285622075392,2026-06-04T19:00:48.773103
+08148,HK,香港本地,geo,0.7,False,deepseek_browser_evidence,软件平台主要服务香港政府部门,https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=08148&type=web,2026-06-04T19:00:48.773111
+08237,HK,酒店,business,0.9,True,deepseek_browser_evidence,"本集团将继续明确聚焦于日本酒店业务的营运与提升,该业务仍是本集团长期发展的支柱。",https://emweb.securities.eastmoney.com/PC_HKF10/pages/home/index.html?code=08237&type=web,2026-06-04T19:00:48.773148
+08245,HK,电子制造,business,0.85,True,deepseek_browser_evidence,公司为一家投资控股公司。集团主要从事按原设计制造基准设计、贸易及制造双向无线对讲机、婴儿监视器及塑胶产品。,https://stockpage.10jqka.com.cn/HK8245/operate/,2026-06-04T19:00:48.773163
+08246,HK,燃气,business,0.9,True,deepseek_browser_evidence,公司名称为中华燃气控股有限公司，主营燃气业务。,https://stock.finance.sina.com.cn/hkstock/finance/08246.html,2026-06-04T19:00:48.773173
+08247,HK,医疗器械,theme,0.85,True,deepseek_browser_evidence,在业务层面，尽管主营业务收入受集采和医保控费影响有所波动，但公司始终坚守品质，全力稳固传统生化诊断产品的市场地位。,https://stockpage.10jqka.com.cn/HK8247/business/,2026-06-04T19:00:48.773185
+08357,HK,医疗服务,business,1.0,True,deepseek_browser_evidence,报告期内，集团收益约为800万新加坡元，较上年度的870万新加坡元减少8.1%，主要由于医疗行业竞争加剧及运营成本上升。,https://wap.stockstar.com/detail/AN2026033000032634,2026-06-04T19:00:48.773202
+08357,HK,东南亚,geo,0.9,True,deepseek_browser_evidence,集团收益约为800万新加坡元，主要由于医疗行业竞争加剧及运营成本上升。,https://wap.stockstar.com/detail/AN2026033000032634,2026-06-04T19:00:48.773210
+08362,HK,餐饮,business,1.0,True,deepseek_browser_evidence,报告期内，集团实现收益约123.0百万港元，同比增长13.4%，主要得益于航空餐饮业务及成为多家连锁餐饮企业的冷冻食品供应商。食品加工及贸易业务收益达110.6百万港元，餐厅经营收益为12.4百万港元。,https://stock.stockstar.com/AN2026033000027885.shtml,2026-06-04T19:00:48.773223
+08432,HK,餐饮,business,1.0,True,deepseek_browser_evidence,公司主营酒吧运营，收入构成显示为太平洋酒吧业务。,https://www.futunn.com/stock/08432-HK/financials-revenue,2026-06-04T19:00:48.773244
+08436,HK,美妆,business,1.0,True,deepseek_browser_evidence,德宝集团控股有限公司为一家主要从事美容产品业务的投资控股公司，设计、开发、制造及销售美容产品和化妆袋。,https://hk.stockstar.com/hshare/08436,2026-06-04T19:00:48.773254
+08439,HK,券商,business,1.0,True,deepseek_browser_evidence,公司主要从事综合金融服务，持有第1、4、6、9类牌照，主要业务为企业融资咨询服务。,https://stock.stockstar.com/AN2026032300039604.shtml,2026-06-04T19:00:48.773267
+08439,HK,香港本地,geo,0.9,False,deepseek_browser_evidence,总部位于香港中环，业务运营主要在香港。,https://stock.stockstar.com/AN2026032300039604.shtml,2026-06-04T19:00:48.773275
+08445,HK,工程建设,business,1.0,True,deepseek_browser_evidence,公司名称为怡康泰工程集团，收入构成页面显示其工程业务。,https://www.futunn.com/stock/08445-HK/financials-revenue,2026-06-04T19:00:48.773287
+08418,HK,汽车经销,business,0.9,True,deepseek_browser_evidence,公司收益为4940万新加坡元，主要由于中国内地汽车贸易业务收入减少,https://4g.stockstar.com/detail/AN2026042900066532,2026-06-04T19:00:48.773310
+08418,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,中国内地汽车贸易业务收入减少,https://4g.stockstar.com/detail/AN2026042900066532,2026-06-04T19:00:48.773320
+08425,HK,机械设备,business,0.9,True,deepseek_browser_evidence,设备安装、拆卸及检测服务收入减少；资本开支大部分用于购置额外塔式起重机,https://reportify.cn/financials/1133569705454473216,2026-06-04T19:00:48.773332
+08423,HK,工程建设,business,0.9,True,deepseek_browser_evidence,业务回顾与展望提及香港经济及物业市场，作为建筑发展商运作,https://chdev.com.hk/wp-content/uploads/2024/06/CW08423-4Q2024_annual-report.pdf,2026-06-04T19:00:48.773342
+08423,HK,香港本地,geo,0.9,False,deepseek_browser_evidence,业务集中在香港经济及物业市场,https://chdev.com.hk/wp-content/uploads/2024/06/CW08423-4Q2024_annual-report.pdf,2026-06-04T19:00:48.773350
+08427,HK,建筑材料,business,0.9,True,deepseek_browser_evidence,集团于马来西亚制造及销售'Target'品牌的预制混凝土电信接线盒及预制混凝土电力接线盒,https://basic.10jqka.com.cn/mobile/HK8427/company.html,2026-06-04T19:00:48.773362
+08427,HK,东南亚,geo,0.9,False,deepseek_browser_evidence,集团于马来西亚制造及销售,https://basic.10jqka.com.cn/mobile/HK8427/company.html,2026-06-04T19:00:48.773369
+09010,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"新浪财经-港股频道为您提供安硕亚洲除日-U (09010)股票股价,实时行情,新闻,财报,研究报告,财务指标分析等与安硕亚洲除日-U (09010)股票相关的信息与服务.",https://stock.finance.sina.com.cn/hkstock/quotes/09010.html,2026-06-04T19:00:48.773412
+09011,HK,货币基金,instrument,1.0,True,deepseek_browser_evidence,提供A工银中金美-U (09011)股票的行情走势、五档盘口、逐笔交易等实时行情数据，及A工银中金美-U (09011)的资讯...,https://quote.eastmoney.com/hk/09011.html,2026-06-04T19:00:48.773424
+09031,HK,ETF,instrument,0.9,True,deepseek_browser_evidence,新浪财经为您提供海通AESG-U (09031)免费实时港股行情，获取有关海通AESG-U (09031)的详细财经信息...,https://stock.finance.sina.com.cn/hkstock/view/CompanyGSH.php?code=09031,2026-06-04T19:00:48.773434
+09040,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,新浪财经为您提供GX中国-U (09040)免费实时港股行情，获取有关GX中国-U (09040)的详细财经信息...,https://stock.finance.sina.com.cn/hkstock/finance/09040.html,2026-06-04T19:00:48.773444
+08601,HK,工程建设,business,0.9,True,deepseek_browser_evidence,集团主要在香港提供工程顾问服务。,https://reportify.cn/financials/1104497938454941696,2026-06-04T19:00:48.773499
+08603,HK,美妆,business,0.9,True,deepseek_browser_evidence,其附属公司主要于香港提供美容疗程服务及出售护肤产品。,https://wap.stockstar.com/detail/AN2025093000040168,2026-06-04T19:00:48.773507
+09115,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"安硕恒生指数-u (09115)股票股价,实时行情,新闻,财报数据 ...",https://stock.finance.sina.com.cn/hkstock/quotes/09115.html,2026-06-04T19:00:48.773518
+09141,HK,债券基金,instrument,1.0,True,deepseek_browser_evidence,华夏亚投债-u (09141)股票价格_行情_走势图—东方财富网,https://quote.eastmoney.com/hk/09141.html?jump_to_web=true,2026-06-04T19:00:48.773527
+09146,HK,债券基金,instrument,1.0,True,deepseek_browser_evidence,华夏20美债-u (09146)最新价格_行情_走势图—东方财富网,https://quote.eastmoney.com/hk/09146.html,2026-06-04T19:00:48.773537
+09151,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"Pp科创50-u (09151)股票股价,实时行情,新闻,财报数据_新浪 ...",https://stock.finance.sina.com.cn/hkstock/quotes/09151.html,2026-06-04T19:00:48.773547
+09151,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,Pp科创50-u (09151) 跟踪上证科创板50指数，投资标的主要在中国内地。,https://stock.finance.sina.com.cn/hkstock/quotes/09151.html,2026-06-04T19:00:48.773555
+09156,HK,债券基金,instrument,1.0,True,deepseek_browser_evidence,博时20美债-u (09156)_公司资料_新浪港股免费实时行情 ...,https://stock.finance.sina.com.cn/hkstock/info/09156.html,2026-06-04T19:00:48.773565
+09156,HK,北美,geo,0.9,False,deepseek_browser_evidence,博时20美债主要投资美国国债，地域聚焦北美。,https://stock.finance.sina.com.cn/hkstock/info/09156.html,2026-06-04T19:00:48.773573
+09159,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,Pp台50a-u (09159)最新价格_行情_走势图—东方财富网,https://quote.eastmoney.com/hk/09159.html,2026-06-04T19:00:48.773583
+09167,HK,ETF,instrument,1.0,True,deepseek_browser_evidence,"工银南方中国-u (09167)股票股价,实时行情,新闻,财报数据 ...",https://stock.finance.sina.com.cn/hkstock/quotes/09167.html,2026-06-04T19:00:48.773594
+09167,HK,中国内地,geo,0.9,False,deepseek_browser_evidence,名称包含 '南方中国'，投资于中国内地市场。,https://stock.finance.sina.com.cn/hkstock/quotes/09167.html,2026-06-04T19:00:48.773610

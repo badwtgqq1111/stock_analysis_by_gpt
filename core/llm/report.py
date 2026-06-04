@@ -176,7 +176,7 @@ def generate_selection_report(
     Args:
         portfolio_result: Output from backtest_hk_market / backtest_portfolio.
         api_key: DeepSeek API key.
-        model: DeepSeek model name (default: deepseek-chat).
+        model: DeepSeek model name (default: deepseek-v4-pro).
         formula_version: Label for the ranking formula version.
         extra_context: Additional context to include in the prompt.
 

@@ -3,6 +3,7 @@
 
 """Stock tag registry tests."""
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -148,6 +149,7 @@ from data.ingest.providers.hk_company_research import (
 from data.ingest.providers.browser_company_search import normalize_browser_search_result
 from data.ingest.llm_tag_extractor import (
     llm_extractions_to_tag_frames,
+    parse_llm_tag_batch_response,
     parse_llm_tag_response,
 )
 
@@ -431,6 +433,19 @@ def test_parse_llm_tag_response_strips_markdown_and_validates_tags():
 
     assert parsed["stock_code"] == "00700"
     assert parsed["tags"][0]["tag"] == "游戏"
+
+
+def test_parse_llm_tag_batch_response_accepts_stocks_wrapper():
+    text = """```json
+    {"stocks":[
+      {"stock_code":"700","tags":[{"tag":"游戏","tag_type":"business","confidence":0.94,"decision":"formal"}]},
+      {"stock_code":"3690","tags":[]}
+    ]}
+    ```"""
+
+    parsed = parse_llm_tag_batch_response(text)
+
+    assert [item["stock_code"] for item in parsed] == ["00700", "03690"]
 
 
 def test_llm_extractions_to_tag_frames_splits_formal_and_candidate():
@@ -1138,6 +1153,164 @@ def test_service_extract_stock_tags_llm_uses_cached_evidence(monkeypatch):
 
         assert summary["formal_rows"] == 1
         assert pd.read_csv(output_csv)["tag"].iloc[0] == "游戏"
+
+
+def test_service_extract_stock_tags_llm_skips_existing_outputs(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        evidence_csv = base / "evidence.csv"
+        dictionary_csv = base / "dictionary.csv"
+        output_csv = base / "llm.csv"
+        candidate_csv = base / "candidate.csv"
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": "00700",
+                    "market": "HK",
+                    "source": "searxng_search",
+                    "title": "Tencent annual report",
+                    "summary": "Tencent games",
+                    "url": "https://example.com/700",
+                    "raw_text": "Tencent games",
+                    "fetched_at": "2026-06-03T00:00:00",
+                },
+                {
+                    "stock_code": "03690",
+                    "market": "HK",
+                    "source": "searxng_search",
+                    "title": "Meituan annual report",
+                    "summary": "Meituan local services",
+                    "url": "https://example.com/3690",
+                    "raw_text": "Meituan local services",
+                    "fetched_at": "2026-06-03T00:00:00",
+                },
+            ],
+            columns=COMPANY_RESEARCH_EVIDENCE_FIELDS,
+        ).to_csv(evidence_csv, index=False, encoding="utf-8-sig")
+        build_default_tag_dictionary().to_csv(dictionary_csv, index=False, encoding="utf-8-sig")
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": "00700",
+                    "market": "HK",
+                    "tag": "游戏",
+                    "tag_type": "business",
+                    "confidence": 0.94,
+                    "is_primary": True,
+                    "source": "deepseek_browser_evidence",
+                    "evidence": "网络游戏",
+                    "evidence_url": "",
+                    "updated_at": "2026-06-03T00:00:00",
+                }
+            ],
+            columns=STOCK_TAG_FIELDS,
+        ).to_csv(output_csv, index=False, encoding="utf-8-sig")
+        pd.DataFrame(columns=STOCK_TAG_CANDIDATE_FIELDS).to_csv(
+            candidate_csv, index=False, encoding="utf-8-sig"
+        )
+
+        called_codes = []
+
+        class FakeClient:
+            def chat_with_retry(self, messages, **kwargs):
+                payload = json.loads(messages[1]["content"])
+                called_codes.append(payload["stock_code"])
+                return '{"stock_code":"03690","tags":[{"tag":"本地生活","tag_type":"business","confidence":0.94,"is_primary":true,"evidence":"本地服务","evidence_url":"https://example.com/3690","decision":"formal","reason":"主营明确"}],"rejected":[]}'
+
+        monkeypatch.setattr("data.ingest.service.LLMClient", lambda *args, **kwargs: FakeClient(), raising=False)
+        service = MarketDataService(base_dir=str(base / "data"))
+        try:
+            summary = service.extract_stock_tags_llm(
+                evidence_csv=evidence_csv,
+                tag_dictionary_csv=dictionary_csv,
+                output_csv=output_csv,
+                candidate_output_csv=candidate_csv,
+                max_workers=2,
+                checkpoint_every=1,
+            )
+        finally:
+            service.close()
+
+        assert summary["skipped_existing"] == 1
+        assert called_codes == ["03690"]
+        tags = pd.read_csv(output_csv, dtype=str).fillna("")
+        assert set(tags["stock_code"]) == {"00700", "03690"}
+
+
+def test_service_extract_stock_tags_llm_batches_multiple_stocks(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        evidence_csv = base / "evidence.csv"
+        dictionary_csv = base / "dictionary.csv"
+        output_csv = base / "llm.csv"
+        candidate_csv = base / "candidate.csv"
+        rows = []
+        for code, summary in [
+            ("00700", "Tencent games"),
+            ("03690", "Meituan local services"),
+            ("09988", "Alibaba ecommerce"),
+        ]:
+            rows.append(
+                {
+                    "stock_code": code,
+                    "market": "HK",
+                    "source": "searxng_search",
+                    "title": f"{code} annual report",
+                    "summary": summary,
+                    "url": f"https://example.com/{code}",
+                    "raw_text": summary,
+                    "fetched_at": "2026-06-03T00:00:00",
+                }
+            )
+        pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS).to_csv(
+            evidence_csv, index=False, encoding="utf-8-sig"
+        )
+        build_default_tag_dictionary().to_csv(dictionary_csv, index=False, encoding="utf-8-sig")
+
+        batch_sizes = []
+
+        class FakeClient:
+            def chat_with_retry(self, messages, **kwargs):
+                payload = json.loads(messages[1]["content"])
+                batch_sizes.append(len(payload["stocks"]))
+                stocks = []
+                for item in payload["stocks"]:
+                    stocks.append(
+                        {
+                            "stock_code": item["stock_code"],
+                            "tags": [
+                                {
+                                    "tag": "平台",
+                                    "tag_type": "value_chain",
+                                    "confidence": 0.9,
+                                    "is_primary": True,
+                                    "evidence": "平台业务",
+                                    "evidence_url": "",
+                                    "decision": "formal",
+                                }
+                            ],
+                        }
+                    )
+                return json.dumps({"stocks": stocks}, ensure_ascii=False)
+
+        monkeypatch.setattr("data.ingest.service.LLMClient", lambda *args, **kwargs: FakeClient(), raising=False)
+        service = MarketDataService(base_dir=str(base / "data"))
+        try:
+            summary = service.extract_stock_tags_llm(
+                evidence_csv=evidence_csv,
+                tag_dictionary_csv=dictionary_csv,
+                output_csv=output_csv,
+                candidate_output_csv=candidate_csv,
+                batch_size=3,
+                checkpoint_every=1,
+            )
+        finally:
+            service.close()
+
+        assert summary["batches"] == 1
+        assert batch_sizes == [3]
+        tags = pd.read_csv(output_csv, dtype=str).fillna("")
+        assert set(tags["stock_code"]) == {"00700", "03690", "09988"}
 
 
 def test_build_stock_tag_csvs_can_merge_llm_outputs():

@@ -214,6 +214,75 @@ def test_tavily_company_search_fetcher_records_api_errors(monkeypatch):
     assert "429" in rows[0]["raw_text"]
 
 
+def test_searxng_company_search_fetcher_normalizes_results(monkeypatch):
+    from data.ingest.providers.searxng_company_search import SearxngCompanySearchFetcher
+
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "title": "投资者 - Tencent 腾讯",
+                        "url": "https://www.tencent.com/zh-cn/investors/financial-reports.html",
+                        "content": "腾讯年报披露游戏、广告、金融科技、云服务等业务。",
+                        "engine": "duckduckgo",
+                        "score": 1.0,
+                    }
+                ],
+                "unresponsive_engines": [],
+            }
+
+    def fake_get(url, params=None, timeout=None):
+        requests.append({"url": url, "params": params, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setenv("SEARXNG_URL", "http://127.0.0.1:8888")
+    monkeypatch.setattr("requests.get", fake_get)
+
+    rows = SearxngCompanySearchFetcher(
+        "700",
+        company_name="腾讯控股",
+        max_results_per_query=1,
+        max_queries_per_stock=1,
+        engines="bing,duckduckgo",
+    ).fetch()
+
+    assert requests[0]["url"] == "http://127.0.0.1:8888/search"
+    assert requests[0]["params"]["format"] == "json"
+    assert requests[0]["params"]["engines"] == "bing,duckduckgo"
+    assert requests[0]["params"]["q"].startswith("00700 腾讯控股")
+    assert rows[0]["stock_code"] == "00700"
+    assert rows[0]["source"] == "searxng_search"
+    assert "云服务" in rows[0]["raw_text"]
+
+
+def test_searxng_company_search_fetcher_records_api_errors(monkeypatch):
+    from data.ingest.providers.searxng_company_search import SearxngCompanySearchFetcher
+
+    class FakeResponse:
+        status_code = 500
+        text = "Internal Server Error"
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: FakeResponse())
+
+    rows = SearxngCompanySearchFetcher(
+        "00883",
+        max_results_per_query=1,
+        max_queries_per_stock=1,
+    ).fetch()
+
+    assert "title=search_error" in rows[0]["title"]
+    assert "500" in rows[0]["raw_text"]
+
+
 def test_normalize_browser_search_result_keeps_query_rank_and_hash():
     row = normalize_browser_search_result(
         stock_code="700",
@@ -860,6 +929,172 @@ def test_service_tavily_research_stock_tags_writes_evidence(monkeypatch):
 
         assert summary["evidence_rows"] == 1
         assert pd.read_csv(evidence_csv)["source"].iloc[0] == "tavily_search"
+
+
+def test_service_tavily_research_stock_tags_can_run_parallel(monkeypatch):
+    import threading
+    import time
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        industry_csv = base / "hk_industry_registry.csv"
+        evidence_csv = base / "hk_company_tavily_evidence.csv"
+        pd.DataFrame(
+            [
+                {"stock_code": "00700", "market": "HK", "name": "腾讯控股"},
+                {"stock_code": "09988", "market": "HK", "name": "阿里巴巴"},
+            ]
+        ).to_csv(industry_csv, index=False, encoding="utf-8-sig")
+
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        class FakeTavilyFetcher:
+            def __init__(self, stock_code, company_name="", **kwargs):
+                self.stock_code = stock_code
+
+            def fetch(self):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+                return [
+                    {
+                        "stock_code": self.stock_code,
+                        "market": "HK",
+                        "source": "tavily_search",
+                        "title": f"query={self.stock_code}; rank=1; title=公司资料",
+                        "summary": "rank=1; url=https://example.com; snippet=业务",
+                        "url": "https://example.com",
+                        "raw_text": "业务",
+                        "fetched_at": "2026-06-03T00:00:00",
+                    }
+                ]
+
+        monkeypatch.setattr("data.ingest.service.TavilyCompanySearchFetcher", FakeTavilyFetcher, raising=False)
+        service = MarketDataService(base_dir=str(base / "data"))
+        try:
+            summary = service.tavily_research_stock_tags(
+                industry_registry_csv=industry_csv,
+                evidence_csv=evidence_csv,
+                max_workers=2,
+            )
+        finally:
+            service.close()
+
+        assert summary["fetched"] == 2
+        assert max_active == 2
+
+
+def test_service_searxng_research_stock_tags_writes_evidence(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        industry_csv = base / "hk_industry_registry.csv"
+        evidence_csv = base / "hk_company_searxng_evidence.csv"
+        pd.DataFrame([{"stock_code": "00700", "market": "HK", "name": "腾讯控股"}]).to_csv(
+            industry_csv, index=False, encoding="utf-8-sig"
+        )
+
+        class FakeSearxngFetcher:
+            def __init__(self, stock_code, company_name="", **kwargs):
+                self.stock_code = stock_code
+                self.company_name = company_name
+                self.kwargs = kwargs
+
+            def fetch(self):
+                assert self.kwargs["searxng_url"] == "http://127.0.0.1:8888"
+                assert self.kwargs["engines"] == "bing,duckduckgo"
+                return [
+                    {
+                        "stock_code": "00700",
+                        "market": "HK",
+                        "source": "searxng_search",
+                        "title": "query=00700 腾讯控股; rank=1; title=公司资料",
+                        "summary": "rank=1; url=https://example.com; snippet=网络游戏 云服务",
+                        "url": "https://example.com",
+                        "raw_text": "网络游戏 云服务",
+                        "fetched_at": "2026-06-04T00:00:00",
+                    }
+                ]
+
+        monkeypatch.setattr("data.ingest.service.SearxngCompanySearchFetcher", FakeSearxngFetcher, raising=False)
+        service = MarketDataService(base_dir=str(base / "data"))
+        try:
+            summary = service.searxng_research_stock_tags(
+                industry_registry_csv=industry_csv,
+                evidence_csv=evidence_csv,
+                searxng_url="http://127.0.0.1:8888",
+                engines="bing,duckduckgo",
+                limit=1,
+            )
+        finally:
+            service.close()
+
+        assert summary["evidence_rows"] == 1
+        assert pd.read_csv(evidence_csv)["source"].iloc[0] == "searxng_search"
+
+
+def test_service_searxng_research_stock_tags_can_run_parallel(monkeypatch):
+    import threading
+    import time
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        industry_csv = base / "hk_industry_registry.csv"
+        evidence_csv = base / "hk_company_searxng_evidence.csv"
+        pd.DataFrame(
+            [
+                {"stock_code": "00700", "market": "HK", "name": "腾讯控股"},
+                {"stock_code": "09988", "market": "HK", "name": "阿里巴巴"},
+            ]
+        ).to_csv(industry_csv, index=False, encoding="utf-8-sig")
+
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        class FakeSearxngFetcher:
+            def __init__(self, stock_code, company_name="", **kwargs):
+                self.stock_code = stock_code
+
+            def fetch(self):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+                return [
+                    {
+                        "stock_code": self.stock_code,
+                        "market": "HK",
+                        "source": "searxng_search",
+                        "title": f"query={self.stock_code}; rank=1; title=公司资料",
+                        "summary": "rank=1; url=https://example.com; snippet=业务",
+                        "url": "https://example.com",
+                        "raw_text": "业务",
+                        "fetched_at": "2026-06-04T00:00:00",
+                    }
+                ]
+
+        monkeypatch.setattr("data.ingest.service.SearxngCompanySearchFetcher", FakeSearxngFetcher, raising=False)
+        service = MarketDataService(base_dir=str(base / "data"))
+        try:
+            summary = service.searxng_research_stock_tags(
+                industry_registry_csv=industry_csv,
+                evidence_csv=evidence_csv,
+                max_workers=2,
+            )
+        finally:
+            service.close()
+
+        assert summary["fetched"] == 2
+        assert max_active == 2
 
 
 def test_service_extract_stock_tags_llm_uses_cached_evidence(monkeypatch):

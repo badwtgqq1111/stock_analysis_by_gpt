@@ -1,0 +1,24 @@
+use_default_settings: true
+
+server:
+  secret_key: "replace-with-random-secret"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+  public_instance: false
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 0
+  default_lang: "zh-CN"
+
+engines:
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: google
+    disabled: true
+

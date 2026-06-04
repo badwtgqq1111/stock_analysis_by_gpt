@@ -676,6 +676,7 @@ class MarketDataService:
         max_pages_per_stock=8,
         per_page_timeout=12,
         search_engine="bing",
+        max_workers=1,
         show_progress=False,
     ):
         """Collect browser-search evidence for stock tag enrichment."""
@@ -729,14 +730,7 @@ class MarketDataService:
         if fetcher_cls is None:
             from data.ingest.providers.browser_company_search import BrowserCompanySearchFetcher as fetcher_cls
 
-        rows = []
-        errors = []
-        iterator = code_name_rows
-        if show_progress:
-            iterator = tqdm(code_name_rows, desc="browser research", unit="stock")
-        for code, name in iterator:
-            if code in existing_codes:
-                continue
+        def fetch_one(code, name):
             try:
                 fetched = fetcher_cls(
                     code,
@@ -747,11 +741,38 @@ class MarketDataService:
                     search_engine=search_engine,
                 ).fetch()
                 if isinstance(fetched, pd.DataFrame):
-                    rows.extend(fetched.to_dict("records"))
-                else:
-                    rows.extend(list(fetched or []))
+                    return fetched.to_dict("records"), None
+                return list(fetched or []), None
             except Exception as exc:
-                errors.append({"stock_code": code, "error": str(exc)})
+                return [], {"stock_code": code, "error": str(exc)}
+
+        rows = []
+        errors = []
+        targets = [(code, name) for code, name in code_name_rows if code not in existing_codes]
+        worker_count = max(1, int(max_workers or 1))
+        if worker_count > 1 and len(targets) > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(fetch_one, code, name): code
+                    for code, name in targets
+                }
+                iterator = as_completed(future_map)
+                if show_progress:
+                    iterator = tqdm(iterator, total=len(future_map), desc="browser research", unit="stock")
+                for future in iterator:
+                    fetched_rows, error = future.result()
+                    rows.extend(fetched_rows)
+                    if error:
+                        errors.append(error)
+        else:
+            iterator = targets
+            if show_progress:
+                iterator = tqdm(targets, desc="browser research", unit="stock")
+            for code, name in iterator:
+                fetched_rows, error = fetch_one(code, name)
+                rows.extend(fetched_rows)
+                if error:
+                    errors.append(error)
 
         new_frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
         combined = pd.concat([existing, new_frame], ignore_index=True) if not existing.empty else new_frame
@@ -792,6 +813,7 @@ class MarketDataService:
         search_depth="basic",
         topic="finance",
         include_raw_content=False,
+        max_workers=1,
         show_progress=False,
     ):
         """Collect Tavily Search API evidence for stock tag enrichment."""
@@ -846,14 +868,7 @@ class MarketDataService:
         if fetcher_cls is None:
             from data.ingest.providers.tavily_company_search import TavilyCompanySearchFetcher as fetcher_cls
 
-        rows = []
-        errors = []
-        iterator = code_name_rows
-        if show_progress:
-            iterator = tqdm(code_name_rows, desc="tavily research", unit="stock")
-        for code, name in iterator:
-            if code in existing_codes:
-                continue
+        def fetch_one(code, name):
             try:
                 fetched = fetcher_cls(
                     code,
@@ -866,11 +881,178 @@ class MarketDataService:
                     include_raw_content=include_raw_content,
                 ).fetch()
                 if isinstance(fetched, pd.DataFrame):
-                    rows.extend(fetched.to_dict("records"))
-                else:
-                    rows.extend(list(fetched or []))
+                    return fetched.to_dict("records"), None
+                return list(fetched or []), None
             except Exception as exc:
-                errors.append({"stock_code": code, "error": str(exc)})
+                return [], {"stock_code": code, "error": str(exc)}
+
+        rows = []
+        errors = []
+        targets = [(code, name) for code, name in code_name_rows if code not in existing_codes]
+        worker_count = max(1, int(max_workers or 1))
+        if worker_count > 1 and len(targets) > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(fetch_one, code, name): code
+                    for code, name in targets
+                }
+                iterator = as_completed(future_map)
+                if show_progress:
+                    iterator = tqdm(iterator, total=len(future_map), desc="tavily research", unit="stock")
+                for future in iterator:
+                    fetched_rows, error = future.result()
+                    rows.extend(fetched_rows)
+                    if error:
+                        errors.append(error)
+        else:
+            iterator = targets
+            if show_progress:
+                iterator = tqdm(targets, desc="tavily research", unit="stock")
+            for code, name in iterator:
+                fetched_rows, error = fetch_one(code, name)
+                rows.extend(fetched_rows)
+                if error:
+                    errors.append(error)
+
+        new_frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        combined = pd.concat([existing, new_frame], ignore_index=True) if not existing.empty else new_frame
+        if combined is None or combined.empty:
+            combined = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+            if column not in combined.columns:
+                combined[column] = ""
+        combined = combined[COMPANY_RESEARCH_EVIDENCE_FIELDS].fillna("")
+        if not combined.empty:
+            combined = combined.drop_duplicates(
+                subset=["market", "stock_code", "source", "title"],
+                keep="last",
+            ).reset_index(drop=True)
+        combined.to_csv(path, index=False, encoding="utf-8-sig")
+        upsert_summary = self.warehouse.upsert_company_research_evidence(combined)
+        return {
+            "status": "completed",
+            "requested": len(code_name_rows),
+            "fetched": len(rows),
+            "evidence_rows": len(combined),
+            "errors": len(errors),
+            "error_samples": errors[:10],
+            "evidence_csv": str(path),
+            "warehouse": upsert_summary,
+        }
+
+    def searxng_research_stock_tags(
+        self,
+        industry_registry_csv="docs/hk_industry_registry.csv",
+        evidence_csv="docs/hk_company_searxng_evidence.csv",
+        stock_codes=None,
+        limit=None,
+        skip_existing=True,
+        searxng_url=None,
+        max_results_per_query=5,
+        max_queries_per_stock=3,
+        engines=None,
+        language="zh-CN",
+        categories="general",
+        max_workers=4,
+        show_progress=False,
+    ):
+        """Collect local SearXNG search evidence for stock tag enrichment."""
+        from data.model import COMPANY_RESEARCH_EVIDENCE_FIELDS
+
+        industry = pd.read_csv(industry_registry_csv, dtype=str).fillna("")
+        if "stock_code" not in industry.columns:
+            raise ValueError(f"{industry_registry_csv} missing stock_code column")
+
+        code_name_rows = []
+        for _, row in industry.iterrows():
+            code = normalize_stock_code(row.get("stock_code"), market="HK")
+            name = str(row.get("name") or row.get("stock_name") or "").strip()
+            code_name_rows.append((code, name))
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            code_name_rows = [(code, name) for code, name in code_name_rows if code in allowed]
+
+        seen_codes = set()
+        deduped_rows = []
+        for code, name in code_name_rows:
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            deduped_rows.append((code, name))
+        code_name_rows = deduped_rows
+        if limit:
+            code_name_rows = code_name_rows[: int(limit)]
+
+        path = Path(evidence_csv)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        if path.exists():
+            existing = pd.read_csv(path, dtype=str).fillna("")
+            for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+                if column not in existing.columns:
+                    existing[column] = ""
+            existing = existing[COMPANY_RESEARCH_EVIDENCE_FIELDS]
+
+        existing_codes = set()
+        if skip_existing and not existing.empty and "source" in existing.columns:
+            existing_titles = existing["title"].astype(str) if "title" in existing.columns else pd.Series("", index=existing.index)
+            successful_existing = (
+                existing["source"].astype(str).eq("searxng_search")
+                & ~existing_titles.str.contains("title=search_error", na=False)
+                & ~existing_titles.str.contains("title=no_results", na=False)
+                & ~existing_titles.str.contains("rank=0", na=False)
+            )
+            existing_codes = set(existing.loc[successful_existing, "stock_code"].astype(str))
+
+        fetcher_cls = globals().get("SearxngCompanySearchFetcher")
+        if fetcher_cls is None:
+            from data.ingest.providers.searxng_company_search import SearxngCompanySearchFetcher as fetcher_cls
+
+        def fetch_one(code, name):
+            try:
+                fetched = fetcher_cls(
+                    code,
+                    company_name=name,
+                    searxng_url=searxng_url,
+                    max_results_per_query=max_results_per_query,
+                    max_queries_per_stock=max_queries_per_stock,
+                    engines=engines,
+                    language=language,
+                    categories=categories,
+                ).fetch()
+                if isinstance(fetched, pd.DataFrame):
+                    return fetched.to_dict("records"), None
+                return list(fetched or []), None
+            except Exception as exc:
+                return [], {"stock_code": code, "error": str(exc)}
+
+        rows = []
+        errors = []
+        targets = [(code, name) for code, name in code_name_rows if code not in existing_codes]
+        worker_count = max(1, int(max_workers or 1))
+        if worker_count > 1 and len(targets) > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(fetch_one, code, name): code
+                    for code, name in targets
+                }
+                iterator = as_completed(future_map)
+                if show_progress:
+                    iterator = tqdm(iterator, total=len(future_map), desc="searxng research", unit="stock")
+                for future in iterator:
+                    fetched_rows, error = future.result()
+                    rows.extend(fetched_rows)
+                    if error:
+                        errors.append(error)
+        else:
+            iterator = targets
+            if show_progress:
+                iterator = tqdm(targets, desc="searxng research", unit="stock")
+            for code, name in iterator:
+                fetched_rows, error = fetch_one(code, name)
+                rows.extend(fetched_rows)
+                if error:
+                    errors.append(error)
 
         new_frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
         combined = pd.concat([existing, new_frame], ignore_index=True) if not existing.empty else new_frame

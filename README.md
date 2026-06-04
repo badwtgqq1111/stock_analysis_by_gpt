@@ -186,12 +186,23 @@ uv run python run.py import-stock-tags \
 uv run python run.py tag-coverage
 ```
 
-### Playwright + DeepSeek 增强模式
+### SearXNG / Tavily / Playwright + DeepSeek 增强模式
 
-增强模式用于提升 tag 丰富度：先用搜索 API 或 Playwright/Chrome 缓存证据，再用 DeepSeek 输出结构化 JSON tag。建议优先用 Tavily，Playwright 只做兜底；先用 `--stock-codes` 或 `--limit 20` 跑小样本，人工看过候选标签后再全量跑。
+增强模式用于提升 tag 丰富度：先用搜索服务缓存证据，再用 DeepSeek 输出结构化 JSON tag。建议优先用本地免费的 SearXNG，Tavily 做额度兜底，Playwright 只做小样本诊断。SearXNG 部署见 `docs/SEARXNG_SEARCH_INTEGRATION.md`。
 
 ```bash
-# 1. 推荐：用 Tavily Search API 抓证据，不需要浏览器
+# 1. 推荐：用本地 SearXNG 抓证据
+uv run python run.py searxng-research-stock-tags \
+  --industry-registry-csv docs/hk_industry_registry.csv \
+  --evidence-csv docs/hk_company_searxng_evidence.csv \
+  --searxng-url http://127.0.0.1:8888 \
+  --max-results-per-query 5 \
+  --max-queries-per-stock 3 \
+  --engines bing,duckduckgo \
+  --max-workers 4 \
+  --show-progress
+
+# 2. 可选兜底：用 Tavily Search API 抓证据
 export TAVILY_API_KEY=...
 uv run python run.py tavily-research-stock-tags \
   --industry-registry-csv docs/hk_industry_registry.csv \
@@ -201,10 +212,10 @@ uv run python run.py tavily-research-stock-tags \
   --max-queries-per-stock 3 \
   --show-progress
 
-# 2. 兜底：首次使用 Playwright 需要安装 Chromium 浏览器
+# 3. 小样本诊断：首次使用 Playwright 需要安装 Chromium 浏览器
 uv run playwright install chromium
 
-# 3. 兜底：浏览器搜索抓证据
+# 4. 小样本诊断：浏览器搜索抓证据
 uv run python run.py browser-research-stock-tags \
   --industry-registry-csv docs/hk_industry_registry.csv \
   --evidence-csv docs/hk_company_browser_evidence.csv \
@@ -215,10 +226,10 @@ uv run python run.py browser-research-stock-tags \
   --per-page-timeout 12 \
   --show-progress
 
-# 4. DeepSeek 从证据中抽取结构化 tag
+# 5. DeepSeek 从证据中抽取结构化 tag
 export DEEPSEEK_API_KEY=...
 uv run python run.py extract-stock-tags-llm \
-  --evidence-csv docs/hk_company_tavily_evidence.csv \
+  --evidence-csv docs/hk_company_searxng_evidence.csv \
   --tag-dictionary-csv docs/hk_tag_dictionary.csv \
   --output docs/hk_llm_tag_extraction.csv \
   --candidate-output docs/hk_stock_tag_candidate_llm.csv \
@@ -226,7 +237,7 @@ uv run python run.py extract-stock-tags-llm \
   --stock-codes 00700 03690 09988 01208 00883 \
   --show-progress
 
-# 5. 合并行业 registry、基础 evidence 和 LLM tags
+# 6. 合并行业 registry、基础 evidence 和 LLM tags
 uv run python run.py build-stock-tags \
   --industry-registry-csv docs/hk_industry_registry.csv \
   --evidence-csv docs/hk_company_research_evidence.csv \
@@ -236,7 +247,7 @@ uv run python run.py build-stock-tags \
   --output docs/hk_stock_tag_registry.csv \
   --candidate-output docs/hk_stock_tag_candidate.csv
 
-# 6. 覆盖导入仓库，避免旧 tag 残留
+# 7. 覆盖导入仓库，避免旧 tag 残留
 uv run python run.py import-stock-tags \
   --tag-dictionary-csv docs/hk_tag_dictionary.csv \
   --stock-tag-csv docs/hk_stock_tag_registry.csv \

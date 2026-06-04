@@ -9,6 +9,7 @@
   uv run python run.py select --analysis-mode lightgbm --top-n 10 --days 365
   uv run python run.py fetch-alt --stock-limit 100
   uv run python run.py research-stock-tags --industry-registry-csv docs/hk_industry_registry.csv
+  uv run python run.py searxng-research-stock-tags --industry-registry-csv docs/hk_industry_registry.csv
   uv run python run.py tavily-research-stock-tags --industry-registry-csv docs/hk_industry_registry.csv
   uv run python run.py browser-research-stock-tags --industry-registry-csv docs/hk_industry_registry.csv
   uv run python run.py extract-stock-tags-llm --evidence-csv docs/hk_company_browser_evidence.csv
@@ -221,6 +222,7 @@ def _run_browser_research_stock_tags(args):
             max_pages_per_stock=args.max_pages_per_stock,
             per_page_timeout=args.per_page_timeout,
             search_engine=args.search_engine,
+            max_workers=args.max_workers,
             show_progress=args.show_progress,
         )
         print(f"浏览器股票标签证据调研完成: {summary}")
@@ -245,9 +247,35 @@ def _run_tavily_research_stock_tags(args):
             search_depth=args.search_depth,
             topic=args.topic,
             include_raw_content=args.include_raw_content,
+            max_workers=args.max_workers,
             show_progress=args.show_progress,
         )
         print(f"Tavily 股票标签证据调研完成: {summary}")
+    finally:
+        service.close()
+
+
+def _run_searxng_research_stock_tags(args):
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        summary = service.searxng_research_stock_tags(
+            industry_registry_csv=args.industry_registry_csv,
+            evidence_csv=args.evidence_csv,
+            stock_codes=args.stock_codes,
+            limit=args.limit,
+            skip_existing=not args.no_skip_existing,
+            searxng_url=args.searxng_url,
+            max_results_per_query=args.max_results_per_query,
+            max_queries_per_stock=args.max_queries_per_stock,
+            engines=args.engines,
+            language=args.language,
+            categories=args.categories,
+            max_workers=args.max_workers,
+            show_progress=args.show_progress,
+        )
+        print(f"SearXNG 股票标签证据调研完成: {summary}")
     finally:
         service.close()
 
@@ -478,6 +506,7 @@ def main():
         parser.add_argument("--max-pages-per-stock", type=int, default=8, help="每只股票最多保留多少证据页")
         parser.add_argument("--per-page-timeout", type=int, default=12, help="单页浏览器超时秒数")
         parser.add_argument("--search-engine", choices=["bing", "google"], default="bing", help="搜索引擎，默认 bing，google 在自动化环境更容易触发风控")
+        parser.add_argument("--max-workers", type=int, default=1, help="并发股票数；浏览器链路建议 1-4")
         parser.add_argument("--no-skip-existing", action="store_true", help="不跳过 evidence CSV 中已有浏览器证据的股票")
         parser.add_argument("--show-progress", action="store_true", help="显示进度")
 
@@ -501,11 +530,36 @@ def main():
         parser.add_argument("--search-depth", choices=["basic", "advanced"], default="basic", help="Tavily search_depth")
         parser.add_argument("--topic", choices=["general", "news", "finance"], default="finance", help="Tavily topic")
         parser.add_argument("--include-raw-content", action="store_true", help="请求 Tavily 返回 raw_content，会消耗更多额度")
+        parser.add_argument("--max-workers", type=int, default=1, help="并发股票数；Tavily 链路建议 4-8 起步")
         parser.add_argument("--no-skip-existing", action="store_true", help="不跳过 evidence CSV 中已有 Tavily 成功证据的股票")
         parser.add_argument("--show-progress", action="store_true", help="显示进度")
 
         args = parser.parse_args(sys.argv[2:])
         _run_tavily_research_stock_tags(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "searxng-research-stock-tags":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py searxng-research-stock-tags", description="用本地 SearXNG 搜索并缓存股票标签证据"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源")
+        parser.add_argument("--industry-registry-csv", default="docs/hk_industry_registry.csv", help="行业 registry CSV")
+        parser.add_argument("--evidence-csv", default="docs/hk_company_searxng_evidence.csv", help="SearXNG 证据 CSV")
+        parser.add_argument("--limit", type=int, default=None, help="限制调研股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--searxng-url", default=None, help="SearXNG 地址，默认读取 SEARXNG_URL 或 http://127.0.0.1:8888")
+        parser.add_argument("--max-results-per-query", type=int, default=5, help="每个查询最多保留多少搜索结果")
+        parser.add_argument("--max-queries-per-stock", type=int, default=3, help="每只股票最多发起多少个查询")
+        parser.add_argument("--engines", default=None, help="SearXNG engines，例如 bing,duckduckgo")
+        parser.add_argument("--language", default="zh-CN", help="SearXNG language")
+        parser.add_argument("--categories", default="general", help="SearXNG categories")
+        parser.add_argument("--max-workers", type=int, default=4, help="并发股票数；SearXNG 链路建议 4 起步")
+        parser.add_argument("--no-skip-existing", action="store_true", help="不跳过 evidence CSV 中已有 SearXNG 成功证据的股票")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_searxng_research_stock_tags(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "extract-stock-tags-llm":
         import argparse
 

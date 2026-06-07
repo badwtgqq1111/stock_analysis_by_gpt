@@ -218,6 +218,188 @@ ORDER BY ({order_by})
 
 _COMPANY_RESEARCH_EVIDENCE_ORDER_BY = ["market", "stock_code", "source", "title"]
 
+_ENTITY_ALIAS_COLUMNS = [
+    "stock_code", "market", "alias", "alias_type", "source", "confidence", "updated_at",
+]
+
+_ENTITY_ALIAS_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    alias String,
+    alias_type LowCardinality(String),
+    source String,
+    confidence Float64,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
+_ENTITY_ALIAS_ORDER_BY = ["market", "stock_code", "alias_type", "alias"]
+
+_STOCK_PROFILE_COLUMNS = [
+    "stock_code", "market", "profile_json", "summary", "strengths", "risks",
+    "open_questions", "evidence_count", "confidence", "updated_at",
+]
+
+_STOCK_PROFILE_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    profile_json String,
+    summary String,
+    strengths String,
+    risks String,
+    open_questions String,
+    evidence_count UInt32,
+    confidence Float64,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
+_STOCK_PROFILE_ORDER_BY = ["market", "stock_code"]
+
+_STOCK_DEEP_TAG_COLUMNS = [
+    "stock_code", "market", "tag", "tag_type", "confidence", "evidence_count",
+    "source_count", "freshness_days", "attention_velocity_7d", "is_primary",
+    "evidence_refs", "source", "updated_at",
+]
+
+_STOCK_DEEP_TAG_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    tag String,
+    tag_type LowCardinality(String),
+    confidence Float64,
+    evidence_count UInt32,
+    source_count UInt32,
+    freshness_days Float64,
+    attention_velocity_7d Float64,
+    is_primary Bool,
+    evidence_refs String,
+    source String,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
+_STOCK_DEEP_TAG_ORDER_BY = ["market", "stock_code", "tag_type", "tag"]
+
+_STOCK_GRAPH_NODE_COLUMNS = [
+    "node_id", "node_type", "name", "canonical_name", "properties_json",
+    "source", "confidence", "updated_at",
+]
+
+_STOCK_GRAPH_NODE_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    node_id String,
+    node_type LowCardinality(String),
+    name String,
+    canonical_name String,
+    properties_json String,
+    source String,
+    confidence Float64,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY node_type
+ORDER BY ({order_by})
+"""
+
+_STOCK_GRAPH_NODE_ORDER_BY = ["node_type", "node_id"]
+
+_STOCK_GRAPH_EDGE_COLUMNS = [
+    "src_type", "src_id", "edge_type", "dst_type", "dst_id", "confidence",
+    "evidence_refs", "source", "updated_at",
+]
+
+_STOCK_GRAPH_EDGE_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    src_type LowCardinality(String),
+    src_id String,
+    edge_type LowCardinality(String),
+    dst_type LowCardinality(String),
+    dst_id String,
+    confidence Float64,
+    evidence_refs String,
+    source String,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY edge_type
+ORDER BY ({order_by})
+"""
+
+_STOCK_GRAPH_EDGE_ORDER_BY = ["src_type", "src_id", "edge_type", "dst_type", "dst_id"]
+
+_ATTENTION_SIGNAL_COLUMNS = [
+    "entity_type", "entity_id", "source", "metric", "value", "window",
+    "velocity", "quality_score", "asof_date",
+]
+
+_ATTENTION_SIGNAL_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    entity_type LowCardinality(String),
+    entity_id String,
+    source LowCardinality(String),
+    metric LowCardinality(String),
+    value Float64,
+    window LowCardinality(String),
+    velocity Float64,
+    quality_score Float64,
+    asof_date Date
+) ENGINE = ReplacingMergeTree()
+PARTITION BY (source, metric)
+ORDER BY ({order_by})
+"""
+
+_ATTENTION_SIGNAL_ORDER_BY = ["entity_type", "entity_id", "source", "metric", "window", "asof_date"]
+
+_THEME_OPPORTUNITY_SCORE_COLUMNS = [
+    "stock_code", "market", "theme", "score", "technology_score",
+    "commercialization_score", "value_chain_score", "bottleneck_score",
+    "catalyst_score", "attention_score", "evidence_quality_score",
+    "liquidity_score", "technical_trend_score", "risk_penalty",
+    "crowding_penalty", "verdict", "rank_reason", "bull_case",
+    "bear_case", "key_evidence_refs", "component_scores_json",
+    "asof_date", "updated_at",
+]
+
+_THEME_OPPORTUNITY_SCORE_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    theme String,
+    score Float64,
+    technology_score Float64,
+    commercialization_score Float64,
+    value_chain_score Float64,
+    bottleneck_score Float64,
+    catalyst_score Float64,
+    attention_score Float64,
+    evidence_quality_score Float64,
+    liquidity_score Float64,
+    technical_trend_score Float64,
+    risk_penalty Float64,
+    crowding_penalty Float64,
+    verdict LowCardinality(String),
+    rank_reason String,
+    bull_case String,
+    bear_case String,
+    key_evidence_refs String,
+    component_scores_json String,
+    asof_date Date,
+    updated_at DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY (market, theme)
+ORDER BY ({order_by})
+"""
+
+_THEME_OPPORTUNITY_SCORE_ORDER_BY = ["market", "theme", "asof_date", "stock_code"]
+
 DATASET_SCHEMA = {
     "features": {
         "columns": _FEATURES_COLUMNS,
@@ -253,6 +435,41 @@ DATASET_SCHEMA = {
         "columns": _COMPANY_RESEARCH_EVIDENCE_COLUMNS,
         "ddl": _COMPANY_RESEARCH_EVIDENCE_DDL,
         "order_by": _COMPANY_RESEARCH_EVIDENCE_ORDER_BY,
+    },
+    "entity_alias_registry": {
+        "columns": _ENTITY_ALIAS_COLUMNS,
+        "ddl": _ENTITY_ALIAS_DDL,
+        "order_by": _ENTITY_ALIAS_ORDER_BY,
+    },
+    "stock_profile": {
+        "columns": _STOCK_PROFILE_COLUMNS,
+        "ddl": _STOCK_PROFILE_DDL,
+        "order_by": _STOCK_PROFILE_ORDER_BY,
+    },
+    "stock_deep_tag_registry": {
+        "columns": _STOCK_DEEP_TAG_COLUMNS,
+        "ddl": _STOCK_DEEP_TAG_DDL,
+        "order_by": _STOCK_DEEP_TAG_ORDER_BY,
+    },
+    "stock_graph_nodes": {
+        "columns": _STOCK_GRAPH_NODE_COLUMNS,
+        "ddl": _STOCK_GRAPH_NODE_DDL,
+        "order_by": _STOCK_GRAPH_NODE_ORDER_BY,
+    },
+    "stock_graph_edges": {
+        "columns": _STOCK_GRAPH_EDGE_COLUMNS,
+        "ddl": _STOCK_GRAPH_EDGE_DDL,
+        "order_by": _STOCK_GRAPH_EDGE_ORDER_BY,
+    },
+    "attention_signal": {
+        "columns": _ATTENTION_SIGNAL_COLUMNS,
+        "ddl": _ATTENTION_SIGNAL_DDL,
+        "order_by": _ATTENTION_SIGNAL_ORDER_BY,
+    },
+    "theme_opportunity_score": {
+        "columns": _THEME_OPPORTUNITY_SCORE_COLUMNS,
+        "ddl": _THEME_OPPORTUNITY_SCORE_DDL,
+        "order_by": _THEME_OPPORTUNITY_SCORE_ORDER_BY,
     },
 }
 

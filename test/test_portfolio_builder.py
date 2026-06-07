@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backtest_engine import TopNPortfolioBuilder
 from backtest_engine.industry_selector import IndustryCandidateSelector
+from core.lightgbm_analysis import LightGBMAnalysisMixin
 
 
 def _make_analysis_result(
@@ -151,6 +152,64 @@ def test_portfolio_builder_supports_score_weight_allocation():
     assert 0 < sum(capital_map.values()) <= 45000.0  # 90000 * 0.5 target, capped
     reasons = {item["stock_code"]: item["weight_reason"] for item in result["selected"]}
     assert reasons["00100"]["method"] == "score_weighted"
+
+
+def test_portfolio_builder_applies_theme_overlay_to_ranking_scores():
+    builder = TopNPortfolioBuilder(top_n=2, initial_capital=100000, theme_overlay_strength=0.10)
+    rows = builder._apply_theme_overlay(
+        [
+            {"stock_code": "00001", "ranking_score": 80.0, "theme_opportunity_score": 10.0},
+            {"stock_code": "00002", "ranking_score": 70.0, "theme_opportunity_score": 90.0},
+        ]
+    )
+
+    first = next(row for row in rows if row["stock_code"] == "00001")
+    second = next(row for row in rows if row["stock_code"] == "00002")
+    assert first["ranking_score_raw"] == 80.0
+    assert first["theme_overlay_applied"]
+    assert first["ranking_score"] < 80.0
+    assert second["ranking_score"] > 70.0
+
+
+def test_lightgbm_theme_feature_merge_reads_standard_feature_rows(monkeypatch):
+    dates = pd.to_datetime(["2026-06-05", "2026-06-06"])
+    panel = pd.DataFrame(
+        {"stock_code": ["02513", "02513"], "base_feature": [1.0, 2.0]},
+        index=dates,
+    )
+    feature_rows = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-06-06",
+                "stock_code": "02513",
+                "market": "HK",
+                "frequency": "daily",
+                "feature_set": "theme_opportunity",
+                "feature_name": "theme_score__abc",
+                "feature_value": 69.5,
+            }
+        ]
+    )
+
+    class FakeWarehouse:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def read_features(self, **kwargs):
+            assert kwargs["feature_set"] == "theme_opportunity"
+            return feature_rows
+
+    import data.store.warehouse as warehouse_module
+
+    monkeypatch.setattr(warehouse_module, "MarketDataWarehouse", FakeWarehouse, raising=False)
+    merged = LightGBMAnalysisMixin._merge_theme_opportunity_features(
+        panel,
+        ["02513"],
+        feature_set="theme_opportunity",
+    )
+
+    assert "theme_score__abc" in merged.columns
+    assert float(merged.loc[pd.Timestamp("2026-06-06"), "theme_score__abc"]) == 69.5
 
 
 def test_portfolio_builder_excludes_ineligible_fallback_candidates_from_selected():
@@ -925,6 +984,8 @@ if __name__ == "__main__":
     test_portfolio_builder_selects_active_actionable_first()
     test_portfolio_builder_generates_cross_sectional_picks_and_watchlist()
     test_portfolio_builder_supports_score_weight_allocation()
+    test_portfolio_builder_applies_theme_overlay_to_ranking_scores()
+    test_lightgbm_theme_feature_merge_reads_standard_feature_rows()
     test_portfolio_builder_excludes_ineligible_fallback_candidates_from_selected()
     test_portfolio_builder_final_selection_comes_from_industry_shortlist()
     test_portfolio_builder_syncs_ranking_selected_flags_to_final_holdings()

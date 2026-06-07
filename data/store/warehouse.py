@@ -8,15 +8,22 @@ from pathlib import Path
 import pandas as pd
 
 from data.model import (
+    ATTENTION_SIGNAL_FIELDS,
     CLEAN_OHLCV_COLUMNS,
     COMPANY_RESEARCH_EVIDENCE_FIELDS,
     CORPORATE_ACTION_FIELDS,
+    ENTITY_ALIAS_FIELDS,
     FEATURE_COLUMNS,
     SIGNAL_COLUMNS,
+    STOCK_DEEP_TAG_FIELDS,
+    STOCK_GRAPH_EDGE_FIELDS,
+    STOCK_GRAPH_NODE_FIELDS,
     STOCK_TAG_CANDIDATE_FIELDS,
     STOCK_TAG_FIELDS,
     STOCK_INFO_FIELDS,
+    STOCK_PROFILE_FIELDS,
     TAG_DICTIONARY_FIELDS,
+    THEME_OPPORTUNITY_SCORE_FIELDS,
     TRADE_COLUMNS,
 )
 import os
@@ -36,6 +43,13 @@ class MarketDataWarehouse:
     STOCK_TAG_DATASET = "stock_tag_registry"
     STOCK_TAG_CANDIDATE_DATASET = "stock_tag_candidate"
     COMPANY_RESEARCH_EVIDENCE_DATASET = "company_research_evidence"
+    ENTITY_ALIAS_DATASET = "entity_alias_registry"
+    STOCK_PROFILE_DATASET = "stock_profile"
+    STOCK_DEEP_TAG_DATASET = "stock_deep_tag_registry"
+    STOCK_GRAPH_NODE_DATASET = "stock_graph_nodes"
+    STOCK_GRAPH_EDGE_DATASET = "stock_graph_edges"
+    ATTENTION_SIGNAL_DATASET = "attention_signal"
+    THEME_OPPORTUNITY_SCORE_DATASET = "theme_opportunity_score"
     CORPORATE_ACTIONS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "action_type", "year")
     FEATURES_PARTITION_COLUMNS = (
         "market",
@@ -858,6 +872,141 @@ class MarketDataWarehouse:
             partition_columns=("market",),
         )
         return {"rows": len(payload), "dataset_path": str(target)}
+
+    def _replace_meta_dataset(self, frame, fields, dataset_name, date_column="updated_at", partition_columns=None):
+        self._ensure_writable()
+        payload = (
+            frame[fields].copy()
+            if frame is not None and not frame.empty
+            else pd.DataFrame(columns=fields)
+        )
+        target = self._write_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            date_column=date_column,
+            partition_columns=partition_columns,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def _upsert_meta_dataset(self, frame, fields, dataset_name, dedupe_keys, sort_by, date_column="updated_at", partition_columns=None):
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
+        payload = frame[fields].copy()
+        target = self._upsert_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=dedupe_keys,
+            sort_by=sort_by,
+            date_column=date_column,
+            partition_columns=partition_columns,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def replace_entity_aliases(self, frame, dataset_name=ENTITY_ALIAS_DATASET):
+        return self._replace_meta_dataset(
+            frame, ENTITY_ALIAS_FIELDS, dataset_name, partition_columns=("market",)
+        )
+
+    def upsert_entity_aliases(self, frame, dataset_name=ENTITY_ALIAS_DATASET):
+        return self._upsert_meta_dataset(
+            frame,
+            ENTITY_ALIAS_FIELDS,
+            dataset_name,
+            dedupe_keys=["market", "stock_code", "alias_type", "alias"],
+            sort_by=["market", "stock_code", "alias_type", "alias", "updated_at"],
+            partition_columns=("market",),
+        )
+
+    def replace_stock_profiles(self, frame, dataset_name=STOCK_PROFILE_DATASET):
+        return self._replace_meta_dataset(
+            frame, STOCK_PROFILE_FIELDS, dataset_name, partition_columns=("market",)
+        )
+
+    def replace_stock_deep_tags(self, frame, dataset_name=STOCK_DEEP_TAG_DATASET):
+        return self._replace_meta_dataset(
+            frame, STOCK_DEEP_TAG_FIELDS, dataset_name, partition_columns=("market",)
+        )
+
+    def replace_stock_graph_nodes(self, frame, dataset_name=STOCK_GRAPH_NODE_DATASET):
+        return self._replace_meta_dataset(
+            frame, STOCK_GRAPH_NODE_FIELDS, dataset_name, partition_columns=("node_type",)
+        )
+
+    def replace_stock_graph_edges(self, frame, dataset_name=STOCK_GRAPH_EDGE_DATASET):
+        return self._replace_meta_dataset(
+            frame, STOCK_GRAPH_EDGE_FIELDS, dataset_name, partition_columns=("edge_type",)
+        )
+
+    def replace_attention_signals(self, frame, dataset_name=ATTENTION_SIGNAL_DATASET):
+        return self._replace_meta_dataset(
+            frame, ATTENTION_SIGNAL_FIELDS, dataset_name, date_column="asof_date", partition_columns=("source", "metric")
+        )
+
+    def replace_theme_opportunity_scores(self, frame, dataset_name=THEME_OPPORTUNITY_SCORE_DATASET):
+        return self._replace_meta_dataset(
+            frame,
+            THEME_OPPORTUNITY_SCORE_FIELDS,
+            dataset_name,
+            date_column="asof_date",
+            partition_columns=("market", "theme"),
+        )
+
+    def read_theme_opportunity_scores(self, stock_codes=None, theme=None, market=None):
+        filters = {}
+        if stock_codes:
+            filters["stock_code"] = list(dict.fromkeys(stock_codes))
+        if theme:
+            filters["theme"] = theme
+        if market:
+            filters["market"] = market
+        return self._read_meta_frame(
+            self.THEME_OPPORTUNITY_SCORE_DATASET,
+            filters=filters,
+            columns=THEME_OPPORTUNITY_SCORE_FIELDS,
+            order_by="market, theme, asof_date, score",
+        )
+
+    def read_entity_aliases(self, stock_codes=None, market=None):
+        filters = {}
+        if stock_codes:
+            filters["stock_code"] = list(dict.fromkeys(stock_codes))
+        if market:
+            filters["market"] = market
+        return self._read_meta_frame(
+            self.ENTITY_ALIAS_DATASET,
+            filters=filters,
+            columns=ENTITY_ALIAS_FIELDS,
+            order_by="market, stock_code, alias_type, alias",
+        )
+
+    def read_stock_graph_edges(self, src_id=None, dst_id=None, edge_type=None):
+        filters = {}
+        if src_id:
+            filters["src_id"] = src_id
+        if dst_id:
+            filters["dst_id"] = dst_id
+        if edge_type:
+            filters["edge_type"] = edge_type
+        return self._read_meta_frame(
+            self.STOCK_GRAPH_EDGE_DATASET,
+            filters=filters,
+            columns=STOCK_GRAPH_EDGE_FIELDS,
+            order_by="src_type, src_id, edge_type, dst_type, dst_id",
+        )
+
+    def read_stock_graph_nodes(self, node_ids=None, node_type=None):
+        filters = {}
+        if node_ids:
+            filters["node_id"] = list(dict.fromkeys(node_ids))
+        if node_type:
+            filters["node_type"] = node_type
+        return self._read_meta_frame(
+            self.STOCK_GRAPH_NODE_DATASET,
+            filters=filters,
+            columns=STOCK_GRAPH_NODE_FIELDS,
+            order_by="node_type, node_id",
+        )
 
     def read_stock_tags(self, stock_codes=None, market=None, tag=None, tag_type=None, min_confidence=None):
         filters = {}

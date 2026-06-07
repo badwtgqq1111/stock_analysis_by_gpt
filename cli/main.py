@@ -45,6 +45,14 @@ def run_cli(argv=None):
     parser.add_argument('--model-type', dest='model_type', default='lightgbm',
                         choices=['lightgbm', 'xgboost', 'catboost'],
                         help='Ranker 模型类型: lightgbm (默认), xgboost, catboost')
+    parser.add_argument('--enable-theme-features', dest='enable_theme_features', action='store_true', default=True,
+                        help='LightGBM 模式读取 theme_opportunity 标准特征，默认开启')
+    parser.add_argument('--no-theme-features', dest='enable_theme_features', action='store_false',
+                        help='LightGBM 模式不读取 theme_opportunity 特征')
+    parser.add_argument('--theme-feature-set', dest='theme_feature_set', default='theme_opportunity',
+                        help='主题机会特征 feature_set，默认 theme_opportunity')
+    parser.add_argument('--theme-overlay-strength', dest='theme_overlay_strength', type=float, default=0.0,
+                        help='最终排名主题 overlay 权重，建议 0.05-0.10，默认 0')
     parser.add_argument('--signal-recipes', dest='signal_recipes', default=None,
                         help='信号 recipe 名称，逗号分隔；默认 low_price_setup')
     parser.add_argument('--signal-cooldown-days', dest='signal_cooldown_days', type=int, default=20,
@@ -184,6 +192,9 @@ def run_cli(argv=None):
             industry_overlay_strength=args.industry_overlay_strength,
             max_industry_weight=args.max_industry_weight,
             hot_industry_weight_multiplier=args.hot_industry_weight_multiplier,
+            enable_theme_features=args.enable_theme_features,
+            theme_feature_set=args.theme_feature_set,
+            theme_overlay_strength=args.theme_overlay_strength,
             llm_report=args.llm_report,
             llm_model=args.llm_model,
         )

@@ -1,12 +1,13 @@
 """LightGBM analysis mixin for StockAnalyzer."""
 
+import datetime as _dt
 import sys
 import time
 
 import numpy as np
 import pandas as pd
 
-from data.model import normalize_bool
+from data.model import normalize_bool, normalize_stock_code
 
 from core.constants import DEFAULT_FACTOR_SET
 from core.formatting import _build_lightgbm_factor_explanation
@@ -337,6 +338,89 @@ class LightGBMAnalysisMixin:
             return None
 
     @staticmethod
+    def _merge_theme_opportunity_features(
+        panel_features,
+        stock_codes,
+        show_progress=False,
+        feature_set="theme_opportunity",
+        feature_prefix="theme_",
+    ):
+        """Merge pre-computed theme opportunity features into LightGBM panel."""
+        try:
+            from data.store.layout import DataLayout
+            from data.store.warehouse import MarketDataWarehouse
+
+            if panel_features is None or panel_features.empty:
+                return panel_features
+            layout = DataLayout(base_dir="assets/data")
+            wh = MarketDataWarehouse(layout, read_only=True)
+            trade_dates = panel_features.index.unique()
+            start_date = str(pd.Timestamp(min(trade_dates)).date())
+            panel_end = pd.Timestamp(max(trade_dates)).normalize()
+            end_date = str(max(panel_end, pd.Timestamp(_dt.date.today())).date())
+            feature_df = wh.read_features(
+                feature_set=feature_set,
+                market="HK",
+                frequency="daily",
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if feature_df is None or feature_df.empty:
+                if show_progress:
+                    print("[PROGRESS] analysis phase=lightgbm_theme_features theme_features=0")
+                return panel_features
+            if stock_codes:
+                allowed_codes = {normalize_stock_code(code, market="HK") for code in stock_codes}
+                feature_df["stock_code"] = feature_df["stock_code"].astype(str).map(lambda code: normalize_stock_code(code, market="HK"))
+                feature_df = feature_df.loc[feature_df["stock_code"].isin(allowed_codes)]
+            if feature_df.empty:
+                return panel_features
+            wide = feature_df.pivot_table(
+                index=["trade_date", "stock_code"],
+                columns="feature_name",
+                values="feature_value",
+                aggfunc="last",
+            ).reset_index()
+            if wide.empty:
+                return panel_features
+            wide["trade_date"] = pd.to_datetime(wide["trade_date"], errors="coerce")
+            base = panel_features.copy()
+            base_reset = base.reset_index()
+            date_col = base_reset.columns[0]
+            base_reset.rename(columns={date_col: "trade_date"}, inplace=True)
+            base_reset["trade_date"] = pd.to_datetime(base_reset["trade_date"], errors="coerce")
+            base_reset["stock_code"] = base_reset["stock_code"].astype(str).map(lambda code: normalize_stock_code(code, market="HK"))
+            theme_cols = [col for col in wide.columns if str(col).startswith(feature_prefix)]
+            future_mask = wide["trade_date"] > panel_end
+            if future_mask.any() and theme_cols:
+                latest_future = (
+                    wide.loc[future_mask]
+                    .sort_values("trade_date")
+                    .groupby("stock_code", as_index=False)
+                    .tail(1)
+                    .copy()
+                )
+                latest_future["trade_date"] = panel_end
+                wide = pd.concat([wide.loc[~future_mask], latest_future], ignore_index=True, sort=False)
+            merged = base_reset.merge(wide, on=["trade_date", "stock_code"], how="left")
+            merged.set_index("trade_date", inplace=True)
+            theme_cols = [col for col in merged.columns if str(col).startswith(feature_prefix)]
+            if theme_cols:
+                merged[theme_cols] = merged.groupby("stock_code", sort=False)[theme_cols].ffill().fillna(0.0)
+            if show_progress:
+                latest_theme_rows = int((wide["trade_date"] == panel_end).sum()) if "trade_date" in wide.columns else 0
+                print(
+                    f"[PROGRESS] analysis phase=lightgbm_theme_features "
+                    f"theme_features={len(theme_cols)} stocks_with_theme={wide['stock_code'].nunique()} "
+                    f"panel_end={panel_end.date()} latest_theme_rows={latest_theme_rows}"
+                )
+            return merged
+        except Exception as exc:
+            if show_progress:
+                print(f"[PROGRESS] analysis phase=lightgbm_theme_features error={exc}")
+            return panel_features
+
+    @staticmethod
     def _build_lightgbm_factor_explanation(
         model_metadata,
         latest_model_score,
@@ -369,6 +453,8 @@ class LightGBMAnalysisMixin:
         max_features=0,
         model_type="lightgbm",
         backtest_date=None,
+        enable_theme_features=True,
+        theme_feature_set="theme_opportunity",
     ):
         import core as core_module
         from factor_engine import FactorContext
@@ -547,6 +633,13 @@ class LightGBMAnalysisMixin:
         panel_features = self._merge_alt_sentiment_features(
             panel_features, stock_codes, show_progress=show_progress
         )
+        if enable_theme_features:
+            panel_features = self._merge_theme_opportunity_features(
+                panel_features,
+                stock_codes,
+                show_progress=show_progress,
+                feature_set=theme_feature_set,
+            )
 
         fit_started_at = time.time()
         if show_progress:
@@ -749,6 +842,15 @@ class LightGBMAnalysisMixin:
             stock_code = item["stock_code"]
             full_data = item["full_data"]
             feature_frame = item["feature_frame"].drop(columns=["stock_code"], errors="ignore")
+            latest_theme_features = {}
+            if not panel_features.empty and "stock_code" in panel_features.columns:
+                theme_rows = panel_features.loc[panel_features["stock_code"].astype(str) == str(stock_code)]
+                if not theme_rows.empty:
+                    theme_cols = [col for col in theme_rows.columns if str(col).startswith("theme_")]
+                    for col in theme_cols:
+                        series = pd.to_numeric(theme_rows[col], errors="coerce").dropna()
+                        if not series.empty:
+                            latest_theme_features[col] = float(series.iloc[-1])
             stock_scores = panel_scores[panel_scores["stock_code"] == stock_code].copy()
             if stock_scores.empty:
                 if show_progress:
@@ -1060,6 +1162,24 @@ class LightGBMAnalysisMixin:
                     "tradable_flag": _tradable_flag,
                     "data_coverage_score": _data_coverage_score,
                     "data_missing_fields": _missing_fields,
+                    "theme_feature_set": theme_feature_set if enable_theme_features else None,
+                    "theme_features": latest_theme_features,
+                    "theme_opportunity_score": max(
+                        [value for key, value in latest_theme_features.items() if str(key).startswith("theme_score__")]
+                        or [np.nan]
+                    ),
+                    "theme_attention_score": max(
+                        [value for key, value in latest_theme_features.items() if "attention_score" in str(key)]
+                        or [np.nan]
+                    ),
+                    "theme_bottleneck_score": max(
+                        [value for key, value in latest_theme_features.items() if "bottleneck_score" in str(key)]
+                        or [np.nan]
+                    ),
+                    "theme_risk_penalty": max(
+                        [value for key, value in latest_theme_features.items() if "risk_penalty" in str(key)]
+                        or [np.nan]
+                    ),
                 }
             )
             if show_progress:

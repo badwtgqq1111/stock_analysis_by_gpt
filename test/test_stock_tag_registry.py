@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from data.model import (
     COMPANY_RESEARCH_EVIDENCE_FIELDS,
+    ENTITY_ALIAS_FIELDS,
     STOCK_TAG_CANDIDATE_FIELDS,
     STOCK_TAG_FIELDS,
     TAG_DICTIONARY_FIELDS,
@@ -534,6 +535,29 @@ def test_extract_tags_from_research_evidence_finds_specific_business_tags():
     assert candidates.empty
 
 
+def test_extract_tags_from_search_evidence_ignores_query_echo_keywords():
+    evidence = pd.DataFrame(
+        [
+            {
+                "stock_code": "00001",
+                "market": "HK",
+                "source": "searxng_search",
+                "title": "query=00001 AI 云服务 游戏 铜矿 铁矿 稳定币 业务; rank=1",
+                "summary": "长江和记主要经营港口、零售、基建及电讯业务。",
+                "url": "https://example.com",
+                "raw_text": "长江和记主要经营港口、零售、基建及电讯业务。",
+                "fetched_at": "2026-06-04T00:00:00",
+            }
+        ],
+        columns=COMPANY_RESEARCH_EVIDENCE_FIELDS,
+    )
+
+    formal, candidates = extract_tags_from_research_evidence(evidence)
+
+    assert formal.empty
+    assert candidates.empty
+
+
 from data.store.layout import DataLayout
 from data.store.warehouse import MarketDataWarehouse
 
@@ -634,6 +658,31 @@ def test_merge_research_tags_adds_precise_tags_and_keeps_candidates_separate():
 
     assert ("00700", "游戏", "business") in pairs
     assert ("00700", "云服务", "business") in pairs
+    assert candidates.empty
+
+
+def test_merge_research_tags_skips_search_only_evidence_rules():
+    base_formal = pd.DataFrame(columns=STOCK_TAG_FIELDS)
+    base_candidates = pd.DataFrame(columns=STOCK_TAG_CANDIDATE_FIELDS)
+    evidence = pd.DataFrame(
+        [
+            {
+                "stock_code": "00001",
+                "market": "HK",
+                "source": "searxng_search",
+                "title": "query=00001 AI 云服务 游戏 铜矿 铁矿 稳定币 业务; rank=1",
+                "summary": "选择阿里云的原因 下一代游戏正在推动游戏工作室提升网络和服务性能",
+                "url": "https://www.alibabacloud.com/zh/solutions/gaming",
+                "raw_text": "选择阿里云的原因 下一代游戏正在推动游戏工作室提升网络和服务性能",
+                "fetched_at": "2026-06-04T00:00:00",
+            }
+        ],
+        columns=COMPANY_RESEARCH_EVIDENCE_FIELDS,
+    )
+
+    formal, candidates = merge_research_tags(base_formal, base_candidates, evidence)
+
+    assert formal.empty
     assert candidates.empty
 
 
@@ -1409,3 +1458,627 @@ def test_review_stock_tag_candidates_accepts_selected_rows():
 
         assert summary["accepted_rows"] == 1
         assert pd.read_csv(accepted_csv)["tag"].iloc[0] == "AI"
+
+
+def test_stock_profile_alias_generation_keeps_manual_deep_aliases():
+    from data.ingest.stock_profile_graph import build_entity_aliases
+
+    stock_info = pd.DataFrame(
+        [
+            {
+                "stock_code": "02513",
+                "market": "HK",
+                "name": "智谱",
+                "theme_tags": "软件服务;AI",
+            }
+        ]
+    )
+
+    aliases = build_entity_aliases(
+        stock_info,
+        manual_aliases={
+            "02513": ["智谱AI", "Zhipu AI", "Z.ai", "GLM", "ChatGLM", "GLM-5.1"],
+        },
+    )
+
+    assert aliases["stock_code"].nunique() == 1
+    assert {"02513", "智谱", "Zhipu AI", "Z.ai", "GLM-5.1"}.issubset(set(aliases["alias"]))
+
+
+def test_stock_profile_relevance_filter_rejects_query_noise_and_cleans_signed_urls():
+    from data.ingest.stock_profile_graph import filter_relevant_evidence
+
+    evidence = pd.DataFrame(
+        [
+            {
+                "stock_code": "02513",
+                "market": "HK",
+                "source": "searxng_search",
+                "title": "query=02513 rank=1 title=AEST truck steps",
+                "summary": "rank=1; url=https://noise.example/a?AccessKeySecret=abc; snippet=Australian time truck guide",
+                "url": "https://noise.example/a?AccessKeySecret=abc",
+                "raw_text": "Australian time truck guide",
+                "fetched_at": "2026-06-06T00:00:00",
+            },
+            {
+                "stock_code": "02513",
+                "market": "HK",
+                "source": "searxng_search",
+                "title": "智谱 GLM-5.1 发布",
+                "summary": "Zhipu AI GLM-5.1 benchmark and AI Coding capability.",
+                "url": "https://z.ai/blog/glm-5-1?Expires=1&Signature=secret",
+                "raw_text": "智谱 Zhipu AI GLM-5.1 大模型 AI Coding benchmark.",
+                "fetched_at": "2026-06-06T00:00:00",
+            },
+        ]
+    )
+    aliases = pd.DataFrame(
+        [
+            {"stock_code": "02513", "market": "HK", "alias": "智谱"},
+            {"stock_code": "02513", "market": "HK", "alias": "Zhipu AI"},
+            {"stock_code": "02513", "market": "HK", "alias": "GLM-5.1"},
+        ]
+    )
+
+    filtered = filter_relevant_evidence(evidence, aliases, min_score=0.25)
+
+    assert len(filtered) == 1
+    assert "GLM-5.1" in filtered.iloc[0]["raw_text"]
+    assert filtered.iloc[0]["url"] == "https://z.ai/blog/glm-5-1"
+
+
+def test_searxng_fetcher_accepts_source_aware_queries(monkeypatch):
+    from data.ingest.providers.searxng_company_search import SearxngCompanySearchFetcher
+
+    queries = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"results": []}
+
+    def fake_get(url, params=None, timeout=None):
+        queries.append(params["q"])
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    fetcher = SearxngCompanySearchFetcher(
+        "02513",
+        company_name="智谱",
+        queries=["site:z.ai GLM-5.1 Zhipu", "site:github.com zhipuai glm"],
+        max_queries_per_stock=1,
+    )
+    fetcher.fetch()
+
+    assert queries == ["site:z.ai GLM-5.1 Zhipu"]
+
+
+def test_profile_payload_to_frames_normalizes_graph_edge_ids_and_subgraph():
+    from data.ingest.stock_profile_graph import profile_payload_to_frames, retrieve_subgraph
+
+    payload = {
+        "stock_code": "02513",
+        "summary": "智谱是大模型公司。",
+        "strengths": ["GLM 产品线"],
+        "risks": ["算力成本"],
+        "deep_tags": [
+            {
+                "tag": "GLM-5.1",
+                "tag_type": "product",
+                "confidence": 0.9,
+                "is_primary": True,
+                "evidence_refs": ["https://z.ai/glm"],
+            }
+        ],
+        "nodes": [
+            {"node_type": "product", "node_id": "GLM-5.1", "name": "GLM-5.1"},
+            {"node_type": "technology", "node_id": "大模型", "name": "大模型"},
+        ],
+        "edges": [
+            {
+                "src_type": "stock",
+                "src_id": "02513",
+                "edge_type": "produces",
+                "dst_type": "product",
+                "dst_id": "GLM-5.1",
+                "confidence": 0.9,
+                "evidence_refs": ["https://z.ai/glm"],
+            },
+            {
+                "src_type": "product",
+                "src_id": "GLM-5.1",
+                "edge_type": "belongs_to",
+                "dst_type": "technology",
+                "dst_id": "大模型",
+                "confidence": 0.86,
+                "evidence_refs": ["https://z.ai/glm"],
+            },
+        ],
+    }
+
+    profile, tags, nodes, edges = profile_payload_to_frames(payload)
+    sub_nodes, sub_edges = retrieve_subgraph(nodes, edges, ["stock:02513"], depth=2)
+
+    assert profile.iloc[0]["evidence_count"] == 1
+    assert tags.iloc[0]["tag"] == "GLM-5.1"
+    assert ("stock:02513", "product:GLM-5.1") in set(zip(edges["src_id"], edges["dst_id"]))
+    assert {"stock:02513", "product:GLM-5.1", "technology:大模型"}.issubset(set(sub_nodes["node_id"]))
+    assert len(sub_edges) == 2
+
+
+def test_service_research_stock_deep_profile_fetches_alias_aware_evidence(monkeypatch):
+    from data.ingest.service import MarketDataService
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        alias_csv = base / "aliases.csv"
+        evidence_csv = base / "deep_evidence.csv"
+        pd.DataFrame(
+            [
+                {"stock_code": "02513", "market": "HK", "alias": "智谱", "alias_type": "company", "source": "manual", "confidence": 0.95, "updated_at": "2026-06-06T00:00:00"},
+                {"stock_code": "02513", "market": "HK", "alias": "Zhipu AI", "alias_type": "company", "source": "manual", "confidence": 0.95, "updated_at": "2026-06-06T00:00:00"},
+                {"stock_code": "02513", "market": "HK", "alias": "GLM-5.1", "alias_type": "product", "source": "manual", "confidence": 0.95, "updated_at": "2026-06-06T00:00:00"},
+            ]
+        ).to_csv(alias_csv, index=False, encoding="utf-8-sig")
+
+        captured_queries = []
+
+        class FakeSearxngFetcher:
+            def __init__(self, stock_code, company_name="", **kwargs):
+                self.stock_code = stock_code
+                self.kwargs = kwargs
+                captured_queries.extend(kwargs.get("queries") or [])
+
+            def fetch(self):
+                return [
+                    {
+                        "stock_code": self.stock_code,
+                        "market": "HK",
+                        "source": "searxng_search",
+                        "title": "智谱 GLM-5.1 benchmark",
+                        "summary": "Zhipu AI GLM-5.1 大模型 AI Coding benchmark.",
+                        "url": "https://z.ai/glm?Signature=secret",
+                        "raw_text": "智谱 Zhipu AI GLM-5.1 大模型 AI Coding benchmark.",
+                        "fetched_at": "2026-06-06T00:00:00",
+                    }
+                ]
+
+        monkeypatch.setattr("data.ingest.service.SearxngCompanySearchFetcher", FakeSearxngFetcher, raising=False)
+        service = MarketDataService(base_dir=str(base / "data"))
+        try:
+            summary = service.research_stock_deep_profile(
+                alias_csv=alias_csv,
+                output_csv=evidence_csv,
+                stock_codes=["02513"],
+                searxng_url="http://127.0.0.1:8888",
+                engines="bing,duckduckgo",
+                max_workers=1,
+            )
+        finally:
+            service.close()
+
+        written = pd.read_csv(evidence_csv, dtype=str).fillna("")
+        assert summary["fetched_relevant"] == 1
+        assert any("site:hkexnews.hk" in query for query in captured_queries)
+        assert any("GLM-5.1" in query for query in captured_queries)
+        assert written.iloc[0]["source"] == "source_aware_search"
+        assert written.iloc[0]["url"] == "https://z.ai/glm"
+
+
+def test_lightrag_evidence_document_sanitizes_urls_and_secret_fragments():
+    from data.ingest.stock_profile_graph import build_lightrag_evidence_document
+
+    doc = build_lightrag_evidence_document(
+        {
+            "stock_code": "02513",
+            "market": "HK",
+            "source": "source_aware_search",
+            "title": "智谱 GLM-5.1",
+            "summary": "url=https://example.com/a?AccessKeySecret=abc123&Signature=s",
+            "url": "https://example.com/a?AccessKeySecret=abc123&Signature=s",
+            "raw_text": "AccessKeyId=AKIAFAKE1234567890 GLM benchmark",
+            "fetched_at": "2026-06-06T00:00:00",
+        },
+        aliases=["02513", "智谱", "GLM-5.1"],
+    )
+
+    assert doc["file_source"].startswith("stock_evidence/HK/02513/")
+    assert "ALIASES: 02513; 智谱; GLM-5.1" in doc["text"]
+    assert "AccessKeySecret=abc123" not in doc["text"]
+    assert "AKIAFAKE1234567890" not in doc["text"]
+    assert "https://example.com/a" in doc["text"]
+
+
+def test_lightrag_context_to_stock_graph_maps_entities_relationships_and_chunks():
+    from data.ingest.stock_profile_graph import lightrag_context_to_stock_graph
+
+    context = {
+        "status": "success",
+        "data": {
+            "entities": [
+                {"entity_name": "GLM-5.1", "description": "智谱大模型产品", "weight": 0.91},
+                {"entity_name": "AI Coding", "description": "benchmark capability", "weight": 0.82},
+            ],
+            "relationships": [
+                {
+                    "src_id": "GLM-5.1",
+                    "tgt_id": "AI Coding",
+                    "description": "GLM-5.1 has coding benchmark capability",
+                    "weight": 0.88,
+                    "file_path": "stock_evidence/HK/02513/evidence.txt",
+                    "reference_id": "1",
+                }
+            ],
+            "chunks": [
+                {
+                    "content": "智谱 GLM-5.1 AI Coding benchmark evidence",
+                    "file_path": "stock_evidence/HK/02513/evidence.txt",
+                    "chunk_id": "chunk-1",
+                    "reference_id": "1",
+                }
+            ],
+            "references": [
+                {"reference_id": "1", "file_path": "stock_evidence/HK/02513/evidence.txt"}
+            ],
+        },
+    }
+
+    nodes, edges = lightrag_context_to_stock_graph(context, stock_code="02513")
+
+    assert {"stock:02513", "product:GLM-5.1"}.issubset(set(nodes["node_id"]))
+    assert "capability" in set(edges["edge_type"])
+    assert "evidence_of" in set(edges["edge_type"])
+    assert any("stock_evidence/HK/02513/evidence.txt" in refs for refs in edges["evidence_refs"])
+
+
+def test_lightrag_context_to_stock_graph_collapses_stock_code_entity_to_stock_node():
+    from data.ingest.stock_profile_graph import lightrag_context_to_stock_graph
+
+    context = {
+        "status": "success",
+        "data": {
+            "entities": [
+                {"entity_name": "02513", "entity_type": "data", "description": "股票代码"},
+                {"entity_name": "智谱", "entity_type": "organization", "description": "AI 公司"},
+            ],
+            "relationships": [
+                {
+                    "src_id": "02513",
+                    "tgt_id": "智谱",
+                    "description": "02513 是智谱股票代码",
+                    "keywords": "股票代码",
+                    "weight": 1.0,
+                }
+            ],
+        },
+    }
+
+    nodes, edges = lightrag_context_to_stock_graph(context, stock_code="02513")
+
+    assert "stock:02513" in set(nodes["node_id"])
+    assert "data:02513" not in set(nodes["node_id"])
+    assert ("stock", "stock:02513") in set(zip(edges["src_type"], edges["src_id"]))
+
+
+def test_extract_aliases_from_evidence_finds_model_and_product_aliases():
+    from data.ingest.stock_profile_graph import extract_aliases_from_evidence
+
+    evidence = pd.DataFrame(
+        [
+            {
+                "stock_code": "02513",
+                "market": "HK",
+                "title": "Zhipu AI GLM-5 and CodeGeeX",
+                "summary": "Z.ai 发布 GLM-5，包含 Agentic Engineering、MoE、200K context。",
+                "raw_text": "智谱AI 智谱清言 ChatGLM CodeGeeX CogVLM CogView MaaS 大模型 智能体。",
+                "url": "https://z.ai/glm",
+            }
+        ]
+    )
+
+    aliases = extract_aliases_from_evidence(evidence)
+
+    values = set(aliases["alias"])
+    assert {"GLM-5", "CodeGeeX", "Zhipu AI", "Z.ai", "智谱AI", "智谱清言"}.issubset(values)
+    assert aliases.loc[aliases["alias"] == "GLM-5", "alias_type"].iloc[0] == "model"
+
+
+def test_build_lightrag_profile_queries_uses_deep_aliases():
+    from data.ingest.stock_profile_graph import build_lightrag_profile_queries
+
+    aliases = pd.DataFrame(
+        [
+            {"stock_code": "02513", "alias": "智谱"},
+            {"stock_code": "02513", "alias": "GLM-5"},
+            {"stock_code": "02513", "alias": "CodeGeeX"},
+            {"stock_code": "02513", "alias": "Z.ai"},
+        ]
+    )
+
+    queries = build_lightrag_profile_queries("02513", aliases)
+
+    assert len(queries) >= 6
+    assert any("GLM-5" in query and "CodeGeeX" in query for query in queries)
+    assert any("风险" in query for query in queries)
+    assert any("产业链" in query for query in queries)
+
+
+def test_lightrag_context_to_stock_graph_reverses_product_to_company_produces_edge():
+    from data.ingest.stock_profile_graph import lightrag_context_to_stock_graph
+
+    context = {
+        "status": "success",
+        "data": {
+            "entities": [
+                {"entity_name": "智谱", "entity_type": "organization", "description": "AI 公司"},
+                {"entity_name": "代码模型", "entity_type": "method", "description": "代码生成模型"},
+            ],
+            "relationships": [
+                {
+                    "src_id": "代码模型",
+                    "tgt_id": "智谱",
+                    "description": "智谱提供代码模型作为其产品能力之一。",
+                    "keywords": "提供",
+                    "weight": 1.0,
+                }
+            ],
+        },
+    }
+
+    _, edges = lightrag_context_to_stock_graph(context, stock_code="02513")
+
+    assert (
+        "organization",
+        "organization:智谱",
+        "produces",
+        "method",
+        "method:代码模型",
+    ) in set(zip(edges["src_type"], edges["src_id"], edges["edge_type"], edges["dst_type"], edges["dst_id"]))
+
+
+def test_score_stock_profile_quality_reports_missing_decision_dimensions():
+    from data.ingest.stock_profile_graph import score_stock_profile_quality
+
+    evidence = pd.DataFrame(
+        [
+            {"stock_code": "02513", "title": "智谱 主营业务", "summary": "MaaS 产品 技术 风险", "raw_text": "GLM CodeGeeX 大模型", "url": "https://z.ai/a"}
+        ]
+    )
+    aliases = pd.DataFrame([{"stock_code": "02513", "alias": "GLM"}])
+    nodes = pd.DataFrame([{"node_id": "stock:02513", "name": "02513"}])
+    edges = pd.DataFrame([{"src_id": "stock:02513", "edge_type": "produces", "dst_id": "product:GLM"}])
+
+    report = score_stock_profile_quality(evidence, aliases, nodes, edges, stock_code="02513")
+
+    assert report["quality_score"] < 75
+    assert not report["decision_ready"]
+    assert "evidence_sources>=5" in report["missing_dimensions"]
+
+
+def test_normalize_graph_frames_materializes_missing_endpoints_and_type_aliases():
+    from data.ingest.stock_profile_graph import normalize_graph_frames
+
+    nodes = pd.DataFrame(
+        [
+            {
+                "node_id": "组织:智谱AI",
+                "node_type": "组织",
+                "name": "智谱AI",
+                "canonical_name": "智谱AI",
+                "properties_json": "",
+                "source": "test",
+                "confidence": 0.8,
+                "updated_at": "2026-06-06T00:00:00",
+            }
+        ]
+    )
+    edges = pd.DataFrame(
+        [
+            {
+                "src_type": "组织",
+                "src_id": "组织:智谱AI",
+                "edge_type": "produces",
+                "dst_type": "人造物",
+                "dst_id": "人造物:GLM-5家族",
+                "confidence": 0.9,
+                "evidence_refs": "ref",
+                "source": "test",
+                "updated_at": "2026-06-06T00:00:00",
+            }
+        ]
+    )
+
+    out_nodes, out_edges = normalize_graph_frames(nodes, edges)
+
+    assert "organization:智谱AI" in set(out_nodes["node_id"])
+    assert "artifact:GLM-5家族" in set(out_nodes["node_id"])
+    assert ("organization", "organization:智谱AI", "artifact", "artifact:GLM-5家族") in set(
+        zip(out_edges["src_type"], out_edges["src_id"], out_edges["dst_type"], out_edges["dst_id"])
+    )
+
+
+def test_stock_profile_report_and_theme_score_include_decision_fields():
+    from data.ingest.stock_profile_graph import (
+        build_stock_profile_report_payload,
+        derive_attention_signals,
+        rank_theme_opportunities,
+        render_stock_profile_report_markdown,
+        score_theme_opportunity,
+    )
+
+    evidence = pd.DataFrame(
+        [
+            {
+                "stock_code": "02513",
+                "title": "智谱 GLM-5 商业化",
+                "summary": "MaaS 收入增长，存在亏损风险，GLM-5 论文 arXiv benchmark。",
+                "raw_text": "英特尔合作 CodeGeeX MoE Agentic Engineering 研发投入。",
+                "url": "https://z.ai/glm",
+            },
+            {
+                "stock_code": "02513",
+                "title": "智谱 财报",
+                "summary": "营收 毛利 亏损 研发投入 商业化。",
+                "raw_text": "产业链 上游 算力 下游 客户 催化。",
+                "url": "https://example.com/report",
+            },
+        ]
+    )
+    aliases = pd.DataFrame(
+        [
+            {"stock_code": "02513", "alias": alias}
+            for alias in ["GLM-5", "CodeGeeX", "MaaS", "Z.ai", "智谱AI", "MoE", "Agentic Engineering", "智谱清言"]
+        ]
+    )
+    nodes = pd.DataFrame(
+        [
+            {"node_id": "stock:02513", "node_type": "stock", "name": "02513"},
+            {"node_id": "organization:智谱", "node_type": "organization", "name": "智谱"},
+            {"node_id": "artifact:GLM-5", "node_type": "artifact", "name": "GLM-5"},
+        ]
+    )
+    edges = pd.DataFrame(
+        [
+            {"src_id": "stock:02513", "edge_type": "produces", "dst_id": "organization:智谱", "evidence_refs": "02513 https://z.ai/glm"},
+            {"src_id": "organization:智谱", "edge_type": "produces", "dst_id": "artifact:GLM-5", "evidence_refs": "https://z.ai/glm"},
+            {"src_id": "organization:智谱", "edge_type": "has_metric", "dst_id": "data:营收", "evidence_refs": "https://example.com/report"},
+            {"src_id": "organization:智谱", "edge_type": "has_risk", "dst_id": "data:亏损", "evidence_refs": "https://example.com/report"},
+            {"src_id": "organization:智谱", "edge_type": "partner_with", "dst_id": "organization:英特尔", "evidence_refs": "https://z.ai/glm"},
+            {"src_id": "artifact:GLM-5", "edge_type": "uses_technology", "dst_id": "concept:MoE", "evidence_refs": "https://z.ai/glm"},
+            {"src_id": "artifact:GLM-5", "edge_type": "has_attention", "dst_id": "content:arXiv论文", "evidence_refs": "https://z.ai/glm"},
+        ]
+    )
+
+    payload = build_stock_profile_report_payload("02513", evidence, aliases, nodes, edges)
+    markdown = render_stock_profile_report_markdown(payload)
+    score = score_theme_opportunity("02513", evidence, aliases, nodes, edges)
+    attention = derive_attention_signals(evidence, nodes, edges, aliases, stock_codes=["02513"], asof_date="2026-06-06")
+    ranked = rank_theme_opportunities(
+        "GLM 大模型",
+        stock_codes=["02513"],
+        evidence_frame=evidence,
+        alias_frame=aliases,
+        node_frame=nodes,
+        edge_frame=edges,
+        attention_frame=attention,
+        asof_date="2026-06-06",
+    )
+
+    assert payload["stock_code"] == "02513"
+    assert "Products" in markdown
+    assert score["stock_code"] == "02513"
+    assert "score" in score
+    assert score["theme"] == "AI大模型"
+    assert "bottleneck_score" in score
+    assert "component_scores_json" in score
+    assert score["bull_case"]
+    assert score["bear_case"]
+    assert not attention.empty
+    assert set(["entity_type", "entity_id", "source", "metric"]).issubset(attention.columns)
+    assert ranked.iloc[0]["stock_code"] == "02513"
+    assert ranked.iloc[0]["theme"] == "GLM 大模型"
+    assert ranked.iloc[0]["score"] >= score["score"]
+
+
+def test_theme_score_relevance_gate_caps_generic_attention_noise():
+    from data.ingest.stock_profile_graph import score_theme_opportunity
+
+    evidence = pd.DataFrame(
+        [
+            {
+                "stock_code": "09999",
+                "title": "Generic search page",
+                "summary": "GitHub benchmark Microsoft support Bing search related page.",
+                "raw_text": "新闻 热度 benchmark 论文，但没有目标主题相关业务或技术证据。",
+                "url": "https://support.microsoft.com/help",
+            }
+        ]
+    )
+    nodes = pd.DataFrame(
+        [
+            {"node_id": "stock:09999", "node_type": "stock", "name": "09999"},
+            {"node_id": "content:generic", "node_type": "content", "name": "generic benchmark"},
+        ]
+    )
+    edges = pd.DataFrame(
+        [
+            {
+                "src_id": "stock:09999",
+                "edge_type": "has_attention",
+                "dst_id": "content:generic",
+                "evidence_refs": "https://support.microsoft.com/help;https://www.bing.com/search",
+            }
+        ]
+    )
+
+    row = score_theme_opportunity(
+        "09999",
+        evidence_frame=evidence,
+        node_frame=nodes,
+        edge_frame=edges,
+        theme="AI大模型",
+    )
+    components = json.loads(row["component_scores_json"])
+
+    assert components["theme_relevance"] == 0
+    assert components["theme_relevance_gate"] == "no_theme_relevance"
+    assert float(row["score"]) <= 12.0
+
+
+def test_service_index_stock_evidence_lightrag_uses_fake_client(monkeypatch):
+    from data.ingest.service import MarketDataService
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        evidence_csv = base / "evidence.csv"
+        alias_csv = base / "aliases.csv"
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": "02513",
+                    "market": "HK",
+                    "source": "source_aware_search",
+                    "title": "智谱 GLM-5.1",
+                    "summary": "Zhipu AI GLM-5.1 大模型",
+                    "url": "https://z.ai/glm?Signature=secret",
+                    "raw_text": "智谱 Zhipu AI GLM-5.1 benchmark",
+                    "fetched_at": "2026-06-06T00:00:00",
+                }
+            ],
+            columns=COMPANY_RESEARCH_EVIDENCE_FIELDS,
+        ).to_csv(evidence_csv, index=False, encoding="utf-8-sig")
+        pd.DataFrame(
+            [
+                {"stock_code": "02513", "market": "HK", "alias": "智谱", "alias_type": "company", "source": "manual", "confidence": 0.95, "updated_at": "2026-06-06T00:00:00"}
+            ],
+            columns=ENTITY_ALIAS_FIELDS,
+        ).to_csv(alias_csv, index=False, encoding="utf-8-sig")
+
+        inserted = []
+
+        class FakeLightRAGClient:
+            def __init__(self, base_url=None, api_key=None, timeout=None):
+                self.base_url = base_url
+
+            def insert_text(self, text, file_source, ignore_conflict=True):
+                inserted.append({"text": text, "file_source": file_source, "ignore_conflict": ignore_conflict})
+                return {"status": "success", "track_id": "insert_1"}
+
+        monkeypatch.setattr("data.ingest.service.LightRAGClient", FakeLightRAGClient, raising=False)
+        service = MarketDataService(base_dir=str(base / "data"))
+        try:
+            summary = service.index_stock_evidence_lightrag(
+                evidence_csv=evidence_csv,
+                alias_csv=alias_csv,
+                stock_codes=["02513"],
+                lightrag_url="http://127.0.0.1:9621",
+            )
+        finally:
+            service.close()
+
+        assert summary["inserted_or_enqueued"] == 1
+        assert inserted[0]["file_source"].startswith("stock_evidence/HK/02513/")
+        assert "智谱" in inserted[0]["text"]

@@ -101,6 +101,12 @@ def merge_research_tags(formal, candidates, evidence_frame):
     """Merge company research-derived tags into formal and candidate tag frames."""
     from data.ingest.providers.hk_company_research import extract_tags_from_research_evidence
 
+    if evidence_frame is not None and not evidence_frame.empty and "source" in evidence_frame.columns:
+        sources = set(evidence_frame["source"].astype(str).str.lower())
+        search_sources = {"searxng_search", "tavily_search", "playwright_search", "browser_search"}
+        if sources and sources.issubset(search_sources):
+            return formal, candidates
+
     research_formal, research_candidates = extract_tags_from_research_evidence(evidence_frame)
     merged_formal = pd.concat([formal, research_formal], ignore_index=True) if formal is not None else research_formal
     merged_candidates = (

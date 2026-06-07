@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: gzdaniel/postgres-for-rag:pg18-age-pgvector
+    platform: linux/amd64
+    container_name: stock-lightrag-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lightrag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lightrag_change_me}
+      POSTGRES_DB: ${POSTGRES_DATABASE:-lightrag_hk_stock}
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lightrag} -d ${POSTGRES_DATABASE:-lightrag_hk_stock}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: stock-lightrag-ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    restart: unless-stopped

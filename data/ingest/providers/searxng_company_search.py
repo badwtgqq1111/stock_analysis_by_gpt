@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import requests
@@ -81,6 +82,8 @@ class SearxngCompanySearchFetcher:
         engines=None,
         language="zh-CN",
         categories="general",
+        queries=None,
+        query_workers=1,
     ):
         self.stock_code = normalize_hk_stock_code(stock_code)
         self.company_name = _clean(company_name)
@@ -90,8 +93,16 @@ class SearxngCompanySearchFetcher:
         self.engines = _clean(engines)
         self.language = _clean(language) or "zh-CN"
         self.categories = _clean(categories) or "general"
+        self.query_workers = max(1, int(query_workers or 1))
+        self.queries = [
+            _clean(query)
+            for query in (queries or [])
+            if _clean(query)
+        ]
 
     def build_queries(self):
+        if self.queries:
+            return self.queries[: max(0, self.max_queries_per_stock)]
         name = self.company_name or self.stock_code
         queries = [
             f"{self.stock_code} {name} 港股 主营业务 年报 收入分部",
@@ -102,11 +113,14 @@ class SearxngCompanySearchFetcher:
 
     def fetch(self):
         rows = []
-        for query in self.build_queries():
+        queries = self.build_queries()
+
+        def fetch_query(query):
+            query_rows = []
             try:
                 data = self._search(query)
             except Exception as exc:
-                rows.append(
+                query_rows.append(
                     normalize_searxng_search_result(
                         stock_code=self.stock_code,
                         query=query,
@@ -117,11 +131,11 @@ class SearxngCompanySearchFetcher:
                         raw_text=str(exc),
                     )
                 )
-                continue
+                return query_rows
 
             results = data.get("results") or []
             if not results:
-                rows.append(
+                query_rows.append(
                     normalize_searxng_search_result(
                         stock_code=self.stock_code,
                         query=query,
@@ -131,10 +145,10 @@ class SearxngCompanySearchFetcher:
                         content="SearXNG returned no results",
                     )
                 )
-                continue
+                return query_rows
 
             for rank, result in enumerate(results[: self.max_results_per_query], start=1):
-                rows.append(
+                query_rows.append(
                     normalize_searxng_search_result(
                         stock_code=self.stock_code,
                         query=query,
@@ -147,6 +161,16 @@ class SearxngCompanySearchFetcher:
                         raw_text=result.get("content"),
                     )
                 )
+            return query_rows
+
+        if self.query_workers > 1 and len(queries) > 1:
+            with ThreadPoolExecutor(max_workers=min(self.query_workers, len(queries))) as executor:
+                future_map = {executor.submit(fetch_query, query): query for query in queries}
+                for future in as_completed(future_map):
+                    rows.extend(future.result())
+        else:
+            for query in queries:
+                rows.extend(fetch_query(query))
         return rows
 
     def _search(self, query):

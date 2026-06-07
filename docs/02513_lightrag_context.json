@@ -1,0 +1,195 @@
+{
+  "stock_code_or_theme": "02513",
+  "query": "02513 智谱 股票画像 主营业务 产品 技术 大模型 AI 产业链 上游 下游 卡脖子 风险 催化 新闻 论文 GitHub benchmark",
+  "mode": "mix",
+  "context": {
+    "status": "success",
+    "message": "Query processed successfully",
+    "data": {
+      "entities": [
+        {
+          "entity_name": "02513",
+          "entity_type": "data",
+          "description": "02513是智谱在香港交易所上市的股票代码。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "entity_name": "MaaS平台",
+          "entity_type": "artifact",
+          "description": "MaaS(模型即服务)平台是智谱集成了人工智能模型和开发工具的云服务平台。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "entity_name": "模型微调、部署及智能体开发集成工具",
+          "entity_type": "artifact",
+          "description": "这是一个集成工具集，用于模型的微调、部署以及智能体应用的开发。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "entity_name": "智谱",
+          "entity_type": "organization",
+          "description": "智谱是一家在香港交易所上市的人工智能公司，提供智能体模型、代码模型和MaaS平台等产品与服务。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "entity_name": "代码模型",
+          "entity_type": "method",
+          "description": "代码模型是智谱提供的一种与代码生成或理解相关的人工智能模型。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "entity_name": "招股书",
+          "entity_type": "content",
+          "description": "招股书是智谱为香港交易所上市提交的公开文件，包含主营业务等信息。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "entity_name": "智能体模型",
+          "entity_type": "method",
+          "description": "智能体模型是智谱提供的一种用于构建智能体应用的人工智能模型。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "entity_name": "香港交易所",
+          "entity_type": "organization",
+          "description": "香港交易所是智谱股票上市交易的证券市场。",
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        }
+      ],
+      "relationships": [
+        {
+          "src_id": "02513",
+          "tgt_id": "智谱",
+          "description": "02513是智谱在香港交易所的股票代码。",
+          "keywords": "股票代码",
+          "weight": 1.0,
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "src_id": "MaaS平台",
+          "tgt_id": "智谱",
+          "description": "智谱拥有并运营MaaS平台，集成模型和工具。",
+          "keywords": "拥有",
+          "weight": 1.0,
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "src_id": "智谱",
+          "tgt_id": "模型微调、部署及智能体开发集成工具",
+          "description": "智谱提供该集成工具以支持模型的微调、部署及智能体开发。",
+          "keywords": "提供",
+          "weight": 1.0,
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "src_id": "代码模型",
+          "tgt_id": "智谱",
+          "description": "智谱提供代码模型作为其产品能力之一。",
+          "keywords": "提供",
+          "weight": 1.0,
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "src_id": "智谱",
+          "tgt_id": "香港交易所",
+          "description": "智谱在香港交易所上市交易。",
+          "keywords": "上市",
+          "weight": 1.0,
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "src_id": "智能体模型",
+          "tgt_id": "智谱",
+          "description": "智谱提供智能体模型作为其产品能力之一。",
+          "keywords": "提供",
+          "weight": 1.0,
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        },
+        {
+          "src_id": "招股书",
+          "tgt_id": "智谱",
+          "description": "智谱发布了招股书以披露其主营业务和财务状况。",
+          "keywords": "发布",
+          "weight": 1.0,
+          "source_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "created_at": 1780761736
+        }
+      ],
+      "chunks": [
+        {
+          "reference_id": "1",
+          "content": "STOCK_CODE: 02513\nMARKET: HK\nALIASES: 02513; 智谱\nSOURCE: source_aware_search\nTITLE: query=site:hkexnews.hk 02513 智谱 年报 招股书 主营业务; rank=1; title=股份代號：2513 獨家保薦人、保薦人兼整體協調人、整體協調人、聯席全球協調人、聯席賬簿管理人及聯席牽頭經辦人\nURL: https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000018_c.pdf\nFETCHED_AT: 2026-06-06T08:59:09.853959\n\nSUMMARY:\nrank=1; engine=brave; score=1.0; url=https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000018_c.pdf; hash=652f33e1ee48f49e; snippet=智能體模型及代碼模型，以及用於模型微調、部署及智能體開發的集成工具。我們MaaS平\n\nRAW_TEXT:\n智能體模型及代碼模型，以及用於模型微調、部署及智能體開發的集成工具。我們MaaS平",
+          "file_path": "evidence:02513:89cf45718fedf981.txt",
+          "chunk_id": "doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000"
+        }
+      ],
+      "references": [
+        {
+          "reference_id": "1",
+          "file_path": "evidence:02513:89cf45718fedf981.txt"
+        }
+      ]
+    },
+    "metadata": {
+      "query_mode": "mix",
+      "keywords": {
+        "high_level": [
+          "股票画像",
+          "智谱AI",
+          "大模型",
+          "产业链分析"
+        ],
+        "low_level": [
+          "02513",
+          "主营业务",
+          "产品",
+          "技术",
+          "上游",
+          "下游",
+          "卡脖子风险",
+          "催化",
+          "新闻",
+          "论文",
+          "GitHub benchmark"
+        ]
+      },
+      "processing_info": {
+        "total_entities_found": 8,
+        "total_relations_found": 7,
+        "entities_after_truncation": 8,
+        "relations_after_truncation": 7,
+        "merged_chunks_count": 1,
+        "final_chunks_count": 1
+      }
+    }
+  }
+}

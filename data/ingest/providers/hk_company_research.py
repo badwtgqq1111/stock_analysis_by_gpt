@@ -107,7 +107,13 @@ def extract_tags_from_research_evidence(evidence_frame):
             pd.DataFrame(columns=STOCK_TAG_CANDIDATE_FIELDS),
         )
     for _, row in evidence_frame.fillna("").iterrows():
-        text = f"{row.get('title', '')}\n{row.get('summary', '')}\n{row.get('raw_text', '')}"
+        source = str(row.get("source") or "")
+        # Search-result titles include the query text ("AI 云服务 游戏 铜矿...").
+        # Do not treat query echoes as company evidence.
+        if source in {"searxng_search", "tavily_search", "playwright_search", "browser_search"}:
+            text = f"{row.get('summary', '')}\n{row.get('raw_text', '')}"
+        else:
+            text = f"{row.get('title', '')}\n{row.get('summary', '')}\n{row.get('raw_text', '')}"
         for keyword, tag, tag_type, confidence in KEYWORD_TAG_RULES:
             if keyword not in text:
                 continue

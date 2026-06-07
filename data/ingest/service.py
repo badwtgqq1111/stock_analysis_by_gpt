@@ -1316,6 +1316,41 @@ class MarketDataService:
             summary["evidence"] = method(frame)
         return summary
 
+    def import_stock_profile_graph_csvs(
+        self,
+        alias_csv=None,
+        profile_csv=None,
+        deep_tag_csv=None,
+        node_csv=None,
+        edge_csv=None,
+        attention_csv=None,
+        theme_score_csv=None,
+    ):
+        """Import generated stock profile and graph CSVs into the warehouse."""
+        summary = {"status": "completed"}
+        if alias_csv:
+            frame = pd.read_csv(alias_csv, dtype=str).fillna("")
+            summary["aliases"] = self.warehouse.replace_entity_aliases(frame)
+        if profile_csv:
+            frame = pd.read_csv(profile_csv, dtype=str).fillna("")
+            summary["profiles"] = self.warehouse.replace_stock_profiles(frame)
+        if deep_tag_csv:
+            frame = pd.read_csv(deep_tag_csv, dtype=str).fillna("")
+            summary["deep_tags"] = self.warehouse.replace_stock_deep_tags(frame)
+        if node_csv:
+            frame = pd.read_csv(node_csv, dtype=str).fillna("")
+            summary["nodes"] = self.warehouse.replace_stock_graph_nodes(frame)
+        if edge_csv:
+            frame = pd.read_csv(edge_csv, dtype=str).fillna("")
+            summary["edges"] = self.warehouse.replace_stock_graph_edges(frame)
+        if attention_csv:
+            frame = pd.read_csv(attention_csv, dtype=str).fillna("")
+            summary["attention"] = self.warehouse.replace_attention_signals(frame)
+        if theme_score_csv:
+            frame = pd.read_csv(theme_score_csv, dtype=str).fillna("")
+            summary["theme_scores"] = self.warehouse.replace_theme_opportunity_scores(frame)
+        return summary
+
     def research_stock_tags(
         self,
         industry_registry_csv="docs/hk_industry_registry.csv",
@@ -1450,6 +1485,1013 @@ class MarketDataService:
             "error_samples": errors[:10],
             "evidence_csv": str(evidence_path),
             "warehouse": upsert_summary,
+        }
+
+    def build_stock_entity_aliases(
+        self,
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        stock_codes=None,
+        manual_alias_csv=None,
+        limit=None,
+    ):
+        """Build stock alias registry from stock_info and optional manual aliases."""
+        from data.ingest.stock_profile_graph import build_entity_aliases
+
+        codes = None
+        if stock_codes:
+            codes = [normalize_stock_code(code, market="HK") for code in stock_codes]
+        info = self.warehouse.read_stock_info(stock_codes=codes, market="HK")
+        if info is None or info.empty:
+            info = pd.DataFrame(columns=["stock_code", "market", "name", "theme_tags"])
+        if limit:
+            info = info.head(int(limit))
+        manual_aliases = {}
+        if manual_alias_csv and Path(manual_alias_csv).exists():
+            manual = pd.read_csv(manual_alias_csv, dtype=str).fillna("")
+            if {"stock_code", "alias"}.issubset(manual.columns):
+                for code, group in manual.groupby("stock_code"):
+                    manual_aliases[normalize_stock_code(code, market="HK")] = group["alias"].tolist()
+        aliases = build_entity_aliases(info, manual_aliases=manual_aliases)
+        Path(alias_csv).parent.mkdir(parents=True, exist_ok=True)
+        aliases.to_csv(alias_csv, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "stocks": int(aliases["stock_code"].nunique()) if not aliases.empty else 0,
+            "alias_rows": len(aliases),
+            "alias_csv": str(alias_csv),
+        }
+
+    def build_stock_deep_evidence(
+        self,
+        evidence_csv="docs/hk_company_searxng_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        output_csv="docs/hk_stock_deep_evidence.csv",
+        stock_codes=None,
+        min_relevance=0.25,
+    ):
+        """Filter noisy search evidence into source-aware deep evidence."""
+        from data.ingest.stock_profile_graph import filter_relevant_evidence
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("")
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            evidence = evidence.loc[evidence["stock_code"].astype(str).isin(allowed)]
+            if not aliases.empty:
+                aliases = aliases.loc[aliases["stock_code"].astype(str).isin(allowed)]
+        filtered = filter_relevant_evidence(evidence, aliases, min_score=min_relevance)
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        filtered.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "input_rows": len(evidence),
+            "output_rows": len(filtered),
+            "stocks": int(filtered["stock_code"].nunique()) if not filtered.empty else 0,
+            "output_csv": str(output_csv),
+        }
+
+    def expand_stock_entity_aliases_from_evidence(
+        self,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        output_csv=None,
+        stock_codes=None,
+        min_occurrences=1,
+    ):
+        """Expand entity aliases with product/model/technology names found in evidence."""
+        from data.ingest.stock_profile_graph import (
+            extract_aliases_from_evidence,
+            merge_alias_frames,
+        )
+        from data.model import ENTITY_ALIAS_FIELDS
+
+        output_csv = output_csv or alias_csv
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("")
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame(columns=ENTITY_ALIAS_FIELDS)
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            evidence = evidence.loc[evidence["stock_code"].astype(str).isin(allowed)]
+            aliases = aliases.loc[aliases["stock_code"].astype(str).isin(allowed)] if not aliases.empty else aliases
+        extracted = extract_aliases_from_evidence(
+            evidence,
+            aliases,
+            min_occurrences=min_occurrences,
+        )
+        merged = merge_alias_frames(aliases, extracted)
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "existing_alias_rows": len(aliases),
+            "extracted_alias_rows": len(extracted),
+            "merged_alias_rows": len(merged),
+            "stocks": int(merged["stock_code"].nunique()) if not merged.empty else 0,
+            "output_csv": str(output_csv),
+        }
+
+    def index_stock_evidence_lightrag(
+        self,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        stock_codes=None,
+        limit=None,
+        lightrag_url="http://127.0.0.1:9621",
+        api_key=None,
+        timeout=60,
+        show_progress=False,
+    ):
+        """Index stock evidence rows into the local LightRAG service."""
+        from data.ingest.stock_profile_graph import (
+            LightRAGClient,
+            build_lightrag_evidence_documents,
+        )
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("")
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        documents = build_lightrag_evidence_documents(
+            evidence,
+            aliases,
+            stock_codes=stock_codes,
+            limit=limit,
+        )
+        client_cls = globals().get("LightRAGClient", LightRAGClient)
+        client = client_cls(base_url=lightrag_url, api_key=api_key, timeout=timeout)
+        inserted = 0
+        duplicated = 0
+        errors = []
+        iterator = documents
+        if show_progress:
+            iterator = tqdm(documents, desc="lightrag index evidence", unit="doc")
+        for doc in iterator:
+            try:
+                result = client.insert_text(
+                    doc["text"],
+                    doc["file_source"],
+                    ignore_conflict=True,
+                )
+                if result.get("status") == "duplicated":
+                    duplicated += 1
+                else:
+                    inserted += 1
+            except Exception as exc:
+                errors.append(
+                    {
+                        "stock_code": doc.get("stock_code"),
+                        "file_source": doc.get("file_source"),
+                        "error": str(exc),
+                    }
+                )
+        return {
+            "status": "completed",
+            "input_rows": len(evidence),
+            "documents": len(documents),
+            "inserted_or_enqueued": inserted,
+            "duplicated": duplicated,
+            "errors": len(errors),
+            "error_samples": errors[:10],
+            "lightrag_url": lightrag_url,
+        }
+
+    def retrieve_lightrag_stock_context(
+        self,
+        stock_code_or_theme,
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        lightrag_url="http://127.0.0.1:9621",
+        api_key=None,
+        mode="mix",
+        top_k=20,
+        chunk_top_k=10,
+        max_total_tokens=None,
+        timeout=120,
+    ):
+        """Retrieve structured LightRAG context for a stock code or theme."""
+        from data.ingest.stock_profile_graph import (
+            LightRAGClient,
+            build_lightrag_stock_query,
+        )
+
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        query = build_lightrag_stock_query(stock_code_or_theme, aliases)
+        client_cls = globals().get("LightRAGClient", LightRAGClient)
+        client = client_cls(base_url=lightrag_url, api_key=api_key, timeout=timeout)
+        context = client.query_data(
+            query,
+            mode=mode,
+            top_k=top_k,
+            chunk_top_k=chunk_top_k,
+            max_total_tokens=max_total_tokens,
+        )
+        return {
+            "stock_code_or_theme": stock_code_or_theme,
+            "query": query,
+            "mode": mode,
+            "context": context,
+        }
+
+    def retrieve_lightrag_stock_profile_contexts(
+        self,
+        stock_code_or_theme,
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        lightrag_url="http://127.0.0.1:9621",
+        api_key=None,
+        mode="mix",
+        top_k=20,
+        chunk_top_k=10,
+        max_total_tokens=None,
+        timeout=120,
+        output_json=None,
+        show_progress=False,
+        profile_mode="full",
+        query_workers=1,
+    ):
+        """Retrieve multiple LightRAG contexts across investable profile dimensions."""
+        from data.ingest.stock_profile_graph import (
+            LightRAGClient,
+            build_lightrag_profile_queries,
+        )
+        import json as _json
+
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        queries = build_lightrag_profile_queries(stock_code_or_theme, aliases, profile_mode=profile_mode)
+        client_cls = globals().get("LightRAGClient", LightRAGClient)
+        contexts = []
+
+        def query_one(index, query):
+            try:
+                client = client_cls(base_url=lightrag_url, api_key=api_key, timeout=timeout)
+                context = client.query_data(
+                    query,
+                    mode=mode,
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    max_total_tokens=max_total_tokens,
+                )
+            except Exception as exc:
+                context = {
+                    "status": "failure",
+                    "message": str(exc),
+                    "data": {},
+                    "metadata": {"failure_reason": "client_error"},
+                }
+            return {"index": index, "query": query, "mode": mode, "context": context}
+
+        indexed_queries = list(enumerate(queries, start=1))
+        worker_count = max(1, min(int(query_workers or 1), len(indexed_queries) or 1))
+        if worker_count > 1 and len(indexed_queries) > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(query_one, idx, query): idx
+                    for idx, query in indexed_queries
+                }
+                iterator = as_completed(future_map)
+                if show_progress:
+                    iterator = tqdm(iterator, total=len(future_map), desc="lightrag profile retrieve", unit="query")
+                for future in iterator:
+                    contexts.append(future.result())
+            contexts = sorted(contexts, key=lambda item: item.get("index") or 0)
+        else:
+            iterator = indexed_queries
+            if show_progress:
+                iterator = tqdm(indexed_queries, desc="lightrag profile retrieve", unit="query")
+            for idx, query in iterator:
+                contexts.append(query_one(idx, query))
+        result = {
+            "stock_code_or_theme": stock_code_or_theme,
+            "mode": mode,
+            "profile_mode": profile_mode,
+            "contexts": contexts,
+        }
+        if output_json:
+            Path(output_json).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_json, "w", encoding="utf-8") as handle:
+                _json.dump(result, handle, indent=2, ensure_ascii=False, default=str)
+        return result
+
+    def build_stock_graph_from_lightrag_context(
+        self,
+        stock_code_or_theme=None,
+        context_json=None,
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        node_output="output/stock_profiles/graph_nodes_lightrag.csv",
+        edge_output="output/stock_profiles/graph_edges_lightrag.csv",
+        lightrag_url="http://127.0.0.1:9621",
+        api_key=None,
+        mode="mix",
+        top_k=20,
+        chunk_top_k=10,
+        max_total_tokens=None,
+        timeout=120,
+    ):
+        """Convert LightRAG structured context into local stock graph CSVs."""
+        import json as _json
+        from data.ingest.stock_profile_graph import lightrag_context_to_stock_graph, normalize_graph_frames
+        from data.model import STOCK_GRAPH_EDGE_FIELDS, STOCK_GRAPH_NODE_FIELDS
+
+        context = None
+        query = ""
+        contexts = []
+        if context_json:
+            with open(context_json, "r", encoding="utf-8") as handle:
+                loaded = _json.load(handle)
+            if isinstance(loaded, dict) and "contexts" in loaded:
+                contexts = [item.get("context") for item in loaded.get("contexts") or []]
+                stock_code_or_theme = stock_code_or_theme or loaded.get("stock_code_or_theme")
+                query = " | ".join(
+                    str(item.get("query") or "").strip()
+                    for item in loaded.get("contexts") or []
+                    if str(item.get("query") or "").strip()
+                )
+            elif isinstance(loaded, dict) and "context" in loaded:
+                context = loaded.get("context")
+                stock_code_or_theme = stock_code_or_theme or loaded.get("stock_code_or_theme")
+                query = loaded.get("query") or ""
+            else:
+                context = loaded
+        else:
+            retrieved = self.retrieve_lightrag_stock_context(
+                stock_code_or_theme,
+                alias_csv=alias_csv,
+                lightrag_url=lightrag_url,
+                api_key=api_key,
+                mode=mode,
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                max_total_tokens=max_total_tokens,
+                timeout=timeout,
+            )
+            context = retrieved["context"]
+            query = retrieved["query"]
+        code = None
+        if stock_code_or_theme:
+            raw = str(stock_code_or_theme).strip()
+            if raw.isdigit():
+                code = normalize_stock_code(raw, market="HK")
+        node_frames = []
+        edge_frames = []
+        if contexts:
+            for item in contexts:
+                nodes_i, edges_i = lightrag_context_to_stock_graph(item, stock_code=code)
+                node_frames.append(nodes_i)
+                edge_frames.append(edges_i)
+            nodes = pd.concat(node_frames, ignore_index=True) if node_frames else pd.DataFrame(columns=STOCK_GRAPH_NODE_FIELDS)
+            edges = pd.concat(edge_frames, ignore_index=True) if edge_frames else pd.DataFrame(columns=STOCK_GRAPH_EDGE_FIELDS)
+            if not nodes.empty:
+                nodes = nodes.drop_duplicates(subset=["node_id"], keep="last")
+            if not edges.empty:
+                edges = edges.drop_duplicates(subset=["src_type", "src_id", "edge_type", "dst_type", "dst_id"], keep="last")
+            nodes, edges = normalize_graph_frames(nodes, edges)
+        else:
+            nodes, edges = lightrag_context_to_stock_graph(context, stock_code=code)
+        if nodes.empty:
+            nodes = pd.DataFrame(columns=STOCK_GRAPH_NODE_FIELDS)
+        if edges.empty:
+            edges = pd.DataFrame(columns=STOCK_GRAPH_EDGE_FIELDS)
+        for path in (node_output, edge_output):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        nodes.to_csv(node_output, index=False, encoding="utf-8-sig")
+        edges.to_csv(edge_output, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "stock_code_or_theme": stock_code_or_theme,
+            "query": query,
+            "nodes": len(nodes),
+            "edges": len(edges),
+            "node_output": str(node_output),
+            "edge_output": str(edge_output),
+        }
+
+    def audit_stock_profile_quality(
+        self,
+        stock_code,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        node_csv="docs/hk_stock_graph_nodes_lightrag.csv",
+        edge_csv="docs/hk_stock_graph_edges_lightrag.csv",
+    ):
+        """Audit whether the stock profile has enough dimensions for decision support."""
+        from data.ingest.stock_profile_graph import score_stock_profile_quality
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("") if Path(evidence_csv).exists() else pd.DataFrame()
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        nodes = pd.read_csv(node_csv, dtype=str).fillna("") if Path(node_csv).exists() else pd.DataFrame()
+        edges = pd.read_csv(edge_csv, dtype=str).fillna("") if Path(edge_csv).exists() else pd.DataFrame()
+        return score_stock_profile_quality(
+            evidence_frame=evidence,
+            alias_frame=aliases,
+            node_frame=nodes,
+            edge_frame=edges,
+            stock_code=stock_code,
+        )
+
+    def generate_stock_profile_report(
+        self,
+        stock_code,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        node_csv="docs/hk_stock_graph_nodes_lightrag.csv",
+        edge_csv="docs/hk_stock_graph_edges_lightrag.csv",
+        output_md="output/stock_profiles/stock_profile_report.md",
+        output_json=None,
+    ):
+        """Generate a stock profile research report from evidence and graph CSVs."""
+        import json as _json
+        from data.ingest.stock_profile_graph import (
+            build_stock_profile_report_payload,
+            render_stock_profile_report_markdown,
+        )
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("") if Path(evidence_csv).exists() else pd.DataFrame()
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        nodes = pd.read_csv(node_csv, dtype=str).fillna("") if Path(node_csv).exists() else pd.DataFrame()
+        edges = pd.read_csv(edge_csv, dtype=str).fillna("") if Path(edge_csv).exists() else pd.DataFrame()
+        payload = build_stock_profile_report_payload(
+            stock_code,
+            evidence_frame=evidence,
+            alias_frame=aliases,
+            node_frame=nodes,
+            edge_frame=edges,
+        )
+        markdown = render_stock_profile_report_markdown(payload)
+        if output_md:
+            Path(output_md).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_md).write_text(markdown, encoding="utf-8")
+        if output_json:
+            Path(output_json).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_json).write_text(_json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        return {
+            "status": "completed",
+            "stock_code": payload["stock_code"],
+            "verdict": payload["verdict"],
+            "quality_score": payload["quality"]["quality_score"],
+            "output_md": str(output_md) if output_md else "",
+            "output_json": str(output_json) if output_json else "",
+        }
+
+    def score_theme_opportunity_csv(
+        self,
+        stock_codes=None,
+        theme="AI大模型",
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        node_csv="docs/hk_stock_graph_nodes_lightrag.csv",
+        edge_csv="docs/hk_stock_graph_edges_lightrag.csv",
+        attention_csv=None,
+        output_csv="output/theme_opportunity_score.csv",
+        import_to_warehouse=False,
+        asof_date=None,
+    ):
+        """Score theme opportunities from evidence and graph CSVs."""
+        from data.ingest.stock_profile_graph import rank_theme_opportunities
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("") if Path(evidence_csv).exists() else pd.DataFrame()
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        nodes = pd.read_csv(node_csv, dtype=str).fillna("") if Path(node_csv).exists() else pd.DataFrame()
+        edges = pd.read_csv(edge_csv, dtype=str).fillna("") if Path(edge_csv).exists() else pd.DataFrame()
+        attention = pd.read_csv(attention_csv, dtype=str).fillna("") if attention_csv and Path(attention_csv).exists() else pd.DataFrame()
+        stock_info = self.warehouse.read_stock_info(stock_codes=stock_codes, market="HK")
+        result = rank_theme_opportunities(
+            theme,
+            stock_codes=stock_codes,
+            evidence_frame=evidence,
+            alias_frame=aliases,
+            node_frame=nodes,
+            edge_frame=edges,
+            attention_frame=attention,
+            stock_info_frame=stock_info,
+            asof_date=asof_date,
+        )
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        warehouse_summary = None
+        if import_to_warehouse:
+            warehouse_summary = self.warehouse.replace_theme_opportunity_scores(result)
+        return {
+            "status": "completed",
+            "rows": len(result),
+            "theme": theme,
+            "output_csv": str(output_csv),
+            "warehouse": warehouse_summary,
+        }
+
+    def derive_attention_signals_csv(
+        self,
+        stock_codes=None,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        node_csv="docs/hk_stock_graph_nodes_lightrag.csv",
+        edge_csv="docs/hk_stock_graph_edges_lightrag.csv",
+        output_csv="output/attention_signal.csv",
+        import_to_warehouse=False,
+        asof_date=None,
+    ):
+        """Derive local attention_signal rows from existing evidence and graph artifacts."""
+        from data.ingest.stock_profile_graph import derive_attention_signals
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("") if Path(evidence_csv).exists() else pd.DataFrame()
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        nodes = pd.read_csv(node_csv, dtype=str).fillna("") if Path(node_csv).exists() else pd.DataFrame()
+        edges = pd.read_csv(edge_csv, dtype=str).fillna("") if Path(edge_csv).exists() else pd.DataFrame()
+        result = derive_attention_signals(
+            evidence_frame=evidence,
+            node_frame=nodes,
+            edge_frame=edges,
+            alias_frame=aliases,
+            stock_codes=stock_codes,
+            asof_date=asof_date,
+        )
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        warehouse_summary = None
+        if import_to_warehouse:
+            warehouse_summary = self.warehouse.replace_attention_signals(result)
+        return {
+            "status": "completed",
+            "rows": len(result),
+            "output_csv": str(output_csv),
+            "warehouse": warehouse_summary,
+        }
+
+    def enrich_supply_chain_graph_csv(
+        self,
+        stock_codes=None,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        node_csv="docs/hk_stock_graph_nodes_lightrag.csv",
+        edge_csv="docs/hk_stock_graph_edges_lightrag.csv",
+        node_output="output/stock_graph_nodes_enriched.csv",
+        edge_output="output/stock_graph_edges_enriched.csv",
+        import_to_warehouse=False,
+    ):
+        """Enrich graph nodes/edges with deterministic supply-chain bottleneck rules."""
+        from data.ingest.stock_profile_graph import enrich_supply_chain_graph
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("") if Path(evidence_csv).exists() else pd.DataFrame()
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        nodes = pd.read_csv(node_csv, dtype=str).fillna("") if Path(node_csv).exists() else pd.DataFrame()
+        edges = pd.read_csv(edge_csv, dtype=str).fillna("") if Path(edge_csv).exists() else pd.DataFrame()
+        node_result, edge_result = enrich_supply_chain_graph(
+            evidence_frame=evidence,
+            alias_frame=aliases,
+            node_frame=nodes,
+            edge_frame=edges,
+            stock_codes=stock_codes,
+        )
+        for path in (node_output, edge_output):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        node_result.to_csv(node_output, index=False, encoding="utf-8-sig")
+        edge_result.to_csv(edge_output, index=False, encoding="utf-8-sig")
+        warehouse_summary = None
+        if import_to_warehouse:
+            warehouse_summary = {
+                "nodes": self.warehouse.replace_stock_graph_nodes(node_result),
+                "edges": self.warehouse.replace_stock_graph_edges(edge_result),
+            }
+        return {
+            "status": "completed",
+            "nodes": len(node_result),
+            "edges": len(edge_result),
+            "node_output": str(node_output),
+            "edge_output": str(edge_output),
+            "warehouse": warehouse_summary,
+        }
+
+    def rank_theme_opportunities_csv(
+        self,
+        theme,
+        stock_codes=None,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        node_csv="docs/hk_stock_graph_nodes_lightrag.csv",
+        edge_csv="docs/hk_stock_graph_edges_lightrag.csv",
+        attention_csv=None,
+        output_csv="output/theme_opportunities.csv",
+        top_n=None,
+        min_score=None,
+        import_to_warehouse=False,
+        asof_date=None,
+        show_progress=False,
+    ):
+        """Rank stocks for a theme using graph/evidence/attention/market-data components."""
+        from data.ingest.stock_profile_graph import rank_theme_opportunities
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("") if Path(evidence_csv).exists() else pd.DataFrame()
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        nodes = pd.read_csv(node_csv, dtype=str).fillna("") if Path(node_csv).exists() else pd.DataFrame()
+        edges = pd.read_csv(edge_csv, dtype=str).fillna("") if Path(edge_csv).exists() else pd.DataFrame()
+        attention = pd.read_csv(attention_csv, dtype=str).fillna("") if attention_csv and Path(attention_csv).exists() else pd.DataFrame()
+        stock_info = self.warehouse.read_stock_info(stock_codes=stock_codes, market="HK")
+        result = rank_theme_opportunities(
+            theme,
+            stock_codes=stock_codes,
+            evidence_frame=evidence,
+            alias_frame=aliases,
+            node_frame=nodes,
+            edge_frame=edges,
+            attention_frame=attention,
+            stock_info_frame=stock_info,
+            top_n=top_n,
+            min_score=min_score,
+            asof_date=asof_date,
+            show_progress=show_progress,
+        )
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        warehouse_summary = None
+        if import_to_warehouse:
+            warehouse_summary = self.warehouse.replace_theme_opportunity_scores(result)
+        return {
+            "status": "completed",
+            "theme": theme,
+            "rows": len(result),
+            "output_csv": str(output_csv),
+            "warehouse": warehouse_summary,
+        }
+
+    def export_theme_score_features(
+        self,
+        theme_score_csv=None,
+        theme=None,
+        output_csv="output/theme_opportunity_features.csv",
+        import_to_warehouse=False,
+        feature_set="theme_opportunity",
+        feature_version="v1",
+        feature_config_hash="theme_opportunity_v1",
+    ):
+        """Convert theme_opportunity_score rows into standard feature rows."""
+        from data.model import FEATURE_COLUMNS
+        import hashlib as _hashlib
+
+        if theme_score_csv and Path(theme_score_csv).exists():
+            scores = pd.read_csv(theme_score_csv, dtype=str).fillna("")
+        else:
+            scores = self.warehouse.read_theme_opportunity_scores(theme=theme, market="HK")
+        if scores is None or scores.empty:
+            result = pd.DataFrame(columns=FEATURE_COLUMNS)
+            Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+            result.to_csv(output_csv, index=False, encoding="utf-8-sig")
+            return {"status": "empty", "rows": 0, "output_csv": str(output_csv), "warehouse": None}
+        metric_columns = [
+            "score",
+            "technology_score",
+            "commercialization_score",
+            "value_chain_score",
+            "bottleneck_score",
+            "catalyst_score",
+            "attention_score",
+            "evidence_quality_score",
+            "liquidity_score",
+            "technical_trend_score",
+            "risk_penalty",
+            "crowding_penalty",
+        ]
+        now = pd.Timestamp.utcnow().isoformat()
+        working = scores.fillna("").copy()
+        for column in metric_columns:
+            if column not in working.columns:
+                working[column] = 0.0
+        id_columns = ["stock_code", "market", "theme", "asof_date"]
+        for column in id_columns:
+            if column not in working.columns:
+                working[column] = ""
+        metric_frame = working[id_columns + metric_columns].melt(
+            id_vars=id_columns,
+            value_vars=metric_columns,
+            var_name="metric",
+            value_name="feature_value",
+        )
+        metric_frame["feature_value"] = pd.to_numeric(metric_frame["feature_value"], errors="coerce")
+        metric_frame = metric_frame.dropna(subset=["feature_value"])
+        metric_frame["stock_code"] = metric_frame.apply(
+            lambda row: normalize_stock_code(row.get("stock_code"), market=row.get("market") or "HK"),
+            axis=1,
+        )
+        metric_frame["market"] = metric_frame["market"].replace("", "HK").str.upper()
+        metric_frame["theme"] = metric_frame["theme"].replace("", "ALL")
+        theme_hashes = {
+            theme_name: _hashlib.sha1(str(theme_name).encode("utf-8")).hexdigest()[:10]
+            for theme_name in metric_frame["theme"].astype(str).unique()
+        }
+        metric_frame["trade_date"] = metric_frame["asof_date"].astype(str).str[:10]
+        metric_frame.loc[metric_frame["trade_date"].eq(""), "trade_date"] = pd.Timestamp.utcnow().date().isoformat()
+        metric_frame["feature_name"] = metric_frame.apply(
+            lambda row: f"theme_{row['metric']}__{theme_hashes.get(str(row['theme']), 'unknown')}",
+            axis=1,
+        )
+        metric_frame["source"] = "theme_opportunity_score:" + metric_frame["theme"].astype(str)
+        result = pd.DataFrame(
+            {
+                "trade_date": metric_frame["trade_date"],
+                "stock_code": metric_frame["stock_code"],
+                "market": metric_frame["market"],
+                "exchange": "HKEX",
+                "asset_type": "equity",
+                "frequency": "daily",
+                "adjust": "none",
+                "feature_set": feature_set,
+                "feature_version": feature_version,
+                "feature_config_hash": feature_config_hash,
+                "feature_name": metric_frame["feature_name"],
+                "feature_value": metric_frame["feature_value"],
+                "source": metric_frame["source"],
+                "ingest_time": now,
+            },
+            columns=FEATURE_COLUMNS,
+        )
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        warehouse_summary = None
+        if import_to_warehouse:
+            warehouse_summary = self.warehouse.append_features(result)
+        return {
+            "status": "completed",
+            "rows": len(result),
+            "output_csv": str(output_csv),
+            "warehouse": warehouse_summary,
+        }
+
+    def research_stock_deep_profile(
+        self,
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        output_csv="docs/hk_stock_deep_evidence.csv",
+        stock_codes=None,
+        manual_alias_csv=None,
+        limit=None,
+        rebuild_aliases=False,
+        skip_existing=True,
+        min_relevance=0.25,
+        searxng_url=None,
+        max_results_per_query=5,
+        max_queries_per_stock=8,
+        engines=None,
+        language="zh-CN",
+        categories="general",
+        query_workers=1,
+        max_workers=1,
+        show_progress=False,
+    ):
+        """Fetch alias-aware source-aware evidence for stock profiles and graph extraction."""
+        from data.ingest.stock_profile_graph import (
+            DEEP_EVIDENCE_SOURCE,
+            fetch_source_aware_evidence,
+            filter_relevant_evidence,
+        )
+        from data.model import COMPANY_RESEARCH_EVIDENCE_FIELDS, ENTITY_ALIAS_FIELDS
+
+        alias_path = Path(alias_csv)
+        if rebuild_aliases or not alias_path.exists():
+            self.build_stock_entity_aliases(
+                alias_csv=alias_csv,
+                stock_codes=stock_codes,
+                manual_alias_csv=manual_alias_csv,
+                limit=limit,
+            )
+
+        aliases = (
+            pd.read_csv(alias_path, dtype=str).fillna("")
+            if alias_path.exists()
+            else pd.DataFrame(columns=ENTITY_ALIAS_FIELDS)
+        )
+        for column in ENTITY_ALIAS_FIELDS:
+            if column not in aliases.columns:
+                aliases[column] = ""
+        aliases = aliases[ENTITY_ALIAS_FIELDS]
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            aliases = aliases.loc[aliases["stock_code"].astype(str).isin(allowed)]
+
+        codes = list(dict.fromkeys(aliases["stock_code"].astype(str))) if not aliases.empty else []
+        if stock_codes and not codes:
+            codes = [normalize_stock_code(code, market="HK") for code in stock_codes]
+        if limit:
+            codes = codes[: int(limit)]
+
+        output_path = Path(output_csv)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        if output_path.exists():
+            existing = pd.read_csv(output_path, dtype=str).fillna("")
+            for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+                if column not in existing.columns:
+                    existing[column] = ""
+            existing = existing[COMPANY_RESEARCH_EVIDENCE_FIELDS]
+
+        existing_codes = set()
+        if skip_existing and not existing.empty:
+            titles = existing["title"].astype(str)
+            successful = (
+                existing["source"].astype(str).eq(DEEP_EVIDENCE_SOURCE)
+                & ~titles.str.contains("title=search_error", na=False)
+                & ~titles.str.contains("title=no_results", na=False)
+                & ~titles.str.contains("rank=0", na=False)
+            )
+            existing_codes = set(existing.loc[successful, "stock_code"].astype(str))
+
+        fetcher_cls = globals().get("SearxngCompanySearchFetcher")
+        if fetcher_cls is None:
+            from data.ingest.providers.searxng_company_search import SearxngCompanySearchFetcher as fetcher_cls
+
+        def aliases_for(code):
+            if aliases.empty:
+                return [code]
+            group = aliases.loc[aliases["stock_code"].astype(str) == code]
+            result = list(dict.fromkeys(group["alias"].astype(str)))
+            return result or [code]
+
+        def fetch_one(code):
+            try:
+                rows = fetch_source_aware_evidence(
+                    code,
+                    aliases_for(code),
+                    fetcher_cls,
+                    searxng_url=searxng_url,
+                    max_results_per_query=max_results_per_query,
+                    max_queries_per_stock=max_queries_per_stock,
+                    engines=engines,
+                    language=language,
+                    categories=categories,
+                    query_workers=query_workers,
+                )
+                frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+                alias_frame = aliases.loc[aliases["stock_code"].astype(str) == code] if not aliases.empty else pd.DataFrame()
+                filtered = filter_relevant_evidence(frame, alias_frame, min_score=min_relevance)
+                return filtered.to_dict("records"), None
+            except Exception as exc:
+                return [], {"stock_code": code, "error": str(exc)}
+
+        targets = [code for code in codes if code not in existing_codes]
+        rows = []
+        errors = []
+        worker_count = max(1, int(max_workers or 1))
+        if worker_count > 1 and len(targets) > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {executor.submit(fetch_one, code): code for code in targets}
+                iterator = as_completed(future_map)
+                if show_progress:
+                    iterator = tqdm(iterator, total=len(future_map), desc="deep profile research", unit="stock")
+                for future in iterator:
+                    fetched_rows, error = future.result()
+                    rows.extend(fetched_rows)
+                    if error:
+                        errors.append(error)
+        else:
+            iterator = targets
+            if show_progress:
+                iterator = tqdm(targets, desc="deep profile research", unit="stock")
+            for code in iterator:
+                fetched_rows, error = fetch_one(code)
+                rows.extend(fetched_rows)
+                if error:
+                    errors.append(error)
+
+        new_frame = pd.DataFrame(rows, columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        combined = pd.concat([existing, new_frame], ignore_index=True) if not existing.empty else new_frame
+        if combined is None or combined.empty:
+            combined = pd.DataFrame(columns=COMPANY_RESEARCH_EVIDENCE_FIELDS)
+        for column in COMPANY_RESEARCH_EVIDENCE_FIELDS:
+            if column not in combined.columns:
+                combined[column] = ""
+        combined = combined[COMPANY_RESEARCH_EVIDENCE_FIELDS].fillna("")
+        if not combined.empty:
+            combined = combined.drop_duplicates(
+                subset=["market", "stock_code", "source", "title"],
+                keep="last",
+            ).reset_index(drop=True)
+        combined.to_csv(output_path, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "skipped_existing": len(existing_codes.intersection(set(codes))),
+            "processed": len(targets),
+            "fetched_relevant": len(rows),
+            "evidence_rows": len(combined),
+            "errors": len(errors),
+            "error_samples": errors[:10],
+            "alias_csv": str(alias_path),
+            "output_csv": str(output_path),
+        }
+
+    def extract_stock_profile_llm(
+        self,
+        evidence_csv="docs/hk_stock_deep_evidence.csv",
+        alias_csv="docs/hk_entity_alias_registry.csv",
+        profile_output="docs/hk_stock_profile.csv",
+        deep_tag_output="docs/hk_stock_deep_tag_registry.csv",
+        node_output="docs/hk_stock_graph_nodes.csv",
+        edge_output="docs/hk_stock_graph_edges.csv",
+        stock_codes=None,
+        limit=None,
+        model=None,
+        temperature=0.1,
+        max_tokens=4096,
+        show_progress=False,
+    ):
+        """Use LLM to extract stock profiles, deep tags, and graph edges."""
+        from core.llm.client import LLMClient
+        from data.ingest.stock_profile_graph import (
+            build_profile_prompt,
+            parse_profile_response,
+            profile_payload_to_frames,
+        )
+
+        evidence = pd.read_csv(evidence_csv, dtype=str).fillna("")
+        aliases = pd.read_csv(alias_csv, dtype=str).fillna("") if Path(alias_csv).exists() else pd.DataFrame()
+        codes = list(dict.fromkeys(evidence["stock_code"].astype(str))) if not evidence.empty else []
+        if stock_codes:
+            allowed = {normalize_stock_code(code, market="HK") for code in stock_codes}
+            codes = [code for code in codes if code in allowed]
+        if limit:
+            codes = codes[: int(limit)]
+        client_cls = globals().get("LLMClient", LLMClient)
+        client = client_cls(model=model)
+        profiles = []
+        deep_tags = []
+        nodes = []
+        edges = []
+        errors = []
+        iterator = codes
+        if show_progress:
+            iterator = tqdm(codes, desc="stock profile extract", unit="stock")
+        for code in iterator:
+            try:
+                evidence_rows = evidence.loc[evidence["stock_code"].astype(str) == code]
+                alias_rows = aliases.loc[aliases["stock_code"].astype(str) == code] if not aliases.empty else pd.DataFrame()
+                messages = build_profile_prompt(code, evidence_rows, alias_rows)
+                text = client.chat_with_retry(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    model=model,
+                )
+                payload = parse_profile_response(text)
+                profile, tag_frame, node_frame, edge_frame = profile_payload_to_frames(payload)
+                profiles.append(profile)
+                deep_tags.append(tag_frame)
+                nodes.append(node_frame)
+                edges.append(edge_frame)
+            except Exception as exc:
+                errors.append({"stock_code": code, "error": str(exc)})
+        profile_frame = pd.concat(profiles, ignore_index=True) if profiles else pd.DataFrame()
+        tag_frame = pd.concat(deep_tags, ignore_index=True) if deep_tags else pd.DataFrame()
+        node_frame = pd.concat(nodes, ignore_index=True) if nodes else pd.DataFrame()
+        edge_frame = pd.concat(edges, ignore_index=True) if edges else pd.DataFrame()
+        if not node_frame.empty:
+            node_frame = node_frame.drop_duplicates(subset=["node_id"], keep="last")
+        if not edge_frame.empty:
+            edge_frame = edge_frame.drop_duplicates(
+                subset=["src_type", "src_id", "edge_type", "dst_type", "dst_id"],
+                keep="last",
+            )
+        for path in (profile_output, deep_tag_output, node_output, edge_output):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        from data.model import STOCK_DEEP_TAG_FIELDS, STOCK_GRAPH_EDGE_FIELDS, STOCK_GRAPH_NODE_FIELDS, STOCK_PROFILE_FIELDS
+        if profile_frame.empty:
+            profile_frame = pd.DataFrame(columns=STOCK_PROFILE_FIELDS)
+        if tag_frame.empty:
+            tag_frame = pd.DataFrame(columns=STOCK_DEEP_TAG_FIELDS)
+        if node_frame.empty:
+            node_frame = pd.DataFrame(columns=STOCK_GRAPH_NODE_FIELDS)
+        if edge_frame.empty:
+            edge_frame = pd.DataFrame(columns=STOCK_GRAPH_EDGE_FIELDS)
+        profile_frame.to_csv(profile_output, index=False, encoding="utf-8-sig")
+        tag_frame.to_csv(deep_tag_output, index=False, encoding="utf-8-sig")
+        node_frame.to_csv(node_output, index=False, encoding="utf-8-sig")
+        edge_frame.to_csv(edge_output, index=False, encoding="utf-8-sig")
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "profiles": len(profile_frame),
+            "deep_tags": len(tag_frame),
+            "nodes": len(node_frame),
+            "edges": len(edge_frame),
+            "errors": len(errors),
+            "error_samples": errors[:10],
+        }
+
+    def retrieve_stock_subgraph(self, stock_code, depth=2, node_csv=None, edge_csv=None):
+        """Retrieve a local stock graph subgraph from CSVs or warehouse."""
+        from data.ingest.stock_profile_graph import retrieve_subgraph
+        from data.model import STOCK_GRAPH_EDGE_FIELDS, STOCK_GRAPH_NODE_FIELDS
+
+        code = normalize_stock_code(stock_code, market="HK")
+        if node_csv and Path(node_csv).exists():
+            nodes = pd.read_csv(node_csv, dtype=str).fillna("")
+        else:
+            nodes = self.warehouse.read_stock_graph_nodes()
+        if edge_csv and Path(edge_csv).exists():
+            edges = pd.read_csv(edge_csv, dtype=str).fillna("")
+        else:
+            edges = self.warehouse.read_stock_graph_edges()
+        if nodes is None or nodes.empty:
+            nodes = pd.DataFrame(columns=STOCK_GRAPH_NODE_FIELDS)
+        if edges is None or edges.empty:
+            edges = pd.DataFrame(columns=STOCK_GRAPH_EDGE_FIELDS)
+        seed = f"stock:{code}"
+        sub_nodes, sub_edges = retrieve_subgraph(nodes, edges, [seed], depth=depth)
+        return {
+            "stock_code": code,
+            "depth": int(depth),
+            "nodes": sub_nodes.to_dict("records"),
+            "edges": sub_edges.to_dict("records"),
         }
 
     def get_stock_tag_coverage(self, market="HK", min_confidence=0.75):

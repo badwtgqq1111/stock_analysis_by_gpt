@@ -10,3 +10,8 @@ uv.lock
 
 # Generated research/search caches can contain signed URLs or other secrets.
 docs/hk_company_*_evidence.csv
+
+# Local LightRAG deployment secrets/state.
+deploy/lightrag/.env
+deploy/lightrag/server.env
+deploy/lightrag/data/

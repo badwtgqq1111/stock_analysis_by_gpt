@@ -1,11 +1,9 @@
 ﻿stock_code,market,tag,tag_type,confidence,is_primary,source,evidence,evidence_url,updated_at,review_status,review_note
-02926,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-04T19:05:47.299956,pending,
-02943,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-04T19:05:47.300169,pending,
-08276,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-04T19:05:47.332755,pending,
-08598,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-04T19:05:47.338697,pending,
-08600,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-04T19:05:47.338721,pending,
-03196,HK,token,theme,0.74,False,searxng_search,keyword=RWA; rank=3; engine=bing; score=0.5; url=https://www.gate.com/learn/articles/from-rwa-to-rwafi-could-plume-be-the-alpha-key-to-capturing-the-trillion-dollar-epic-narrative/6230; hash=f2,https://www.gate.com/learn/articles/from-rwa-to-rwafi-could-plume-be-the-alpha-key-to-capturing-the-trillion-dollar-epic-narrative/6230,2026-06-04T19:05:48.701760,pending,
-09636,HK,token,theme,0.74,False,searxng_search,"keyword=RWA; rank=4; engine=duckduckgo; score=0.5; url=https://guba.eastmoney.com/news,hk09636,1604155334.html; hash=ebf67176d8704a0c; snippet=在香港稳定币、RWA等数字资产业务的新机遇下，方德证券将通过升级1、4类牌照，向客户提供数字资产交易","https://guba.eastmoney.com/news,hk09636,1604155334.html",2026-06-04T19:05:49.157318,pending,
+02926,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-06T05:58:26.482622,pending,
+02943,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-06T05:58:26.482862,pending,
+08276,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-06T05:58:26.521223,pending,
+08598,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-06T05:58:26.528138,pending,
+08600,HK,待人工确认,industry,0.2,False,nan+local_taxonomy+local_taxonomy+local_taxonomy;local_registry_enrichment,industry registry marked as unclassified,,2026-06-06T05:58:26.528164,pending,
 01208,HK,黄金,resource,0.7,False,deepseek_browser_evidence,公司业务包括勘探、开发和开采金矿床，Rosebery矿也生产金。,https://hk.stockstar.com/hshare/01208,2026-06-03T10:49:17.685996,pending,黄金是公司开采的金属之一，但非核心产品，证据强度中等。
 01208,HK,白银,resource,0.7,False,deepseek_browser_evidence,公司业务包括勘探、开发和开采银矿床，Khoemacau矿也生产银。,https://hk.stockstar.com/hshare/01208,2026-06-03T10:49:17.686006,pending,白银是公司开采的金属之一，但非核心产品，证据强度中等。
 01208,HK,钴,resource,0.6,False,deepseek_browser_evidence,公司业务包括勘探、开发和开采钴矿床。,https://hk.stockstar.com/hshare/01208,2026-06-03T10:49:17.686014,pending,钴是公司开采的金属之一，但非主要产品，证据强度一般。

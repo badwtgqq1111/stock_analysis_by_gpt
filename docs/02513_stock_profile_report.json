@@ -1,0 +1,1114 @@
+{
+  "stock_code": "02513",
+  "generated_at": "2026-06-06T17:00:49.208115",
+  "verdict": "watchlist",
+  "quality": {
+    "stock_code": "02513",
+    "quality_score": 100,
+    "decision_ready": true,
+    "covered_dimensions": [
+      "business",
+      "product",
+      "technology",
+      "value_chain",
+      "catalyst",
+      "risk",
+      "attention"
+    ],
+    "missing_dimensions": [],
+    "dimension_hits": {
+      "business": 9,
+      "product": 9,
+      "technology": 9,
+      "value_chain": 3,
+      "catalyst": 5,
+      "risk": 8,
+      "attention": 7
+    },
+    "evidence_sources": 24,
+    "alias_count": 21,
+    "node_count": 194,
+    "edge_count": 213
+  },
+  "aliases": [
+    "02513",
+    "ARC",
+    "Agentic Engineering",
+    "BigModel",
+    "ChatGLM",
+    "ChatGLM-20230821",
+    "DSA",
+    "GLM-4",
+    "GLM-4-Plus",
+    "GLM-5",
+    "HuggingFace",
+    "MaaS",
+    "Vibe Coding",
+    "Z.ai",
+    "Zhipu AI",
+    "代码模型",
+    "多模态",
+    "大模型",
+    "智能体",
+    "智谱AI",
+    "智谱清言"
+  ],
+  "sections": {
+    "products": {
+      "nodes": [
+        {
+          "node_id": "concept:KNOWLEDGE ATLAS",
+          "node_type": "concept",
+          "name": "KNOWLEDGE ATLAS"
+        },
+        {
+          "node_id": "organization:新浪财经",
+          "node_type": "organization",
+          "name": "新浪财经"
+        },
+        {
+          "node_id": "organization:同花顺金融网",
+          "node_type": "organization",
+          "name": "同花顺金融网"
+        },
+        {
+          "node_id": "evidence_chunk:d3dbf981e95a",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:5ba523278dfb38a4.txt"
+        },
+        {
+          "node_id": "product:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "node_type": "product",
+          "name": "Glm技术复盘：21篇论文深度解读智谱模型家族"
+        },
+        {
+          "node_id": "product:备案号Beijing-ChatGLM-20230821",
+          "node_type": "product",
+          "name": "备案号Beijing-ChatGLM-20230821"
+        },
+        {
+          "node_id": "method:CodeGeeX",
+          "node_type": "method",
+          "name": "CodeGeeX"
+        },
+        {
+          "node_id": "content:智谱清言",
+          "node_type": "content",
+          "name": "智谱清言"
+        },
+        {
+          "node_id": "method:CogView",
+          "node_type": "method",
+          "name": "CogView"
+        },
+        {
+          "node_id": "entity:MaaS API平台",
+          "node_type": "entity",
+          "name": "MaaS API平台"
+        },
+        {
+          "node_id": "content:智谱首份财报",
+          "node_type": "content",
+          "name": "智谱首份财报"
+        },
+        {
+          "node_id": "organization:MiniMax",
+          "node_type": "organization",
+          "name": "MiniMax"
+        }
+      ],
+      "edges": [
+        {
+          "src_id": "product:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "edge_type": "uses_technology",
+          "dst_id": "organization:智谱AI",
+          "evidence_refs": "evidence:02513:edc4e3bef28dd82e.txt;doc-68acb4bb9d5b8bf722b114092a63d02d-chunk-000"
+        },
+        {
+          "src_id": "product:备案号Beijing-ChatGLM-20230821",
+          "edge_type": "related_to",
+          "dst_id": "artifact:智谱清言(ChatGLM)",
+          "evidence_refs": "evidence:02513:1fee14579342d00b.txt;doc-d9bbf73932d18eeffb95e83597295fa0-chunk-000"
+        },
+        {
+          "src_id": "data:ARR",
+          "edge_type": "has_metric",
+          "dst_id": "entity:MaaS API平台",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "other:AIGC模型产品矩阵",
+          "edge_type": "produces",
+          "dst_id": "method:CogVLM",
+          "evidence_refs": "evidence:02513:d9f141da7ec3f385.txt;doc-0326400fcdf73fe5cdbd8616c1a23e13-chunk-000"
+        },
+        {
+          "src_id": "other:AIGC模型产品矩阵",
+          "edge_type": "produces",
+          "dst_id": "method:CodeGeeX",
+          "evidence_refs": "evidence:02513:d9f141da7ec3f385.txt;doc-0326400fcdf73fe5cdbd8616c1a23e13-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "produces",
+          "dst_id": "content:智谱清言",
+          "evidence_refs": "evidence:02513:434e5b846052be06.txt;doc-9da4919957dc304f45e11a62041e9d1c-chunk-000"
+        },
+        {
+          "src_id": "other:AIGC模型产品矩阵",
+          "edge_type": "produces",
+          "dst_id": "method:CogView",
+          "evidence_refs": "evidence:02513:d9f141da7ec3f385.txt;doc-0326400fcdf73fe5cdbd8616c1a23e13-chunk-000"
+        },
+        {
+          "src_id": "other:AIGC模型产品矩阵",
+          "edge_type": "produces",
+          "dst_id": "content:智谱清言",
+          "evidence_refs": "evidence:02513:d9f141da7ec3f385.txt;doc-0326400fcdf73fe5cdbd8616c1a23e13-chunk-000"
+        },
+        {
+          "src_id": "entity:MaaS API平台",
+          "edge_type": "related_to",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "technology:Agentic Engineering",
+          "edge_type": "uses_technology",
+          "dst_id": "artifact:GLM-5",
+          "evidence_refs": "evidence:02513:a2199ad093dcd419.txt;doc-b4e38788f6345e577d0544273756e626-chunk-000"
+        },
+        {
+          "src_id": "technology:AI开发新模式",
+          "edge_type": "produces",
+          "dst_id": "other:智谱大模型开放平台",
+          "evidence_refs": "evidence:02513:2315e55978c3764d.txt;doc-676b8171863c25e934e20e27b2e393f0-chunk-000"
+        },
+        {
+          "src_id": "organization:MiniMax",
+          "edge_type": "produces",
+          "dst_id": "concept:全球AI产品公司路线",
+          "evidence_refs": "evidence:02513:79fc2bd415a0b425.txt;doc-1e6e26cb9f67d6b1abacdcbf1a3612ef-chunk-000"
+        }
+      ],
+      "evidence": [
+        {
+          "title": "query=site:hkexnews.hk 02513 智谱 年报 招股书 主营业务; rank=1; title=股份代號：2513 獨家保薦人、保薦人兼整體協調人、整體協調人、聯席全球協調人、聯席賬簿管理人及聯席牽頭經辦人",
+          "url": "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000018_c.pdf",
+          "summary": "rank=1; engine=brave; score=1.0; url=https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000018_c.pdf; hash=652f33e1ee48f49e; snippet=智能體模型及代碼模型，以及用於模型微調、部署及智能體開發的集成工具。我們MaaS平"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=1; title=Zhipu Ai Open Platform",
+          "url": "https://open.bigmodel.cn/",
+          "summary": "rank=1; engine=duckduckgo; score=1.0; url=https://open.bigmodel.cn/; hash=4fd8bce000351d71; snippet=智谱大模型开放平台-新一代国产自主通用AI大模型开放平台，是国内大模型排名前列的大模型网站，研发了多款LLM模型，多模态视觉模型产品，致力于将AI产品技术与行业场景双轮驱动的中国先进的认知智能技术和千行百业应用相结合，构建更高精度、高效率、通用化的AI开发新模式和企业级解决 ..."
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=2; title=Z.ai - Inspiring AGI to Benefit Humanity",
+          "url": "https://www.zhipuai.cn/",
+          "summary": "rank=2; engine=duckduckgo; score=0.5; url=https://www.zhipuai.cn/; hash=ea92af238e9bcd8a; snippet=智谱与英特尔深化智能生态合作，落地端侧智谱清言和CodeGeeX智能编程助手"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=3; title=智谱 - 维基百科，自由的百科全书",
+          "url": "https://zh.wikipedia.org/wiki/%E6%99%BA%E8%B0%B1",
+          "summary": "rank=3; engine=duckduckgo; score=0.3333333333333333; url=https://zh.wikipedia.org/wiki/%E6%99%BA%E8%B0%B1; hash=8e12b56dfa7a134e; snippet=2023年8月31日，智谱推出的 人工智能 大语言模型 \" 智谱清言 （ChatGLM）\"通过了 中华人民共和国 《生成式人工智能 服务管理暂行办法》备案，备案号为\"Beijing-ChatGLM-20230821\" [7][8]，同日，智谱清"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=4; title=智谱\"瘦身\"，AI公司的商业化大考_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251021A074N300",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://news.qq.com/rain/a/20251021A074N300; hash=eb371d23026be7c2; snippet=对此，智谱方面回应光锥智能表示，网上传言的大规模裁员不符合事实，公司产品和研发部门运转正常，此次是基于公司战略目标的人员调整，涉及十余人。 智谱近期在其官方公众号发布的招聘帖显示，包括多模态生成算法工程师、推理优化工程师、产品和业务团队在内的近50个岗位待招。 对于一家即将IPO的"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=5; title=北京智谱华章科技有限公司 _ 百科",
+          "url": "https://baike.sogou.com/m/fullLemma",
+          "summary": "rank=5; engine=duckduckgo; score=0.2; url=https://baike.sogou.com/m/fullLemma?lid=191740446&g_ut=3; hash=839ec493713d8393; snippet=智谱AI基于全自研基座大模型的强大能力，构建了极具竞争力的AIGC模型产品矩阵，包括AI提效助手智谱清言、高效率代码模型CodeGeeX、多模态理解模型CogVLM和文生图模型CogView等 8。"
+        }
+      ]
+    },
+    "technology": {
+      "nodes": [
+        {
+          "node_id": "concept:KNOWLEDGE ATLAS",
+          "node_type": "concept",
+          "name": "KNOWLEDGE ATLAS"
+        },
+        {
+          "node_id": "evidence_chunk:6a7f390b3ec2",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:7cfbd96da05cf3fb.txt"
+        },
+        {
+          "node_id": "evidence_chunk:d3dbf981e95a",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:5ba523278dfb38a4.txt"
+        },
+        {
+          "node_id": "product:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "node_type": "product",
+          "name": "Glm技术复盘：21篇论文深度解读智谱模型家族"
+        },
+        {
+          "node_id": "technology:Agentic Engineering",
+          "node_type": "technology",
+          "name": "Agentic Engineering"
+        },
+        {
+          "node_id": "product:AI产品技术",
+          "node_type": "product",
+          "name": "AI产品技术"
+        },
+        {
+          "node_id": "technology:认知智能技术",
+          "node_type": "technology",
+          "name": "认知智能技术"
+        },
+        {
+          "node_id": "entity:ARC Capabilities",
+          "node_type": "entity",
+          "name": "ARC Capabilities"
+        },
+        {
+          "node_id": "concept:业务落地路径",
+          "node_type": "concept",
+          "name": "业务落地路径"
+        },
+        {
+          "node_id": "other:AI产品技术",
+          "node_type": "other",
+          "name": "AI产品技术"
+        },
+        {
+          "node_id": "concept:行业场景",
+          "node_type": "concept",
+          "name": "行业场景"
+        },
+        {
+          "node_id": "organization:英特尔",
+          "node_type": "organization",
+          "name": "英特尔"
+        }
+      ],
+      "edges": [
+        {
+          "src_id": "product:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "edge_type": "uses_technology",
+          "dst_id": "organization:智谱AI",
+          "evidence_refs": "evidence:02513:edc4e3bef28dd82e.txt;doc-68acb4bb9d5b8bf722b114092a63d02d-chunk-000"
+        },
+        {
+          "src_id": "technology:Agentic Engineering",
+          "edge_type": "uses_technology",
+          "dst_id": "artifact:GLM-5",
+          "evidence_refs": "evidence:02513:a2199ad093dcd419.txt;doc-b4e38788f6345e577d0544273756e626-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "produces",
+          "dst_id": "product:AI产品技术",
+          "evidence_refs": "evidence:02513:2315e55978c3764d.txt;doc-676b8171863c25e934e20e27b2e393f0-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "uses_technology",
+          "dst_id": "technology:认知智能技术",
+          "evidence_refs": "evidence:02513:2315e55978c3764d.txt;doc-676b8171863c25e934e20e27b2e393f0-chunk-000"
+        },
+        {
+          "src_id": "product:GLM-130B",
+          "edge_type": "produces",
+          "dst_id": "method:GLM架构",
+          "evidence_refs": "evidence:02513:edc4e3bef28dd82e.txt;doc-68acb4bb9d5b8bf722b114092a63d02d-chunk-000"
+        },
+        {
+          "src_id": "entity:ARC Capabilities",
+          "edge_type": "capability",
+          "dst_id": "artifact:GLM-5 Predecessor",
+          "evidence_refs": "evidence:02513:a2199ad093dcd419.txt;doc-b4e38788f6345e577d0544273756e626-chunk-000"
+        },
+        {
+          "src_id": "other:AI产品技术",
+          "edge_type": "produces",
+          "dst_id": "concept:行业场景",
+          "evidence_refs": "evidence:02513:2315e55978c3764d.txt;doc-676b8171863c25e934e20e27b2e393f0-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "uses_technology",
+          "dst_id": "concept:认知智能技术",
+          "evidence_refs": "evidence:02513:2315e55978c3764d.txt;doc-676b8171863c25e934e20e27b2e393f0-chunk-000"
+        },
+        {
+          "src_id": "entity:DSA",
+          "edge_type": "capability",
+          "dst_id": "artifact:GLM-5",
+          "evidence_refs": "evidence:02513:a2199ad093dcd419.txt;doc-b4e38788f6345e577d0544273756e626-chunk-000"
+        },
+        {
+          "src_id": "method:技术划线测量",
+          "edge_type": "uses_technology",
+          "dst_id": "artifact:数据分析软件",
+          "evidence_refs": "evidence:02513:9ca2448e1b8b07c0.txt;doc-f2cf379daa921290ffc504fa5ea785c6-chunk-000"
+        },
+        {
+          "src_id": "artifact:GLM-5",
+          "edge_type": "capability",
+          "dst_id": "technology:Vibe Coding",
+          "evidence_refs": "evidence:02513:a2199ad093dcd419.txt;doc-b4e38788f6345e577d0544273756e626-chunk-000"
+        },
+        {
+          "src_id": "artifact:多模态视觉模型",
+          "edge_type": "produces",
+          "dst_id": "other:智谱大模型开放平台",
+          "evidence_refs": "evidence:02513:2315e55978c3764d.txt;doc-676b8171863c25e934e20e27b2e393f0-chunk-000"
+        }
+      ],
+      "evidence": [
+        {
+          "title": "query=02513.HK 智谱 company profile business segments annual report; rank=2; title=智谱(02513)公司概况",
+          "url": "https://www.lixinger.com/equity/company/detail/hk/02513/2513/profile",
+          "summary": "rank=2; engine=brave; score=1.0; url=https://www.lixinger.com/equity/company/detail/hk/02513/2513/profile; hash=757d081023b8886d; snippet=“用过很多免费及付费数据分析软件，主要问题有两个：一是功能过多，不得不兼顾技术派、消息派、价值派等用户的需要，把整个软件做的庞杂冗余，二是功能过偏，仅仅为技术划线测量使用，缺少太多投资中需要的重..."
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=1; title=Zhipu Ai Open Platform",
+          "url": "https://open.bigmodel.cn/",
+          "summary": "rank=1; engine=duckduckgo; score=1.0; url=https://open.bigmodel.cn/; hash=4fd8bce000351d71; snippet=智谱大模型开放平台-新一代国产自主通用AI大模型开放平台，是国内大模型排名前列的大模型网站，研发了多款LLM模型，多模态视觉模型产品，致力于将AI产品技术与行业场景双轮驱动的中国先进的认知智能技术和千行百业应用相结合，构建更高精度、高效率、通用化的AI开发新模式和企业级解决 ..."
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=2; title=Z.ai - Inspiring AGI to Benefit Humanity",
+          "url": "https://www.zhipuai.cn/",
+          "summary": "rank=2; engine=duckduckgo; score=0.5; url=https://www.zhipuai.cn/; hash=ea92af238e9bcd8a; snippet=智谱与英特尔深化智能生态合作，落地端侧智谱清言和CodeGeeX智能编程助手"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=3; title=智谱 - 维基百科，自由的百科全书",
+          "url": "https://zh.wikipedia.org/wiki/%E6%99%BA%E8%B0%B1",
+          "summary": "rank=3; engine=duckduckgo; score=0.3333333333333333; url=https://zh.wikipedia.org/wiki/%E6%99%BA%E8%B0%B1; hash=8e12b56dfa7a134e; snippet=2023年8月31日，智谱推出的 人工智能 大语言模型 \" 智谱清言 （ChatGLM）\"通过了 中华人民共和国 《生成式人工智能 服务管理暂行办法》备案，备案号为\"Beijing-ChatGLM-20230821\" [7][8]，同日，智谱清"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=4; title=智谱\"瘦身\"，AI公司的商业化大考_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251021A074N300",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://news.qq.com/rain/a/20251021A074N300; hash=eb371d23026be7c2; snippet=对此，智谱方面回应光锥智能表示，网上传言的大规模裁员不符合事实，公司产品和研发部门运转正常，此次是基于公司战略目标的人员调整，涉及十余人。 智谱近期在其官方公众号发布的招聘帖显示，包括多模态生成算法工程师、推理优化工程师、产品和业务团队在内的近50个岗位待招。 对于一家即将IPO的"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=5; title=北京智谱华章科技有限公司 _ 百科",
+          "url": "https://baike.sogou.com/m/fullLemma",
+          "summary": "rank=5; engine=duckduckgo; score=0.2; url=https://baike.sogou.com/m/fullLemma?lid=191740446&g_ut=3; hash=839ec493713d8393; snippet=智谱AI基于全自研基座大模型的强大能力，构建了极具竞争力的AIGC模型产品矩阵，包括AI提效助手智谱清言、高效率代码模型CodeGeeX、多模态理解模型CogVLM和文生图模型CogView等 8。"
+        }
+      ]
+    },
+    "business": {
+      "nodes": [
+        {
+          "node_id": "evidence_chunk:d3dbf981e95a",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:5ba523278dfb38a4.txt"
+        },
+        {
+          "node_id": "entity:MaaS API平台",
+          "node_type": "entity",
+          "name": "MaaS API平台"
+        },
+        {
+          "node_id": "content:智谱首份财报",
+          "node_type": "content",
+          "name": "智谱首份财报"
+        },
+        {
+          "node_id": "artifact:MaaS平台",
+          "node_type": "artifact",
+          "name": "MaaS平台"
+        },
+        {
+          "node_id": "data:ARR",
+          "node_type": "data",
+          "name": "ARR"
+        },
+        {
+          "node_id": "artifact:MaaS API平台",
+          "node_type": "artifact",
+          "name": "MaaS API平台"
+        },
+        {
+          "node_id": "entity:营收",
+          "node_type": "entity",
+          "name": "营收"
+        },
+        {
+          "node_id": "entity:研发投入",
+          "node_type": "entity",
+          "name": "研发投入"
+        },
+        {
+          "node_id": "entity:商业化方向",
+          "node_type": "entity",
+          "name": "商业化方向"
+        },
+        {
+          "node_id": "entity:毛利率",
+          "node_type": "entity",
+          "name": "毛利率"
+        },
+        {
+          "node_id": "entity:2025年营收7亿",
+          "node_type": "entity",
+          "name": "2025年营收7亿"
+        },
+        {
+          "node_id": "entity:企业收入",
+          "node_type": "entity",
+          "name": "企业收入"
+        }
+      ],
+      "edges": [
+        {
+          "src_id": "data:ARR",
+          "edge_type": "has_metric",
+          "dst_id": "entity:MaaS API平台",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "entity:MaaS API平台",
+          "edge_type": "related_to",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "produces",
+          "dst_id": "artifact:MaaS平台",
+          "evidence_refs": "evidence:02513:89cf45718fedf981.txt;doc-7b78a94bf9c700343fdb8338229d6b4c-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "has_metric",
+          "dst_id": "entity:营收",
+          "evidence_refs": "evidence:02513:5ba523278dfb38a4.txt;doc-3bc59d9dd7efdabb5e96d649b2cf7029-chunk-000"
+        },
+        {
+          "src_id": "data:ARR",
+          "edge_type": "has_metric",
+          "dst_id": "artifact:MaaS API平台",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "has_metric",
+          "dst_id": "entity:研发投入",
+          "evidence_refs": "evidence:02513:5ba523278dfb38a4.txt;doc-3bc59d9dd7efdabb5e96d649b2cf7029-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "produces",
+          "dst_id": "artifact:MaaS API平台",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "entity:商业化方向",
+          "edge_type": "has_risk",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "has_metric",
+          "dst_id": "entity:毛利率",
+          "evidence_refs": "evidence:02513:5ba523278dfb38a4.txt;doc-3bc59d9dd7efdabb5e96d649b2cf7029-chunk-000"
+        },
+        {
+          "src_id": "entity:2025年营收7亿",
+          "edge_type": "has_metric",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:79fc2bd415a0b425.txt;doc-1e6e26cb9f67d6b1abacdcbf1a3612ef-chunk-000"
+        },
+        {
+          "src_id": "entity:企业收入",
+          "edge_type": "has_metric",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:79fc2bd415a0b425.txt;doc-1e6e26cb9f67d6b1abacdcbf1a3612ef-chunk-000"
+        },
+        {
+          "src_id": "entity:国内B端商业化",
+          "edge_type": "has_risk",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:79fc2bd415a0b425.txt;doc-1e6e26cb9f67d6b1abacdcbf1a3612ef-chunk-000"
+        }
+      ],
+      "evidence": [
+        {
+          "title": "query=site:hkexnews.hk 02513 智谱 年报 招股书 主营业务; rank=1; title=股份代號：2513 獨家保薦人、保薦人兼整體協調人、整體協調人、聯席全球協調人、聯席賬簿管理人及聯席牽頭經辦人",
+          "url": "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000018_c.pdf",
+          "summary": "rank=1; engine=brave; score=1.0; url=https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000018_c.pdf; hash=652f33e1ee48f49e; snippet=智能體模型及代碼模型，以及用於模型微調、部署及智能體開發的集成工具。我們MaaS平"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=4; title=智谱\"瘦身\"，AI公司的商业化大考_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251021A074N300",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://news.qq.com/rain/a/20251021A074N300; hash=eb371d23026be7c2; snippet=对此，智谱方面回应光锥智能表示，网上传言的大规模裁员不符合事实，公司产品和研发部门运转正常，此次是基于公司战略目标的人员调整，涉及十余人。 智谱近期在其官方公众号发布的招聘帖显示，包括多模态生成算法工程师、推理优化工程师、产品和业务团队在内的近50个岗位待招。 对于一家即将IPO的"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=1; title=冲刺\"全球大模型第一股\"!智谱财务数据曝光_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251220A01Z1800",
+          "summary": "rank=1; engine=duckduckgo; score=1.0; url=https://news.qq.com/rain/a/20251220A01Z1800; hash=a388567f0dd18904; snippet=港交所披露的聆讯后资料集显示，智谱于2022年、2023年、2024年、2025年上半年实现营收5740万元、1.245亿元、3.124亿元、1.9亿元（人民币，下同），2022年至2024年连续三年营收翻倍，复合年增长率达到130%；毛利率分别为54.6%、64.6%、56.3%、"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=2; title=智谱去年营收7.24亿元增长132%，开放平台及api收入增近三倍",
+          "url": "https://www.thepaper.cn/newsDetail_forward_32867423",
+          "summary": "rank=2; engine=duckduckgo; score=0.5; url=https://www.thepaper.cn/newsDetail_forward_32867423; hash=761beac759ec8202; snippet=3月31日，智谱（02513.HK）交出上市后首份成绩单。 2025年，智谱全年收入7.24亿元，同比增长132%；毛利2.97亿元，同比增加68.7%；经调整年内净亏损31.82亿元，同比增加29.1%；每股亏损12.03元；MaaS API平台实现ARR 17亿元"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=3; title=智谱：2025年全年总收入7.24亿元，同比增长131.9% | 科技 ...",
+          "url": "https://www.zgeo.com.cn/news/zhipu-ai-2025-revenue-growth-analysis",
+          "summary": "rank=3; engine=duckduckgo; score=0.3333333333333333; url=https://www.zgeo.com.cn/news/zhipu-ai-2025-revenue-growth-analysis; hash=bded4e210d3684c2; snippet=智谱AI 2025年总收入达7.24亿元，同比增长131.9%，作为国内大模型初创公司，其财务数据反映了AI技术商业化加速趋势。本文分析其商业表现、业务落地路径及对企业AI化的启示，为高管和营销负责人提供决策"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=4; title=智谱首份财报出炉：双面叙事下， Ai 商业化的真实坐标",
+          "url": "https://www.toutiao.com/article/7623969752083546650/",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://www.toutiao.com/article/7623969752083546650/; hash=c3007b531657ab00; snippet=财报披露，中国前十大互联网公司中有9家深度调用GLM模型。 这些头部客户同时拥有自研模型的能力。 智谱CEO张鹏在媒体沟通会上回应称，\"大厂一定会自研，但不一定在所有场景中都能做到有足够的竞争力\"。 但这一判断的前提是智谱保持足够的技术 ..."
+        }
+      ]
+    },
+    "value_chain": {
+      "nodes": [
+        {
+          "node_id": "artifact:MaaS平台",
+          "node_type": "artifact",
+          "name": "MaaS平台"
+        },
+        {
+          "node_id": "entity:英特尔",
+          "node_type": "entity",
+          "name": "英特尔"
+        },
+        {
+          "node_id": "organization:英特尔",
+          "node_type": "organization",
+          "name": "英特尔"
+        },
+        {
+          "node_id": "organization:智谱",
+          "node_type": "organization",
+          "name": "智谱"
+        },
+        {
+          "node_id": "evidence_chunk:f0304ffe90ad",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:434e5b846052be06.txt"
+        }
+      ],
+      "edges": [
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "catalyst_for",
+          "dst_id": "entity:英特尔",
+          "evidence_refs": "evidence:02513:434e5b846052be06.txt;doc-9da4919957dc304f45e11a62041e9d1c-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "catalyst_for",
+          "dst_id": "organization:英特尔",
+          "evidence_refs": "evidence:02513:434e5b846052be06.txt;doc-9da4919957dc304f45e11a62041e9d1c-chunk-000"
+        }
+      ],
+      "evidence": [
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=2; title=Z.ai - Inspiring AGI to Benefit Humanity",
+          "url": "https://www.zhipuai.cn/",
+          "summary": "rank=2; engine=duckduckgo; score=0.5; url=https://www.zhipuai.cn/; hash=ea92af238e9bcd8a; snippet=智谱与英特尔深化智能生态合作，落地端侧智谱清言和CodeGeeX智能编程助手"
+        }
+      ]
+    },
+    "catalysts": {
+      "nodes": [
+        {
+          "node_id": "location:HK",
+          "node_type": "location",
+          "name": "HK"
+        },
+        {
+          "node_id": "location:香港市场",
+          "node_type": "location",
+          "name": "香港市场"
+        },
+        {
+          "node_id": "organization:香港聯合交易所有限公司(聯交所)",
+          "node_type": "organization",
+          "name": "香港聯合交易所有限公司(聯交所)"
+        },
+        {
+          "node_id": "evidence_chunk:6a7f390b3ec2",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:7cfbd96da05cf3fb.txt"
+        },
+        {
+          "node_id": "evidence_chunk:d3dbf981e95a",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:5ba523278dfb38a4.txt"
+        },
+        {
+          "node_id": "product:备案号Beijing-ChatGLM-20230821",
+          "node_type": "product",
+          "name": "备案号Beijing-ChatGLM-20230821"
+        },
+        {
+          "node_id": "content:智谱首份财报",
+          "node_type": "content",
+          "name": "智谱首份财报"
+        },
+        {
+          "node_id": "event:轻交付、标准化合作模式",
+          "node_type": "event",
+          "name": "轻交付、标准化合作模式"
+        },
+        {
+          "node_id": "entity:英特尔",
+          "node_type": "entity",
+          "name": "英特尔"
+        },
+        {
+          "node_id": "entity:上市后首份成绩单",
+          "node_type": "entity",
+          "name": "上市后首份成绩单"
+        },
+        {
+          "node_id": "content:分析文章",
+          "node_type": "content",
+          "name": "分析文章"
+        },
+        {
+          "node_id": "organization:英特尔",
+          "node_type": "organization",
+          "name": "英特尔"
+        }
+      ],
+      "edges": [
+        {
+          "src_id": "product:备案号Beijing-ChatGLM-20230821",
+          "edge_type": "related_to",
+          "dst_id": "artifact:智谱清言(ChatGLM)",
+          "evidence_refs": "evidence:02513:1fee14579342d00b.txt;doc-d9bbf73932d18eeffb95e83597295fa0-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "catalyst_for",
+          "dst_id": "event:轻交付、标准化合作模式",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "catalyst_for",
+          "dst_id": "entity:英特尔",
+          "evidence_refs": "evidence:02513:434e5b846052be06.txt;doc-9da4919957dc304f45e11a62041e9d1c-chunk-000"
+        },
+        {
+          "src_id": "entity:上市后首份成绩单",
+          "edge_type": "produces",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "concept:业务落地路径",
+          "edge_type": "has_metric",
+          "dst_id": "content:智谱：2025年全年总收入7.24亿元，同比增长131.9% | 科技 ...",
+          "evidence_refs": "evidence:02513:188bbc6c85b01d0b.txt;doc-28d04bfb177a8df8436828b9a7314fd4-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "catalyst_for",
+          "dst_id": "organization:英特尔",
+          "evidence_refs": "evidence:02513:434e5b846052be06.txt;doc-9da4919957dc304f45e11a62041e9d1c-chunk-000"
+        },
+        {
+          "src_id": "concept:估值",
+          "edge_type": "catalyst_for",
+          "dst_id": "method:轻交付、标准化合作模式",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱AI",
+          "edge_type": "has_metric",
+          "dst_id": "content:智谱：2025年全年总收入7.24亿元，同比增长131.9% | 科技 ...",
+          "evidence_refs": "evidence:02513:188bbc6c85b01d0b.txt;doc-28d04bfb177a8df8436828b9a7314fd4-chunk-000"
+        },
+        {
+          "src_id": "concept:企业AI化",
+          "edge_type": "has_metric",
+          "dst_id": "content:智谱：2025年全年总收入7.24亿元，同比增长131.9% | 科技 ...",
+          "evidence_refs": "evidence:02513:188bbc6c85b01d0b.txt;doc-28d04bfb177a8df8436828b9a7314fd4-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱AI",
+          "edge_type": "has_metric",
+          "dst_id": "entity:智谱：2025年全年总收入7.24亿元，同比增长131.9% | 科技 ...",
+          "evidence_refs": "evidence:02513:188bbc6c85b01d0b.txt;doc-28d04bfb177a8df8436828b9a7314fd4-chunk-000"
+        },
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "catalyst_for",
+          "dst_id": "method:轻交付、标准化合作模式",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "entity:同比增长131.9%",
+          "edge_type": "catalyst_for",
+          "dst_id": "organization:智谱AI",
+          "evidence_refs": "evidence:02513:188bbc6c85b01d0b.txt;doc-28d04bfb177a8df8436828b9a7314fd4-chunk-000"
+        }
+      ],
+      "evidence": [
+        {
+          "title": "query=site:hkexnews.hk 02513 智谱 年报 招股书 主营业务; rank=4; title=披露易 - HKEXnews",
+          "url": "https://sc.hkexnews.hk/TuniS/www.hkexnews.hk/index_c.htm",
+          "summary": "rank=4; engine=duckduckgo; score=0.5; url=https://sc.hkexnews.hk/TuniS/www.hkexnews.hk/index_c.htm; hash=e8bf723aa776c1e9; snippet=披露易提供上市公司公告、财务报告及其他重要信息。"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=2; title=Z.ai - Inspiring AGI to Benefit Humanity",
+          "url": "https://www.zhipuai.cn/",
+          "summary": "rank=2; engine=duckduckgo; score=0.5; url=https://www.zhipuai.cn/; hash=ea92af238e9bcd8a; snippet=智谱与英特尔深化智能生态合作，落地端侧智谱清言和CodeGeeX智能编程助手"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=3; title=智谱 - 维基百科，自由的百科全书",
+          "url": "https://zh.wikipedia.org/wiki/%E6%99%BA%E8%B0%B1",
+          "summary": "rank=3; engine=duckduckgo; score=0.3333333333333333; url=https://zh.wikipedia.org/wiki/%E6%99%BA%E8%B0%B1; hash=8e12b56dfa7a134e; snippet=2023年8月31日，智谱推出的 人工智能 大语言模型 \" 智谱清言 （ChatGLM）\"通过了 中华人民共和国 《生成式人工智能 服务管理暂行办法》备案，备案号为\"Beijing-ChatGLM-20230821\" [7][8]，同日，智谱清"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=4; title=智谱\"瘦身\"，AI公司的商业化大考_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251021A074N300",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://news.qq.com/rain/a/20251021A074N300; hash=eb371d23026be7c2; snippet=对此，智谱方面回应光锥智能表示，网上传言的大规模裁员不符合事实，公司产品和研发部门运转正常，此次是基于公司战略目标的人员调整，涉及十余人。 智谱近期在其官方公众号发布的招聘帖显示，包括多模态生成算法工程师、推理优化工程师、产品和业务团队在内的近50个岗位待招。 对于一家即将IPO的"
+        },
+        {
+          "title": "query=智谱 智谱 论文 arxiv GitHub HuggingFace benchmark; rank=1; title=Glm技术复盘：21篇论文深度解读智谱模型家族 - 知乎",
+          "url": "https://zhuanlan.zhihu.com/p/2017879689117594918",
+          "summary": "rank=1; engine=duckduckgo; score=1.0; url=https://zhuanlan.zhihu.com/p/2017879689117594918; hash=c710229fb05ab780; snippet=在人工智能从通用语言建模向端到端智能体转型的历史进程中， 智谱AI （Zhipu AI，于2026年上市后更名为Z.ai）凭借其深厚的学术积淀与工程落地能力，构建了以GLM（General Language Model）架构为核心的庞大技术体系 。 从2022年双语稠密模型"
+        },
+        {
+          "title": "query=智谱 智谱 论文 arxiv GitHub HuggingFace benchmark; rank=3; title=Glm技术复盘：21篇论文深度解读智谱模型家族 - Ai ...",
+          "url": "https://www.cnblogs.com/aifrontiers/p/19736953",
+          "summary": "rank=3; engine=duckduckgo; score=0.3333333333333333; url=https://www.cnblogs.com/aifrontiers/p/19736953; hash=6eba3d1231ab1249; snippet=在人工智能从通用语言建模向端到端智能体转型的历史进程中，智谱AI（Zhipu AI，于2026年上市后更名为Z.ai）凭借其深厚的学术积淀与工程落地能力，构建了以GLM（General Language Model）架构为核心的庞大技术体系 。 从"
+        }
+      ]
+    },
+    "risks": {
+      "nodes": [
+        {
+          "node_id": "evidence_chunk:d3dbf981e95a",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:5ba523278dfb38a4.txt"
+        },
+        {
+          "node_id": "content:智谱首份财报",
+          "node_type": "content",
+          "name": "智谱首份财报"
+        },
+        {
+          "node_id": "entity:经调整净亏损",
+          "node_type": "entity",
+          "name": "经调整净亏损"
+        },
+        {
+          "node_id": "entity:商业化方向",
+          "node_type": "entity",
+          "name": "商业化方向"
+        },
+        {
+          "node_id": "entity:亏损47亿",
+          "node_type": "entity",
+          "name": "亏损47亿"
+        },
+        {
+          "node_id": "entity:国内B端商业化",
+          "node_type": "entity",
+          "name": "国内B端商业化"
+        },
+        {
+          "node_id": "entity:2025年经调整净亏损",
+          "node_type": "entity",
+          "name": "2025年经调整净亏损"
+        },
+        {
+          "node_id": "entity:2025年每股亏损",
+          "node_type": "entity",
+          "name": "2025年每股亏损"
+        },
+        {
+          "node_id": "other:AIGC模型产品矩阵",
+          "node_type": "other",
+          "name": "AIGC模型产品矩阵"
+        },
+        {
+          "node_id": "concept:估值",
+          "node_type": "concept",
+          "name": "估值"
+        },
+        {
+          "node_id": "other:商业化方向",
+          "node_type": "other",
+          "name": "商业化方向"
+        },
+        {
+          "node_id": "other:组织结构调整",
+          "node_type": "other",
+          "name": "组织结构调整"
+        }
+      ],
+      "edges": [
+        {
+          "src_id": "organization:智谱",
+          "edge_type": "has_metric",
+          "dst_id": "entity:经调整净亏损",
+          "evidence_refs": "evidence:02513:5ba523278dfb38a4.txt;doc-3bc59d9dd7efdabb5e96d649b2cf7029-chunk-000"
+        },
+        {
+          "src_id": "entity:商业化方向",
+          "edge_type": "has_risk",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "entity:亏损47亿",
+          "edge_type": "has_metric",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:79fc2bd415a0b425.txt;doc-1e6e26cb9f67d6b1abacdcbf1a3612ef-chunk-000"
+        },
+        {
+          "src_id": "entity:国内B端商业化",
+          "edge_type": "has_risk",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:79fc2bd415a0b425.txt;doc-1e6e26cb9f67d6b1abacdcbf1a3612ef-chunk-000"
+        },
+        {
+          "src_id": "entity:2025年经调整净亏损",
+          "edge_type": "has_metric",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "entity:2025年每股亏损",
+          "edge_type": "has_metric",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:3a2946fdc6d7525b.txt;doc-4af6bd61e79109ab6732460c02dcbbee-chunk-000"
+        },
+        {
+          "src_id": "concept:估值",
+          "edge_type": "catalyst_for",
+          "dst_id": "method:轻交付、标准化合作模式",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "other:商业化方向",
+          "edge_type": "has_risk",
+          "dst_id": "other:组织结构调整",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "concept:投资风险因素",
+          "edge_type": "risk_of",
+          "dst_id": "person:潜在投资者",
+          "evidence_refs": "evidence:02513:d2b44ba8ea4d1c7b.txt;doc-bbbb32529f902c38e6fcea699979689e-chunk-000"
+        },
+        {
+          "src_id": "other:商业化方向",
+          "edge_type": "has_risk",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:70badf3159f93488.txt;doc-5647361f6bedcbde814a2fb73eeb0c1a-chunk-000"
+        },
+        {
+          "src_id": "concept:国内B端商业化",
+          "edge_type": "has_risk",
+          "dst_id": "organization:智谱",
+          "evidence_refs": "evidence:02513:79fc2bd415a0b425.txt;doc-1e6e26cb9f67d6b1abacdcbf1a3612ef-chunk-000"
+        },
+        {
+          "src_id": "concept:投资风险因素",
+          "edge_type": "risk_of",
+          "dst_id": "concept:金融体系差异",
+          "evidence_refs": "evidence:02513:d2b44ba8ea4d1c7b.txt;doc-bbbb32529f902c38e6fcea699979689e-chunk-000"
+        }
+      ],
+      "evidence": [
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=4; title=智谱\"瘦身\"，AI公司的商业化大考_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251021A074N300",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://news.qq.com/rain/a/20251021A074N300; hash=eb371d23026be7c2; snippet=对此，智谱方面回应光锥智能表示，网上传言的大规模裁员不符合事实，公司产品和研发部门运转正常，此次是基于公司战略目标的人员调整，涉及十余人。 智谱近期在其官方公众号发布的招聘帖显示，包括多模态生成算法工程师、推理优化工程师、产品和业务团队在内的近50个岗位待招。 对于一家即将IPO的"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=5; title=北京智谱华章科技有限公司 _ 百科",
+          "url": "https://baike.sogou.com/m/fullLemma",
+          "summary": "rank=5; engine=duckduckgo; score=0.2; url=https://baike.sogou.com/m/fullLemma?lid=191740446&g_ut=3; hash=839ec493713d8393; snippet=智谱AI基于全自研基座大模型的强大能力，构建了极具竞争力的AIGC模型产品矩阵，包括AI提效助手智谱清言、高效率代码模型CodeGeeX、多模态理解模型CogVLM和文生图模型CogView等 8。"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=1; title=冲刺\"全球大模型第一股\"!智谱财务数据曝光_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251220A01Z1800",
+          "summary": "rank=1; engine=duckduckgo; score=1.0; url=https://news.qq.com/rain/a/20251220A01Z1800; hash=a388567f0dd18904; snippet=港交所披露的聆讯后资料集显示，智谱于2022年、2023年、2024年、2025年上半年实现营收5740万元、1.245亿元、3.124亿元、1.9亿元（人民币，下同），2022年至2024年连续三年营收翻倍，复合年增长率达到130%；毛利率分别为54.6%、64.6%、56.3%、"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=2; title=智谱去年营收7.24亿元增长132%，开放平台及api收入增近三倍",
+          "url": "https://www.thepaper.cn/newsDetail_forward_32867423",
+          "summary": "rank=2; engine=duckduckgo; score=0.5; url=https://www.thepaper.cn/newsDetail_forward_32867423; hash=761beac759ec8202; snippet=3月31日，智谱（02513.HK）交出上市后首份成绩单。 2025年，智谱全年收入7.24亿元，同比增长132%；毛利2.97亿元，同比增加68.7%；经调整年内净亏损31.82亿元，同比增加29.1%；每股亏损12.03元；MaaS API平台实现ARR 17亿元"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=3; title=智谱：2025年全年总收入7.24亿元，同比增长131.9% | 科技 ...",
+          "url": "https://www.zgeo.com.cn/news/zhipu-ai-2025-revenue-growth-analysis",
+          "summary": "rank=3; engine=duckduckgo; score=0.3333333333333333; url=https://www.zgeo.com.cn/news/zhipu-ai-2025-revenue-growth-analysis; hash=bded4e210d3684c2; snippet=智谱AI 2025年总收入达7.24亿元，同比增长131.9%，作为国内大模型初创公司，其财务数据反映了AI技术商业化加速趋势。本文分析其商业表现、业务落地路径及对企业AI化的启示，为高管和营销负责人提供决策"
+        },
+        {
+          "title": "query=智谱 智谱 新闻 合作 客户 收入; rank=4; title=智谱首份财报出炉：双面叙事下， Ai 商业化的真实坐标",
+          "url": "https://www.toutiao.com/article/7623969752083546650/",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://www.toutiao.com/article/7623969752083546650/; hash=c3007b531657ab00; snippet=财报披露，中国前十大互联网公司中有9家深度调用GLM模型。 这些头部客户同时拥有自研模型的能力。 智谱CEO张鹏在媒体沟通会上回应称，\"大厂一定会自研，但不一定在所有场景中都能做到有足够的竞争力\"。 但这一判断的前提是智谱保持足够的技术 ..."
+        }
+      ]
+    },
+    "attention": {
+      "nodes": [
+        {
+          "node_id": "organization:同花顺金融网",
+          "node_type": "organization",
+          "name": "同花顺金融网"
+        },
+        {
+          "node_id": "evidence_chunk:d3dbf981e95a",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:5ba523278dfb38a4.txt"
+        },
+        {
+          "node_id": "product:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "node_type": "product",
+          "name": "Glm技术复盘：21篇论文深度解读智谱模型家族"
+        },
+        {
+          "node_id": "entity:Hugging Face",
+          "node_type": "entity",
+          "name": "Hugging Face"
+        },
+        {
+          "node_id": "evidence_chunk:61db2acc044d",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:79fc2bd415a0b425.txt"
+        },
+        {
+          "node_id": "evidence_chunk:6c334d3d45df",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:70badf3159f93488.txt"
+        },
+        {
+          "node_id": "content:arXiv论文2602.15763",
+          "node_type": "content",
+          "name": "arXiv论文2602.15763"
+        },
+        {
+          "node_id": "organization:Hugging Face",
+          "node_type": "organization",
+          "name": "Hugging Face"
+        },
+        {
+          "node_id": "content:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "node_type": "content",
+          "name": "Glm技术复盘：21篇论文深度解读智谱模型家族"
+        },
+        {
+          "node_id": "evidence_chunk:c3f824cdcc05",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:a2199ad093dcd419.txt"
+        },
+        {
+          "node_id": "evidence_chunk:d0fdd4488eef",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:4a23a57f0cd55f15.txt"
+        },
+        {
+          "node_id": "evidence_chunk:5a485883a185",
+          "node_type": "evidence_chunk",
+          "name": "evidence:02513:80a6e2b94201e945.txt"
+        }
+      ],
+      "edges": [
+        {
+          "src_id": "product:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "edge_type": "uses_technology",
+          "dst_id": "organization:智谱AI",
+          "evidence_refs": "evidence:02513:edc4e3bef28dd82e.txt;doc-68acb4bb9d5b8bf722b114092a63d02d-chunk-000"
+        },
+        {
+          "src_id": "artifact:GLM-5",
+          "edge_type": "has_attention",
+          "dst_id": "entity:Hugging Face",
+          "evidence_refs": "evidence:02513:4a23a57f0cd55f15.txt;doc-93950896a6b0ceeaf6354962d9632b74-chunk-000"
+        },
+        {
+          "src_id": "content:Glm技术复盘：21篇论文深度解读智谱模型家族",
+          "edge_type": "uses_technology",
+          "dst_id": "organization:智谱AI",
+          "evidence_refs": "evidence:02513:edc4e3bef28dd82e.txt;doc-68acb4bb9d5b8bf722b114092a63d02d-chunk-000"
+        },
+        {
+          "src_id": "artifact:GLM-5",
+          "edge_type": "has_attention",
+          "dst_id": "content:arXiv论文2602.15763",
+          "evidence_refs": "evidence:02513:a2199ad093dcd419.txt;doc-b4e38788f6345e577d0544273756e626-chunk-000"
+        },
+        {
+          "src_id": "organization:Hugging Face",
+          "edge_type": "produces",
+          "dst_id": "artifact:GLM-5",
+          "evidence_refs": "evidence:02513:4a23a57f0cd55f15.txt;doc-93950896a6b0ceeaf6354962d9632b74-chunk-000"
+        },
+        {
+          "src_id": "entity:arXiv",
+          "edge_type": "has_attention",
+          "dst_id": "content:arXiv论文2602.15763",
+          "evidence_refs": "evidence:02513:a2199ad093dcd419.txt;doc-b4e38788f6345e577d0544273756e626-chunk-000"
+        }
+      ],
+      "evidence": [
+        {
+          "title": "query=02513.HK 智谱 company profile business segments annual report; rank=4; title=智谱 (02513)首页概览_港股行情_同花顺金融网",
+          "url": "https://stockpage.10jqka.com.cn/HK2513/",
+          "summary": "rank=4; engine=duckduckgo; score=0.5; url=https://stockpage.10jqka.com.cn/HK2513/; hash=f3f93e8357792ca8; snippet=提供智谱 (02513)实时行情数据；汇总智谱 (02513)基本资料及重大新闻、研究报告及行业资讯，解读智谱 (02513)主力资金动向、财务数据，为投资智谱 (02513)提供参考决策"
+        },
+        {
+          "title": "query=智谱 智谱 官方 产品 技术 业务; rank=4; title=智谱\"瘦身\"，AI公司的商业化大考_腾讯新闻",
+          "url": "https://news.qq.com/rain/a/20251021A074N300",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://news.qq.com/rain/a/20251021A074N300; hash=eb371d23026be7c2; snippet=对此，智谱方面回应光锥智能表示，网上传言的大规模裁员不符合事实，公司产品和研发部门运转正常，此次是基于公司战略目标的人员调整，涉及十余人。 智谱近期在其官方公众号发布的招聘帖显示，包括多模态生成算法工程师、推理优化工程师、产品和业务团队在内的近50个岗位待招。 对于一家即将IPO的"
+        },
+        {
+          "title": "query=智谱 智谱 论文 arxiv GitHub HuggingFace benchmark; rank=1; title=Glm技术复盘：21篇论文深度解读智谱模型家族 - 知乎",
+          "url": "https://zhuanlan.zhihu.com/p/2017879689117594918",
+          "summary": "rank=1; engine=duckduckgo; score=1.0; url=https://zhuanlan.zhihu.com/p/2017879689117594918; hash=c710229fb05ab780; snippet=在人工智能从通用语言建模向端到端智能体转型的历史进程中， 智谱AI （Zhipu AI，于2026年上市后更名为Z.ai）凭借其深厚的学术积淀与工程落地能力，构建了以GLM（General Language Model）架构为核心的庞大技术体系 。 从2022年双语稠密模型"
+        },
+        {
+          "title": "query=智谱 智谱 论文 arxiv GitHub HuggingFace benchmark; rank=3; title=Glm技术复盘：21篇论文深度解读智谱模型家族 - Ai ...",
+          "url": "https://www.cnblogs.com/aifrontiers/p/19736953",
+          "summary": "rank=3; engine=duckduckgo; score=0.3333333333333333; url=https://www.cnblogs.com/aifrontiers/p/19736953; hash=6eba3d1231ab1249; snippet=在人工智能从通用语言建模向端到端智能体转型的历史进程中，智谱AI（Zhipu AI，于2026年上市后更名为Z.ai）凭借其深厚的学术积淀与工程落地能力，构建了以GLM（General Language Model）架构为核心的庞大技术体系 。 从"
+        },
+        {
+          "title": "query=智谱 智谱 论文 arxiv GitHub HuggingFace benchmark; rank=4; title=[2602.15763] GLM-5: from Vibe Coding to Agentic Engineering - arXiv.org",
+          "url": "https://arxiv.org/abs/2602.15763",
+          "summary": "rank=4; engine=duckduckgo; score=0.25; url=https://arxiv.org/abs/2602.15763; hash=5e182b504574ecec; snippet=We present GLM-5, a next-generation foundation model designed to transition the paradigm of vibe coding to agentic engineering. Building upon the agenti"
+        },
+        {
+          "title": "query=智谱 智谱 论文 arxiv GitHub HuggingFace benchmark; rank=5; title=Glm 5：智谱ai 745b大模型 | 200k上下文、Api接入与使用指南",
+          "url": "https://glm-5.org/zh/",
+          "summary": "rank=5; engine=duckduckgo; score=0.2; url=https://glm-5.org/zh/; hash=13affcfdcb58cbe6; snippet=GLM-5 是智谱AI第五代大模型：7450亿参数、440亿激活MoE、200K上下文、智能体能力。 创意写作、编程、推理、开源。 通过 Z.ai、WaveSpeed API、Hugging Face 获取。"
+        }
+      ]
+    }
+  },
+  "evidence_refs": [
+    "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000018_c.pdf",
+    "https://www.hkexnews.hk/",
+    "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000010_c.pdf",
+    "https://sc.hkexnews.hk/TuniS/www.hkexnews.hk/index_c.htm",
+    "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/1230/2025123000017.pdf",
+    "https://xueqiu.com/S/02513/384623207",
+    "https://www.lixinger.com/equity/company/detail/hk/02513/2513/profile",
+    "https://stock.finance.sina.com.cn/hkstock/info/02513.html",
+    "https://stockpage.10jqka.com.cn/HK2513/",
+    "https://stock.qianzhan.com/report/fullcompare/02513.HK",
+    "https://open.bigmodel.cn/",
+    "https://www.zhipuai.cn/",
+    "https://zh.wikipedia.org/wiki/%E6%99%BA%E8%B0%B1",
+    "https://news.qq.com/rain/a/20251021A074N300",
+    "https://baike.sogou.com/m/fullLemma",
+    "https://zhuanlan.zhihu.com/p/2017879689117594918",
+    "https://www.cnblogs.com/aifrontiers/p/19736953",
+    "https://arxiv.org/abs/2602.15763",
+    "https://glm-5.org/zh/",
+    "https://news.qq.com/rain/a/20251220A01Z1800"
+  ]
+}

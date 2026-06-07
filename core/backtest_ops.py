@@ -43,6 +43,9 @@ class BacktestMixin:
         industry_overlay_strength=0.0,
         max_industry_weight=0.35,
         hot_industry_weight_multiplier=1.3,
+        enable_theme_features=True,
+        theme_feature_set="theme_opportunity",
+        theme_overlay_strength=0.0,
     ):
         """固定股票池组合回测：按日期横向比较评分，只持有当日最优的 Top N 信号。"""
         from backtest_engine import TopNPortfolioBuilder
@@ -135,6 +138,8 @@ class BacktestMixin:
                 max_features=max_features,
                 model_type=model_type,
                 backtest_date=backtest_date,
+                enable_theme_features=enable_theme_features,
+                theme_feature_set=theme_feature_set,
             )
             if not pool_results:
                 return None
@@ -151,6 +156,7 @@ class BacktestMixin:
                 industry_overlay_strength=industry_overlay_strength,
                 max_industry_weight=max_industry_weight,
                 hot_industry_weight_multiplier=hot_industry_weight_multiplier,
+                theme_overlay_strength=theme_overlay_strength,
             )
             return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
@@ -310,6 +316,7 @@ class BacktestMixin:
                 industry_overlay_strength=industry_overlay_strength,
                 max_industry_weight=max_industry_weight,
                 hot_industry_weight_multiplier=hot_industry_weight_multiplier,
+                theme_overlay_strength=theme_overlay_strength,
             )
             return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
@@ -396,6 +403,7 @@ class BacktestMixin:
             industry_overlay_strength=industry_overlay_strength,
             max_industry_weight=max_industry_weight,
             hot_industry_weight_multiplier=hot_industry_weight_multiplier,
+            theme_overlay_strength=theme_overlay_strength,
         )
         return builder.build(stock_codes=stock_codes, analysis_results=pool_results)
 
@@ -429,6 +437,9 @@ class BacktestMixin:
         industry_overlay_strength=0.0,
         max_industry_weight=0.35,
         hot_industry_weight_multiplier=1.3,
+        enable_theme_features=True,
+        theme_feature_set="theme_opportunity",
+        theme_overlay_strength=0.0,
     ):
         """对本地已同步的全部港股执行 TopN 组合回测。"""
         return self.backtest_portfolio(
@@ -460,6 +471,9 @@ class BacktestMixin:
             industry_overlay_strength=industry_overlay_strength,
             max_industry_weight=max_industry_weight,
             hot_industry_weight_multiplier=hot_industry_weight_multiplier,
+            enable_theme_features=enable_theme_features,
+            theme_feature_set=theme_feature_set,
+            theme_overlay_strength=theme_overlay_strength,
         )
 
     def backtest_strategy(self, data, buy_signals, sell_signals, initial_capital=100000, default_holding_days=60):

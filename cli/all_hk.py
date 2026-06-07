@@ -249,10 +249,19 @@ def main_all_hk(
         export_path.parent.mkdir(parents=True, exist_ok=True)
         ranking_path = export_path.with_name(f"{export_path.stem}_ranking.csv")
         selected_path = export_path.with_name(f"{export_path.stem}_selected.csv")
+        candidates_path = export_path.with_name(f"{export_path.stem}_candidates.csv")
         watchlist_path = export_path.with_name(f"{export_path.stem}_watchlist.csv")
 
         pd.DataFrame(portfolio_result.get("ranking", [])).to_csv(ranking_path, index=False, encoding="utf-8-sig")
-        pd.DataFrame(portfolio_result.get("selected", [])).to_csv(selected_path, index=False, encoding="utf-8-sig")
+        selected_frame = pd.DataFrame(portfolio_result.get("selected", []))
+        if not selected_frame.empty and "selected" in selected_frame.columns:
+            holdings_frame = selected_frame.loc[selected_frame["selected"].fillna(False).astype(bool)].copy()
+            candidates_frame = selected_frame.loc[~selected_frame["selected"].fillna(False).astype(bool)].copy()
+        else:
+            holdings_frame = selected_frame
+            candidates_frame = pd.DataFrame()
+        holdings_frame.to_csv(selected_path, index=False, encoding="utf-8-sig")
+        candidates_frame.to_csv(candidates_path, index=False, encoding="utf-8-sig")
         pd.DataFrame(portfolio_result.get("watchlist", [])).to_csv(watchlist_path, index=False, encoding="utf-8-sig")
 
         # Industry weight table
@@ -277,6 +286,7 @@ def main_all_hk(
 
         print(f"[OK] 已导出全市场排名: {ranking_path}")
         print(f"[OK] 已导出当前持有: {selected_path}")
+        print(f"[OK] 已导出候选池: {candidates_path}")
         print(f"[OK] 已导出观察名单: {watchlist_path}")
 
     if persist_signals:
@@ -328,6 +338,7 @@ def main_all_hk(
         artifacts={
             "ranking_csv_path": str(ranking_path) if ranking_path is not None else None,
             "selected_csv_path": str(selected_path) if selected_path is not None else None,
+            "candidates_csv_path": str(candidates_path) if export_csv else None,
             "watchlist_csv_path": str(watchlist_path) if watchlist_path is not None else None,
             "persist_batch_id": persist_result.get("batch_id") if persist_result is not None else None,
         },

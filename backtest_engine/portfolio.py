@@ -108,6 +108,7 @@ class TopNPortfolioBuilder:
         industry_overlay_strength=0.0,
         max_industry_weight=0.35,
         hot_industry_weight_multiplier=1.3,
+        theme_overlay_strength=0.0,
     ):
         self.top_n = int(top_n)
         self.initial_capital = float(initial_capital)
@@ -121,6 +122,7 @@ class TopNPortfolioBuilder:
         self.industry_overlay_strength = float(industry_overlay_strength or 0.0)
         self.max_industry_weight = float(max_industry_weight or 0.35)
         self.hot_industry_weight_multiplier = float(hot_industry_weight_multiplier or 1.3)
+        self.theme_overlay_strength = float(np.clip(float(theme_overlay_strength or 0.0), 0.0, 0.30))
         if self.weighting_mode not in {"equal_weight", "score_weight"}:
             raise ValueError(f"unsupported weighting_mode: {self.weighting_mode}")
 
@@ -131,6 +133,7 @@ class TopNPortfolioBuilder:
             return None
 
         ranking = self._build_ranking_rows(pool_results)
+        ranking = self._apply_theme_overlay(ranking)
         signal_rows = []
         for result in pool_results:
             signal_rows.extend(self._collect_signal_rows(result))
@@ -1024,6 +1027,30 @@ class TopNPortfolioBuilder:
             rows.extend(TopNPortfolioBuilder._build_factor_rank_rows(factor_results))
         return rows
 
+    def _apply_theme_overlay(self, ranking):
+        """Apply conservative theme opportunity overlay to ranking scores."""
+        strength = float(getattr(self, "theme_overlay_strength", 0.0) or 0.0)
+        if strength <= 0 or not ranking:
+            return ranking
+        raw_values = []
+        for row in ranking:
+            try:
+                raw_values.append(float(row.get("theme_opportunity_score")))
+            except (TypeError, ValueError):
+                raw_values.append(np.nan)
+        if all(np.isnan(value) for value in raw_values):
+            return ranking
+        ranks = self._cross_sectional_rank(raw_values)
+        for idx, row in enumerate(ranking):
+            base = float(row.get("ranking_score", 0.0) or 0.0)
+            theme_rank = 50.0 if np.isnan(raw_values[idx]) else float(ranks[idx])
+            row["ranking_score_raw"] = base
+            row["theme_overlay_strength"] = strength
+            row["theme_overlay_rank"] = theme_rank
+            row["theme_overlay_applied"] = True
+            row["ranking_score"] = float(base * (1.0 - strength) + theme_rank * strength)
+        return ranking
+
     @staticmethod
     def _build_lightgbm_rank_rows(results):
         """LightGBM 路径: 截面 Rank 排名."""
@@ -1222,6 +1249,12 @@ class TopNPortfolioBuilder:
                 "data_coverage_score": r.get("data_coverage_score"),
                 "data_missing_fields": r.get("data_missing_fields"),
                 "require_complete_data_for_selection": bool(r.get("require_complete_data_for_selection", False)),
+                "theme_feature_set": r.get("theme_feature_set"),
+                "theme_features": r.get("theme_features", {}),
+                "theme_opportunity_score": r.get("theme_opportunity_score"),
+                "theme_attention_score": r.get("theme_attention_score"),
+                "theme_bottleneck_score": r.get("theme_bottleneck_score"),
+                "theme_risk_penalty": r.get("theme_risk_penalty"),
             })
 
         return rows

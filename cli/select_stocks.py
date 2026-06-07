@@ -48,6 +48,9 @@ def main_select_stocks(
     industry_overlay_strength=0.0,
     max_industry_weight=0.35,
     hot_industry_weight_multiplier=1.3,
+    enable_theme_features=True,
+    theme_feature_set="theme_opportunity",
+    theme_overlay_strength=0.0,
     llm_report=False,
     llm_model="deepseek-v4-pro",
 ):
@@ -141,6 +144,9 @@ def main_select_stocks(
             "industry_overlay_strength": industry_overlay_strength,
             "max_industry_weight": max_industry_weight,
             "hot_industry_weight_multiplier": hot_industry_weight_multiplier,
+            "enable_theme_features": enable_theme_features,
+            "theme_feature_set": theme_feature_set,
+            "theme_overlay_strength": theme_overlay_strength,
         }
         if backtest_date is not None:
             backtest_kwargs["backtest_date"] = str(backtest_date)
@@ -214,10 +220,19 @@ def main_select_stocks(
         suffix = f"_{factor_set}" if factor_set else ""
         ranking_path = export_path.with_name(f"{export_path.stem}{suffix}_ranking.csv")
         selected_path = export_path.with_name(f"{export_path.stem}{suffix}_selected.csv")
+        candidates_path = export_path.with_name(f"{export_path.stem}{suffix}_candidates.csv")
         watchlist_path = export_path.with_name(f"{export_path.stem}{suffix}_watchlist.csv")
 
         pd.DataFrame(portfolio_result.get("ranking", [])).to_csv(ranking_path, index=False, encoding="utf-8-sig")
-        pd.DataFrame(portfolio_result.get("selected", [])).to_csv(selected_path, index=False, encoding="utf-8-sig")
+        selected_frame = pd.DataFrame(portfolio_result.get("selected", []))
+        if not selected_frame.empty and "selected" in selected_frame.columns:
+            holdings_frame = selected_frame.loc[selected_frame["selected"].fillna(False).astype(bool)].copy()
+            candidates_frame = selected_frame.loc[~selected_frame["selected"].fillna(False).astype(bool)].copy()
+        else:
+            holdings_frame = selected_frame
+            candidates_frame = pd.DataFrame()
+        holdings_frame.to_csv(selected_path, index=False, encoding="utf-8-sig")
+        candidates_frame.to_csv(candidates_path, index=False, encoding="utf-8-sig")
         pd.DataFrame(portfolio_result.get("watchlist", [])).to_csv(watchlist_path, index=False, encoding="utf-8-sig")
 
         # 导出入选股票的每日信号时序 (供 K 线图标注买卖点)
@@ -225,7 +240,7 @@ def main_select_stocks(
         signals_dir.mkdir(parents=True, exist_ok=True)
         selected_codes = set(
             str(r.get("stock_code", "")).zfill(5)
-            for r in portfolio_result.get("selected", [])
+            for r in holdings_frame.to_dict("records")
         )
         for item in analysis_results:
             code = str(item.get("stock_code", "")).zfill(5)
@@ -260,6 +275,7 @@ def main_select_stocks(
 
         print(f"[OK] 已导出全市场排名: {ranking_path}")
         print(f"[OK] 已导出当前持有: {selected_path}")
+        print(f"[OK] 已导出候选池: {candidates_path}")
         print(f"[OK] 已导出观察名单: {watchlist_path}")
 
     if persist_signals:
@@ -303,10 +319,14 @@ def main_select_stocks(
             "industry_overlay_strength": float(industry_overlay_strength or 0.0),
             "max_industry_weight": float(max_industry_weight or 0.35),
             "hot_industry_weight_multiplier": float(hot_industry_weight_multiplier or 1.3),
+            "enable_theme_features": bool(enable_theme_features),
+            "theme_feature_set": str(theme_feature_set or "theme_opportunity"),
+            "theme_overlay_strength": float(theme_overlay_strength or 0.0),
         },
         artifacts={
             "ranking_csv_path": str(ranking_path) if ranking_path is not None else None,
             "selected_csv_path": str(selected_path) if selected_path is not None else None,
+            "candidates_csv_path": str(candidates_path) if export_csv else None,
             "watchlist_csv_path": str(watchlist_path) if watchlist_path is not None else None,
             "signals_dir": str(signals_dir) if signals_dir is not None else None,
             "persist_batch_id": persist_result.get("batch_id") if persist_result is not None else None,

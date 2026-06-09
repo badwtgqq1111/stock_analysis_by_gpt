@@ -44,6 +44,7 @@ def _make_ohlcv_frame(rows=90):
 def test_factor_registry_contains_qlib_sets():
     assert "qlib_alpha158" in list_factor_sets()
     assert "qlib_alpha360" in list_factor_sets()
+    assert "gtja_alpha191" in list_factor_sets()
 
 
 def test_alpha360_shape_and_basics():
@@ -74,6 +75,39 @@ def test_alpha158_default_feature_count_and_values():
     assert pd.notna(latest_row["RSQR60"])
 
 
+def test_alpha158_hk_includes_gtja_alpha191_features():
+    factor_set = create_factor_set("alpha158_hk")
+    normalized = normalize_ohlcv_frame(_make_ohlcv_frame(rows=260), stock_code="00700", market="HK")
+    feature_frame = factor_set.transform(normalized)
+    metadata = factor_set.metadata().to_dict()
+
+    assert feature_frame.shape[1] == metadata["extra"]["feature_count"]
+    assert metadata["version"] == "3.0.0"
+    assert metadata["extra"]["gtja_feature_count"] == 191
+    assert metadata["extra"]["hk_custom_factor_count"] == 9
+    assert {"KMID", "buying_pressure", "GTJA001", "GTJA191"}.issubset(feature_frame.columns)
+    assert pd.notna(feature_frame.iloc[-1]["GTJA191"])
+
+
+def test_gtja_alpha191_shape_metadata_and_representative_values():
+    factor_set = create_factor_set("gtja_alpha191")
+    normalized = normalize_ohlcv_frame(_make_ohlcv_frame(rows=260), stock_code="00700", market="HK")
+    feature_frame = factor_set.transform(normalized)
+    metadata = factor_set.metadata().to_dict()
+
+    assert feature_frame.shape[1] == 191
+    assert feature_frame.columns[0] == "GTJA001"
+    assert feature_frame.columns[-1] == "GTJA191"
+    assert metadata["extra"]["feature_count"] == 191
+    assert metadata["extra"]["proxy_formula_count"] > 0
+
+    latest = feature_frame.iloc[-1]
+    close = normalized["close"]
+    assert abs(latest["GTJA018"] - (close.iloc[-1] / close.shift(5).iloc[-1])) < 1e-9
+    assert pd.notna(latest["GTJA041"])
+    assert pd.notna(latest["GTJA191"])
+
+
 def test_factor_compute_worker_uses_trade_date_payload_with_range_index():
     normalized = normalize_ohlcv_frame(_make_ohlcv_frame(), stock_code="00700", market="HK")
     range_index_frame = normalized.reset_index(drop=True)
@@ -98,6 +132,31 @@ def test_factor_compute_worker_uses_trade_date_payload_with_range_index():
     assert len(result["feature_index"]) == len(range_index_frame)
     assert result["feature_index"][0].startswith("2024-")
     assert "KMID" in result["feature_columns"]
+
+
+def test_factor_compute_worker_supports_gtja_alpha191():
+    normalized = normalize_ohlcv_frame(_make_ohlcv_frame(rows=260), stock_code="00700", market="HK")
+    payload = {
+        "stock_code": "00700",
+        "ohlcv_data": normalized.to_dict("list"),
+        "ohlcv_columns": list(normalized.columns),
+        "ohlcv_trade_dates": list(normalized["trade_date"].dt.strftime("%Y-%m-%d")),
+        "factor_set": "gtja_alpha191",
+        "config": None,
+        "market": "HK",
+        "frequency": "daily",
+        "adjust": "qfq",
+        "exchange": None,
+        "asset_type": "equity",
+    }
+
+    result = _factor_compute_worker(payload)
+
+    assert result["stock_code"] == "00700"
+    assert len(result["feature_columns"]) == 191
+    assert "GTJA001" in result["feature_columns"]
+    assert "GTJA191" in result["feature_columns"]
+
 
 
 def test_service_can_compute_and_persist_factor_set():
@@ -382,6 +441,61 @@ def test_parquet_rps_feature_count_returns_written_rows():
     assert set(rps["feature_name"]) == {"RPS_5"}
 
 
+def test_parquet_rps_uses_append_only_and_skips_existing_rows():
+    trade_date = pd.Timestamp("2026-01-01")
+    frame = pd.DataFrame(
+        [
+            {
+                "trade_date": trade_date,
+                "stock_code": code,
+                "market": "HK",
+                "exchange": "HKEX",
+                "asset_type": "equity",
+                "frequency": "daily",
+                "adjust": "qfq",
+                "feature_set": "unit_alpha",
+                "feature_version": "0.1.0",
+                "feature_config_hash": "unit",
+                "feature_name": "ROC5",
+                "feature_value": value,
+                "source": "unit_test",
+                "ingest_time": trade_date,
+            }
+            for code, value in [("00001", 0.9), ("00002", 1.1)]
+        ],
+        columns=FEATURE_COLUMNS,
+    )
+
+    with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+            warehouse.append_features(frame)
+
+            with patch.object(
+                warehouse.parquet_store,
+                "upsert_frame",
+                side_effect=AssertionError("RPS should not rewrite the full feature dataset"),
+            ):
+                rows_written = warehouse.compute_rps_features(
+                    factor_set="unit_alpha",
+                    windows=(5,),
+                )
+                rows_written_again = warehouse.compute_rps_features(
+                    factor_set="unit_alpha",
+                    windows=(5,),
+                )
+
+            rps = warehouse.read_features(
+                market="HK",
+                feature_set="unit_alpha",
+                feature_name="RPS_5",
+            )
+
+    assert rows_written == 2
+    assert rows_written_again == 0
+    assert len(rps) == 2
+
+
 def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_feature_reads():
     with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -436,6 +550,33 @@ def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_fe
         assert read_feature_calls == [["00700", "00005"]]
         assert append_feature_calls
         assert result["rows_written"] == sum(append_feature_calls)
+
+
+def test_generate_gtja_alpha191_skips_rps_postprocess_without_roc_sources():
+    gtja_metadata = create_factor_set("gtja_alpha191").metadata().to_dict()
+    alpha158_metadata = create_factor_set("qlib_alpha158").metadata().to_dict()
+    alpha158_hk_metadata = create_factor_set("alpha158_hk").metadata().to_dict()
+
+    assert not MarketDataService._should_compute_rps_for_factor_set(
+        "gtja_alpha191",
+        gtja_metadata,
+        computed_count=1,
+    )
+    assert MarketDataService._should_compute_rps_for_factor_set(
+        "qlib_alpha158",
+        alpha158_metadata,
+        computed_count=1,
+    )
+    assert MarketDataService._should_compute_rps_for_factor_set(
+        "alpha158_hk",
+        alpha158_hk_metadata,
+        computed_count=1,
+    )
+    assert MarketDataService._should_compute_rps_for_factor_set(
+        "qlib_alpha158",
+        alpha158_metadata,
+        computed_count=0,
+    )
 
 
 def test_lightgbm_ranker_loader_reports_missing_libomp_on_macos():
@@ -508,6 +649,56 @@ def test_lightgbm_ranker_excludes_target_columns_from_features():
     feature_columns = pipeline._resolve_feature_columns(merged)
 
     assert feature_columns == ["MA5", "STD20"]
+
+
+def test_lightgbm_ranker_prepare_dedupes_trade_date_before_neutralization():
+    pipeline = LightGBMRankerPipeline(neutralization_mode="industry_size")
+    rows = []
+    target_rows = []
+    trade_date = pd.Timestamp("2026-01-02")
+    for idx in range(10):
+        stock_code = f"{idx + 1:05d}"
+        rows.append([
+            trade_date,
+            trade_date,
+            stock_code,
+            float(idx),
+            "Tech" if idx % 2 else "Finance",
+            1_000_000.0 + idx * 10_000.0,
+        ])
+        target_rows.append(
+            {
+                "trade_date": trade_date,
+                "stock_code": stock_code,
+                "forward_return_20": idx / 100.0,
+            }
+        )
+
+    panel_features = pd.DataFrame(rows)
+    panel_features.columns = [
+        "trade_date", "trade_date", "stock_code",
+        "factor_a", "industry_l1", "market_cap",
+    ]
+    panel_targets = pd.DataFrame(target_rows)
+
+    merged = pipeline._prepare_merged_frame(panel_features, panel_targets)
+    assert not merged.columns.has_duplicates
+    assert list(merged.columns).count("trade_date") == 1
+
+    preprocessed = pipeline._preprocess_features_by_date(merged, ["factor_a"])
+    assert len(preprocessed) == len(merged)
+    assert list(preprocessed.columns).count("trade_date") == 1
+
+    neutralized = pipeline._neutralize_industry_size_features(
+        preprocessed,
+        ["factor_a"],
+        target_col="forward_return_20",
+        use_size=True,
+        neutralize_target=True,
+    )
+
+    assert len(neutralized) == len(preprocessed)
+    assert list(neutralized.columns).count("trade_date") == 1
 
 
 if __name__ == "__main__":

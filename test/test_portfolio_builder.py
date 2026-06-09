@@ -517,6 +517,57 @@ def test_selection_eligibility_matches_selector_filter_reasons():
     assert len(result["eligibility_reasons"]) == len(set(result["eligibility_reasons"]))
 
 
+def test_selection_eligibility_blocks_documented_high_chase_guardrails():
+    base = {
+        "stock_code": "09110",
+        "current_signal_active": True,
+        "current_signal_actionable": True,
+        "liquidity_ok": True,
+        "is_fund_like": False,
+        "tradable_flag": True,
+        "setup_type": "pre_breakout",
+        "market_cap": 1000.0,
+        "latest_risk_score": 80.0,
+        "risk_adjusted_score": 75.0,
+        "drawdown_penalty_score": 0.0,
+        "downtrend_penalty_score": 0.0,
+        "overheat_penalty_score": 0.0,
+        "industry_l1": "Technology",
+        "signal_tier": "strong",
+        "signal_freshness_score": 95.0,
+        "quality_data_coverage": 1.0,
+        "data_coverage_score": 100.0,
+        "pe_ratio": 15.0,
+        "pb_ratio": 1.0,
+    }
+
+    cases = [
+        ({**base, "high_chase_score": 80.0}, "high_chase_score(80)"),
+        ({**base, "price_return_20d_pct": 81.0}, "recent_20d_spike(81%)"),
+        ({**base, "price_return_60d_pct": 100.0}, "recent_60d_multibagger(100%)"),
+        ({**base, "price_return_120d_pct": 180.0}, "recent_120d_multibagger(180%)"),
+        (
+            {**base, "price_position_52w_high": 95.0, "ma60_gap_pct": 41.0},
+            "near_52w_high_ma60_gap(pos=95,gap=41%)",
+        ),
+    ]
+
+    for item, expected_reason in cases:
+        result = TopNPortfolioBuilder._compute_selection_eligibility(item)
+        assert result["selection_eligible"] is False
+        assert expected_reason in result["eligibility_reasons"]
+
+    assert TopNPortfolioBuilder._compute_selection_eligibility(
+        {**base, "high_chase_score": 80.0}
+    )["blocked_by_high_chase"] is True
+    assert TopNPortfolioBuilder._compute_selection_eligibility(
+        {**base, "price_return_60d_pct": 100.0}
+    )["blocked_by_multibagger"] is True
+    assert TopNPortfolioBuilder._compute_selection_eligibility(
+        {**base, "price_position_52w_high": 95.0, "ma60_gap_pct": 41.0}
+    )["blocked_by_52w_ma_gap"] is True
+
+
 def test_industry_selector_applies_documented_hard_filters_and_preserves_zero_coverage():
     rows = [
         {

@@ -28,7 +28,9 @@ def main_select_stocks(
     batch_id=None,
     max_workers=1,
     analysis_mode="factor",
-    factor_set="qlib_alpha158",
+    factor_set="alpha158_hk",
+    stock_codes=None,
+    stock_limit=None,
     show_progress=False,
     fast_mode=False,
     validation_days=None,
@@ -40,6 +42,8 @@ def main_select_stocks(
     signal_recipes=None,
     max_features=0,
     model_type="lightgbm",
+    model_objective="regression_csrank",
+    neutralization_mode="industry_size",
     backtest_date=None,
     min_market_cap=None,
     min_daily_turnover=100,
@@ -125,10 +129,17 @@ def main_select_stocks(
                 extra += f", model={model_type}"
             print(f"[INFO] LightGBM 模式启用: factor_set={factor_set}, train_window={days}d{extra}")
 
+        effective_stock_codes = stock_codes
+        if effective_stock_codes is None and stock_limit is not None:
+            all_stock_codes = analyzer.get_all_stocks()
+            effective_stock_codes = all_stock_codes[: max(int(stock_limit), 0)]
+            print(f"[INFO] 股票扫描限制: {len(all_stock_codes)} -> {len(effective_stock_codes)}")
+
         backtest_kwargs = {
             "days": days,
             "top_n": top_n,
             "initial_capital": initial_capital,
+            "stock_codes": effective_stock_codes,
             "max_workers": max_workers,
             "analysis_mode": analysis_mode,
             "factor_set": factor_set,
@@ -147,6 +158,8 @@ def main_select_stocks(
             "enable_theme_features": enable_theme_features,
             "theme_feature_set": theme_feature_set,
             "theme_overlay_strength": theme_overlay_strength,
+            "model_objective": model_objective,
+            "neutralization_mode": neutralization_mode,
         }
         if backtest_date is not None:
             backtest_kwargs["backtest_date"] = str(backtest_date)
@@ -222,6 +235,8 @@ def main_select_stocks(
         selected_path = export_path.with_name(f"{export_path.stem}{suffix}_selected.csv")
         candidates_path = export_path.with_name(f"{export_path.stem}{suffix}_candidates.csv")
         watchlist_path = export_path.with_name(f"{export_path.stem}{suffix}_watchlist.csv")
+        liquidity_path = export_path.with_name(f"{export_path.stem}{suffix}_liquidity_capacity.csv")
+        tca_path = export_path.with_name(f"{export_path.stem}{suffix}_tca_simulated_report.csv")
 
         pd.DataFrame(portfolio_result.get("ranking", [])).to_csv(ranking_path, index=False, encoding="utf-8-sig")
         selected_frame = pd.DataFrame(portfolio_result.get("selected", []))
@@ -234,6 +249,8 @@ def main_select_stocks(
         holdings_frame.to_csv(selected_path, index=False, encoding="utf-8-sig")
         candidates_frame.to_csv(candidates_path, index=False, encoding="utf-8-sig")
         pd.DataFrame(portfolio_result.get("watchlist", [])).to_csv(watchlist_path, index=False, encoding="utf-8-sig")
+        pd.DataFrame(portfolio_result.get("liquidity_capacity", [])).to_csv(liquidity_path, index=False, encoding="utf-8-sig")
+        pd.DataFrame(portfolio_result.get("tca_simulated_report", [])).to_csv(tca_path, index=False, encoding="utf-8-sig")
 
         # 导出入选股票的每日信号时序 (供 K 线图标注买卖点)
         signals_dir = export_path.parent / "signals"
@@ -277,6 +294,8 @@ def main_select_stocks(
         print(f"[OK] 已导出当前持有: {selected_path}")
         print(f"[OK] 已导出候选池: {candidates_path}")
         print(f"[OK] 已导出观察名单: {watchlist_path}")
+        print(f"[OK] 已导出流动性容量: {liquidity_path}")
+        print(f"[OK] 已导出模拟 TCA: {tca_path}")
 
     if persist_signals:
         service = MarketDataService()
@@ -311,6 +330,7 @@ def main_select_stocks(
             "validation_quantiles": int(validation_quantiles),
             "validation_min_observations": int(validation_min_observations),
             "validation_stock_limit": None if validation_stock_limit is None else int(validation_stock_limit),
+            "stock_limit": None if stock_limit is None else int(stock_limit),
             "validation_factor_scope": validation_factor_scope or "all",
             "signal_recipes": list(signal_recipes or []),
             "max_features": int(max_features or 0),
@@ -322,12 +342,17 @@ def main_select_stocks(
             "enable_theme_features": bool(enable_theme_features),
             "theme_feature_set": str(theme_feature_set or "theme_opportunity"),
             "theme_overlay_strength": float(theme_overlay_strength or 0.0),
+            "model_type": str(model_type or "lightgbm"),
+            "model_objective": str(model_objective or "regression_csrank"),
+            "neutralization_mode": str(neutralization_mode or "industry_size"),
         },
         artifacts={
             "ranking_csv_path": str(ranking_path) if ranking_path is not None else None,
             "selected_csv_path": str(selected_path) if selected_path is not None else None,
             "candidates_csv_path": str(candidates_path) if export_csv else None,
             "watchlist_csv_path": str(watchlist_path) if watchlist_path is not None else None,
+            "liquidity_capacity_csv_path": str(liquidity_path) if export_csv else None,
+            "tca_simulated_report_csv_path": str(tca_path) if export_csv else None,
             "signals_dir": str(signals_dir) if signals_dir is not None else None,
             "persist_batch_id": persist_result.get("batch_id") if persist_result is not None else None,
         },

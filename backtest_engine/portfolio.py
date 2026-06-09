@@ -9,7 +9,23 @@ import pandas as pd
 from data.model import normalize_bool
 
 from backtest_engine.models import EquityPoint, PortfolioBuildResult, PortfolioReplayResult, TradeRecord
+from factor_engine.portfolio.costs import (
+    apply_cost_adjusted_scores,
+    build_liquidity_capacity_report,
+    build_simulated_tca_report,
+    summarize_tca,
+)
 from factor_engine.signals import summarize_low_price_setup
+
+
+HIGH_CHASE_GUARD = {
+    "high_chase_score_block": 80.0,
+    "ret20_watchlist": 80.0,
+    "ret60_block": 100.0,
+    "ret120_block": 180.0,
+    "near_52w_high": 95.0,
+    "ma60_gap_block": 40.0,
+}
 
 
 def _concentration_penalty(count_in_cluster: int) -> float:
@@ -439,7 +455,16 @@ class TopNPortfolioBuilder:
 
         self.kelly_position_ratio = kelly_position_ratio
         self._apply_weights(selected)
+        selected = apply_cost_adjusted_scores(selected, initial_capital=self.initial_capital)
+        selected.sort(
+            key=lambda item: (
+                -float(item.get("cost_adjusted_ranking_score", item.get("ranking_score", 0)) or 0),
+                -float(item.get("ranking_score", 0) or 0),
+            )
+        )
         self._sync_final_selection_flags(ranking, selected)
+        ranking = apply_cost_adjusted_scores(ranking, initial_capital=self.initial_capital)
+        liquidity_capacity = build_liquidity_capacity_report(ranking, initial_capital=self.initial_capital)
 
         synthetic_portfolio_equity_curve = self._build_synthetic_portfolio_equity_curve(cross_sectional_picks)
         portfolio_replay = (
@@ -447,6 +472,9 @@ class TopNPortfolioBuilder:
             if self.enable_portfolio_replay
             else None
         )
+        replay_trades = portfolio_replay.trades if portfolio_replay is not None else []
+        tca_simulated_report = build_simulated_tca_report(replay_trades)
+        tca_summary = summarize_tca(tca_simulated_report)
         portfolio_equity_curve = (
             portfolio_replay.equity_curve
             if portfolio_replay and portfolio_replay.equity_curve
@@ -481,6 +509,9 @@ class TopNPortfolioBuilder:
             daily_candidate_counts=grouped_candidates,
             contributions=contributions,
             analysis_results=pool_results,
+            liquidity_capacity=liquidity_capacity,
+            tca_simulated_report=tca_simulated_report,
+            tca_summary=tca_summary,
         )
         return result.to_dict()
 
@@ -506,6 +537,12 @@ class TopNPortfolioBuilder:
                     "weight_reason",
                     "portfolio_industry_hhi",
                     "portfolio_industry_hhi_invested",
+                    "cost_adjusted_ranking_score",
+                    "expected_transaction_cost_bps",
+                    "expected_slippage_bps",
+                    "expected_impact_bps",
+                    "order_size_to_adv",
+                    "liquidity_capacity_score",
                 ):
                     if field in final_item:
                         row[field] = final_item[field]
@@ -518,6 +555,12 @@ class TopNPortfolioBuilder:
                     "weight_reason",
                     "portfolio_industry_hhi",
                     "portfolio_industry_hhi_invested",
+                    "cost_adjusted_ranking_score",
+                    "expected_transaction_cost_bps",
+                    "expected_slippage_bps",
+                    "expected_impact_bps",
+                    "order_size_to_adv",
+                    "liquidity_capacity_score",
                 ):
                     row.pop(field, None)
 
@@ -957,13 +1000,14 @@ class TopNPortfolioBuilder:
     # weight: 组件在复合得分中的相对权重
     _LIGHTGBM_COMPONENTS = [
         # (name,               direction, weight)
-        ("win_rate_pct",         1,  0.15),
-        ("latest_model_score",   1,  0.30),
-        ("quality_score",        1,  0.15),
+        ("win_rate_pct",         1,  0.13),
+        ("latest_model_score",   1,  0.26),
+        ("quality_score",        1,  0.13),
         ("risk_adjusted_score",  1,  0.06),
         ("signal_freshness",     1,  0.06),
         ("pb_value_score",       1,  0.06),
         ("overheat_penalty",    -1,  0.08),
+        ("high_chase_penalty",  -1,  0.08),
         ("drawdown_penalty",    -1,  0.05),
         ("downtrend_penalty",   -1,  0.05),
         ("hot_sector_value",    -1,  0.02),
@@ -1070,6 +1114,7 @@ class TopNPortfolioBuilder:
             quality_score = np.nan_to_num(r.get("quality_score", np.nan), nan=50.0)
             risk_adj = np.nan_to_num(r.get("risk_adjusted_score", np.nan), nan=0.0)
             overheat = np.nan_to_num(r.get("overheat_penalty_score", np.nan), nan=0.0)
+            high_chase = np.nan_to_num(r.get("high_chase_score", np.nan), nan=0.0)
             drawdown = np.nan_to_num(r.get("drawdown_penalty_score", np.nan), nan=0.0)
             downtrend = np.nan_to_num(r.get("downtrend_penalty_score", np.nan), nan=0.0)
             hot_sector = np.nan_to_num(r.get("hot_sector_value_score", 50.0), nan=50.0)
@@ -1107,6 +1152,7 @@ class TopNPortfolioBuilder:
                     "signal_freshness":    signal_freshness,
                     "pb_value_score":      pb_value_score,
                     "overheat_penalty":    overheat,
+                    "high_chase_penalty":  high_chase,
                     "drawdown_penalty":    drawdown,
                     "downtrend_penalty":   downtrend,
                     "hot_sector_value":    hot_sector,
@@ -1164,6 +1210,11 @@ class TopNPortfolioBuilder:
                 score -= 25.0
             elif overheat_val > 60:
                 score -= 10.0
+            high_chase_val = np.nan_to_num(r.get("high_chase_score", np.nan), nan=0.0)
+            if high_chase_val >= HIGH_CHASE_GUARD["high_chase_score_block"]:
+                score -= 40.0
+            elif high_chase_val >= 70:
+                score -= 20.0
             if bool(r.get("startup_candidate", False)) or r.get("trend_state") == "startup":
                 score += 12.0
             if r.get("trend_state") == "downtrend":
@@ -1206,6 +1257,16 @@ class TopNPortfolioBuilder:
                 "drawdown_penalty_score": r.get("drawdown_penalty_score"),
                 "recent_drawdown": r.get("recent_drawdown"),
                 "recent_volatility": r.get("recent_volatility"),
+                "price_change_30d": r.get("price_change_30d"),
+                "price_return_5d_pct": r.get("price_return_5d_pct"),
+                "price_return_20d_pct": r.get("price_return_20d_pct"),
+                "price_return_60d_pct": r.get("price_return_60d_pct"),
+                "price_return_120d_pct": r.get("price_return_120d_pct"),
+                "price_return_252d_pct": r.get("price_return_252d_pct"),
+                "price_position_52w_high": r.get("price_position_52w_high"),
+                "ma60_gap_pct": r.get("ma60_gap_pct"),
+                "high_chase_score": r.get("high_chase_score"),
+                "high_chase_reasons": r.get("high_chase_reasons"),
                 "startup_score": r.get("startup_score"),
                 "startup_candidate": bool(r.get("startup_candidate", False)),
                 "startup_candidate_score": r.get("startup_candidate_score"),
@@ -1323,6 +1384,36 @@ class TopNPortfolioBuilder:
         if overheat >= 85:
             reasons.append(f"overheated({overheat:.0f})")
 
+        high_chase = TopNPortfolioBuilder._float_or_default(item.get("high_chase_score"), 0.0)
+        ret20 = TopNPortfolioBuilder._float_or_default(item.get("price_return_20d_pct"), np.nan)
+        ret60 = TopNPortfolioBuilder._float_or_default(item.get("price_return_60d_pct"), np.nan)
+        ret120 = TopNPortfolioBuilder._float_or_default(item.get("price_return_120d_pct"), np.nan)
+        pos52w = TopNPortfolioBuilder._float_or_default(item.get("price_position_52w_high"), np.nan)
+        ma60_gap = TopNPortfolioBuilder._float_or_default(item.get("ma60_gap_pct"), np.nan)
+        blocked_by_high_chase = False
+        blocked_by_multibagger = False
+        blocked_by_52w_ma_gap = False
+        if high_chase >= HIGH_CHASE_GUARD["high_chase_score_block"]:
+            reasons.append(f"high_chase_score({high_chase:.0f})")
+            blocked_by_high_chase = True
+        if np.isfinite(ret20) and ret20 > HIGH_CHASE_GUARD["ret20_watchlist"]:
+            reasons.append(f"recent_20d_spike({ret20:.0f}%)")
+            blocked_by_high_chase = True
+        if np.isfinite(ret60) and ret60 >= HIGH_CHASE_GUARD["ret60_block"]:
+            reasons.append(f"recent_60d_multibagger({ret60:.0f}%)")
+            blocked_by_multibagger = True
+        if np.isfinite(ret120) and ret120 >= HIGH_CHASE_GUARD["ret120_block"]:
+            reasons.append(f"recent_120d_multibagger({ret120:.0f}%)")
+            blocked_by_multibagger = True
+        if (
+            np.isfinite(pos52w)
+            and np.isfinite(ma60_gap)
+            and pos52w >= HIGH_CHASE_GUARD["near_52w_high"]
+            and ma60_gap > HIGH_CHASE_GUARD["ma60_gap_block"]
+        ):
+            reasons.append(f"near_52w_high_ma60_gap(pos={pos52w:.0f},gap={ma60_gap:.0f}%)")
+            blocked_by_52w_ma_gap = True
+
         # Chekhlov et al. (2005): CDaR — extreme drawdown → near-certain underperformance
         drawdown = TopNPortfolioBuilder._float_or_default(item.get("drawdown_penalty_score"), 0.0)
         if drawdown >= 30:
@@ -1359,6 +1450,9 @@ class TopNPortfolioBuilder:
         return {
             "selection_eligible": not reasons,
             "eligibility_reasons": reasons,
+            "blocked_by_high_chase": blocked_by_high_chase,
+            "blocked_by_multibagger": blocked_by_multibagger,
+            "blocked_by_52w_ma_gap": blocked_by_52w_ma_gap,
             "data_coverage_score": float(data_coverage_score),
             "data_missing_fields": item.get("data_missing_fields") or missing_fields,
         }

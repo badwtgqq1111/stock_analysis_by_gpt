@@ -1,0 +1,205 @@
+<svg width="1440" height="860" viewBox="0 0 1440 860" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">推荐 Runbook 执行流程图</title>
+  <desc id="desc">基础数据和因子经 LightGBM 生产选股，可选特征汇入特征仓库，选股产物继续进入模型诊断、研究验证和执行组合研究。</desc>
+  <defs>
+    <marker id="arrow-main" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-soft" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#64748b"/>
+    </marker>
+    <filter id="shadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .grid { stroke: #e2e8f0; stroke-width: 1; opacity: 0.55; }
+      .title { font: 700 30px "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; fill: #0f172a; }
+      .subtitle { font: 15px "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; fill: #64748b; }
+      .section { fill: #ffffff; stroke: #d8e0ea; stroke-width: 1.4; rx: 8; ry: 8; }
+      .section-fill-blue { fill: #f1f7ff; stroke: #bfdbfe; }
+      .section-fill-cyan { fill: #effcff; stroke: #a5f3fc; }
+      .section-fill-amber { fill: #fff8ed; stroke: #fed7aa; }
+      .section-fill-green { fill: #f2fbf5; stroke: #bbf7d0; }
+      .section-title { font: 700 15px "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; fill: #334155; }
+      .chip { fill: #e2e8f0; rx: 999; ry: 999; }
+      .chip-text { font: 700 12px "Segoe UI", sans-serif; fill: #475569; }
+      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.3; rx: 8; ry: 8; filter: url(#shadow); }
+      .card-blue { stroke: #60a5fa; }
+      .card-cyan { stroke: #22d3ee; }
+      .card-violet { stroke: #8b5cf6; }
+      .card-amber { stroke: #fb923c; }
+      .card-green { stroke: #22c55e; }
+      .bar-blue { fill: #2563eb; }
+      .bar-cyan { fill: #0891b2; }
+      .bar-violet { fill: #7c3aed; }
+      .bar-amber { fill: #ea580c; }
+      .bar-green { fill: #16a34a; }
+      .label { font: 700 16px "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; fill: #111827; }
+      .label-small { font: 700 14px "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; fill: #111827; }
+      .text { font: 14px "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; fill: #475569; }
+      .text-small { font: 13px "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; fill: #64748b; }
+      .edge { fill: none; stroke: #334155; stroke-width: 2.2; marker-end: url(#arrow-main); }
+      .edge-soft { fill: none; stroke: #64748b; stroke-width: 1.9; marker-end: url(#arrow-soft); }
+      .edge-feature { fill: none; stroke: #0891b2; stroke-width: 1.9; marker-end: url(#arrow-soft); }
+      .pipe { fill: none; stroke: #94a3b8; stroke-width: 1.7; stroke-dasharray: 5 6; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1440" height="860"/>
+  <path class="grid" d="M 60 105 H 1380 M 60 425 H 1380 M 60 715 H 1380"/>
+  <text class="title" x="720" y="48" text-anchor="middle">推荐 Runbook 执行流程图</text>
+  <text class="subtitle" x="720" y="76" text-anchor="middle">主流程从左到右，可选特征从下方汇入，选股产物继续驱动后验诊断与执行研究</text>
+
+  <rect class="section section-fill-blue" x="48" y="110" width="920" height="280"/>
+  <rect class="chip" x="72" y="132" width="74" height="24"/>
+  <text class="chip-text" x="109" y="149" text-anchor="middle">必跑</text>
+  <text class="section-title" x="160" y="150">基础行情、行业元数据与因子</text>
+
+  <g transform="translate(82 184)">
+    <rect class="card card-blue" x="0" y="0" width="170" height="86"/>
+    <rect class="bar-blue" x="0" y="0" width="170" height="7" rx="8" ry="8"/>
+    <text class="label" x="85" y="34" text-anchor="middle">环境部署</text>
+    <text class="text" x="85" y="59" text-anchor="middle">uv sync --dev</text>
+  </g>
+
+  <g transform="translate(300 184)">
+    <rect class="card card-blue" x="0" y="0" width="170" height="86"/>
+    <rect class="bar-blue" x="0" y="0" width="170" height="7" rx="8" ry="8"/>
+    <text class="label" x="85" y="34" text-anchor="middle">sync</text>
+    <text class="text" x="85" y="59" text-anchor="middle">OHLCV / 代码池</text>
+  </g>
+
+  <g transform="translate(526 142)">
+    <rect class="card card-blue" x="0" y="0" width="196" height="80"/>
+    <rect class="bar-blue" x="0" y="0" width="196" height="7" rx="8" ry="8"/>
+    <text class="label" x="98" y="33" text-anchor="middle">backfill-industry</text>
+    <text class="text-small" x="98" y="56" text-anchor="middle">行业 / 类型 / 可交易性</text>
+  </g>
+
+  <g transform="translate(526 250)">
+    <rect class="card card-blue" x="0" y="0" width="196" height="80"/>
+    <rect class="bar-blue" x="0" y="0" width="196" height="7" rx="8" ry="8"/>
+    <text class="label" x="98" y="33" text-anchor="middle">generate-factors</text>
+    <text class="text-small" x="98" y="56" text-anchor="middle">alpha158_hk / GTJA191</text>
+  </g>
+
+  <g transform="translate(790 172)">
+    <rect class="card card-violet" x="0" y="0" width="230" height="118"/>
+    <rect class="bar-violet" x="0" y="0" width="230" height="7" rx="8" ry="8"/>
+    <text class="label" x="115" y="35" text-anchor="middle">select</text>
+    <text class="text" x="115" y="60" text-anchor="middle">--analysis-mode lightgbm</text>
+    <text class="text-small" x="115" y="84" text-anchor="middle">训练 + 预测 + 组合构建</text>
+  </g>
+
+  <rect class="section section-fill-amber" x="1040" y="110" width="352" height="280"/>
+  <rect class="chip" x="1064" y="132" width="74" height="24"/>
+  <text class="chip-text" x="1101" y="149" text-anchor="middle">导出</text>
+  <text class="section-title" x="1152" y="150">生产选股产物</text>
+
+  <g transform="translate(1074 174)">
+    <rect class="card card-amber" x="0" y="0" width="284" height="56"/>
+    <rect class="bar-amber" x="0" y="0" width="284" height="6" rx="8" ry="8"/>
+    <text class="label-small" x="142" y="28" text-anchor="middle">ranking / selected</text>
+    <text class="text-small" x="142" y="47" text-anchor="middle">candidates / watchlist</text>
+  </g>
+
+  <g transform="translate(1074 248)">
+    <rect class="card card-amber" x="0" y="0" width="284" height="56"/>
+    <rect class="bar-amber" x="0" y="0" width="284" height="6" rx="8" ry="8"/>
+    <text class="label-small" x="142" y="28" text-anchor="middle">manifest / importance</text>
+    <text class="text-small" x="142" y="47" text-anchor="middle">SHAP exports</text>
+  </g>
+
+  <g transform="translate(1074 322)">
+    <rect class="card card-amber" x="0" y="0" width="284" height="56"/>
+    <rect class="bar-amber" x="0" y="0" width="284" height="6" rx="8" ry="8"/>
+    <text class="label-small" x="142" y="28" text-anchor="middle">liquidity_capacity</text>
+    <text class="text-small" x="142" y="47" text-anchor="middle">simulated TCA</text>
+  </g>
+
+  <rect class="section section-fill-cyan" x="48" y="440" width="920" height="250"/>
+  <rect class="chip" x="72" y="462" width="74" height="24"/>
+  <text class="chip-text" x="109" y="479" text-anchor="middle">可选</text>
+  <text class="section-title" x="160" y="480">选股前特征层</text>
+
+  <g transform="translate(82 522)">
+    <rect class="card card-cyan" x="0" y="0" width="188" height="78"/>
+    <rect class="bar-cyan" x="0" y="0" width="188" height="7" rx="8" ry="8"/>
+    <text class="label-small" x="94" y="32" text-anchor="middle">stock-intelligence</text>
+    <text class="text-small" x="94" y="55" text-anchor="middle">画像 / 图谱 / 主题机会</text>
+  </g>
+
+  <g transform="translate(294 522)">
+    <rect class="card card-cyan" x="0" y="0" width="188" height="78"/>
+    <rect class="bar-cyan" x="0" y="0" width="188" height="7" rx="8" ry="8"/>
+    <text class="label-small" x="94" y="32" text-anchor="middle">event features</text>
+    <text class="text-small" x="94" y="55" text-anchor="middle">事件/NLP -> 日频</text>
+  </g>
+
+  <g transform="translate(506 522)">
+    <rect class="card card-cyan" x="0" y="0" width="188" height="78"/>
+    <rect class="bar-cyan" x="0" y="0" width="188" height="7" rx="8" ry="8"/>
+    <text class="label-small" x="94" y="32" text-anchor="middle">microstructure</text>
+    <text class="text-small" x="94" y="55" text-anchor="middle">分钟线 -> 日频微结构</text>
+  </g>
+
+  <g transform="translate(718 522)">
+    <rect class="card card-cyan" x="0" y="0" width="188" height="78"/>
+    <rect class="bar-cyan" x="0" y="0" width="188" height="7" rx="8" ry="8"/>
+    <text class="label-small" x="94" y="32" text-anchor="middle">fetch-alt</text>
+    <text class="text-small" x="94" y="55" text-anchor="middle">新闻情绪特征</text>
+  </g>
+
+  <g transform="translate(610 626)">
+    <rect class="card card-cyan" x="0" y="0" width="236" height="72"/>
+    <rect class="bar-cyan" x="0" y="0" width="236" height="7" rx="8" ry="8"/>
+    <text class="label" x="118" y="31" text-anchor="middle">特征仓库</text>
+    <text class="text-small" x="118" y="54" text-anchor="middle">Parquet / ClickHouse</text>
+  </g>
+
+  <rect class="section section-fill-green" x="1040" y="440" width="352" height="250"/>
+  <rect class="chip" x="1064" y="462" width="74" height="24"/>
+  <text class="chip-text" x="1101" y="479" text-anchor="middle">验收</text>
+  <text class="section-title" x="1152" y="480">选股后研究诊断</text>
+
+  <g transform="translate(1074 516)">
+    <rect class="card card-green" x="0" y="0" width="284" height="58"/>
+    <rect class="bar-green" x="0" y="0" width="284" height="6" rx="8" ry="8"/>
+    <text class="label-small" x="142" y="28" text-anchor="middle">模型与主题诊断</text>
+    <text class="text-small" x="142" y="48" text-anchor="middle">model / theme diagnostics</text>
+  </g>
+
+  <g transform="translate(1074 596)">
+    <rect class="card card-green" x="0" y="0" width="284" height="58"/>
+    <rect class="bar-green" x="0" y="0" width="284" height="6" rx="8" ry="8"/>
+    <text class="label-small" x="142" y="28" text-anchor="middle">研究验证</text>
+    <text class="text-small" x="142" y="48" text-anchor="middle">Purged CV / A/B / ablation</text>
+  </g>
+
+  <g transform="translate(1074 716)">
+    <rect class="card card-green" x="0" y="0" width="284" height="72"/>
+    <rect class="bar-green" x="0" y="0" width="284" height="7" rx="8" ry="8"/>
+    <text class="label-small" x="142" y="31" text-anchor="middle">执行与组合研究</text>
+    <text class="text-small" x="142" y="54" text-anchor="middle">execution / cost / policy eval</text>
+  </g>
+
+  <path class="edge" d="M 252 227 H 300"/>
+  <path class="edge" d="M 470 227 H 498 V 182 H 526"/>
+  <path class="edge" d="M 470 227 H 498 V 290 H 526"/>
+  <path class="edge" d="M 722 182 H 754 V 231 H 790"/>
+  <path class="edge" d="M 722 290 H 754 V 231 H 790"/>
+  <path class="edge" d="M 1020 231 H 1052 V 202 H 1074"/>
+  <path class="edge" d="M 1020 231 H 1052 V 276 H 1074"/>
+  <path class="edge" d="M 1020 231 H 1052 V 350 H 1074"/>
+
+  <path class="pipe" d="M 176 600 V 642 H 610"/>
+  <path class="pipe" d="M 388 600 V 642 H 610"/>
+  <path class="pipe" d="M 600 600 V 642 H 610"/>
+  <path class="pipe" d="M 812 600 V 642 H 846"/>
+  <path class="edge-feature" d="M 728 626 V 410 H 905 V 290"/>
+
+  <path class="edge-soft" d="M 1358 350 H 1376 V 545 H 1358"/>
+  <path class="edge-soft" d="M 1376 545 V 625 H 1358"/>
+  <path class="edge-soft" d="M 1376 625 V 752 H 1358"/>
+</svg>

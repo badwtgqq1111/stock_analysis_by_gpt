@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""HK-specific manual factors extending Alpha158.
+"""HK-specific manual and GTJA factors extending Alpha158.
 
 IC-validated (2026-05-29, 200 stocks, 365d):
   - pb_ratio_sector_relative   IC=-0.58 (60d)  strong value premium
@@ -30,17 +30,26 @@ from factor_engine.expressions.qlib_alpha import _prepare_qlib_frame
 from factor_engine.registry import create_factor_set, register_factor_set
 
 
+HK_CUSTOM_FACTOR_NAMES = [
+    "price_position_52w_high",
+    "pb_ratio_sector_relative",
+    "sector_rps_reversal_20d",
+    "volume_price_divergence_10d",
+    "consecutive_up_days_5d",
+    "momentum_12m_skip_1m",
+    "short_term_reversal_1m",
+    "turnover_rate",
+    "buying_pressure",
+]
+
+
 @register_factor_set("alpha158_hk")
 class Alpha158HKFactorSet(BaseFactorSet):
-    """Alpha158 + 6 HK manual custom factors.
-
-    Delegates to Alpha158 for the base 158 features, then appends 6
-    HK-specific factors computed from the same OHLCV frame.
-    """
+    """Alpha158 + HK manual custom factors + GTJA Alpha191."""
 
     name = "alpha158_hk"
-    description = "Alpha158 extended with 9 HK-specific manual factors"
-    version = "2.2.0"
+    description = "Alpha158 extended with HK-specific manual factors and GTJA Alpha191"
+    version = "3.0.0"
 
     def transform(self, frame, context=None):
         alpha158 = create_factor_set("qlib_alpha158", config=self.config)
@@ -102,15 +111,35 @@ class Alpha158HKFactorSet(BaseFactorSet):
         columns["buying_pressure"] = np.clip(safe_divide(close - low, hl_range), 0.0, 1.0)
 
         custom_df = pd.DataFrame(columns, index=qlib_frame.index)
+        gtja = create_factor_set("gtja_alpha191", config=self.config).transform(frame, context=context)
 
         if base.empty:
-            return custom_df
-        return pd.concat([base, custom_df], axis=1)
+            return pd.concat([custom_df, gtja], axis=1) if not gtja.empty else custom_df
+        frames = [base, custom_df]
+        if not gtja.empty:
+            frames.append(gtja)
+        return pd.concat(frames, axis=1)
 
     def metadata(self):
+        alpha158_meta = create_factor_set("qlib_alpha158", config=self.config).metadata().to_dict()
+        gtja_meta = create_factor_set("gtja_alpha191", config=self.config).metadata().to_dict()
+        alpha158_names = list((alpha158_meta.get("extra") or {}).get("feature_names") or [])
+        gtja_names = list((gtja_meta.get("extra") or {}).get("feature_names") or [])
+        feature_names = alpha158_names + HK_CUSTOM_FACTOR_NAMES + gtja_names
         return FactorSetMetadata(
             name=self.name,
             description=self.description,
             version=self.version,
-            extra={"feature_count": 202},
+            assumptions=tuple(
+                list(alpha158_meta.get("assumptions") or [])
+                + list(gtja_meta.get("assumptions") or [])
+            ),
+            extra={
+                "feature_count": len(feature_names),
+                "feature_names": feature_names,
+                "base_feature_set": "qlib_alpha158",
+                "hk_custom_factor_count": len(HK_CUSTOM_FACTOR_NAMES),
+                "gtja_feature_count": len(gtja_names),
+                "gtja_proxy_formula_count": (gtja_meta.get("extra") or {}).get("proxy_formula_count"),
+            },
         )

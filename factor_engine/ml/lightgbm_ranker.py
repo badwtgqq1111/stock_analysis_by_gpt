@@ -44,6 +44,24 @@ def _load_lightgbm_regressor_class():
         raise ImportError(f"failed to load lightgbm runtime: {message}") from exc
 
 
+def _load_lightgbm_ranker_class():
+    try:
+        from lightgbm import LGBMRanker
+        return LGBMRanker
+    except ImportError as exc:
+        raise ImportError(
+            "lightgbm is not installed. Run `uv sync` to install project dependencies."
+        ) from exc
+    except OSError as exc:
+        message = str(exc)
+        if platform.system() == "Darwin" and "libomp" in message:
+            raise ImportError(
+                "LightGBM is installed, but macOS is missing the OpenMP runtime `libomp`. "
+                "Fix it with `brew install libomp`, then re-run your command."
+            ) from exc
+        raise ImportError(f"failed to load lightgbm runtime: {message}") from exc
+
+
 def _load_xgboost_regressor_class():
     try:
         from xgboost import XGBRegressor
@@ -66,6 +84,31 @@ _MODEL_LOADERS = {
     "catboost": _load_catboost_regressor_class,
 }
 
+_RANKER_LOADERS = {
+    "lightgbm": _load_lightgbm_ranker_class,
+}
+
+_RANKER_DEFAULT_PARAMS = {
+    "lightgbm": {
+        "objective": "lambdarank",
+        "metric": "ndcg",
+        "learning_rate": 0.1,
+        "n_estimators": 1000,
+        "num_leaves": 128,
+        "max_depth": 8,
+        "lambda_l1": 200.0,
+        "lambda_l2": 500.0,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "min_child_samples": 20,
+        "importance_type": "gain",
+        "verbosity": -1,
+        "n_jobs": 1,
+        "lambdarank_truncation_level": 30,
+        "ndcg_eval_at": [10, 20, 50],
+    },
+}
+
 _MODEL_DEFAULT_PARAMS = {
     "lightgbm": {
         "objective": "regression",
@@ -81,7 +124,7 @@ _MODEL_DEFAULT_PARAMS = {
         "min_child_samples": 20,
         "importance_type": "gain",
         "verbosity": -1,
-        "n_jobs": -1,
+        "n_jobs": 1,
     },
     "xgboost": {
         "objective": "reg:squarederror",
@@ -130,6 +173,20 @@ def _cs_rank_norm(series: pd.Series) -> pd.Series:
     return normalized.reindex(series.index)
 
 
+def _cs_rank_to_relevance(series: pd.Series, n_buckets: int = 20) -> pd.Series:
+    """Convert cross-sectional ranks to integer relevance labels for LambdaRank.
+
+    Higher forward returns get higher relevance (better ranking target).
+    Returns integer labels in [0, n_buckets-1].
+    """
+    valid = series.dropna()
+    if len(valid) < 2:
+        return pd.Series(np.nan, index=series.index, dtype=float)
+    rank_pct = valid.rank(method="average", pct=True)
+    relevance = (rank_pct * n_buckets).astype(int).clip(0, n_buckets - 1)
+    return relevance.reindex(series.index)
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -157,6 +214,11 @@ class LightGBMRankerPipeline:
     max_features: int = 0
     model_type: str = "lightgbm"
     neutralize_cluster_features: bool = False
+    feature_preprocess: str = "qlib_robust"
+    neutralization_mode: str = "none"
+    neutralize_label: bool = True
+    objective_mode: str = "regression_csrank"
+    allow_ranking_fallback: bool = False
 
     # Legacy compatibility fields (deprecated, ignored in new logic)
     drawdown_horizon: int = 20
@@ -169,7 +231,10 @@ class LightGBMRankerPipeline:
 
     def _default_params(self) -> dict:
         """Default model parameters keyed by model_type."""
-        base = _MODEL_DEFAULT_PARAMS.get(self.model_type, _MODEL_DEFAULT_PARAMS["lightgbm"])
+        if self._is_ranking_mode():
+            base = _RANKER_DEFAULT_PARAMS.get(self.model_type, _RANKER_DEFAULT_PARAMS["lightgbm"])
+        else:
+            base = _MODEL_DEFAULT_PARAMS.get(self.model_type, _MODEL_DEFAULT_PARAMS["lightgbm"])
         params = dict(base)
         if "random_state" in params:
             params["random_state"] = int(self.random_state)
@@ -177,8 +242,16 @@ class LightGBMRankerPipeline:
             params["random_seed"] = int(self.random_state)
         return params
 
+    def _is_ranking_mode(self) -> bool:
+        return str(self.objective_mode or "").strip().lower() in {"lambdarank", "rank_xendcg"}
+
     def _load_model_class(self):
-        """Load the regressor class for the configured model_type."""
+        """Load the model class for the configured model_type and objective_mode."""
+        if self._is_ranking_mode():
+            loader = _RANKER_LOADERS.get(self.model_type)
+            if loader is None:
+                raise ValueError(f"Unknown ranker model_type: {self.model_type}")
+            return loader()
         loader = _MODEL_LOADERS.get(self.model_type)
         if loader is None:
             raise ValueError(f"Unknown model_type: {self.model_type}. Choices: {list(_MODEL_LOADERS)}")
@@ -189,7 +262,7 @@ class LightGBMRankerPipeline:
     # ------------------------------------------------------------------
 
     def fit_predict(self, panel_features: pd.DataFrame, panel_targets: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-        """Main entry point. Delegates to fit_predict_rolling.
+        """Main entry point. Dispatches to regression or ranking model based on objective_mode.
 
         Args:
             panel_features: DataFrame with index=trade_date, columns include 'stock_code' + feature columns.
@@ -198,6 +271,16 @@ class LightGBMRankerPipeline:
         Returns:
             (result_frame, metadata) where result_frame has model_score per stock per date.
         """
+        if self._is_ranking_mode():
+            try:
+                return self._fit_predict_ranking(panel_features, panel_targets)
+            except Exception as exc:
+                import traceback
+                message = f"LambdaRank pipeline failed:\n{traceback.format_exc()}"
+                if not self.allow_ranking_fallback:
+                    raise RuntimeError(message) from exc
+                _emit(f"{message}\nFalling back to regression because allow_ranking_fallback=True.")
+                return self.fit_predict_rolling(panel_features, panel_targets)
         return self.fit_predict_rolling(panel_features, panel_targets)
 
     def fit_predict_rolling(
@@ -235,29 +318,72 @@ class LightGBMRankerPipeline:
         trunc_days = self.label_horizon + self.execution_delay
 
         # --- Prepare merged frame ---
+        stage_started = time.time()
         merged = self._prepare_merged_frame(panel_features, panel_targets)
         feature_columns = self._resolve_feature_columns(merged)
         if not feature_columns:
             raise ValueError("no feature columns available for LightGBM")
+        _emit(
+            f"prepare merged rows={len(merged)} features={len(feature_columns)} "
+            f"elapsed={time.time() - stage_started:.1f}s"
+        )
 
-        # --- Cluster feature neutralization (QMJ-style) ---
-        if self.neutralize_cluster_features:
-            merged = self._neutralize_cluster_features(merged, feature_columns)
-
-        # --- Winsorize forward returns (cross-sectional, 0.5%/99.5% quantiles) ---
         target_col = f"forward_return_{self.label_horizon}"
         if target_col not in merged.columns:
             raise ValueError(f"target column {target_col} not found in merged frame")
 
+        # --- Qlib-style cross-sectional feature preprocessing ---
+        preprocess_meta = {"mode": "none", "stages_applied": []}
+        if self.feature_preprocess and str(self.feature_preprocess).lower() not in {"none", "raw", "off"}:
+            from factor_engine.ml.preprocessing import preprocess_features_by_date
+
+            stage_started = time.time()
+            merged, preprocess_meta = preprocess_features_by_date(merged, feature_columns)
+            _emit(
+                f"preprocess mode={preprocess_meta.get('mode')} rows={len(merged)} "
+                f"features={len(feature_columns)} elapsed={time.time() - stage_started:.1f}s"
+            )
+
+        # --- Winsorize forward returns (cross-sectional, 0.5%/99.5% quantiles) ---
         merged[target_col] = merged.groupby("trade_date", sort=True)[target_col].transform(
             lambda x: x.clip(x.quantile(0.005), x.quantile(0.995))
         )
+
+        # --- Feature/label neutralization ---
+        neutralization_mode = self._effective_neutralization_mode()
+        neut_meta: dict = {"mode": "none", "features_neutralized": 0, "target_neutralized": False}
+        if neutralization_mode in {"industry", "industry_size"}:
+            from factor_engine.ml.neutralization import neutralize_features
+
+            stage_started = time.time()
+            merged, neut_meta = neutralize_features(
+                merged,
+                feature_columns,
+                mode=neutralization_mode,
+                target_col=target_col,
+                neutralize_target=bool(self.neutralize_label),
+            )
+            _emit(
+                f"neutralization mode={neut_meta.get('mode')} "
+                f"features_neutralized={neut_meta.get('features_neutralized', 0)} "
+                f"elapsed={time.time() - stage_started:.1f}s"
+            )
+        elif neutralization_mode == "cluster_mean":
+            stage_started = time.time()
+            merged = self._neutralize_cluster_features(merged, feature_columns)
+            neut_meta = {"mode": "cluster_mean", "features_neutralized": len(feature_columns), "target_neutralized": False}
+            _emit(
+                f"neutralization mode=cluster_mean features_neutralized={len(feature_columns)} "
+                f"elapsed={time.time() - stage_started:.1f}s"
+            )
+        merged = merged.copy()
 
         # --- Build CSRankNorm labels ---
         merged["label"] = merged.groupby("trade_date", sort=True)[target_col].transform(_cs_rank_norm)
         labeled = merged.dropna(subset=["label"]).copy()
         if labeled.empty:
             raise ValueError("no valid labels after CSRankNorm")
+        _emit(f"labels ready rows={len(labeled)} dates={labeled['trade_date'].nunique()}")
 
         # --- Rolling windows ---
         all_dates = sorted(labeled["trade_date"].unique())
@@ -282,7 +408,7 @@ class LightGBMRankerPipeline:
             if self.params:
                 model_params.update(self.params)
             probe = RegressorClass(**model_params)
-            probe.fit(initial_train[feature_columns], initial_train["label"])
+            probe.fit(initial_train[feature_columns].astype(float).copy(), initial_train["label"])
             feature_columns = self._select_top_features(probe, feature_columns)
             _emit(f"global feature selection: {len(feature_columns)} factors kept")
 
@@ -333,7 +459,7 @@ class LightGBMRankerPipeline:
             model = RegressorClass(**model_params)
             fit_kwargs: dict[str, Any] = {}
             if not actual_valid.empty:
-                eval_data = (actual_valid[feature_columns], actual_valid["label"])
+                eval_data = (actual_valid[feature_columns].astype(float).copy(), actual_valid["label"])
                 if self.model_type == "catboost":
                     fit_kwargs["eval_set"] = eval_data
                     fit_kwargs["early_stopping_rounds"] = 50
@@ -342,14 +468,13 @@ class LightGBMRankerPipeline:
                 if self.model_type == "lightgbm":
                     fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
 
-            model.fit(
-                actual_train[feature_columns],
-                actual_train["label"],
-                **fit_kwargs,
-            )
+            X_train = actual_train[feature_columns].astype(float).copy()
+            y_train = actual_train["label"]
+            model.fit(X_train, y_train, **fit_kwargs)
 
             # Predict OOS
-            test_preds = model.predict(test_frame[feature_columns])
+            X_test = test_frame[feature_columns].astype(float).copy()
+            test_preds = model.predict(X_test)
             pred_frame = test_frame[["trade_date", "stock_code"]].copy()
             pred_frame["model_score_raw"] = test_preds
             oos_predictions.append(pred_frame)
@@ -377,29 +502,35 @@ class LightGBMRankerPipeline:
         # --- Assemble OOS predictions ---
         oos_frame = pd.concat(oos_predictions, ignore_index=True)
         oos_frame["model_score"] = self._normalize_scores_by_date(oos_frame)
-
-        # --- Train final model on all data for latest-date prediction ---
-        # Always train a final model (needed for SHAP and for predicting uncovered dates)
-        final_model = self._train_final_model(labeled, feature_columns, RegressorClass)
+        pure_oos_frame = oos_frame.copy()
 
         # Dates without OOS predictions: either between rolling windows or too recent to have labels
         all_merged_dates = set(merged["trade_date"].unique())
         oos_covered_dates = set(oos_frame["trade_date"].unique())
         dates_needing_prediction = all_merged_dates - oos_covered_dates
-        if dates_needing_prediction and final_model is not None:
-            missing_frame = merged[merged["trade_date"].isin(dates_needing_prediction)].copy()
+        if dates_needing_prediction:
+            latest_missing_date = max(dates_needing_prediction)
+            _emit(
+                f"latest inference fallback=carry_forward date={str(latest_missing_date)[:10]} "
+                f"missing_dates={len(dates_needing_prediction)}"
+            )
+            missing_frame = merged[merged["trade_date"].isin({latest_missing_date})].copy()
             if not missing_frame.empty:
-                missing_preds = final_model.predict(missing_frame[feature_columns])
                 missing_pred_frame = missing_frame[["trade_date", "stock_code"]].copy()
-                missing_pred_frame["model_score_raw"] = missing_preds
-                missing_pred_frame["model_score"] = self._normalize_scores_by_date(missing_pred_frame)
+                last_scores = (
+                    oos_frame.sort_values("trade_date")
+                    .groupby("stock_code", as_index=False)
+                    .tail(1)[["stock_code", "model_score_raw", "model_score"]]
+                )
+                missing_pred_frame = missing_pred_frame.merge(last_scores, on="stock_code", how="left")
                 oos_frame = pd.concat([oos_frame, missing_pred_frame], ignore_index=True)
+        final_model = None
 
         # --- Feature importance from last rolling model ---
         importance_frame = self._resolve_feature_importance(model, feature_columns)
 
         # --- OOS evaluation metrics ---
-        eval_metrics = self._evaluate_oos(oos_frame, merged, target_col)
+        eval_metrics = self._evaluate_oos(pure_oos_frame, merged, target_col)
 
         # --- Merge back to full frame ---
         result = merged[["trade_date", "stock_code"]].merge(
@@ -409,6 +540,22 @@ class LightGBMRankerPipeline:
         )
         result.set_index("trade_date", inplace=True)
         result.sort_index(inplace=True)
+
+        # Feature importance JSON export (for model diagnostics)
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            _fi_path = _Path("output/lightgbm_feature_importance.json")
+            _fi_path.parent.mkdir(parents=True, exist_ok=True)
+            _fi_payload = {
+                "feature_columns": feature_columns,
+                "feature_importance": importance_frame.to_dict(orient="records"),
+                "objective_mode": self.objective_mode,
+                "neutralization_mode": neutralization_mode,
+            }
+            _fi_path.write_text(_json.dumps(_fi_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
         metadata = {
             "label_horizon": int(self.label_horizon),
@@ -421,14 +568,22 @@ class LightGBMRankerPipeline:
             "total_dates": len(all_dates),
             "feature_count": len(feature_columns),
             "feature_columns": feature_columns,
+            "feature_preprocess": str(self.feature_preprocess or "none"),
+            "preprocess_metadata": preprocess_meta,
+            "neutralization_mode": neutralization_mode,
+            "neutralization_metadata": neut_meta,
+            "neutralize_label": bool(self.neutralize_label and neutralization_mode in {"industry", "industry_size"}),
             "label_method": "CSRankNorm",
             "objective": "mse",
-            "rolling_details": rolling_metadata[-3:] if rolling_metadata else [],  # last 3 windows
+            "objective_mode": self.objective_mode,
+            "pure_oos_prediction_rows": int(len(pure_oos_frame)),
+            "latest_inference_prediction_rows": int(len(oos_frame) - len(pure_oos_frame)),
+            "rolling_details": rolling_metadata[-3:] if rolling_metadata else [],
             "oos_metrics": eval_metrics,
             "top_features": importance_frame.head(10).to_dict(orient="records"),
             "feature_importance": importance_frame.to_dict(orient="records"),
             "final_model": final_model,
-            # Legacy compat fields
+            "feature_importance_json": "output/lightgbm_feature_importance.json",
             "train_rows": sum(w["train_rows"] for w in rolling_metadata) if rolling_metadata else 0,
             "valid_rows": sum(w["valid_rows"] for w in rolling_metadata) if rolling_metadata else 0,
         }
@@ -436,16 +591,443 @@ class LightGBMRankerPipeline:
         return result, metadata
 
     # ------------------------------------------------------------------
+    # LambdaRank / RankXENDCG pipeline
+    # ------------------------------------------------------------------
+
+    def _fit_predict_ranking(
+        self,
+        panel_features: pd.DataFrame,
+        panel_targets: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, dict]:
+        """LambdaRank/RankXENDCG training with date-grouped samples.
+
+        Uses LGBMRanker with per-trade_date groups and relevance labels derived
+        from CSRankNorm scores bucketed into 20 relevance levels.
+        """
+        RankerClass = self._load_model_class()
+
+        stage_started = time.time()
+        merged = self._prepare_merged_frame(panel_features, panel_targets)
+        feature_columns = self._resolve_feature_columns(merged)
+        if not feature_columns:
+            raise ValueError("no feature columns available for LightGBM ranker")
+        _emit(
+            f"prepare merged rows={len(merged)} features={len(feature_columns)} "
+            f"elapsed={time.time() - stage_started:.1f}s"
+        )
+
+        target_col = f"forward_return_{self.label_horizon}"
+        if target_col not in merged.columns:
+            raise ValueError(f"target column {target_col} not found")
+
+        preprocess_meta = {"mode": "none", "stages_applied": []}
+        if self.feature_preprocess and str(self.feature_preprocess).lower() not in {"none", "raw", "off"}:
+            from factor_engine.ml.preprocessing import preprocess_features_by_date
+
+            stage_started = time.time()
+            merged, preprocess_meta = preprocess_features_by_date(merged, feature_columns)
+            _emit(
+                f"preprocess mode={preprocess_meta.get('mode')} rows={len(merged)} "
+                f"features={len(feature_columns)} elapsed={time.time() - stage_started:.1f}s"
+            )
+
+        neutralization_mode = self._effective_neutralization_mode()
+        neut_meta: dict = {"mode": "none", "features_neutralized": 0, "target_neutralized": False}
+        if neutralization_mode in {"industry", "industry_size"}:
+            from factor_engine.ml.neutralization import neutralize_features
+
+            stage_started = time.time()
+            merged, neut_meta = neutralize_features(
+                merged,
+                feature_columns,
+                mode=neutralization_mode,
+                target_col=target_col,
+                neutralize_target=bool(self.neutralize_label),
+            )
+            _emit(
+                f"neutralization mode={neut_meta.get('mode')} "
+                f"features_neutralized={neut_meta.get('features_neutralized', 0)} "
+                f"elapsed={time.time() - stage_started:.1f}s"
+            )
+        elif neutralization_mode == "cluster_mean":
+            stage_started = time.time()
+            merged = self._neutralize_cluster_features(merged, feature_columns)
+            neut_meta = {"mode": "cluster_mean", "features_neutralized": len(feature_columns), "target_neutralized": False}
+            _emit(
+                f"neutralization mode=cluster_mean features_neutralized={len(feature_columns)} "
+                f"elapsed={time.time() - stage_started:.1f}s"
+            )
+        merged = merged.copy()
+
+        # Build relevance labels: bucketed CSRankNorm into 20 levels
+        merged["label"] = merged.groupby("trade_date", sort=True)[target_col].transform(
+            lambda x: _cs_rank_to_relevance(x, n_buckets=20)
+        )
+        labeled = merged.dropna(subset=["label"]).copy()
+        if labeled.empty:
+            raise ValueError("no valid relevance labels")
+        _emit(f"labels ready rows={len(labeled)} dates={labeled['trade_date'].nunique()}")
+
+        # Sort by trade_date for group construction
+        labeled = labeled.sort_values(["trade_date", "stock_code"]).reset_index(drop=True)
+
+        # Build date groups
+        date_counts = labeled.groupby("trade_date", sort=True).size()
+        group_sizes = [int(count) for count in date_counts.values if count > 0]
+        if not group_sizes:
+            return self._fit_predict_single(labeled, feature_columns, merged, RankerClass)
+
+        all_dates = sorted(labeled["trade_date"].unique())
+        min_train_days = self.min_train_days
+        trunc_days = self.label_horizon + self.execution_delay
+        first_test_idx = min_train_days + trunc_days
+
+        if first_test_idx >= len(all_dates):
+            return self._fit_predict_ranking_single(labeled, feature_columns, merged,
+                                                     group_sizes, RankerClass, all_dates)
+
+        oos_predictions = []
+        rolling_metadata = []
+        step = self.rolling_step
+        test_start_idx = first_test_idx
+        win_idx = 0
+
+        _emit(f"LambdaRank rolling: {len(feature_columns)} features, objective={self.objective_mode}")
+
+        while test_start_idx < len(all_dates):
+            test_end_idx = min(test_start_idx + step, len(all_dates))
+            test_dates = all_dates[test_start_idx:test_end_idx]
+            train_end_idx = test_start_idx - trunc_days
+            if train_end_idx < min_train_days:
+                test_start_idx = test_end_idx
+                continue
+
+            train_dates = all_dates[:train_end_idx]
+            train_set = set(train_dates)
+            test_set = set(test_dates)
+
+            train_frame = labeled[labeled["trade_date"].isin(train_set)].copy()
+            test_frame = merged[merged["trade_date"].isin(test_set)].copy()
+
+            if train_frame.empty or test_frame.empty:
+                test_start_idx = test_end_idx
+                continue
+
+            train_frame = train_frame.sort_values("trade_date").reset_index(drop=True)
+            train_groups = [int(c) for c in train_frame.groupby("trade_date", sort=True).size().values if c > 0]
+
+            # Split train into train/valid
+            valid_count = max(1, int(len(train_dates) * self.valid_fraction))
+            valid_dates_set = set(train_dates[-valid_count:])
+            actual_train = train_frame[~train_frame["trade_date"].isin(valid_dates_set)]
+            actual_valid = train_frame[train_frame["trade_date"].isin(valid_dates_set)]
+
+            if actual_train.empty:
+                test_start_idx = test_end_idx
+                continue
+
+            actual_train = actual_train.sort_values("trade_date").reset_index(drop=True)
+            train_groups = [int(c) for c in actual_train.groupby("trade_date", sort=True).size().values if c > 0]
+            valid_groups = [int(c) for c in actual_valid.groupby("trade_date", sort=True).size().values if c > 0] if not actual_valid.empty else None
+
+            model_params = self._default_params()
+            if self.params:
+                model_params.update(self.params)
+            if self.objective_mode == "rank_xendcg":
+                model_params["objective"] = "rank_xendcg"
+
+            model = RankerClass(**model_params)
+            X_train = actual_train[feature_columns].astype(float).copy()
+            y_train = actual_train["label"].astype(int)
+
+            fit_kwargs: dict[str, Any] = {}
+            if valid_groups:
+                X_valid = actual_valid[feature_columns].astype(float).copy()
+                y_valid = actual_valid["label"].astype(int)
+                fit_kwargs["eval_set"] = [(X_valid, y_valid)]
+                fit_kwargs["eval_group"] = [valid_groups]
+                if self.model_type == "lightgbm":
+                    fit_kwargs["eval_at"] = [10, 20]
+                    fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
+
+            model.fit(X_train, y_train, group=train_groups, **fit_kwargs)
+
+            test_preds = model.predict(test_frame[feature_columns].astype(float).copy())
+            pred_frame = test_frame[["trade_date", "stock_code"]].copy()
+            pred_frame["model_score_raw"] = test_preds
+            oos_predictions.append(pred_frame)
+
+            rolling_metadata.append({
+                "train_start": str(train_dates[0])[:10],
+                "train_end": str(train_dates[-1])[:10],
+                "test_start": str(test_dates[0])[:10],
+                "test_end": str(test_dates[-1])[:10],
+                "train_rows": len(actual_train),
+                "valid_rows": len(actual_valid),
+                "test_rows": len(test_frame),
+                "n_estimators_used": _get_best_iteration(model),
+            })
+            win_idx += 1
+            test_start_idx = test_end_idx
+
+        if not oos_predictions:
+            return self._fit_predict_ranking_single(labeled, feature_columns, merged,
+                                                     group_sizes, RankerClass, all_dates)
+
+        oos_frame = pd.concat(oos_predictions, ignore_index=True)
+        oos_frame["model_score"] = self._normalize_scores_by_date(oos_frame)
+        pure_oos_frame = oos_frame.copy()
+
+        all_merged_dates = set(merged["trade_date"].unique())
+        oos_covered_dates = set(oos_frame["trade_date"].unique())
+        dates_needing_prediction = all_merged_dates - oos_covered_dates
+        if dates_needing_prediction:
+            latest_missing_date = max(dates_needing_prediction)
+            _emit(
+                f"latest inference fallback=carry_forward date={str(latest_missing_date)[:10]} "
+                f"missing_dates={len(dates_needing_prediction)}"
+            )
+            missing_frame = merged[merged["trade_date"].isin({latest_missing_date})].copy()
+            if not missing_frame.empty:
+                missing_pred_frame = missing_frame[["trade_date", "stock_code"]].copy()
+                last_scores = (
+                    oos_frame.sort_values("trade_date")
+                    .groupby("stock_code", as_index=False)
+                    .tail(1)[["stock_code", "model_score_raw", "model_score"]]
+                )
+                missing_pred_frame = missing_pred_frame.merge(last_scores, on="stock_code", how="left")
+                oos_frame = pd.concat([oos_frame, missing_pred_frame], ignore_index=True)
+        final_model = None
+
+        importance_frame = self._resolve_feature_importance(model, feature_columns)
+        eval_metrics = self._evaluate_oos(pure_oos_frame, merged, target_col)
+        ndcg_metrics = self._evaluate_ndcg(pure_oos_frame, merged, target_col)
+
+        result = merged[["trade_date", "stock_code"]].merge(
+            oos_frame[["trade_date", "stock_code", "model_score_raw", "model_score"]],
+            on=["trade_date", "stock_code"], how="left",
+        )
+        result.set_index("trade_date", inplace=True)
+        result.sort_index(inplace=True)
+
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            _fi_path = _Path("output/lightgbm_feature_importance.json")
+            _fi_path.parent.mkdir(parents=True, exist_ok=True)
+            _fi_payload = {
+                "feature_columns": feature_columns,
+                "feature_importance": importance_frame.to_dict(orient="records"),
+                "objective_mode": self.objective_mode,
+                "neutralization_mode": neutralization_mode,
+            }
+            _fi_path.write_text(_json.dumps(_fi_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+        metadata = {
+            "label_horizon": int(self.label_horizon),
+            "execution_delay": int(self.execution_delay),
+            "rolling_step": int(step),
+            "min_train_days": int(min_train_days),
+            "trunc_days": int(trunc_days),
+            "rolling_windows": len(rolling_metadata),
+            "oos_dates": int(oos_frame["trade_date"].nunique()),
+            "total_dates": len(all_dates),
+            "feature_count": len(feature_columns),
+            "feature_columns": feature_columns,
+            "feature_preprocess": str(self.feature_preprocess or "none"),
+            "preprocess_metadata": preprocess_meta,
+            "neutralization_mode": neutralization_mode,
+            "neutralization_metadata": neut_meta,
+            "neutralize_label": bool(self.neutralize_label and neutralization_mode in {"industry", "industry_size"}),
+            "label_method": "CSRankNorm→RelevanceBuckets",
+            "objective": self.objective_mode,
+            "objective_mode": self.objective_mode,
+            "ndcg_metrics": ndcg_metrics,
+            "pure_oos_prediction_rows": int(len(pure_oos_frame)),
+            "latest_inference_prediction_rows": int(len(oos_frame) - len(pure_oos_frame)),
+            "rolling_details": rolling_metadata[-3:] if rolling_metadata else [],
+            "oos_metrics": eval_metrics,
+            "top_features": importance_frame.head(10).to_dict(orient="records"),
+            "feature_importance": importance_frame.to_dict(orient="records"),
+            "final_model": final_model,
+            "feature_importance_json": "output/lightgbm_feature_importance.json",
+            "train_rows": sum(w["train_rows"] for w in rolling_metadata) if rolling_metadata else 0,
+            "valid_rows": sum(w["valid_rows"] for w in rolling_metadata) if rolling_metadata else 0,
+        }
+        return result, metadata
+
+    def _fit_predict_ranking_single(
+        self, labeled: pd.DataFrame, feature_columns: list[str],
+        full_frame: pd.DataFrame, group_sizes: list[int],
+        RankerClass, all_dates: list,
+    ) -> tuple[pd.DataFrame, dict]:
+        """Single split fallback for LambdaRank mode."""
+        valid_count = max(1, int(len(all_dates) * self.valid_fraction))
+        valid_dates_set = set(all_dates[-valid_count:])
+        train_frame = labeled[~labeled["trade_date"].isin(valid_dates_set)]
+        valid_frame = labeled[labeled["trade_date"].isin(valid_dates_set)]
+
+        if train_frame.empty:
+            raise ValueError("not enough data for ranking training")
+
+        train_frame = train_frame.sort_values("trade_date").reset_index(drop=True)
+        train_groups = [int(c) for c in train_frame.groupby("trade_date", sort=True).size().values if c > 0]
+        valid_groups = [int(c) for c in valid_frame.groupby("trade_date", sort=True).size().values if c > 0] if not valid_frame.empty else None
+
+        model_params = self._default_params()
+        if self.params:
+            model_params.update(self.params)
+        if self.objective_mode == "rank_xendcg":
+            model_params["objective"] = "rank_xendcg"
+
+        model = RankerClass(**model_params)
+        X_train = train_frame[feature_columns].astype(float).copy()
+        y_train = train_frame["label"].astype(int)
+        fit_kwargs: dict[str, Any] = {}
+        if valid_groups:
+            X_valid = valid_frame[feature_columns].astype(float).copy()
+            y_valid = valid_frame["label"].astype(int)
+            fit_kwargs["eval_set"] = [(X_valid, y_valid)]
+            fit_kwargs["eval_group"] = [valid_groups]
+            if self.model_type == "lightgbm":
+                fit_kwargs["eval_at"] = [10, 20]
+                fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
+
+        model.fit(X_train, y_train, group=train_groups, **fit_kwargs)
+
+        predict_frame = full_frame[["trade_date", "stock_code"]].copy()
+        predict_frame["model_score_raw"] = model.predict(full_frame[feature_columns].astype(float).copy())
+        predict_frame["model_score"] = self._normalize_scores_by_date(predict_frame)
+
+        importance_frame = self._resolve_feature_importance(model, feature_columns)
+        target_col = f"forward_return_{self.label_horizon}"
+        eval_metrics = self._evaluate_oos(predict_frame, full_frame, target_col)
+
+        result = predict_frame.set_index("trade_date").sort_index()
+        metadata = {
+            "label_horizon": int(self.label_horizon),
+            "execution_delay": int(self.execution_delay),
+            "rolling_windows": 0,
+            "mode": "single_split_ranking_fallback",
+            "train_rows": len(train_frame),
+            "valid_rows": len(valid_frame),
+            "feature_count": len(feature_columns),
+            "feature_preprocess": str(self.feature_preprocess or "none"),
+            "neutralization_mode": self._effective_neutralization_mode(),
+            "label_method": "CSRankNorm→RelevanceBuckets",
+            "objective": self.objective_mode,
+            "objective_mode": self.objective_mode,
+            "oos_metrics": eval_metrics,
+            "top_features": importance_frame.head(10).to_dict(orient="records"),
+            "feature_importance": importance_frame.to_dict(orient="records"),
+        }
+        return result, metadata
+
+    def _train_final_ranker(self, labeled, feature_columns, group_sizes, RankerClass):
+        """Train a final ranking model on all labeled data."""
+        if labeled.empty:
+            return None
+        all_dates = sorted(labeled["trade_date"].unique())
+        valid_count = max(1, int(len(all_dates) * self.valid_fraction))
+        valid_dates_set = set(all_dates[-valid_count:])
+        train_frame = labeled[~labeled["trade_date"].isin(valid_dates_set)].sort_values("trade_date").reset_index(drop=True)
+        valid_frame = labeled[labeled["trade_date"].isin(valid_dates_set)].sort_values("trade_date").reset_index(drop=True)
+        if train_frame.empty:
+            return None
+        train_groups = [int(c) for c in train_frame.groupby("trade_date", sort=True).size().values if c > 0]
+        valid_groups = [int(c) for c in valid_frame.groupby("trade_date", sort=True).size().values if c > 0] if not valid_frame.empty else None
+        model_params = self._default_params()
+        if self.params:
+            model_params.update(self.params)
+        if self.objective_mode == "rank_xendcg":
+            model_params["objective"] = "rank_xendcg"
+        model = RankerClass(**model_params)
+        X_train = train_frame[feature_columns].astype(float).copy()
+        y_train = train_frame["label"].astype(int)
+        fit_kwargs: dict[str, Any] = {}
+        if valid_groups:
+            X_valid = valid_frame[feature_columns].astype(float).copy()
+            y_valid = valid_frame["label"].astype(int)
+            fit_kwargs["eval_set"] = [(X_valid, y_valid)]
+            fit_kwargs["eval_group"] = [valid_groups]
+            if self.model_type == "lightgbm":
+                fit_kwargs["eval_at"] = [10, 20]
+                fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
+        model.fit(X_train, y_train, group=train_groups, **fit_kwargs)
+        return model
+
+    @staticmethod
+    def _evaluate_ndcg(predictions: pd.DataFrame, full_frame: pd.DataFrame, target_col: str) -> dict:
+        """Compute approximate NDCG@K metrics for OOS predictions."""
+        eval_frame = predictions.merge(
+            full_frame[["trade_date", "stock_code", target_col]],
+            on=["trade_date", "stock_code"], how="inner",
+        ).dropna(subset=["model_score_raw", target_col])
+        if eval_frame.empty:
+            return {}
+        ndcg_scores = {10: [], 20: []}
+        for _date, group in eval_frame.groupby("trade_date"):
+            n = len(group)
+            if n < 5:
+                continue
+            ranked = group.sort_values("model_score_raw", ascending=False)
+            for k in [10, 20]:
+                if n < k:
+                    continue
+                top_k = ranked.head(k)
+                dcg = sum(
+                    (2 ** float(ranked.iloc[i][target_col]) - 1) / np.log2(i + 2)
+                    for i in range(k)
+                )
+                ideal = ranked.nlargest(k, target_col)
+                idcg = sum(
+                    (2 ** float(ideal.iloc[i][target_col]) - 1) / np.log2(i + 2)
+                    for i in range(min(k, len(ideal)))
+                )
+                if idcg > 0:
+                    ndcg_scores[k].append(dcg / idcg)
+        result = {}
+        for k, scores in ndcg_scores.items():
+            if scores:
+                result[f"ndcg@{k}"] = round(float(np.mean(scores)), 4)
+        return result
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _prepare_merged_frame(self, panel_features: pd.DataFrame, panel_targets: pd.DataFrame) -> pd.DataFrame:
-        """Merge features and targets into a single frame."""
-        feature_index_name = panel_features.index.name or "trade_date"
-        target_index_name = panel_targets.index.name or "trade_date"
+        """Merge features and targets into a single frame.
 
-        features = panel_features.reset_index().rename(columns={feature_index_name: "trade_date"}).copy()
-        targets = panel_targets.reset_index().rename(columns={target_index_name: "trade_date"}).copy()
+        Robust to the case where trade_date is already a column OR the index name.
+        """
+        def _dedupe_columns(frame: pd.DataFrame) -> pd.DataFrame:
+            if not frame.columns.has_duplicates:
+                return frame
+            return frame.loc[:, ~frame.columns.duplicated(keep="last")].copy()
+
+        def _ensure_trade_date_column(frame: pd.DataFrame) -> pd.DataFrame:
+            frame = frame.copy()
+            has_trade_date_col = "trade_date" in frame.columns
+            idx_name = frame.index.name
+            if has_trade_date_col and (not idx_name or idx_name == "trade_date"):
+                result = frame.reset_index(drop=True)
+                if "trade_date" not in result.columns:
+                    result["trade_date"] = frame.index
+                return _dedupe_columns(result)
+            if has_trade_date_col:
+                # trade_date is a column, index has a different name
+                return _dedupe_columns(frame.reset_index(drop=True))
+            result = frame.reset_index()
+            col_name = result.columns[0]
+            if col_name != "trade_date":
+                result = result.rename(columns={col_name: "trade_date"})
+            return _dedupe_columns(result)
+
+        features = _ensure_trade_date_column(panel_features)
+        targets = _ensure_trade_date_column(panel_targets)
 
         # Rename target column to standard name
         target_col = f"forward_return_{self.label_horizon}"
@@ -456,11 +1038,15 @@ class LightGBMRankerPipeline:
                 targets = targets.rename(columns={candidates[0]: target_col})
 
         merge_cols = ["trade_date", "stock_code"]
-        target_keep = [c for c in targets.columns if c in merge_cols or c.startswith("forward_return")]
+        target_keep = list(dict.fromkeys(
+            c for c in targets.columns if c in merge_cols or c.startswith("forward_return")
+        ))
         merged = features.merge(targets[target_keep], on=merge_cols, how="left")
+        merged = _dedupe_columns(merged)
         merged["trade_date"] = pd.to_datetime(merged["trade_date"])
         merged.sort_values(["trade_date", "stock_code"], inplace=True)
         merged.reset_index(drop=True, inplace=True)
+        merged = merged.copy()
 
         # Coerce feature columns to numeric
         feature_columns = self._resolve_feature_columns(merged)
@@ -475,6 +1061,8 @@ class LightGBMRankerPipeline:
         blocked = {
             "trade_date", "stock_code", "label",
             "market", "exchange", "asset_type", "frequency", "adjust",
+            "cluster_id", "industry_l1", "industry_l2", "industry_l3",
+            "market_cap", "log_market_cap", "total_shares",
         }
         return [
             col for col in merged.columns
@@ -483,6 +1071,71 @@ class LightGBMRankerPipeline:
             and not col.startswith("target_")
             and not col.startswith("ipo_")
         ]
+
+    @staticmethod
+    def _preprocess_features_by_date(merged: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
+        """Qlib-style per-date robust preprocessing for model inputs.
+
+        Applies cross-sectional winsorization, robust z-score, clipping and
+        neutral fill.  Processing is strictly within each trade_date, avoiding
+        global history statistics that would leak future distribution shifts.
+        """
+        if not feature_columns:
+            return merged
+        working = merged.copy()
+
+        def _transform_group(group: pd.DataFrame) -> pd.DataFrame:
+            transformed = group.copy()
+            n = len(transformed)
+            for col in feature_columns:
+                series = pd.to_numeric(transformed[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+                valid = series.dropna()
+                if valid.empty:
+                    transformed[col] = 0.0
+                    continue
+                if n >= 20 and valid.nunique(dropna=True) > 2:
+                    lo = float(valid.quantile(0.01))
+                    hi = float(valid.quantile(0.99))
+                    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                        series = series.clip(lo, hi)
+                        valid = series.dropna()
+                median = float(valid.median()) if not valid.empty else 0.0
+                mad = float((valid - median).abs().median()) if not valid.empty else 0.0
+                scale = mad * 1.4826
+                if not np.isfinite(scale) or scale < 1e-12:
+                    scale = float(valid.std(ddof=0)) if len(valid) > 1 else 1.0
+                if not np.isfinite(scale) or scale < 1e-12:
+                    transformed[col] = series.fillna(median) * 0.0
+                    continue
+                z = (series - median) / scale
+                transformed[col] = z.clip(-5.0, 5.0).fillna(0.0)
+            return transformed
+
+        transformed_groups = []
+        for trade_date, group in working.groupby("trade_date", sort=False):
+            transformed = _transform_group(group)
+            if "trade_date" not in transformed.columns:
+                transformed["trade_date"] = trade_date
+            transformed_groups.append(transformed)
+        if not transformed_groups:
+            return working
+        return pd.concat(transformed_groups, axis=0, sort=False).reset_index(drop=True)
+
+    def _effective_neutralization_mode(self) -> str:
+        mode = str(self.neutralization_mode or "none").strip().lower()
+        aliases = {
+            "off": "none",
+            "raw": "none",
+            "cluster": "cluster_mean",
+            "cluster_mean": "cluster_mean",
+            "industry_size_beta": "industry_size",
+        }
+        mode = aliases.get(mode, mode)
+        if mode == "none" and self.neutralize_cluster_features:
+            return "cluster_mean"
+        if mode not in {"none", "cluster_mean", "industry", "industry_size"}:
+            return "none"
+        return mode
 
     @staticmethod
     def _neutralize_cluster_features(merged: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
@@ -519,6 +1172,80 @@ class LightGBMRankerPipeline:
 
         return neutralized
 
+    @staticmethod
+    def _neutralize_industry_size_features(
+        merged: pd.DataFrame,
+        feature_columns: list[str],
+        *,
+        target_col: str | None = None,
+        use_size: bool = True,
+        neutralize_target: bool = True,
+    ) -> pd.DataFrame:
+        """Residualize features/label by date against industry and log market cap."""
+        if not feature_columns and not target_col:
+            return merged
+        industry_col = "industry_l2" if "industry_l2" in merged.columns else "industry_l1"
+        has_industry = industry_col in merged.columns
+        has_size = use_size and ("market_cap" in merged.columns or "log_market_cap" in merged.columns)
+        if not has_industry and not has_size:
+            return merged
+
+        working = merged.loc[:, ~merged.columns.duplicated(keep="last")].copy()
+        if has_size and "log_market_cap" not in working.columns and "market_cap" in working.columns:
+            market_cap = pd.to_numeric(working["market_cap"], errors="coerce")
+            working["log_market_cap"] = np.log(market_cap.where(market_cap > 0))
+
+        def _control_matrix(group: pd.DataFrame) -> pd.DataFrame:
+            controls = pd.DataFrame(index=group.index)
+            if has_size and "log_market_cap" in group.columns:
+                size = pd.to_numeric(group["log_market_cap"], errors="coerce")
+                if size.notna().sum() >= 5 and size.nunique(dropna=True) > 1:
+                    controls["log_market_cap"] = size.fillna(size.median())
+            if has_industry:
+                industry = group[industry_col].astype(str).replace({"": "UNKNOWN", "nan": "UNKNOWN"})
+                if industry.nunique(dropna=True) > 1:
+                    dummies = pd.get_dummies(industry, prefix="industry", drop_first=True, dtype=float)
+                    controls = pd.concat([controls, dummies], axis=1)
+            return controls
+
+        def _residualize_group(group: pd.DataFrame) -> pd.DataFrame:
+            out = group.copy()
+            controls = _control_matrix(group)
+            if controls.empty or len(group) < max(8, controls.shape[1] + 3):
+                return out
+            x_base = controls.astype(float).to_numpy()
+            x_base = np.column_stack([np.ones(len(x_base)), x_base])
+
+            def _residualize_column(col: str):
+                y = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float)
+                valid = np.isfinite(y) & np.isfinite(x_base).all(axis=1)
+                if valid.sum() < max(8, x_base.shape[1] + 2):
+                    return
+                try:
+                    beta, *_ = np.linalg.lstsq(x_base[valid], y[valid], rcond=None)
+                except np.linalg.LinAlgError:
+                    return
+                resid = np.full(len(y), np.nan, dtype=float)
+                resid[valid] = y[valid] - x_base[valid].dot(beta)
+                out[col] = pd.Series(resid, index=out.index).fillna(out[col])
+
+            for feature in feature_columns:
+                if feature in out.columns:
+                    _residualize_column(feature)
+            if neutralize_target and target_col and target_col in out.columns:
+                _residualize_column(target_col)
+            return out
+
+        neutralized_groups = []
+        for trade_date, group in working.groupby("trade_date", sort=False):
+            residualized = _residualize_group(group)
+            if "trade_date" not in residualized.columns:
+                residualized["trade_date"] = trade_date
+            neutralized_groups.append(residualized)
+        if not neutralized_groups:
+            return working
+        return pd.concat(neutralized_groups, axis=0, sort=False).reset_index(drop=True)
+
     def _select_top_features(self, model, feature_columns: list[str]) -> list[str]:
         """Select top N features by importance from a trained model."""
         if not self.max_features or self.max_features >= len(feature_columns):
@@ -534,10 +1261,6 @@ class LightGBMRankerPipeline:
         RegressorClass,
     ) -> tuple[pd.DataFrame, dict]:
         """Single train/valid split. When max_features>0, uses two-stage: first fit to select top features, then refit."""
-        if self.neutralize_cluster_features:
-            labeled = self._neutralize_cluster_features(labeled, feature_columns)
-            full_frame = self._neutralize_cluster_features(full_frame, feature_columns)
-
         all_dates = sorted(labeled["trade_date"].unique())
         valid_count = max(1, int(len(all_dates) * self.valid_fraction))
         valid_dates_set = set(all_dates[-valid_count:])
@@ -557,7 +1280,7 @@ class LightGBMRankerPipeline:
         model = RegressorClass(**model_params)
         fit_kwargs: dict[str, Any] = {}
         if not valid_frame.empty:
-            eval_data = (valid_frame[feature_columns], valid_frame["label"])
+            eval_data = (valid_frame[feature_columns].astype(float).copy(), valid_frame["label"])
             if self.model_type == "catboost":
                 fit_kwargs["eval_set"] = eval_data
             else:
@@ -565,7 +1288,7 @@ class LightGBMRankerPipeline:
             if self.model_type == "lightgbm":
                 fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
 
-        model.fit(train_frame[feature_columns], train_frame["label"], **fit_kwargs)
+        model.fit(train_frame[feature_columns].astype(float).copy(), train_frame["label"], **fit_kwargs)
 
         # Two-stage: select top features and refit
         selected_features = self._select_top_features(model, feature_columns)
@@ -575,20 +1298,20 @@ class LightGBMRankerPipeline:
             model2 = RegressorClass(**model2_params)
             fit_kwargs2: dict[str, Any] = {}
             if not valid_frame.empty:
-                eval_data2 = (valid_frame[selected_features], valid_frame["label"])
+                eval_data2 = (valid_frame[selected_features].astype(float).copy(), valid_frame["label"])
                 if self.model_type == "catboost":
                     fit_kwargs2["eval_set"] = eval_data2
                 else:
                     fit_kwargs2["eval_set"] = [eval_data2]
                 if self.model_type == "lightgbm":
                     fit_kwargs2["callbacks"] = [_early_stopping_callback(50)]
-            model2.fit(train_frame[selected_features], train_frame["label"], **fit_kwargs2)
+            model2.fit(train_frame[selected_features].astype(float).copy(), train_frame["label"], **fit_kwargs2)
             model = model2
             feature_columns = selected_features
 
         # Predict on full frame
         predict_frame = full_frame[["trade_date", "stock_code"]].copy()
-        predict_frame["model_score_raw"] = model.predict(full_frame[feature_columns])
+        predict_frame["model_score_raw"] = model.predict(full_frame[feature_columns].astype(float).copy())
         predict_frame["model_score"] = self._normalize_scores_by_date(predict_frame)
 
         importance_frame = self._resolve_feature_importance(model, feature_columns)
@@ -604,6 +1327,9 @@ class LightGBMRankerPipeline:
             "train_rows": len(train_frame),
             "valid_rows": len(valid_frame),
             "feature_count": len(feature_columns),
+            "feature_preprocess": str(self.feature_preprocess or "none"),
+            "neutralization_mode": self._effective_neutralization_mode(),
+            "neutralize_label": bool(self.neutralize_label and self._effective_neutralization_mode() in {"industry", "industry_size"}),
             "label_method": "CSRankNorm",
             "objective": "mse",
             "oos_metrics": eval_metrics,
@@ -636,7 +1362,7 @@ class LightGBMRankerPipeline:
         model = RegressorClass(**model_params)
         fit_kwargs: dict[str, Any] = {}
         if not valid_frame.empty:
-            eval_data = (valid_frame[feature_columns], valid_frame["label"])
+            eval_data = (valid_frame[feature_columns].astype(float).copy(), valid_frame["label"])
             if self.model_type == "catboost":
                 fit_kwargs["eval_set"] = eval_data
             else:
@@ -644,7 +1370,7 @@ class LightGBMRankerPipeline:
             if self.model_type == "lightgbm":
                 fit_kwargs["callbacks"] = [_early_stopping_callback(50)]
 
-        model.fit(train_frame[feature_columns], train_frame["label"], **fit_kwargs)
+        model.fit(train_frame[feature_columns].astype(float).copy(), train_frame["label"], **fit_kwargs)
         return model
 
     @staticmethod
@@ -914,24 +1640,24 @@ def compute_stock_shap(model, stock_features: pd.DataFrame, feature_columns: lis
         return {"positive": [], "negative": []}
 
     try:
-        import shap
-    except ImportError:
-        return {"positive": [], "negative": []}
-
-    try:
         # Use the latest row
         latest_row = stock_features[feature_columns].iloc[[-1]]
         # Replace inf/nan for SHAP computation
-        latest_row = latest_row.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        latest_row = latest_row.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float).copy()
 
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(latest_row)
+        booster = getattr(model, "booster_", None)
+        if booster is None:
+            return {"positive": [], "negative": []}
+        shap_values = booster.predict(latest_row, pred_contrib=True)
 
         if shap_values is None:
             return {"positive": [], "negative": []}
 
         # shap_values shape: (1, n_features)
+        shap_values = np.asarray(shap_values)
         values = shap_values[0] if len(shap_values.shape) > 1 else shap_values
+        if len(values) == len(feature_columns) + 1:
+            values = values[:-1]
         shap_series = pd.Series(values, index=feature_columns)
 
         # Top positive contributors

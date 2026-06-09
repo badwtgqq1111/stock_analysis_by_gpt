@@ -710,12 +710,17 @@ class ClickHouseStore:
 
     def compute_rps_features(self, factor_set="qlib_alpha158",
                              windows=(5, 10, 20, 30, 60),
-                             layer="feature"):
+                             layer="feature",
+                             progress_callback=None):
         """基于已有 ROC 因子计算横截面 RPS 排名并写入同一张表。
 
         对每个窗口的 ROC 因子做跨股票百分位排名，生成 RPS_{w} 特征。
         ROC{w} = close_past / close_today，值越低收益越高，所以升序排名。
         """
+        def _progress(message):
+            if progress_callback is not None:
+                progress_callback(message)
+
         table = self._table_name("features", layer=layer)
         client = self._connect()
         rows_written = 0
@@ -724,6 +729,7 @@ class ClickHouseStore:
             for w in windows:
                 roc_name = f"ROC{w}"
                 rps_name = f"RPS_{w}"
+                _progress(f"rps window={w} querying ClickHouse")
 
                 # Get existing metadata from one ROC row
                 meta = client.query(
@@ -776,6 +782,7 @@ class ClickHouseStore:
 
                 client.insert_df(table, rps_df)
                 rows_written += len(rps_df)
+                _progress(f"rps window={w} inserted_rows={len(rps_df)}")
         finally:
             client.close()
         return rows_written
@@ -822,6 +829,6 @@ class ClickHouseStore:
         if configured_chunk_rows:
             chunk_rows = max(1, int(configured_chunk_rows))
         else:
-            chunk_rows = max(1, 300 // max(len(prepared.columns), 1))
+            chunk_rows = 50_000
         for start in range(0, len(prepared), chunk_rows):
             client.insert_df(table, prepared.iloc[start:start + chunk_rows])

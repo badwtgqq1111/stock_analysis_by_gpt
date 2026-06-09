@@ -388,10 +388,11 @@ class Alpha158FactorSet(BaseFactorSet):
 
     def metadata(self):
         config = DEFAULT_ALPHA158_CONFIG | self.config
+        feature_names = _alpha158_feature_names(config)
         return FactorSetMetadata(
             name=self.name,
             description=self.description,
             version=self.version,
             assumptions=("VWAP is approximated with OHLC4 when not available in clean layer",),
-            extra={"feature_count": len(_alpha158_feature_names(config)), "config": config},
+            extra={"feature_count": len(feature_names), "feature_names": feature_names, "config": config},
         )

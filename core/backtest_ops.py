@@ -46,6 +46,8 @@ class BacktestMixin:
         enable_theme_features=True,
         theme_feature_set="theme_opportunity",
         theme_overlay_strength=0.0,
+        model_objective="regression_csrank",
+        neutralization_mode="industry_size",
     ):
         """固定股票池组合回测：按日期横向比较评分，只持有当日最优的 Top N 信号。"""
         from backtest_engine import TopNPortfolioBuilder
@@ -140,6 +142,8 @@ class BacktestMixin:
                 backtest_date=backtest_date,
                 enable_theme_features=enable_theme_features,
                 theme_feature_set=theme_feature_set,
+                model_objective=model_objective,
+                neutralization_mode=neutralization_mode,
             )
             if not pool_results:
                 return None
@@ -440,6 +444,8 @@ class BacktestMixin:
         enable_theme_features=True,
         theme_feature_set="theme_opportunity",
         theme_overlay_strength=0.0,
+        model_objective="regression_csrank",
+        neutralization_mode="industry_size",
     ):
         """对本地已同步的全部港股执行 TopN 组合回测。"""
         return self.backtest_portfolio(
@@ -474,6 +480,8 @@ class BacktestMixin:
             enable_theme_features=enable_theme_features,
             theme_feature_set=theme_feature_set,
             theme_overlay_strength=theme_overlay_strength,
+            model_objective=model_objective,
+            neutralization_mode=neutralization_mode,
         )
 
     def backtest_strategy(self, data, buy_signals, sell_signals, initial_capital=100000, default_holding_days=60):

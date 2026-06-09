@@ -244,6 +244,15 @@ class MarketDataService:
             "estimated_rows_per_stock": estimated_rows_per_stock,
         }
 
+    @staticmethod
+    def _should_compute_rps_for_factor_set(factor_set, factor_metadata, computed_count):
+        """Only run RPS post-processing when ROC source features exist."""
+        rps_source_features = {f"ROC{window}" for window in (5, 10, 20, 30, 60)}
+        factor_feature_names = set((factor_metadata.get("extra") or {}).get("feature_names") or [])
+        if factor_feature_names:
+            return rps_source_features.issubset(factor_feature_names)
+        return factor_set in {"qlib_alpha158", "alpha158_hk"}
+
     def __init__(self, base_dir="./assets/data", data_source="akshare"):
         self.layout = DataLayout(base_dir=base_dir)
         self.data_layout = self.layout
@@ -3156,8 +3165,9 @@ class MarketDataService:
                     feature_set=factor_set,
                     feature_version=materialization["feature_version"],
                     feature_config_hash=materialization["feature_config_hash"],
-                    start_date=start_date,
+                    start_date=str(latest_trade_date.date()),
                     end_date=str(latest_trade_date.date()),
+                    columns=["stock_code", "trade_date", "feature_name"],
                 )
             except Exception:
                 return pd.DataFrame()
@@ -3188,41 +3198,66 @@ class MarketDataService:
                     adjust=normalized_adjust,
                 )
                 # latest_dates is {(code, freq): timestamp}
-                codes_with_data = [c for c in normalized_codes if (c, frequency) in latest_dates]
+                coverage_start_ts = pd.to_datetime(start_date).normalize()
+                codes_with_data = [
+                    c for c in normalized_codes
+                    if (c, frequency) in latest_dates
+                    and pd.Timestamp(latest_dates[(c, frequency)]).normalize() >= coverage_start_ts
+                ]
                 if codes_with_data:
-                    # One query for all stocks — feature dataset is partitioned
-                    # only by market=HK, so individual batch queries would each
-                    # trigger a full table scan.  One query is dramatically faster.
-                    max_date = max(
-                        latest_dates[(c, frequency)]
-                        for c in codes_with_data
-                    )
-                    existing_features_map = self.warehouse.read_features(
-                        stock_code=codes_with_data,
-                        market=normalized_market,
-                        exchange=exchange,
-                        asset_type=asset_type,
-                        frequency=frequency,
-                        adjust=normalized_adjust,
-                        feature_set=factor_set,
-                        feature_version=materialization["feature_version"],
-                        feature_config_hash=materialization["feature_config_hash"],
-                        start_date=start_date,
-                        end_date=str(pd.Timestamp(max_date).date()),
-                    )
-                    coverage_prechecked_codes.update(codes_with_data)
-                    if not existing_features_map.empty:
-                        existing_features_map["trade_date"] = pd.to_datetime(
-                            existing_features_map["trade_date"], errors="coerce"
+                    codes_by_latest_date = {}
+                    for code in codes_with_data:
+                        date_key = str(pd.Timestamp(latest_dates[(code, frequency)]).date())
+                        codes_by_latest_date.setdefault(date_key, []).append(code)
+
+                    coverage_pbar = None
+                    if show_progress:
+                        coverage_pbar = tqdm(
+                            total=len(codes_by_latest_date),
+                            desc="coverage precheck",
+                            unit="group",
+                            file=sys.stderr,
+                            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+                            "[{elapsed}<{remaining}, {rate_fmt}]",
                         )
-                        for code, group in existing_features_map.groupby("stock_code"):
-                            if (code, frequency) in latest_dates:
-                                last_date = group["trade_date"].max()
-                                n_features = group["feature_name"].nunique()
-                                ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
-                                if (last_date.normalize() >= ohlcv_latest.normalize()
-                                        and n_features >= expected_feature_count):
-                                    skip_codes.add(code)
+                    try:
+                        for latest_date, date_codes in sorted(codes_by_latest_date.items()):
+                            existing_features_map = self.warehouse.read_features(
+                                stock_code=date_codes,
+                                market=normalized_market,
+                                exchange=exchange,
+                                asset_type=asset_type,
+                                frequency=frequency,
+                                adjust=normalized_adjust,
+                                feature_set=factor_set,
+                                feature_version=materialization["feature_version"],
+                                feature_config_hash=materialization["feature_config_hash"],
+                                start_date=latest_date,
+                                end_date=latest_date,
+                                columns=["stock_code", "trade_date", "feature_name"],
+                            )
+                            coverage_prechecked_codes.update(date_codes)
+                            if not existing_features_map.empty:
+                                existing_features_map["trade_date"] = pd.to_datetime(
+                                    existing_features_map["trade_date"], errors="coerce"
+                                )
+                                for code, group in existing_features_map.groupby("stock_code"):
+                                    if (code, frequency) not in latest_dates:
+                                        continue
+                                    last_date = group["trade_date"].max()
+                                    n_features = group["feature_name"].nunique()
+                                    ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
+                                    if (last_date.normalize() >= ohlcv_latest.normalize()
+                                            and n_features >= expected_feature_count):
+                                        skip_codes.add(code)
+                            if coverage_pbar is not None:
+                                coverage_pbar.update(1)
+                                coverage_pbar.set_postfix_str(
+                                    f"date={latest_date} stocks={len(date_codes)} skipped={len(skip_codes)}"
+                                )
+                    finally:
+                        if coverage_pbar is not None:
+                            coverage_pbar.close()
             except Exception:
                 skip_codes.clear()
                 coverage_prechecked_codes.clear()
@@ -3561,13 +3596,24 @@ class MarketDataService:
         dataset_path = str(self.layout.dataset_path(self.warehouse.FEATURES_DATASET, layer="feature"))
 
         computed_n = sum(item["status"] == "computed" for item in results)
-        if computed_n > 0:
+        should_compute_rps = self._should_compute_rps_for_factor_set(factor_set, factor_metadata, computed_n)
+        if should_compute_rps:
             if show_progress:
                 _write("[PROGRESS] rps computing cross-sectional ranks")
-            n_rps = self.warehouse.compute_rps_features(factor_set=factor_set)
+            progress_callback = (
+                (lambda message: _write(f"[PROGRESS] {message}"))
+                if show_progress
+                else None
+            )
+            n_rps = self.warehouse.compute_rps_features(
+                factor_set=factor_set,
+                progress_callback=progress_callback,
+            )
             total_rows_written += n_rps
             if show_progress:
                 _write(f"[PROGRESS] rps done rows={n_rps}")
+        elif computed_n > 0 and show_progress:
+            _write(f"[PROGRESS] rps skipped factor_set={factor_set} reason=no_roc_source_features")
 
         return {
             "stock_count": total,

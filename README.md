@@ -20,22 +20,45 @@ brew install libomp
 
 ## 推荐 Runbook
 
-README 只保留两条生产主线：行情因子线负责 LightGBM 基础选股，智能画像线负责证据、图谱、热度和主题机会特征。基础标签流水线已经退出推荐流程；LightRAG 只用于 evidence 索引和重点股票深挖，不作为全市场逐股在线问答引擎。
+README 以依赖顺序组织流程：基础行情、行业元数据和因子是生产选股硬依赖；画像、事件、微结构、新闻情绪是选股前可选特征层；模型诊断、TCA、执行模拟和组合策略评估都消费 `select` 的导出结果。基础标签流水线已经退出推荐流程；LightRAG 只用于 evidence 索引和重点股票深挖，不作为全市场逐股在线问答引擎。
 
 ```text
-日常选股:
-sync -> backfill-industry -> generate-factors -> select
+基础数据:
+  sync -> backfill-industry
+       -> generate-factors
 
-智能画像/主题特征刷新:
-stock-intelligence-pipeline -> select
+选股前可选特征层:
+  stock-intelligence-pipeline -> theme_opportunity features
+  export-event-features -> event_daily features
+  export-microstructure-features -> intraday_microstructure features
+  fetch-alt -> alt_sentiment features
+
+生产选股:
+  select --analysis-mode lightgbm
+    -> ranking / selected / candidates / watchlist
+    -> liquidity_capacity / simulated TCA
+    -> LightGBM manifest / feature importance / SHAP exports
+
+选股后研究诊断:
+  lightgbm-model-diagnostics / theme-feature-diagnostics
+  lightgbm-abtest / theme-ablation / lightgbm-purged-cv-report
+  execution-simulate / fit-execution-cost-model / portfolio-policy-eval
 ```
 
-| 场景 | 跑什么 | 频率 |
-|---|---|---|
-| 第一次部署 | `uv sync --dev`，可选部署 ClickHouse、SearXNG、LightRAG | 只跑一次 |
-| 第一次建库或行情更新 | `sync`、`backfill-industry`、`generate-factors` | 初次全量，之后按交易日增量 |
-| 重新选股 | `select --analysis-mode lightgbm` | 每次要出组合 |
-| 新股票、新主题、画像过期 | `stock-intelligence-pipeline` | 按周/月，或研究主题变化时 |
+### 执行流程图
+
+![执行流程图](./docs/recommended_runbook_flow.svg)
+
+| 场景 | 前置依赖 | 跑什么 | 频率 |
+|---|---|---|---|
+| 第一次部署 | 无 | `uv sync --dev`，可选部署 ClickHouse、SearXNG、LightRAG | 只跑一次 |
+| 第一次建库或行情更新 | 无 | `sync` | 初次全量，之后按交易日增量 |
+| 行业、标的类型、可交易性刷新 | `sync` 产生代码池 | `backfill-industry`、`industry-coverage` | 新股票或元数据过期时 |
+| 因子刷新 | `sync` 产生 OHLCV | `generate-factors --factor-set alpha158_hk` | 每次重训/选股前 |
+| 智能画像/主题特征刷新 | SearXNG、LightRAG、别名/evidence | `stock-intelligence-pipeline --import-to-warehouse` | 按周/月，或研究主题变化时 |
+| 事件/微结构实验特征 | 外部事件 CSV 或分钟线 CSV | `export-event-features`、`export-microstructure-features`，再接入特征仓库 | 研究需要时，在 `select` 前 |
+| 生产选股 | `sync`、`generate-factors`；强烈建议先 `backfill-industry`；可叠加特征层 | `select --analysis-mode lightgbm --export-csv output/results` | 每次要出组合 |
+| 选股后验收 | `select` 导出的 ranking/selected/feature artifacts | `lightgbm-model-diagnostics`、`theme-feature-diagnostics`、Purged CV、A/B、TCA/RL | 每次模型或特征变化后 |
 
 ### 日常选股
 
@@ -55,7 +78,38 @@ uv run python run.py select \
   --show-progress
 ```
 
-`select --analysis-mode lightgbm` 会在单次命令内训练和预测，不依赖 `validate-factors`。只有旧的 `select --analysis-mode factor` 才需要先跑 `validate-factors`。
+`select --analysis-mode lightgbm` 会在单次命令内训练和预测，不依赖 `validate-factors`。生产默认 `--factor-set alpha158_hk`、`--model-objective regression_csrank`、`industry_size` 中性化；`lambdarank` 和 `rank_xendcg` 只作为对照实验。只有旧的 `select --analysis-mode factor` 才需要先跑 `validate-factors`。
+
+`select --export-csv output/results` 会同时导出排名、持仓、候选池、观察名单、行业归因、流动性容量、模拟 TCA、模型 manifest、特征重要性和 SHAP 解释文件。后续诊断、成本模型和组合策略评估都应消费这些产物，不要反向依赖选股前的原始特征文件。
+
+### 国泰君安 191 因子
+
+`alpha158_hk` 已经合并国泰君安 191 因子，生产选股继续只需要跑 `alpha158_hk`。输出中会同时包含 Qlib Alpha158、9 个港股定制因子，以及 `GTJA001` 到 `GTJA191`：
+
+```bash
+uv run python run.py generate-factors \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --max-workers 8 \
+  --show-progress
+
+uv run python run.py factor-report \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --export-csv output/factor_report_alpha158_hk \
+  --show-progress
+
+uv run python run.py select \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --max-workers 8 \
+  --export-csv output/results \
+  --show-progress
+```
+
+如需单独评估 GTJA191 的边际贡献，可以临时使用 `--factor-set gtja_alpha191` 跑 `factor-report` 或小样本对照。注意：原始 GTJA191 中的 `RANK(x)` 是横截面排名，本项目当前因子物化是单股 OHLCV 流式计算，因此内置实现用滚动时序百分位做代理，并在 metadata 中标明。建议让 LightGBM 做特征选择，不建议把 191 个因子等权用于 factor 模式。
 
 ### 智能画像/主题特征刷新
 
@@ -121,11 +175,18 @@ uv run python run.py select \
 跑完选股后，用诊断命令检查智能画像是否真的贡献了有效覆盖，而不是只生成了空特征：
 
 ```bash
+uv run python run.py lightgbm-model-diagnostics \
+  --ranking-csv output/results_alpha158_hk_ranking.csv \
+  --selected-csv output/results_alpha158_hk_selected.csv \
+  --output-json output/lightgbm_model_diagnostics.json
+
 uv run python run.py theme-feature-diagnostics \
   --ranking-csv output/results_alpha158_hk_ranking.csv \
   --selected-csv output/results_alpha158_hk_selected.csv \
   --theme-feature-csv output/theme_opportunity_features.csv
 ```
+
+`lightgbm-model-diagnostics` 重点看 `selected_high_chase_rate`、`selected_60d_multibagger_rate`、`selected_120d_multibagger_rate`、`selected_near_52w_high_rate` 和 `selected_high_chase_stocks`。如果持仓里出现过去 60/120 日翻倍、接近 52 周高点且 `high_chase_score` 很高的股票，这不是“正常强势”，而是追高红旗；应先确认是否被 `eligibility_reasons` 拦截，并用中性化/特征家族/主题 ablation 查模型是不是被短期动量主导。
 
 重点看 `theme_feature_stock_coverage_rate`、`theme_opportunity_score` 的 `non_zero_rate`、高分桶平均收益、持仓里 `non_zero` 的数量，以及主题分质量里的 `high_score_zero_relevance_rate`。若 `avg_stocks_per_feature_name` 接近 100 且覆盖率很低，通常是生产命令误加了 `--top-n`，先不带 `--top-n` 重跑智能画像特征；若 `high_score_zero_relevance_rate` 偏高，说明旧主题分被泛热度/泛证据顶高，需要用相关性闸门版本重跑主题分；若全量输出后非零覆盖仍低于 20%，再扩大主题体系或补充行业主题；若高分桶没有更高胜率，不要提高 overlay 权重。
 
@@ -371,7 +432,7 @@ uv run python run.py select \
 | 文件 | 检查项 |
 |---|---|
 | `output/results_alpha158_hk_ranking.csv` | 包含 `selection_eligible`、`eligibility_reasons`、`industry_rank`、`industry_score`、`industry_cap` |
-| `output/results_alpha158_hk_selected.csv` | 全部 `selection_eligible=True` 且 `industry_rank <= industry_cap` |
+| `output/results_alpha158_hk_selected.csv` | 全部 `selection_eligible=True` 且 `industry_rank <= industry_cap`；重点检查 `high_chase_score`、`price_return_60d_pct`、`price_return_120d_pct` |
 | `output/results_alpha158_hk_industry_weights.csv` | 行业权重、预算和 HHI 是否过度集中 |
 | `output/results_alpha158_hk_industry_attribution.csv` | 行业内 Alpha、行业机会分、Hot/Cold bucket、OOS gate |
 | `docs/report/{日期}_llm.md` | 入选/剔除理由是否能解释行业、质量、估值、流动性 |
@@ -429,6 +490,8 @@ uv run python run.py select \
 | `factor-report` | `generate-factors` | 独立评估因子 IC/RankIC |
 | `fetch-alt` | 无 | 可选新闻情感特征，LightGBM 有数据则自动加载 |
 | `stock-intelligence-pipeline` | SearXNG、LightRAG、别名表 | 推荐主流程，一条命令生成画像图谱、热度、主题分和 LightGBM 特征 |
+| `export-event-features` | 事件/NLP CSV，需 `stock_code` 和 `available_at`/`publish_time`/`event_time`/`event_date` 之一 | 生成 PIT 日频事件特征；如要参与模型，需在 `select` 前接入特征仓库 |
+| `export-microstructure-features` | 分钟线/盘中 bars CSV | 聚合日频微结构特征；如要参与模型，需在 `select` 前接入特征仓库 |
 | `build-stock-entity-aliases` | `stock_info_registry`、人工别名可选 | 生成股票/公司/产品/模型别名 |
 | `expand-stock-entity-aliases` | 深度 evidence、别名表 | 从 evidence 里补产品名、模型名、技术名 |
 | `research-stock-deep-profile` | 别名表、本地 SearXNG | 主动检索股票画像/图谱 evidence |
@@ -441,6 +504,14 @@ uv run python run.py select \
 | `rank-theme-opportunities` | 图谱、热度、evidence | 生成主题机会分 |
 | `export-theme-score-features` | 主题机会分 | 导出 `theme_opportunity` 标准特征供 LightGBM 读取 |
 | `stock-subgraph` | 图节点/边 CSV 或仓库 | 查看某只股票的画像子图 |
+| `lightgbm-model-diagnostics` | `select` 导出的 ranking/selected CSV | 模型追高诊断：特征家族重要性、动量暴露、多倍涨幅红旗 |
+| `theme-feature-diagnostics` | `select` 导出 + 主题特征 CSV | 主题画像覆盖率、分桶收益、持仓命中诊断 |
+| `lightgbm-abtest` | 无（内部调用 `select`） | 中性化模式 A/B 对照：`none` vs `industry` vs `industry_size` |
+| `theme-ablation` | 无（内部调用 `select`） | 画像特征 ablation：with/without 主题特征的 OOS 对比 |
+| `lightgbm-purged-cv-report` | 带日期、预测分和 forward return 的 ranking/prediction CSV | 生成 Purged CV fold-level 报告，验证研究协议稳定性 |
+| `execution-simulate` | 订单参数，可选真实/合成盘中切片 | TWAP/VWAP/POV/IS/AC 执行 baseline 模拟 |
+| `fit-execution-cost-model` | simulated/real TCA CSV | 训练/诊断监督式执行成本模型 |
+| `portfolio-policy-eval` | ranking/panel CSV，需 `trade_date`、`stock_code`、分数、forward return、成本字段 | 离线评估 expert/imitation 组合 policy |
 
 常用命令模板：
 
@@ -464,9 +535,17 @@ uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progre
 |---|---|
 | `{base}_{factor_set}_ranking.csv` | 全市场排名、硬过滤原因、行业排名 |
 | `{base}_{factor_set}_selected.csv` | 最终持仓 |
+| `{base}_{factor_set}_candidates.csv` | 进入组合构建但未最终持有的候选池 |
 | `{base}_{factor_set}_watchlist.csv` | 观察名单 |
 | `{base}_{factor_set}_industry_weights.csv` | 组合行业权重 |
 | `{base}_{factor_set}_industry_attribution.csv` | 行业 Core/Overlay 归因 |
+| `{base}_{factor_set}_liquidity_capacity.csv` | ADV、订单占比、预估滑点/冲击、流动性容量分 |
+| `{base}_{factor_set}_tca_simulated_report.csv` | 基于组合 replay 的 simulated TCA，供执行成本模型和 RL reward sanity check 使用 |
+| `output/lightgbm_feature_importance.json` | LightGBM 特征重要性 |
+| `output/lightgbm_model_manifest.json` | 模型训练配置、特征集、目标函数和数据窗口 manifest |
+| `output/stock_shap_contribution.csv` | 最新截面 stock-feature SHAP 长表 |
+| `output/portfolio_shap_exposure.csv` | 组合层面按特征家族汇总的 SHAP 暴露 |
+| `output/shap_history_latest.json` | 最新 SHAP 历史窗口，可用于漂移检测 |
 
 行业分层字段：
 
@@ -489,6 +568,142 @@ uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progre
 | `portfolio_industry_hhi_invested` | 已投资仓位归一化后的行业集中度，避免现金仓位稀释 HHI |
 
 `Broken` 行业不会进入 selected；如个股本身信号强，会被放入 watchlist 供观察。Overlay 的 OOS gate 当前使用本次可得的 OOS/forward-return 汇总做代理检验，后续如接入完整历史行业轮动 panel，可替换为严格 walk-forward 口径。
+
+## 选股后诊断与研究流程
+
+这些命令按依赖分组使用：事件、微结构和画像特征必须在 `select` 前准备；模型诊断、Purged CV、TCA、执行成本模型和组合 policy 评估都在 `select` 导出结果之后运行。
+
+```bash
+# A. 选股前可选特征：文本事件 CSV -> PIT 日频特征
+uv run python run.py export-event-features \
+  --events-csv output/events.csv \
+  --long-format \
+  --output-csv output/event_daily_features.csv
+
+# A. 选股前可选特征：分钟线 -> 日频微结构特征
+uv run python run.py export-microstructure-features \
+  --bars-csv output/minute_bars.csv \
+  --long-format \
+  --output-csv output/intraday_microstructure_features.csv
+
+# B. 生产选股：自带 manifest、特征重要性、SHAP、流动性容量和模拟 TCA 导出
+uv run python run.py select \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --min-market-cap 30 \
+  --min-daily-turnover 500 \
+  --max-workers 8 \
+  --export-csv output/results \
+  --show-progress
+
+# C. 选股后验收：模型追高/动量诊断
+uv run python run.py lightgbm-model-diagnostics \
+  --ranking-csv output/results_alpha158_hk_ranking.csv \
+  --selected-csv output/results_alpha158_hk_selected.csv \
+  --feature-importance-json output/lightgbm_feature_importance.json \
+  --output-json output/lightgbm_model_diagnostics.json
+
+# C. 选股后验收：主题画像诊断（如果启用了智能画像）
+uv run python run.py theme-feature-diagnostics \
+  --ranking-csv output/results_alpha158_hk_ranking.csv \
+  --selected-csv output/results_alpha158_hk_selected.csv \
+  --theme-feature-csv output/theme_opportunity_features.csv \
+  --theme-score-csv output/theme_opportunities.csv
+
+# C. 研究协议：Purged CV fold-level 报告
+uv run python run.py lightgbm-purged-cv-report \
+  --predictions-csv output/results_alpha158_hk_ranking.csv \
+  --score-col model_score \
+  --target-col forward_return_20 \
+  --output-csv output/lightgbm_purged_cv_report.csv \
+  --output-json output/lightgbm_purged_cv_summary.json
+
+# D. A/B：中性化模式对照，内部会调用 select
+uv run python run.py lightgbm-abtest \
+  --compare none,industry,industry_size \
+  --days 365 \
+  --stock-limit 300 \
+  --output-json output/lightgbm_abtest.json
+
+# D. A/B：主题画像 ablation，内部会调用 select
+uv run python run.py theme-ablation \
+  --days 365 \
+  --stock-limit 300 \
+  --output-json output/theme_ablation.json
+
+# D. A/B：实验性 LambdaRank 对照
+uv run python run.py select \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --factor-set alpha158_hk \
+  --model-objective lambdarank \
+  --export-csv output/results_lambdarank \
+  --show-progress
+
+# E. 执行层 baseline：TWAP/VWAP/POV/IS/AC 模拟
+uv run python run.py execution-simulate \
+  --stock-code 00700 \
+  --side buy \
+  --quantity 10000 \
+  --arrival-price 300 \
+  --algo pov \
+  --max-pov 0.10 \
+  --output-csv output/execution_simulated_report.csv
+
+# E. 组合 RL sandbox：expert / imitation policy 离线评估
+uv run python run.py portfolio-policy-eval \
+  --panel-csv output/results_alpha158_hk_ranking.csv \
+  --policy expert \
+  --output-json output/portfolio_policy_eval.json
+
+# E. 执行成本模型：simulated/real TCA -> 监督成本模型
+uv run python run.py fit-execution-cost-model \
+  --tca-csv output/results_alpha158_hk_tca_simulated_report.csv \
+  --output-json output/execution_cost_model.json
+```
+
+`export-event-features` 和 `export-microstructure-features` 默认只生成 CSV。要让它们参与 LightGBM，需要把 long-format 结果按标准特征口径导入 Parquet/ClickHouse 或接入特征加载链路，然后再跑 `select`。`portfolio-policy-eval` 需要的是多日期 panel；单日 ranking CSV 只适合 CLI smoke，不代表完整离线策略评估。
+
+### 诊断指标验收标准
+
+| 指标 | 目标 | 说明 |
+|---|---|---|
+| 单一特征家族 gain 占比 | < 35% | momentum/value/volume 等不应一家独大 |
+| TopK 追高比例 | < 50% | `selected_high_chase_rate` 不过半 |
+| 60 日涨幅 >100% 的持仓比例 | < 30% | `selected_60d_multibagger_rate` 不超标 |
+| 接近 52 周高点比例 | < 50% | `selected_near_52w_high_rate` |
+| OOS IC / RankIC | 同向为正 | 不能只靠 1-2 个行业贡献 |
+| 主题特征贡献 | > 0 或模型自然降权 | `theme_features_zero_contribution` 才需排查 |
+| 中性化后 IC | 允许略降但回撤/高位暴露应下降 | 优先实盘稳定性 |
+| 成本后排名 | 低成本不等于好股票，但高成本必须扣分 | `cost_adjusted_ranking_score` |
+| TCA 模拟成本 | 用于执行 RL 前的 reward sanity check | `*_tca_simulated_report.csv` |
+
+### 模型目标函数对照
+
+| 模式 | CLI 参数 | 适用场景 |
+|---|---|---|
+| MSE 回归 + CSRankNorm（基线） | `--model-objective regression_csrank` | 生产默认 |
+| LambdaRank + date group | `--model-objective lambdarank` | TopK 优化对照 |
+| RankXENDCG | `--model-objective rank_xendcg` | 更快收敛的 rank 对照 |
+
+LambdaRank 不是默认替代——应先在 A/B 中确认真实 OOS 提升后再考虑小权重 ensemble。
+
+### 成本感知组合与执行研究
+
+`select --export-csv` 会额外导出：
+
+| 产物 | 说明 |
+|---|---|
+| `*_liquidity_capacity.csv` | `adv_20d`、`order_size_to_adv`、预估滑点/冲击、流动性容量分 |
+| `*_tca_simulated_report.csv` | 基于组合 replay 成交记录生成的 simulated TCA |
+| `output/stock_shap_contribution.csv` | LightGBM 最新截面 stock-feature SHAP 长表 |
+| `output/portfolio_shap_exposure.csv` | 按特征家族汇总的组合 SHAP 暴露 |
+| `output/shap_history_latest.json` | 可接入 `compute_shap_drift` 的 SHAP 历史窗口 |
+
+组合 ranking/selected 中会带 `expected_transaction_cost_bps`、`liquidity_capacity_score` 和 `cost_adjusted_ranking_score`。这些字段是规则组合器和后续 RL 环境的共同接口；真实券商成交回报接入前，TCA 明确标记为 simulated。
 
 ## 辅助功能
 

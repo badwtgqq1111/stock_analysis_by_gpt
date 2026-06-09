@@ -175,6 +175,76 @@ class LightGBMAnalysisMixin:
         )
 
     @staticmethod
+    def _compute_price_momentum_snapshot(data):
+        """Compute point-in-time price-position fields used to detect chasing."""
+        fields = {
+            "price_return_5d_pct": np.nan,
+            "price_return_20d_pct": np.nan,
+            "price_return_60d_pct": np.nan,
+            "price_return_120d_pct": np.nan,
+            "price_return_252d_pct": np.nan,
+            "price_position_52w_high": np.nan,
+            "ma60_gap_pct": np.nan,
+            "high_chase_score": 0.0,
+            "high_chase_reasons": [],
+        }
+        if data is None or data.empty or "Close" not in data.columns:
+            return fields
+
+        close = pd.to_numeric(data["Close"], errors="coerce").dropna()
+        if close.empty:
+            return fields
+        high = pd.to_numeric(data.get("High", data["Close"]), errors="coerce").reindex(close.index)
+        latest = float(close.iloc[-1])
+        if not np.isfinite(latest) or latest <= 0:
+            return fields
+
+        def _ret_pct(days):
+            if len(close) <= days:
+                return np.nan
+            base = float(close.iloc[-days - 1])
+            if not np.isfinite(base) or base <= 0:
+                return np.nan
+            return (latest / base - 1.0) * 100.0
+
+        for days in (5, 20, 60, 120, 252):
+            fields[f"price_return_{days}d_pct"] = _ret_pct(days)
+
+        high252 = high.rolling(252, min_periods=min(60, len(high))).max().iloc[-1]
+        if pd.notna(high252) and high252 > 0:
+            fields["price_position_52w_high"] = latest / float(high252) * 100.0
+        ma60 = close.rolling(60, min_periods=min(20, len(close))).mean().iloc[-1]
+        if pd.notna(ma60) and ma60 > 0:
+            fields["ma60_gap_pct"] = (latest / float(ma60) - 1.0) * 100.0
+
+        ret20 = fields["price_return_20d_pct"]
+        ret60 = fields["price_return_60d_pct"]
+        ret120 = fields["price_return_120d_pct"]
+        position = fields["price_position_52w_high"]
+        ma60_gap = fields["ma60_gap_pct"]
+        score = 0.0
+        reasons = []
+        if pd.notna(ret20) and ret20 >= 35:
+            score += min(25.0, (ret20 - 35.0) * 0.8)
+            reasons.append(f"ret20={ret20:.0f}%")
+        if pd.notna(ret60) and ret60 >= 80:
+            score += min(35.0, (ret60 - 80.0) * 0.45)
+            reasons.append(f"ret60={ret60:.0f}%")
+        if pd.notna(ret120) and ret120 >= 150:
+            score += min(30.0, (ret120 - 150.0) * 0.25)
+            reasons.append(f"ret120={ret120:.0f}%")
+        if pd.notna(position) and position >= 95:
+            score += min(15.0, (position - 95.0) * 3.0)
+            reasons.append(f"52w_high_pos={position:.0f}")
+        if pd.notna(ma60_gap) and ma60_gap >= 45:
+            score += min(25.0, (ma60_gap - 45.0) * 0.7)
+            reasons.append(f"ma60_gap={ma60_gap:.0f}%")
+
+        fields["high_chase_score"] = float(np.clip(score, 0.0, 100.0))
+        fields["high_chase_reasons"] = reasons
+        return fields
+
+    @staticmethod
     def _compute_sector_features(batch_data_map):
         """从 batch OHLCV 数据计算行业/赛道特征。"""
         try:
@@ -455,6 +525,8 @@ class LightGBMAnalysisMixin:
         backtest_date=None,
         enable_theme_features=True,
         theme_feature_set="theme_opportunity",
+        model_objective="regression_csrank",
+        neutralization_mode="industry_size",
     ):
         import core as core_module
         from factor_engine import FactorContext
@@ -466,7 +538,14 @@ class LightGBMAnalysisMixin:
 
         ranker_cls = core_module.LightGBMRankerPipeline
         try:
-            ranker = ranker_cls(max_features=max_features, model_type=model_type, neutralize_cluster_features=True)
+            ranker = ranker_cls(
+                max_features=max_features,
+                model_type=model_type,
+                neutralize_cluster_features=False,
+                neutralization_mode=neutralization_mode,
+                neutralize_label=neutralization_mode != "none",
+                objective_mode=model_objective,
+            )
         except TypeError:
             ranker = ranker_cls()
         label_horizon = int(getattr(ranker, "label_horizon", 20))
@@ -541,10 +620,13 @@ class LightGBMAnalysisMixin:
             ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
 
             stock_info = self.market_warehouse.get_stock_info(stock_code)
+            _stock_market_cap = np.nan
+            if stock_info and stock_info.get("market_cap"):
+                _stock_market_cap = float(stock_info["market_cap"])
             if stock_info and stock_info.get("total_shares"):
                 ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
-            if stock_info and stock_info.get("market_cap"):
-                ohlcv_frame["market_cap"] = float(stock_info["market_cap"])
+            if np.isfinite(_stock_market_cap):
+                ohlcv_frame["market_cap"] = _stock_market_cap
 
             factor = core_module.create_factor_set(factor_set)
             context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
@@ -582,6 +664,11 @@ class LightGBMAnalysisMixin:
                         if col not in ("stock_code", "industry_l1", "industry_l2"):
                             feature_frame[col] = stock_ind[col].iloc[0]
             feature_frame["stock_code"] = stock_code
+            feature_frame["market_cap"] = _stock_market_cap
+            feature_frame["log_market_cap"] = np.log(_stock_market_cap) if np.isfinite(_stock_market_cap) and _stock_market_cap > 0 else np.nan
+            mapped_info = stock_info_map.get(stock_code) or {}
+            feature_frame["industry_l1"] = mapped_info.get("industry_l1")
+            feature_frame["industry_l2"] = mapped_info.get("industry_l2")
             feature_frames.append(feature_frame)
 
             forward_metrics = self._compute_forward_metrics(full_data, execution_delay=execution_delay)
@@ -590,10 +677,6 @@ class LightGBMAnalysisMixin:
             target_frame = forward_metrics[target_columns].copy()
             target_frame["stock_code"] = stock_code
             target_frames.append(target_frame)
-
-            _stock_market_cap = np.nan
-            if stock_info and stock_info.get("market_cap"):
-                _stock_market_cap = float(stock_info["market_cap"])
 
             batch_results.append(
                 {
@@ -649,6 +732,28 @@ class LightGBMAnalysisMixin:
             )
         try:
             panel_scores, model_metadata = ranker.fit_predict(panel_features, panel_targets)
+            try:
+                from factor_engine.ml.model_manifest import build_lightgbm_model_manifest
+
+                model_metadata["model_manifest"] = build_lightgbm_model_manifest(
+                    factor_set=factor_set,
+                    model_metadata=model_metadata,
+                )
+                # Auto-export model manifest to disk for reproducibility
+                try:
+                    import json as _json
+                    from pathlib import Path as _Path
+                    _manifest_path = _Path("output/lightgbm_model_manifest.json")
+                    _manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                    _manifest_payload = dict(model_metadata["model_manifest"])
+                    _manifest_payload["preprocess_metadata"] = model_metadata.get("preprocess_metadata", {})
+                    _manifest_payload["neutralization_metadata"] = model_metadata.get("neutralization_metadata", {})
+                    _manifest_path.write_text(_json.dumps(_manifest_payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+                    model_metadata["model_manifest_path"] = str(_manifest_path)
+                except Exception:
+                    pass
+            except Exception:
+                pass
         except Exception as exc:
             print(f"[ERROR] LightGBM 排序学习失败: {exc}")
             return []
@@ -712,40 +817,11 @@ class LightGBMAnalysisMixin:
         quality_scores: dict[str, float] = {}
         quality_details: dict[str, dict] = {}
         try:
-            from core.industry_scoring import compute_industry_quality_scores
-            from core.quality import enrich_with_quality, fetch_quality_components_batch
+            from core.quality import enrich_with_quality
 
             if show_progress:
-                print("[QUALITY] 正在获取基本面质量评分...")
-            quality_components = fetch_quality_components_batch(
-                batch_codes,
-                max_workers=8,
-                progress_callback=(
-                    lambda done, total: print(
-                        f"\r[QUALITY] {done}/{total} ({done/total*100:.0f}%)",
-                        end="", file=sys.stderr,
-                    )
-                    if show_progress else None
-                ),
-            )
-            if show_progress:
-                print(file=sys.stderr)
-            industry_quality = compute_industry_quality_scores(
-                quality_components,
-                industry_l2_map,
-                industry_l1_map,
-            )
-            if not industry_quality.empty:
-                quality_details = {
-                    str(row["stock_code"]): row.to_dict()
-                    for _, row in industry_quality.iterrows()
-                }
-                quality_raw = {
-                    code: details.get("quality_score", np.nan)
-                    for code, details in quality_details.items()
-                }
-            else:
-                quality_raw = {}
+                print("[QUALITY] 跳过 live 基本面抓取，使用中性质量分（避免外部请求拖慢/崩溃主流程）")
+            quality_raw = {}
             quality_scores = enrich_with_quality(
                 batch_codes,
                 quality_raw,
@@ -761,23 +837,11 @@ class LightGBMAnalysisMixin:
         industry_valuation_details: dict[str, dict] = {}
         try:
             from core.industry_scoring import compute_industry_valuation_scores
-            from core.sector_valuation import compute_sector_valuation, fetch_valuation_batch
+            from core.sector_valuation import compute_sector_valuation
 
             if show_progress:
-                print("[VALUATION] 正在获取估值与赛道热度评分...")
-            pe_pb_data = fetch_valuation_batch(
-                batch_codes,
-                max_workers=20,
-                progress_callback=(
-                    lambda done, total: print(
-                        f"\r[VALUATION] {done}/{total} ({done/total*100:.0f}%)",
-                        end="", file=sys.stderr,
-                    )
-                    if show_progress else None
-                ),
-            )
-            if show_progress:
-                print(file=sys.stderr)
+                print("[VALUATION] 跳过 live 估值抓取，使用中性估值分（避免外部请求拖慢/崩溃主流程）")
+            pe_pb_data = {code: (np.nan, np.nan) for code in batch_codes}
             valuation_df = compute_sector_valuation(batch_data_map, pe_pb_data, sector_features)
             valuation_payload = {
                 code: {
@@ -837,6 +901,40 @@ class LightGBMAnalysisMixin:
                 cs_mask = panel_features.index == latest_date
                 if cs_mask.any():
                     cross_section_features = panel_features.loc[cs_mask].copy()
+        if final_model is not None and feature_columns and cross_section_features is not None and not cross_section_features.empty:
+            try:
+                import json as _json
+                from pathlib import Path as _Path
+                from factor_engine.ml.shap_monitoring import (
+                    compute_shap_contribution_frame,
+                    summarize_portfolio_shap_exposure,
+                    summarize_shap_history,
+                )
+
+                shap_frame = compute_shap_contribution_frame(
+                    final_model,
+                    cross_section_features,
+                    feature_columns,
+                    trade_date=panel_features.index.max(),
+                )
+                if shap_frame is not None and not shap_frame.empty:
+                    _Path("output").mkdir(parents=True, exist_ok=True)
+                    shap_path = _Path("output/stock_shap_contribution.csv")
+                    shap_frame.to_csv(shap_path, index=False, encoding="utf-8-sig")
+                    exposure_frame = summarize_portfolio_shap_exposure(shap_frame)
+                    exposure_path = _Path("output/portfolio_shap_exposure.csv")
+                    exposure_frame.to_csv(exposure_path, index=False, encoding="utf-8-sig")
+                    history_path = _Path("output/shap_history_latest.json")
+                    history_path.write_text(
+                        _json.dumps(summarize_shap_history(shap_frame), ensure_ascii=False, indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                    model_metadata["stock_shap_contribution_csv"] = str(shap_path)
+                    model_metadata["portfolio_shap_exposure_csv"] = str(exposure_path)
+                    model_metadata["shap_history_json"] = str(history_path)
+            except Exception as exc:
+                if show_progress:
+                    print(f"[PROGRESS] analysis phase=lightgbm_shap_export error={exc}")
 
         for item in batch_results:
             stock_code = item["stock_code"]
@@ -969,6 +1067,7 @@ class LightGBMAnalysisMixin:
             # Reference: Barroso & Santa-Clara (2015)
             recent_vol = self._compute_recent_volatility(analysis_data, window=60)
             tactical_overlay = self._compute_lightgbm_tactical_overlay(analysis_data)
+            price_momentum_snapshot = self._compute_price_momentum_snapshot(analysis_data)
             risk_adjusted_score = (
                 latest_model_score - drawdown_penalty_score * 0.65
                 if pd.notna(latest_model_score) and pd.notna(drawdown_penalty_score)
@@ -1090,6 +1189,7 @@ class LightGBMAnalysisMixin:
                     "backtest": backtest_result,
                     "latest_price": analysis_data["Close"].iloc[-1],
                     "price_change_30d": (analysis_data["Close"].iloc[-1] - analysis_data["Close"].iloc[-30]) / analysis_data["Close"].iloc[-30] * 100 if len(analysis_data) >= 30 else 0,
+                    **price_momentum_snapshot,
                     "latest_expected_3m_score": latest_model_score,
                     "latest_matrix_score": latest_model_score,
                     "latest_regime_score": q_score,

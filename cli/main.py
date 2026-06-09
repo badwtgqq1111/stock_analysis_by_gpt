@@ -38,10 +38,16 @@ def run_cli(argv=None):
     parser.add_argument('--analysis-mode', dest='analysis_mode', default='factor',
                         choices=['factor', 'strategy', 'lightgbm'],
                         help='全市场分析模式：factor / strategy / lightgbm，默认 factor')
-    parser.add_argument('--factor-set', dest='factor_set', default='qlib_alpha158',
-                        help='因子模式下使用的因子集，默认 qlib_alpha158')
+    parser.add_argument('--factor-set', dest='factor_set', default='alpha158_hk',
+                        help='因子/LightGBM 模式下使用的因子集，默认 alpha158_hk')
     parser.add_argument('--max-features', dest='max_features', type=int, default=0,
                         help='LightGBM 模式下的最大因子数（先训练→按 importance 筛到 TopN→重训），0 表示使用全部因子')
+    parser.add_argument('--model-objective', dest='model_objective', default='regression_csrank',
+                        choices=['regression_csrank', 'lambdarank', 'rank_xendcg'],
+                        help='LightGBM 目标函数: regression_csrank (默认基线), lambdarank, rank_xendcg')
+    parser.add_argument('--neutralization-mode', dest='neutralization_mode', default='industry_size',
+                        choices=['none', 'industry', 'industry_size'],
+                        help='特征/标签中性化模式: none, industry, industry_size (默认)')
     parser.add_argument('--model-type', dest='model_type', default='lightgbm',
                         choices=['lightgbm', 'xgboost', 'catboost'],
                         help='Ranker 模型类型: lightgbm (默认), xgboost, catboost')
@@ -76,6 +82,8 @@ def run_cli(argv=None):
                         help='因子验证最小样本数，默认 5')
     parser.add_argument('--stock-limit', dest='stock_limit', type=int, default=None,
                         help='限制参与因子验证/扫描的股票数量，默认不限制')
+    parser.add_argument('--stock-codes', dest='stock_codes', nargs='*', default=None,
+                        help='限制参与 select/lightgbm-abtest/theme-ablation 的股票代码列表')
     parser.add_argument('--use-recommended-factor-weights', dest='use_recommended_factor_weights', action='store_true',
                         help='在 all_hk factor 模式下先跑因子验证，再使用 recommended_factor_weight 回填打分权重')
     parser.add_argument('--validation-days', dest='validation_days', type=int, default=None,
@@ -173,6 +181,8 @@ def run_cli(argv=None):
             max_workers=args.max_workers,
             analysis_mode=args.analysis_mode,
             factor_set=args.factor_set,
+            stock_codes=args.stock_codes,
+            stock_limit=args.stock_limit,
             show_progress=args.show_progress,
             fast_mode=args.fast_mode,
             backtest_date=args.backtest_date,
@@ -185,6 +195,8 @@ def run_cli(argv=None):
             signal_recipes=signal_recipes,
             max_features=args.max_features,
             model_type=args.model_type,
+            model_objective=args.model_objective,
+            neutralization_mode=args.neutralization_mode,
             min_market_cap=args.min_market_cap,
             min_daily_turnover=args.min_daily_turnover,
             min_ipo_days=args.min_ipo_days,

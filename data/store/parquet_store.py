@@ -327,21 +327,51 @@ class ParquetDataStore:
 
     def compute_rps_features(self, factor_set="qlib_alpha158",
                              windows=(5, 10, 20, 30, 60),
-                             layer="feature"):
+                             layer="feature",
+                             progress_callback=None):
         """基于已有 ROC 因子计算横截面 RPS 排名（pandas 实现）。
 
         ROC{w} = close_past / close_today，值越低收益越高。
         """
-        import numpy as np
+        def _progress(message):
+            if progress_callback is not None:
+                progress_callback(message)
 
         roc_names = [f"ROC{w}" for w in windows]
+        rps_names = [f"RPS_{w}" for w in windows]
+        key_columns = [
+            "market", "stock_code", "trade_date", "frequency", "adjust",
+            "feature_set", "feature_version", "feature_config_hash", "feature_name",
+        ]
+        columns_to_read = [
+            "trade_date", "stock_code", "market", "exchange", "asset_type",
+            "frequency", "adjust", "feature_set", "feature_version",
+            "feature_config_hash", "feature_name", "feature_value",
+        ]
+        _progress(f"rps reading source ROC rows windows={','.join(map(str, windows))}")
         roc_long = self.read_frame(
             "features", layer=layer,
             filters={"feature_set": factor_set, "feature_name": roc_names},
-            order_by="trade_date, stock_code, feature_name",
+            columns=columns_to_read,
         )
+        _progress(f"rps source rows={len(roc_long)}")
         if roc_long.empty:
             return 0
+
+        _progress("rps reading existing RPS rows")
+        existing_rps = self.read_frame(
+            "features", layer=layer,
+            filters={"feature_set": factor_set, "feature_name": rps_names},
+            columns=key_columns,
+        )
+        _progress(f"rps existing rows={len(existing_rps)}")
+        existing_keys_by_name = {}
+        if not existing_rps.empty:
+            existing_rps["trade_date"] = pd.to_datetime(existing_rps["trade_date"], errors="coerce")
+            for feature_name, group in existing_rps.groupby("feature_name", sort=False):
+                existing_keys_by_name[feature_name] = set(
+                    group[key_columns].itertuples(index=False, name=None)
+                )
 
         rows = []
         for feature_name, group in roc_long.groupby("feature_name", sort=False):
@@ -350,6 +380,7 @@ class ParquetDataStore:
             group = group.dropna(subset=["feature_value"]).copy()
             if group.empty:
                 continue
+            source_rows = len(group)
             group["feature_value"] = (
                 group.groupby("trade_date")["feature_value"]
                 .rank(ascending=True, pct=True) * 100
@@ -357,6 +388,19 @@ class ParquetDataStore:
             group["feature_name"] = rps_name
             group["source"] = "rps"
             group["ingest_time"] = pd.Timestamp.utcnow()
+            existing_keys = existing_keys_by_name.get(rps_name)
+            if existing_keys:
+                missing_mask = [
+                    key not in existing_keys
+                    for key in group[key_columns].itertuples(index=False, name=None)
+                ]
+                group = group.loc[missing_mask].copy()
+            _progress(
+                f"rps window={w} source_rows={source_rows} "
+                f"missing_rows={len(group)} existing_rows={source_rows - len(group)}"
+            )
+            if group.empty:
+                continue
             rows.append(group)
 
         if not rows:
@@ -370,15 +414,16 @@ class ParquetDataStore:
             "source", "ingest_time",
         ]
         result = result[[c for c in columns_to_write if c in result.columns]]
-        self.upsert_frame(
+        self.append_frame(
             "features", result,
-            dedupe_keys=[
-                "market", "stock_code", "trade_date", "frequency", "adjust",
-                "feature_set", "feature_version", "feature_config_hash", "feature_name",
-            ],
             layer=layer,
             date_column="trade_date",
+            partition_columns=(
+                "market", "exchange", "asset_type", "frequency", "adjust",
+                "feature_set", "feature_version", "feature_config_hash", "year",
+            ),
         )
+        _progress(f"rps appended rows={len(result)}")
         return len(result)
 
     def _append_dataset(self, dataset_dir, frame, date_column="trade_date", partition_columns=None):

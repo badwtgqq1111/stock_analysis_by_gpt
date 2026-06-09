@@ -47,6 +47,16 @@ def fetch_valuation_batch(
         except Exception:
             return code, np.nan, np.nan
 
+    if max_workers <= 1:
+        for stock_code in stock_codes:
+            code, pe, pb = _fetch_one(stock_code)
+            with lock:
+                result[code] = (pe, pb)
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total)
+        return result
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_fetch_one, code): code for code in stock_codes}
         for future in as_completed(futures):

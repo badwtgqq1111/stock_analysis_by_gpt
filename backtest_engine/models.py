@@ -199,6 +199,9 @@ class PortfolioBuildResult:
     contributions: list[dict] = field(default_factory=list)
     analysis_results: list = field(default_factory=list)
     kelly_position_ratio: float = 0.1
+    liquidity_capacity: list[dict] = field(default_factory=list)
+    tca_simulated_report: list[dict] = field(default_factory=list)
+    tca_summary: dict = field(default_factory=dict)
 
     def to_dict(self):
         return {
@@ -228,4 +231,7 @@ class PortfolioBuildResult:
             "contributions": list(self.contributions),
             "analysis_results": list(self.analysis_results),
             "kelly_position_ratio": self.kelly_position_ratio,
+            "liquidity_capacity": list(self.liquidity_capacity),
+            "tca_simulated_report": list(self.tca_simulated_report),
+            "tca_summary": dict(self.tca_summary),
         }

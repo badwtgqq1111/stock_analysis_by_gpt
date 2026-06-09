@@ -123,6 +123,14 @@ class MarketDataWarehouse:
         stores.append(self.parquet_store)
         return stores
 
+    def _clean_store_candidates(self):
+        """返回 clean 层数据可用后端，ClickHouse 优先，Parquet 兜底。"""
+        stores = []
+        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+            stores.append(self.clickhouse_store)
+        stores.append(self.parquet_store)
+        return stores
+
     def _ensure_writable(self):
         if self.read_only:
             raise RuntimeError(f"只读仓库不支持写入: {self.layout.base_path}")
@@ -238,31 +246,57 @@ class MarketDataWarehouse:
         return merged[payload.columns].copy()
 
     def upsert_ohlcv(self, frame, dataset_name=OHLCV_DATASET):
-        """将标准 OHLCV 数据 upsert 到分区 parquet 数据集。"""
+        """将标准 OHLCV 数据 upsert 到 clean 层，ClickHouse 优先。"""
         if frame is None or frame.empty:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="clean"))}
 
         payload = frame[CLEAN_OHLCV_COLUMNS].copy()
-        target = self.parquet_store.upsert_frame(
-            dataset_name=dataset_name,
-            frame=payload,
-            dedupe_keys=["market", "stock_code", "trade_date", "frequency", "adjust"],
-            layer="clean",
-            sort_by=["market", "stock_code", "trade_date", "frequency", "adjust", "ingest_time"],
-        )
+        last_error = None
+        for store in self._clean_store_candidates():
+            try:
+                target = store.upsert_frame(
+                    dataset_name=dataset_name,
+                    frame=payload,
+                    dedupe_keys=["market", "stock_code", "trade_date", "frequency", "adjust"],
+                    layer="clean",
+                    sort_by=["market", "stock_code", "trade_date", "frequency", "adjust", "ingest_time"],
+                )
+                return {"rows": len(payload), "dataset_path": str(target)}
+            except Exception as exc:
+                last_error = exc
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                if store is self.parquet_store:
+                    raise
+                continue
+        if last_error is not None:
+            raise last_error
         return {"rows": len(payload), "dataset_path": str(target)}
 
     def append_ohlcv(self, frame, dataset_name=OHLCV_DATASET):
-        """批量追加 OHLCV 到分区 parquet 数据集，不做单次去重。"""
+        """批量追加 OHLCV 到 clean 层，不做单次去重，ClickHouse 优先。"""
         if frame is None or frame.empty:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="clean"))}
 
         payload = frame[CLEAN_OHLCV_COLUMNS].copy()
-        target = self.parquet_store.append_frame(
-            dataset_name=dataset_name,
-            frame=payload,
-            layer="clean",
-        )
+        last_error = None
+        for store in self._clean_store_candidates():
+            try:
+                target = store.append_frame(
+                    dataset_name=dataset_name,
+                    frame=payload,
+                    layer="clean",
+                )
+                return {"rows": len(payload), "dataset_path": str(target)}
+            except Exception as exc:
+                last_error = exc
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                if store is self.parquet_store:
+                    raise
+                continue
+        if last_error is not None:
+            raise last_error
         return {"rows": len(payload), "dataset_path": str(target)}
 
     def upsert_corporate_actions(self, frame, dataset_name=CORPORATE_ACTIONS_DATASET):
@@ -415,6 +449,7 @@ class MarketDataWarehouse:
         feature_name=None,
         start_date=None,
         end_date=None,
+        columns=None,
         dataset_name=FEATURES_DATASET,
     ):
         """按条件读取 feature 层数据。"""
@@ -430,6 +465,12 @@ class MarketDataWarehouse:
             "feature_config_hash": feature_config_hash,
             "feature_name": feature_name,
         }
+        range_filters = {}
+        if start_date or end_date:
+            range_filters["trade_date"] = {
+                "gte": start_date,
+                "lte": end_date,
+            }
         frame = pd.DataFrame()
         for store in self._feature_store_candidates():
             try:
@@ -437,6 +478,8 @@ class MarketDataWarehouse:
                     dataset_name=dataset_name,
                     layer="feature",
                     filters=filters,
+                    range_filters=range_filters or None,
+                    columns=columns,
                     order_by=(
                         "market, stock_code, trade_date, feature_set, "
                         "feature_version, feature_config_hash, feature_name"
@@ -462,6 +505,8 @@ class MarketDataWarehouse:
                                 "feature_set": feature_set,
                                 "feature_name": feature_name,
                             },
+                            range_filters=range_filters or None,
+                            columns=columns,
                             order_by="market, stock_code, trade_date, feature_set, feature_name",
                         )
                     except Exception:
@@ -1044,7 +1089,7 @@ class MarketDataWarehouse:
         end_date=None,
         dataset_name=OHLCV_DATASET,
     ):
-        """按条件读取 clean 层 OHLCV 数据。"""
+        """按条件读取 clean 层 OHLCV 数据，ClickHouse 优先。"""
         year_filter = None
         range_filters = {}
         start_ts = pd.to_datetime(start_date) if start_date else None
@@ -1062,22 +1107,33 @@ class MarketDataWarehouse:
                 "gte": start_ts.strftime("%Y-%m-%d") if start_ts is not None else None,
                 "lte": end_ts.strftime("%Y-%m-%d") if end_ts is not None else None,
             }
-        filters = {
+        base_filters = {
             "stock_code": stock_code,
             "market": market,
             "exchange": exchange,
             "asset_type": asset_type,
             "frequency": frequency,
             "adjust": adjust,
-            "year": year_filter,
         }
-        frame = self.parquet_store.read_frame(
-            dataset_name=dataset_name,
-            layer="clean",
-            filters=filters,
-            order_by="market, stock_code, trade_date",
-            range_filters=range_filters,
-        )
+        frame = pd.DataFrame()
+        for store in self._clean_store_candidates():
+            try:
+                filters = dict(base_filters)
+                if store is self.parquet_store:
+                    filters["year"] = year_filter
+                frame = store.read_frame(
+                    dataset_name=dataset_name,
+                    layer="clean",
+                    filters=filters,
+                    order_by="market, stock_code, trade_date",
+                    range_filters=range_filters,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                frame = pd.DataFrame()
+            if frame is not None and not frame.empty:
+                break
         if frame.empty:
             return frame
 
@@ -1134,7 +1190,7 @@ class MarketDataWarehouse:
         adjust=None,
         dataset_name=OHLCV_DATASET,
     ):
-        """获取某只证券的最新交易日。"""
+        """获取某只证券的最新交易日，ClickHouse 优先。"""
         filters = {
             "stock_code": stock_code,
             "market": market,
@@ -1143,12 +1199,21 @@ class MarketDataWarehouse:
             "frequency": frequency,
             "adjust": adjust,
         }
-        latest = self.parquet_store.scalar_query(
-            dataset_name=dataset_name,
-            expression="MAX(trade_date)",
-            layer="clean",
-            filters=filters,
-        )
+        latest = None
+        for store in self._clean_store_candidates():
+            try:
+                latest = store.scalar_query(
+                    dataset_name=dataset_name,
+                    expression="MAX(trade_date)",
+                    layer="clean",
+                    filters=filters,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                latest = None
+            if latest is not None:
+                break
         if latest is None:
             return None
         latest_ts = pd.to_datetime(latest)
@@ -1166,7 +1231,7 @@ class MarketDataWarehouse:
         adjust=None,
         dataset_name=OHLCV_DATASET,
     ):
-        """批量获取证券最新交易日，避免全市场同步前逐只扫描 Parquet。"""
+        """批量获取证券最新交易日，ClickHouse 优先，避免逐只扫描。"""
         filters = {
             "stock_code": list(dict.fromkeys(stock_codes)) if stock_codes else None,
             "market": market,
@@ -1176,12 +1241,21 @@ class MarketDataWarehouse:
             "adjust": adjust,
         }
         columns = ["stock_code", "market", "frequency", "adjust", "trade_date"]
-        frame = self.parquet_store.read_frame(
-            dataset_name=dataset_name,
-            layer="clean",
-            filters=filters,
-            columns=columns,
-        )
+        frame = pd.DataFrame()
+        for store in self._clean_store_candidates():
+            try:
+                frame = store.read_frame(
+                    dataset_name=dataset_name,
+                    layer="clean",
+                    filters=filters,
+                    columns=columns,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                frame = pd.DataFrame(columns=columns)
+            if frame is not None and not frame.empty:
+                break
         if frame is None or frame.empty:
             return {}
         frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
@@ -1208,7 +1282,7 @@ class MarketDataWarehouse:
         adjust=None,
         dataset_name=OHLCV_DATASET,
     ):
-        """获取 parquet 数据集统计信息。"""
+        """获取 OHLCV 数据集统计信息，ClickHouse 优先。"""
         filters = {
             "stock_code": stock_code,
             "market": market,
@@ -1217,22 +1291,33 @@ class MarketDataWarehouse:
             "frequency": frequency,
             "adjust": adjust,
         }
-        total_records = self.parquet_store.scalar_query(
-            dataset_name=dataset_name,
-            expression="COUNT(*)",
-            layer="clean",
-            filters=filters,
-        )
+        stats_store = None
+        total_records = None
+        for store in self._clean_store_candidates():
+            try:
+                total_records = store.scalar_query(
+                    dataset_name=dataset_name,
+                    expression="COUNT(*)",
+                    layer="clean",
+                    filters=filters,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                total_records = None
+            if total_records not in (None, 0):
+                stats_store = store
+                break
         if total_records in (None, 0):
             return None
 
-        min_date = self.parquet_store.scalar_query(
+        min_date = stats_store.scalar_query(
             dataset_name=dataset_name,
             expression="MIN(trade_date)",
             layer="clean",
             filters=filters,
         )
-        max_date = self.parquet_store.scalar_query(
+        max_date = stats_store.scalar_query(
             dataset_name=dataset_name,
             expression="MAX(trade_date)",
             layer="clean",
@@ -1245,43 +1330,62 @@ class MarketDataWarehouse:
         }
 
     def get_all_stock_codes(self, market=None, asset_type=None, frequency=None, adjust=None, dataset_name=OHLCV_DATASET):
-        """获取 parquet 数据集中全部证券代码。"""
+        """获取 OHLCV 数据集中全部证券代码，ClickHouse 优先。"""
         filters = {
             "market": market,
             "asset_type": asset_type,
             "frequency": frequency,
             "adjust": adjust,
         }
-        return self.parquet_store.values_query(
-            dataset_name=dataset_name,
-            column="stock_code",
-            layer="clean",
-            filters=filters,
-            distinct=True,
-            order_by="value",
-        )
+        for store in self._clean_store_candidates():
+            try:
+                values = store.values_query(
+                    dataset_name=dataset_name,
+                    column="stock_code",
+                    layer="clean",
+                    filters=filters,
+                    distinct=True,
+                    order_by="value",
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                values = []
+            if values:
+                return values
+        return []
 
     def get_total_rows(self, market=None, asset_type=None, frequency=None, adjust=None, dataset_name=OHLCV_DATASET):
-        """获取 parquet 数据集总行数。"""
+        """获取 OHLCV 数据集总行数，ClickHouse 优先。"""
         filters = {
             "market": market,
             "asset_type": asset_type,
             "frequency": frequency,
             "adjust": adjust,
         }
-        total = self.parquet_store.scalar_query(
-            dataset_name=dataset_name,
-            expression="COUNT(*)",
-            layer="clean",
-            filters=filters,
-        )
+        total = None
+        for store in self._clean_store_candidates():
+            try:
+                total = store.scalar_query(
+                    dataset_name=dataset_name,
+                    expression="COUNT(*)",
+                    layer="clean",
+                    filters=filters,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                total = None
+            if total not in (None, 0):
+                break
         return int(total or 0)
 
     def compute_rps_features(self, factor_set="qlib_alpha158",
-                             windows=(5, 10, 20, 30, 60)):
+                             windows=(5, 10, 20, 30, 60),
+                             progress_callback=None):
         """基于已有 ROC 因子计算横截面 RPS 排名并写入 feature 层。"""
         return self._feature_store.compute_rps_features(
-            factor_set=factor_set, windows=windows,
+            factor_set=factor_set, windows=windows, progress_callback=progress_callback,
         )
 
     def compact_ohlcv(self, dataset_name=OHLCV_DATASET):

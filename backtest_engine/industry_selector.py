@@ -52,6 +52,9 @@ class IndustryCandidateSelector:
         min_market_cap: float = 0.0,
         min_daily_turnover: float = 0.0,
         max_overheat: float = 85.0,
+        max_high_chase_score: float = 85.0,
+        max_return_60d_pct: float = 100.0,
+        max_return_120d_pct: float = 180.0,
         max_drawdown_pct: float = 0.30,
         max_downtrend_penalty: float = 50.0,
         require_liquidity: bool = True,
@@ -82,6 +85,9 @@ class IndustryCandidateSelector:
         self.min_market_cap = float(min_market_cap)
         self.min_daily_turnover = float(min_daily_turnover)
         self.max_overheat = float(max_overheat)
+        self.max_high_chase_score = float(max_high_chase_score)
+        self.max_return_60d_pct = float(max_return_60d_pct)
+        self.max_return_120d_pct = float(max_return_120d_pct)
         self.max_drawdown_pct = float(max_drawdown_pct)
         self.max_downtrend_penalty = float(max_downtrend_penalty)
         self.require_liquidity = bool(require_liquidity)
@@ -303,6 +309,16 @@ class IndustryCandidateSelector:
         if overheat >= self.max_overheat:
             reasons.append(f"overheated(score={overheat:.0f})")
 
+        high_chase = self._float_or_default(row.get("high_chase_score"), 0.0)
+        if high_chase >= self.max_high_chase_score:
+            reasons.append(f"high_chase_score(score={high_chase:.0f})")
+        ret60 = self._float_or_default(row.get("price_return_60d_pct"), np.nan)
+        if np.isfinite(ret60) and ret60 >= self.max_return_60d_pct:
+            reasons.append(f"recent_60d_multibagger(ret={ret60:.0f}%)")
+        ret120 = self._float_or_default(row.get("price_return_120d_pct"), np.nan)
+        if np.isfinite(ret120) and ret120 >= self.max_return_120d_pct:
+            reasons.append(f"recent_120d_multibagger(ret={ret120:.0f}%)")
+
         # Chekhlov, Uryasev & Zabarankin (2005): drawdown >30% implies
         # near-certain long-run underperformance for long-only portfolios.
         drawdown = self._float_or_default(row.get("drawdown_penalty_score"), 0.0)
@@ -362,6 +378,9 @@ class IndustryCandidateSelector:
             "low_data_coverage": "low_data_coverage",
             "stale_signal": "stale_signal",
             "overheated": "overheated",
+            "high_chase_score": "high_chase_score",
+            "recent_60d_multibagger": "recent_60d_multibagger",
+            "recent_120d_multibagger": "recent_120d_multibagger",
             "negative_pe": "negative_pe",
             "extreme_pe": "extreme_pe",
             "negative_pb": "negative_pb",

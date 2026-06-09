@@ -1534,6 +1534,433 @@ def _run_theme_feature_diagnostics(args):
         print(f"  - {item}")
 
 
+def _run_lightgbm_model_diagnostics(args):
+    import json
+
+    import pandas as pd
+
+    from factor_engine.ml.diagnostics import compute_lightgbm_model_diagnostics
+
+    ranking = (
+        pd.read_csv(args.ranking_csv, dtype={"stock_code": str}).fillna("")
+        if Path(args.ranking_csv).exists()
+        else pd.DataFrame()
+    )
+    selected = (
+        pd.read_csv(args.selected_csv, dtype={"stock_code": str}).fillna("")
+        if args.selected_csv and Path(args.selected_csv).exists()
+        else pd.DataFrame()
+    )
+    if ranking.empty:
+        raise SystemExit(f"ranking csv not found or empty: {args.ranking_csv}")
+
+    feature_importance = None
+    if args.feature_importance_json and Path(args.feature_importance_json).exists():
+        try:
+            payload = json.loads(Path(args.feature_importance_json).read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                feature_importance = pd.DataFrame(payload.get("feature_importance") or [])
+            elif isinstance(payload, list):
+                feature_importance = pd.DataFrame(payload)
+        except Exception:
+            pass
+
+    diagnostics = compute_lightgbm_model_diagnostics(
+        ranking,
+        selected,
+        feature_importance=feature_importance,
+        high_chase_threshold=args.high_chase_threshold,
+        multibagger_60d_threshold=args.multibagger_60d_threshold,
+        multibagger_120d_threshold=args.multibagger_120d_threshold,
+    )
+    if args.output_json:
+        output_path = Path(args.output_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if args.json:
+        print(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+        return
+
+    print("LightGBM 模型/追高风险诊断")
+    print("=" * 60)
+    print(f"ranking_rows: {diagnostics['ranking_rows']}")
+    print(f"selected_rows: {diagnostics['selected_rows']}")
+    print(f"momentum_columns_available: {', '.join(diagnostics['momentum_columns_available']) or 'none'}")
+
+    fam_imp = diagnostics.get("feature_family_importance", {})
+    if fam_imp:
+        print("\n特征家族重要性:")
+        for fam, pct in sorted(fam_imp.items(), key=lambda x: -x[1]):
+            bar = "█" * int(pct * 50)
+            print(f"  {fam:20s}: {pct:.1%} {bar}")
+
+    print(f"\nranking_high_chase_rate: {diagnostics['ranking_high_chase_rate']:.1%}")
+    print(f"selected_high_chase_rate: {diagnostics['selected_high_chase_rate']:.1%}")
+    print(f"selected_60d_multibagger_rate: {diagnostics['selected_60d_multibagger_rate']:.1%}")
+    print(f"selected_120d_multibagger_rate: {diagnostics['selected_120d_multibagger_rate']:.1%}")
+    print(f"selected_near_52w_high_rate: {diagnostics['selected_near_52w_high_rate']:.1%}")
+    print(f"production_gate_pass: {diagnostics.get('production_gate_pass', True)}")
+    failures = diagnostics.get("production_gate_failures") or []
+    if failures:
+        print(f"production_gate_failures: {', '.join(failures)}")
+
+    print("\n持仓动量暴露:")
+    for column, stats in diagnostics.get("selected_momentum", {}).items():
+        print(
+            f"  {column}: median={stats['median']}, p90={stats['p90']}, "
+            f"max={stats['max']}, count={stats['count']}"
+        )
+
+    flagged = diagnostics.get("selected_high_chase_stocks") or []
+    if flagged:
+        print("\n追高红旗持仓:")
+        for row in flagged[:20]:
+            print(
+                f"  {row.get('stock_code')}: high_chase={row.get('high_chase_score')}, "
+                f"ret20={row.get('price_return_20d_pct')}, ret60={row.get('price_return_60d_pct')}, "
+                f"ret120={row.get('price_return_120d_pct')}, pos52w={row.get('price_position_52w_high')}, "
+                f"reasons={row.get('eligibility_reasons')}"
+            )
+
+    print("\n红旗:")
+    for item in diagnostics.get("red_flags") or ["ok"]:
+        print(f"  - {item}")
+    print("\n建议:")
+    for item in diagnostics.get("recommendations") or ["ok"]:
+        print(f"  - {item}")
+    if args.output_json:
+        print(f"\n[OK] 已写入诊断 JSON: {args.output_json}")
+
+
+def _run_lightgbm_abtest(args):
+    import json
+    import subprocess
+    import sys as _sys
+
+    factor_set = args.factor_set or "alpha158_hk"
+    compare_modes = args.compare.split(",") if args.compare else ["none", "industry_size"]
+    results = {}
+    base_args = [
+        _sys.executable, str(Path(__file__).resolve()),
+        "select",
+        "--analysis-mode", "lightgbm",
+        "--top-n", str(getattr(args, "top_n", 10)),
+        "--days", str(args.days),
+        "--factor-set", factor_set,
+        "--model-objective", str(args.objective_mode),
+        "--model-type", str(args.model_type),
+    ]
+    if args.max_features:
+        base_args.extend(["--max-features", str(args.max_features)])
+    if args.stock_limit:
+        base_args.extend(["--stock-limit", str(args.stock_limit)])
+    if args.stock_codes:
+        base_args.extend(["--stock-codes"] + args.stock_codes)
+    if getattr(args, "disable_theme_features", False):
+        base_args.append("--no-theme-features")
+    if getattr(args, "show_progress", False):
+        base_args.append("--show-progress")
+    if getattr(args, "backtest_date", None):
+        base_args.extend(["--backtest-date", args.backtest_date])
+
+    print(f"[lightgbm-abtest] 比较模式: {compare_modes}")
+    print(f"[lightgbm-abtest] factor_set={factor_set} days={args.days}")
+
+    for mode in compare_modes:
+        mode_clean = mode.strip()
+        print(f"\n[lightgbm-abtest] {mode_clean} 开始...")
+
+        mode_base = args.export_csv or "output/abtest"
+        export_dir = f"{mode_base}_neutralization_{mode_clean}"
+        run_args = base_args + [
+            "--neutralization-mode", mode_clean,
+            "--export-csv", export_dir,
+        ]
+
+        result = subprocess.run(run_args, capture_output=True, text=True)
+        print(f"[lightgbm-abtest] {mode_clean} stdout:\n{result.stdout[-2000:]}")
+        if result.returncode != 0:
+            print(f"[lightgbm-abtest] {mode_clean} FAILED: {result.stderr[-500:]}")
+            results[mode_clean] = {"error": result.stderr[-500:]}
+            continue
+
+        # Read the ranking CSV to compute OOS metrics
+        import pandas as pd
+        ranking_csv = f"{export_dir}_{factor_set}_ranking.csv"
+        if Path(ranking_csv).exists():
+            ranking = pd.read_csv(ranking_csv, dtype={"stock_code": str}).fillna("")
+            results[mode_clean] = {
+                "ranking_rows": int(len(ranking)),
+                "ranking_csv": ranking_csv,
+            }
+        else:
+            results[mode_clean] = {"ranking_csv": ranking_csv, "note": "file_not_found"}
+
+    # Output comparison
+    print("\n中性化 A/B 对比报告 (基于 select 导出)")
+    print("=" * 60)
+    for mode, meta in results.items():
+        if "error" in meta:
+            print(f"  {mode:20s}  ERROR: {meta['error'][:100]}")
+        else:
+            print(f"  {mode:20s}  rows={meta.get('ranking_rows', 'N/A')}  file={meta.get('ranking_csv', 'N/A')}")
+
+    print("\n使用建议:")
+    print("  1. 对每种模式分别运行 select --neutralization-mode <mode> --export-csv <dir>")
+    print("  2. 然后用 lightgbm-model-diagnostics 对比 ranking CSV 中的 OOS 指标")
+    print("  3. 选择 RankIC 最高、高位动量暴露最低的模式作为生产配置")
+
+    if args.output_json:
+        output_path = Path(args.output_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n[OK] A/B 记录已写入: {args.output_json}")
+
+
+def _run_lightgbm_purged_cv_report(args):
+    import json
+
+    import pandas as pd
+
+    from factor_engine.ml.research import build_purged_cv_report
+
+    input_path = Path(args.predictions_csv)
+    if not input_path.exists():
+        raise SystemExit(f"predictions csv not found: {input_path}")
+    frame = pd.read_csv(input_path, dtype={"stock_code": str})
+    report, summary = build_purged_cv_report(
+        frame,
+        score_col=args.score_col,
+        target_col=args.target_col,
+        date_col=args.date_col,
+        n_splits=args.n_splits,
+        purge_days=args.purge_days,
+        embargo_days=args.embargo_days,
+        top_quantile=args.top_quantile,
+    )
+    if args.output_csv:
+        out_csv = Path(args.output_csv)
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        report.to_csv(out_csv, index=False, encoding="utf-8-sig")
+        print(f"[OK] 已写入 Purged CV CSV: {out_csv}")
+    if args.output_json:
+        out_json = Path(args.output_json)
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[OK] 已写入 Purged CV JSON: {out_json}")
+    if args.json:
+        print(json.dumps({"summary": summary, "folds": report.to_dict(orient="records")}, ensure_ascii=False, indent=2))
+    else:
+        print("LightGBM Purged CV 报告")
+        print("=" * 60)
+        for key, value in summary.items():
+            print(f"{key}: {value}")
+
+
+def _run_execution_simulator(args):
+    import pandas as pd
+
+    from factor_engine.rl.execution_simulator import ExecutionOrder, ExecutionSimulator
+
+    bars = pd.read_csv(args.bars_csv) if args.bars_csv else pd.DataFrame(
+        {
+            "price": [float(args.arrival_price)] * int(args.slices),
+            "volume": [float(args.market_volume)] * int(args.slices),
+        }
+    )
+    simulator = ExecutionSimulator(bars)
+    order = ExecutionOrder(
+        stock_code=args.stock_code,
+        side=args.side,
+        quantity=float(args.quantity),
+        arrival_price=float(args.arrival_price),
+    )
+    fills = simulator.schedule(order, algo=args.algo, max_pov=args.max_pov, risk_aversion=args.risk_aversion)
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fills.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"[OK] 已写入执行模拟报告: {output_path}")
+
+
+def _run_export_event_features(args):
+    import pandas as pd
+
+    from factor_engine.events import build_event_feature_panel, event_features_to_long
+
+    events = pd.read_csv(args.events_csv, dtype={"stock_code": str})
+    panel = build_event_feature_panel(
+        events,
+        stock_codes=args.stock_codes,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.long_format:
+        panel = event_features_to_long(panel, feature_set=args.feature_set, feature_version=args.feature_version)
+    panel.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"[OK] 已写入事件特征: {output_path}")
+
+
+def _run_export_microstructure_features(args):
+    import pandas as pd
+
+    from factor_engine.microstructure import build_intraday_microstructure_features, microstructure_features_to_long
+
+    bars = pd.read_csv(args.bars_csv, dtype={"stock_code": str})
+    if args.stock_code and "stock_code" not in bars.columns:
+        bars["stock_code"] = str(args.stock_code).zfill(5)
+    frames = []
+    if "stock_code" in bars.columns:
+        for code, group in bars.groupby("stock_code"):
+            frames.append(build_intraday_microstructure_features(group, stock_code=str(code).zfill(5)))
+    else:
+        frames.append(build_intraday_microstructure_features(bars, stock_code=args.stock_code))
+    panel = pd.concat([frame for frame in frames if frame is not None and not frame.empty], ignore_index=True, sort=False) if frames else pd.DataFrame()
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.long_format:
+        panel = microstructure_features_to_long(panel, feature_set=args.feature_set, feature_version=args.feature_version)
+    panel.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"[OK] 已写入微结构特征: {output_path}")
+
+
+def _run_portfolio_policy_eval(args):
+    import json
+    import pandas as pd
+
+    from factor_engine.rl.imitation import LinearImitationPolicy, build_expert_training_rows
+    from factor_engine.rl.portfolio_env import PortfolioEnv, evaluate_policy
+
+    panel = pd.read_csv(args.panel_csv, dtype={"stock_code": str})
+    feature_columns = [col.strip() for col in args.feature_columns.split(",") if col.strip()]
+    if args.policy == "expert":
+        def policy_fn(obs):
+            return PortfolioEnv.expert_policy(obs, top_n=args.top_n, max_weight=args.max_weight)
+    else:
+        training = build_expert_training_rows(panel, score_col=args.score_col, top_n=args.top_n, max_weight=args.max_weight)
+        policy = LinearImitationPolicy.fit(training, feature_columns, max_weight=args.max_weight)
+        policy_fn = policy
+    result = evaluate_policy(
+        panel,
+        policy_fn,
+        max_weight=args.max_weight,
+        score_col=args.score_col,
+        return_col=args.return_col,
+        cost_bps_col=args.cost_bps_col,
+    )
+    if args.output_json:
+        out = Path(args.output_json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[OK] 已写入组合策略评估: {out}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _run_fit_execution_cost_model(args):
+    import json
+    import pandas as pd
+
+    from factor_engine.portfolio.costs import SupervisedExecutionCostModel
+
+    tca = pd.read_csv(args.tca_csv, dtype={"stock_code": str})
+    feature_columns = [col.strip() for col in args.feature_columns.split(",") if col.strip()]
+    model = SupervisedExecutionCostModel.fit(tca.to_dict(orient="records"), feature_columns, target_col=args.target_col)
+    predictions = model.predict(tca)
+    output = {
+        "feature_columns": feature_columns,
+        "intercept": model.intercept,
+        "coef": {name: float(value) for name, value in zip(feature_columns, model.coef)},
+        "train_rows": int(len(tca)),
+        "prediction_mean": float(predictions.mean()) if len(predictions) else 0.0,
+    }
+    out = Path(args.output_json)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[OK] 已写入执行成本模型: {out}")
+
+
+def _run_theme_ablation(args):
+    import json
+    import subprocess
+    import sys as _sys
+
+    factor_set = args.factor_set or "alpha158_hk"
+    overlay_weights = [float(w) for w in args.overlay_weights.split(",")] if args.overlay_weights else [0.0, 0.05, 0.10]
+    results = {}
+    base_args = [
+        _sys.executable, str(Path(__file__).resolve()),
+        "select",
+        "--analysis-mode", "lightgbm",
+        "--top-n", str(getattr(args, "top_n", 10)),
+        "--days", str(args.days),
+        "--factor-set", factor_set,
+        "--neutralization-mode", args.neutralization_mode,
+        "--model-objective", str(args.objective_mode),
+        "--model-type", str(args.model_type),
+    ]
+    if args.max_features:
+        base_args.extend(["--max-features", str(args.max_features)])
+    if args.stock_limit:
+        base_args.extend(["--stock-limit", str(args.stock_limit)])
+    if args.stock_codes:
+        base_args.extend(["--stock-codes"] + args.stock_codes)
+    if getattr(args, "show_progress", False):
+        base_args.append("--show-progress")
+    if getattr(args, "backtest_date", None):
+        base_args.extend(["--backtest-date", args.backtest_date])
+
+    print(f"[theme-ablation] overlay_weights={overlay_weights}")
+
+    for enable_theme in [True, False]:
+        label = "with_theme" if enable_theme else "without_theme"
+        print(f"\n[theme-ablation] {label} 开始...")
+
+        mode_base = args.export_csv or "output/ablation"
+        export_dir = f"{mode_base}_theme_{label}"
+        run_args = list(base_args) + ["--export-csv", export_dir]
+        if not enable_theme:
+            run_args.append("--no-theme-features")
+
+        result = subprocess.run(run_args, capture_output=True, text=True)
+        print(f"[theme-ablation] {label} stdout:\n{result.stdout[-2000:]}")
+        if result.returncode != 0:
+            print(f"[theme-ablation] {label} FAILED: {result.stderr[-500:]}")
+            results[label] = {"error": result.stderr[-500:]}
+            continue
+
+        import pandas as pd
+        ranking_csv = f"{export_dir}_{factor_set}_ranking.csv"
+        if Path(ranking_csv).exists():
+            ranking = pd.read_csv(ranking_csv, dtype={"stock_code": str}).fillna("")
+            results[label] = {
+                "ranking_rows": int(len(ranking)),
+                "ranking_csv": ranking_csv,
+            }
+        else:
+            results[label] = {"ranking_csv": ranking_csv, "note": "file_not_found"}
+
+    print("\n智能画像特征 Ablation 报告 (基于 select 导出)")
+    print("=" * 60)
+    for label, meta in results.items():
+        if "error" in meta:
+            print(f"  {label:20s}  ERROR: {meta['error'][:100]}")
+        else:
+            print(f"  {label:20s}  rows={meta.get('ranking_rows', 'N/A')}  file={meta.get('ranking_csv', 'N/A')}")
+
+    print("\n使用建议:")
+    print("  1. 对 with/without 主题特征分别运行 select --export-csv <dir>")
+    print("  2. 然后用 lightgbm-model-diagnostics 和 theme-feature-diagnostics 对比")
+    print("  3. 如果 with_theme 的 IC 没有显著提升，关闭 theme overlay")
+
+    if args.output_json:
+        output_path = Path(args.output_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n[OK] Ablation 记录已写入: {args.output_json}")
+
+
 def _run_tag_coverage(args):
     from data.ingest.service import MarketDataService
 
@@ -2202,6 +2629,187 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_theme_feature_diagnostics(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "lightgbm-model-diagnostics":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py lightgbm-model-diagnostics",
+            description="诊断 LightGBM 排名/持仓的追高、动量和高位暴露",
+        )
+        parser.add_argument("--ranking-csv", default="output/results_alpha158_hk_ranking.csv", help="select 导出的全市场 ranking CSV")
+        parser.add_argument("--selected-csv", default="output/results_alpha158_hk_selected.csv", help="select 导出的当前持有 CSV")
+        parser.add_argument("--feature-importance-json", default=None, help="LightGBM 特征重要性 JSON 文件")
+        parser.add_argument("--high-chase-threshold", type=float, default=80.0, help="追高综合分红旗阈值")
+        parser.add_argument("--multibagger-60d-threshold", type=float, default=100.0, help="60 日涨幅红旗阈值，单位百分比")
+        parser.add_argument("--multibagger-120d-threshold", type=float, default=180.0, help="120 日涨幅红旗阈值，单位百分比")
+        parser.add_argument("--output-json", default=None, help="可选：写入诊断 JSON")
+        parser.add_argument("--json", action="store_true", help="JSON 输出")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_lightgbm_model_diagnostics(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "lightgbm-abtest":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py lightgbm-abtest",
+            description="LightGBM 中性化/目标函数/画像特征 A/B 对照研究",
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源")
+        parser.add_argument("--factor-set", default=None, help="因子集，默认 alpha158_hk")
+        parser.add_argument("--days", type=int, default=365, help="分析周期")
+        parser.add_argument("--top-n", type=int, default=10, help="持仓数量")
+        parser.add_argument("--stock-limit", type=int, default=200, help="限制股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码")
+        parser.add_argument("--compare", default="none,industry_size", help="逗号分隔的 neutralization 模式")
+        parser.add_argument("--model-type", default="lightgbm", help="模型类型")
+        parser.add_argument("--objective-mode", default="regression_csrank", help="objective_mode")
+        parser.add_argument("--max-features", type=int, default=0, help="最大特征数")
+        parser.add_argument("--disable-theme-features", action="store_true", help="禁用主题特征")
+        parser.add_argument("--backtest-date", default=None, help="回测截止日期 YYYY-MM-DD")
+        parser.add_argument("--export-csv", default="output/abtest", help="select 导出 CSV 基础路径")
+        parser.add_argument("--output-json", default="output/lightgbm_abtest.json", help="输出 A/B 报告 JSON")
+        parser.add_argument("--json", action="store_true", help="JSON 输出")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_lightgbm_abtest(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "lightgbm-purged-cv-report":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py lightgbm-purged-cv-report",
+            description="基于 select/ranking 导出生成 Purged CV fold-level 报告",
+        )
+        parser.add_argument("--predictions-csv", default="output/results_alpha158_hk_ranking.csv", help="含 score/target 的预测 CSV")
+        parser.add_argument("--score-col", default="model_score", help="预测分数字段")
+        parser.add_argument("--target-col", default="forward_return_20", help="未来收益字段")
+        parser.add_argument("--date-col", default="trade_date", help="日期字段")
+        parser.add_argument("--n-splits", type=int, default=5, help="折数")
+        parser.add_argument("--purge-days", type=int, default=21, help="purge 天数")
+        parser.add_argument("--embargo-days", type=int, default=20, help="embargo 天数")
+        parser.add_argument("--top-quantile", type=float, default=0.10, help="Top 分位收益口径")
+        parser.add_argument("--output-csv", default="output/lightgbm_purged_cv_report.csv", help="输出 fold CSV")
+        parser.add_argument("--output-json", default="output/lightgbm_purged_cv_summary.json", help="输出摘要 JSON")
+        parser.add_argument("--json", action="store_true", help="JSON 输出")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_lightgbm_purged_cv_report(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "execution-simulate":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py execution-simulate",
+            description="执行层 TWAP/VWAP/POV/IS/AC baseline 模拟器",
+        )
+        parser.add_argument("--bars-csv", default=None, help="可选 minute/daily bars CSV，需含 price/volume")
+        parser.add_argument("--stock-code", default="00000", help="股票代码")
+        parser.add_argument("--side", choices=["buy", "sell"], default="buy", help="方向")
+        parser.add_argument("--quantity", type=float, default=10000.0, help="目标数量")
+        parser.add_argument("--arrival-price", type=float, default=10.0, help="arrival price")
+        parser.add_argument("--market-volume", type=float, default=100000.0, help="无 bars-csv 时每片成交量")
+        parser.add_argument("--slices", type=int, default=20, help="无 bars-csv 时切片数")
+        parser.add_argument("--algo", choices=["twap", "vwap", "pov", "is", "implementation_shortfall", "ac", "almgren_chriss"], default="twap")
+        parser.add_argument("--max-pov", type=float, default=0.10, help="POV 最大参与率")
+        parser.add_argument("--risk-aversion", type=float, default=1.0, help="IS/AC 风险厌恶参数")
+        parser.add_argument("--output-csv", default="output/execution_simulated_report.csv", help="输出 CSV")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_execution_simulator(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "export-event-features":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py export-event-features",
+            description="把公告/新闻/NLP 事件转成 point-in-time 日频特征",
+        )
+        parser.add_argument("--events-csv", required=True, help="事件 CSV，需含 stock_code 和 available_at/publish_time/event_time/event_date")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="可选股票代码过滤")
+        parser.add_argument("--start-date", default=None)
+        parser.add_argument("--end-date", default=None)
+        parser.add_argument("--long-format", action="store_true", help="输出标准 features 长表")
+        parser.add_argument("--feature-set", default="event_daily")
+        parser.add_argument("--feature-version", default="v1")
+        parser.add_argument("--output-csv", default="output/event_daily_features.csv")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_export_event_features(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "export-microstructure-features":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py export-microstructure-features",
+            description="把分钟/盘中 OHLCV 聚合成日频微结构特征",
+        )
+        parser.add_argument("--bars-csv", required=True, help="分钟/盘中 bars CSV")
+        parser.add_argument("--stock-code", default=None, help="CSV 不含 stock_code 时使用")
+        parser.add_argument("--long-format", action="store_true", help="输出标准 features 长表")
+        parser.add_argument("--feature-set", default="intraday_microstructure")
+        parser.add_argument("--feature-version", default="v1")
+        parser.add_argument("--output-csv", default="output/intraday_microstructure_features.csv")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_export_microstructure_features(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "portfolio-policy-eval":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py portfolio-policy-eval",
+            description="组合 RL research sandbox：expert/imitation policy 离线评估",
+        )
+        parser.add_argument("--panel-csv", required=True, help="含 trade_date/stock_code/score/forward_return/cost 的 panel")
+        parser.add_argument("--policy", choices=["expert", "imitation"], default="expert")
+        parser.add_argument("--score-col", default="ranking_score")
+        parser.add_argument("--return-col", default="forward_return_20")
+        parser.add_argument("--cost-bps-col", default="expected_transaction_cost_bps")
+        parser.add_argument("--feature-columns", default="ranking_score,expected_transaction_cost_bps,liquidity_capacity_score")
+        parser.add_argument("--top-n", type=int, default=10)
+        parser.add_argument("--max-weight", type=float, default=0.08)
+        parser.add_argument("--output-json", default="output/portfolio_policy_eval.json")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_portfolio_policy_eval(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "fit-execution-cost-model":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py fit-execution-cost-model",
+            description="用 TCA 报告拟合轻量监督执行成本模型",
+        )
+        parser.add_argument("--tca-csv", required=True)
+        parser.add_argument("--feature-columns", default="participation_rate,impact_bps,commission_bps")
+        parser.add_argument("--target-col", default="implementation_shortfall_bps")
+        parser.add_argument("--output-json", default="output/execution_cost_model.json")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_fit_execution_cost_model(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "theme-ablation":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py theme-ablation",
+            description="智能画像特征 ablation：with/without 主题特征的 OOS 对比",
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源")
+        parser.add_argument("--factor-set", default=None, help="因子集，默认 alpha158_hk")
+        parser.add_argument("--days", type=int, default=365, help="分析周期")
+        parser.add_argument("--top-n", type=int, default=10, help="持仓数量")
+        parser.add_argument("--stock-limit", type=int, default=200, help="限制股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码")
+        parser.add_argument("--model-type", default="lightgbm", help="模型类型")
+        parser.add_argument("--objective-mode", default="regression_csrank", help="objective_mode")
+        parser.add_argument("--neutralization-mode", default="industry_size", help="中性化模式")
+        parser.add_argument("--max-features", type=int, default=0, help="最大特征数")
+        parser.add_argument("--overlay-weights", default="0.0,0.05,0.10", help="逗号分隔的 overlay weights")
+        parser.add_argument("--backtest-date", default=None, help="回测截止日期")
+        parser.add_argument("--export-csv", default="output/ablation", help="select 导出 CSV 基础路径")
+        parser.add_argument("--output-json", default="output/theme_ablation.json", help="输出 ablation JSON")
+        parser.add_argument("--json", action="store_true", help="JSON 输出")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_theme_ablation(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "stock-intelligence-pipeline":
         import argparse
 
@@ -2291,7 +2899,9 @@ def main():
     else:
         from cli.main import run_cli
 
-        run_cli()
+        result = run_cli()
+        if result is None:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

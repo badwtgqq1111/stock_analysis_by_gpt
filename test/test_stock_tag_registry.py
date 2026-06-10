@@ -95,7 +95,20 @@ def test_expanded_tag_dictionary_contains_investable_specific_tags():
     dictionary = build_expanded_tag_dictionary()
     tags = set(dictionary["tag"])
 
-    assert {"AI", "大模型", "稳定币", "铜", "锂", "光模块", "创新药", "博彩", "航运"}.issubset(tags)
+    assert {
+        "AI",
+        "大模型",
+        "稳定币",
+        "铜",
+        "锂",
+        "光模块",
+        "MLCC",
+        "被动元件",
+        "电子元件",
+        "创新药",
+        "博彩",
+        "航运",
+    }.issubset(tags)
     assert len(dictionary) >= 120
     assert dictionary["aliases"].astype(str).str.contains(",").sum() == 0
 

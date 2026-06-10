@@ -511,18 +511,16 @@ class LightGBMRankerPipeline:
         if dates_needing_prediction:
             latest_missing_date = max(dates_needing_prediction)
             _emit(
-                f"latest inference fallback=carry_forward date={str(latest_missing_date)[:10]} "
+                f"latest inference fallback=latest_feature_blend date={str(latest_missing_date)[:10]} "
                 f"missing_dates={len(dates_needing_prediction)}"
             )
             missing_frame = merged[merged["trade_date"].isin({latest_missing_date})].copy()
             if not missing_frame.empty:
-                missing_pred_frame = missing_frame[["trade_date", "stock_code"]].copy()
-                last_scores = (
-                    oos_frame.sort_values("trade_date")
-                    .groupby("stock_code", as_index=False)
-                    .tail(1)[["stock_code", "model_score_raw", "model_score"]]
+                missing_pred_frame = self._build_latest_inference_fallback(
+                    missing_frame,
+                    oos_frame,
+                    feature_columns,
                 )
-                missing_pred_frame = missing_pred_frame.merge(last_scores, on="stock_code", how="left")
                 oos_frame = pd.concat([oos_frame, missing_pred_frame], ignore_index=True)
         final_model = None
 
@@ -784,18 +782,16 @@ class LightGBMRankerPipeline:
         if dates_needing_prediction:
             latest_missing_date = max(dates_needing_prediction)
             _emit(
-                f"latest inference fallback=carry_forward date={str(latest_missing_date)[:10]} "
+                f"latest inference fallback=latest_feature_blend date={str(latest_missing_date)[:10]} "
                 f"missing_dates={len(dates_needing_prediction)}"
             )
             missing_frame = merged[merged["trade_date"].isin({latest_missing_date})].copy()
             if not missing_frame.empty:
-                missing_pred_frame = missing_frame[["trade_date", "stock_code"]].copy()
-                last_scores = (
-                    oos_frame.sort_values("trade_date")
-                    .groupby("stock_code", as_index=False)
-                    .tail(1)[["stock_code", "model_score_raw", "model_score"]]
+                missing_pred_frame = self._build_latest_inference_fallback(
+                    missing_frame,
+                    oos_frame,
+                    feature_columns,
                 )
-                missing_pred_frame = missing_pred_frame.merge(last_scores, on="stock_code", how="left")
                 oos_frame = pd.concat([oos_frame, missing_pred_frame], ignore_index=True)
         final_model = None
 
@@ -1383,6 +1379,72 @@ class LightGBMRankerPipeline:
             return (valid.rank(pct=True) * 100.0).clip(0.0, 100.0)
 
         return score_frame.groupby("trade_date", sort=True)["model_score_raw"].transform(_rank_group)
+
+    @staticmethod
+    def _build_latest_inference_fallback(
+        latest_frame: pd.DataFrame,
+        oos_frame: pd.DataFrame,
+        feature_columns: list[str],
+    ) -> pd.DataFrame:
+        """Build latest-date scores without calling native model predict.
+
+        The latest date has no forward label yet, so rolling OOS predictions do
+        not cover it.  Instead of carrying forward stale stock scores only, mix
+        the last OOS score with current cross-sectional ranks from momentum and
+        risk-like features.  This keeps the live selector responsive to sector
+        rotation while avoiding the native LightGBM predict path that can be
+        unstable on some local runtimes.
+        """
+        result = latest_frame[["trade_date", "stock_code"]].copy()
+        last_scores = (
+            oos_frame.sort_values("trade_date")
+            .groupby("stock_code", as_index=False)
+            .tail(1)[["stock_code", "model_score_raw", "model_score"]]
+        )
+        result = result.merge(last_scores, on="stock_code", how="left")
+
+        carry_score = pd.to_numeric(result["model_score"], errors="coerce")
+        carry_raw = pd.to_numeric(result["model_score_raw"], errors="coerce")
+        carry = carry_score.fillna(carry_raw).fillna(50.0).clip(0.0, 100.0)
+
+        positive_tokens = (
+            "rps", "momentum", "mom", "roc", "ret_5", "ret_10", "ret_20",
+            "return_5", "return_10", "return_20", "alpha", "relative_strength",
+        )
+        negative_tokens = (
+            "drawdown", "downtrend", "overheat", "chase", "volatility", "vol_20", "vol_60",
+        )
+        positive_cols = [
+            col for col in feature_columns
+            if any(token in col.lower() for token in positive_tokens)
+            and col in latest_frame.columns
+        ]
+        negative_cols = [
+            col for col in feature_columns
+            if any(token in col.lower() for token in negative_tokens)
+            and col in latest_frame.columns
+        ]
+
+        rank_parts = []
+        for col in positive_cols[:40]:
+            values = pd.to_numeric(latest_frame[col], errors="coerce")
+            if values.notna().sum() > 1:
+                rank_parts.append(values.rank(pct=True) * 100.0)
+        for col in negative_cols[:25]:
+            values = pd.to_numeric(latest_frame[col], errors="coerce")
+            if values.notna().sum() > 1:
+                rank_parts.append((1.0 - values.rank(pct=True)) * 100.0)
+
+        if rank_parts:
+            live_score = pd.concat(rank_parts, axis=1).mean(axis=1).fillna(50.0).clip(0.0, 100.0)
+            blended_raw = carry.to_numpy(dtype=float) * 0.55 + live_score.to_numpy(dtype=float) * 0.45
+        else:
+            blended_raw = carry.to_numpy(dtype=float)
+
+        result["model_score_raw"] = blended_raw
+        result["model_score"] = LightGBMRankerPipeline._normalize_scores_by_date(result)
+        result["model_score"] = result["model_score"].fillna(result["model_score_raw"]).clip(0.0, 100.0)
+        return result[["trade_date", "stock_code", "model_score_raw", "model_score"]]
 
     @staticmethod
     def _resolve_feature_importance(model, feature_columns: list[str]) -> pd.DataFrame:

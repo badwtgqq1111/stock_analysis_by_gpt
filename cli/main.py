@@ -113,7 +113,7 @@ def run_cli(argv=None):
                         choices=['core', 'core_overlay', 'timing_only'], default='core_overlay',
                         help='行业选股模式：core=行业内选股，core_overlay=行业内选股+行业预算叠加，timing_only=研究用纯行业择时')
     parser.add_argument('--industry-overlay-strength', dest='industry_overlay_strength', type=float, default=0.0,
-                        help='行业择时 Overlay 权重，默认 0（仅输出字段，不改变候选预算）')
+                        help='行业择时 Overlay 权重，默认 0 表示自动使用保守强行业动量权重')
     parser.add_argument('--max-industry-weight', dest='max_industry_weight', type=float, default=0.35,
                         help='单行业权重预算上限，默认 0.35')
     parser.add_argument('--hot-industry-weight-multiplier', dest='hot_industry_weight_multiplier', type=float, default=1.3,

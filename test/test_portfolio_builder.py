@@ -154,6 +154,37 @@ def test_portfolio_builder_supports_score_weight_allocation():
     assert reasons["00100"]["method"] == "score_weighted"
 
 
+def test_weight_floor_scales_with_top_n_and_preserves_high_vol_strong_industry():
+    builder = TopNPortfolioBuilder(top_n=20, initial_capital=100000)
+    builder.kelly_position_ratio = 0.2298
+    selected = [
+        {
+            "stock_code": f"10{idx:03d}",
+            "ranking_score": 70.0 - idx,
+            "recent_volatility": 0.35,
+            "industry_l2": f"Group {idx}",
+        }
+        for idx in range(19)
+    ]
+    selected.append(
+        {
+            "stock_code": "01050",
+            "ranking_score": 54.0,
+            "recent_volatility": 0.90,
+            "industry_l2": "资讯科技器材",
+            "strong_industry": True,
+        }
+    )
+
+    builder._apply_weights(selected)
+
+    strong = next(item for item in selected if item["stock_code"] == "01050")
+    assert strong["portfolio_weight"] > 0
+    assert strong["portfolio_weight"] < 0.01
+    assert strong["weight_reason"]["min_single_weight"] < 0.01
+    assert strong["weight_reason"]["floor_triggered"] is False
+
+
 def test_portfolio_builder_applies_theme_overlay_to_ranking_scores():
     builder = TopNPortfolioBuilder(top_n=2, initial_capital=100000, theme_overlay_strength=0.10)
     rows = builder._apply_theme_overlay(
@@ -212,7 +243,7 @@ def test_lightgbm_theme_feature_merge_reads_standard_feature_rows(monkeypatch):
     assert float(merged.loc[pd.Timestamp("2026-06-06"), "theme_score__abc"]) == 69.5
 
 
-def test_portfolio_builder_excludes_ineligible_fallback_candidates_from_selected():
+def test_portfolio_builder_allows_risk_managed_fallback_but_keeps_hard_blocks():
     builder = TopNPortfolioBuilder(top_n=2, initial_capital=100000)
     good = _make_analysis_result(
         "01000",
@@ -295,16 +326,17 @@ def test_portfolio_builder_excludes_ineligible_fallback_candidates_from_selected
     selected_codes = {item["stock_code"] for item in result["selected"]}
     ranking_by_code = {item["stock_code"]: item for item in result["ranking"]}
 
-    assert selected_codes == {"01000"}
+    assert selected_codes == {"01000", "01001"}
     assert ranking_by_code["01000"]["selection_eligible"] is True
     assert ranking_by_code["01000"]["data_coverage_score"] >= 70
-    assert ranking_by_code["01001"]["selection_eligible"] is False
-    assert "signal_not_actionable" in ranking_by_code["01001"]["eligibility_reasons"]
+    assert ranking_by_code["01001"]["selection_eligible"] is True
+    assert ranking_by_code["01001"]["risk_managed_fallback"] is True
+    assert "signal_not_actionable" in ranking_by_code["01001"]["eligibility_relaxed_reasons"]
     assert ranking_by_code["01002"]["selection_eligible"] is False
     assert "liquidity_not_ok" in ranking_by_code["01002"]["eligibility_reasons"]
 
 
-def test_portfolio_builder_final_selection_comes_from_industry_shortlist():
+def test_portfolio_builder_fills_topn_after_industry_shortlist():
     builder = TopNPortfolioBuilder(top_n=4, initial_capital=100000)
 
     results = []
@@ -370,10 +402,15 @@ def test_portfolio_builder_final_selection_comes_from_industry_shortlist():
     selected_codes = {item["stock_code"] for item in result["selected"]}
     ranking_by_code = {item["stock_code"]: item for item in result["ranking"]}
 
-    assert "02003" not in selected_codes
     assert "02004" not in selected_codes
     assert ranking_by_code["02003"]["industry_rank"] > ranking_by_code["02003"]["industry_cap"]
-    assert all(item["industry_rank"] <= item["industry_cap"] for item in result["selected"])
+    assert len(selected_codes) == 4
+    assert "02003" in selected_codes
+    assert ranking_by_code["02003"]["selection_layer"] == "topn_fill"
+    assert all(
+        item["industry_rank"] <= item["industry_cap"] or item["selection_layer"] == "topn_fill"
+        for item in result["selected"]
+    )
 
 
 def test_portfolio_builder_syncs_ranking_selected_flags_to_final_holdings():
@@ -434,6 +471,7 @@ def test_portfolio_builder_syncs_ranking_selected_flags_to_final_holdings():
     }
 
     assert selected_codes == ranking_selected_codes
+    assert all(item.get("selected") is True for item in result["selected"])
     assert "02104" not in selected_codes
     assert all(item.get("portfolio_weight", 0) > 0 for item in result["selected"])
     assert all(
@@ -630,9 +668,10 @@ def test_industry_selector_applies_documented_hard_filters_and_preserves_zero_co
     selected = IndustryCandidateSelector(top_n=2).select(rows)
     by_code = {row["stock_code"]: row for row in selected}
 
-    assert by_code["09001"]["eligibility_pass"] is False
-    assert "weak_signal_tier(tier=weak)" in by_code["09001"]["eligibility_reasons"]
-    assert len(by_code["09001"]["eligibility_reasons"]) == 1
+    assert by_code["09001"]["eligibility_pass"] is True
+    assert by_code["09001"]["risk_managed_fallback"] is True
+    assert "weak_signal_tier(tier=weak)" in by_code["09001"]["eligibility_relaxed_reasons"]
+    assert by_code["09001"]["eligibility_reasons"] == []
     assert by_code["09002"]["eligibility_pass"] is False
     assert "low_quality_coverage(0%)" in by_code["09002"]["eligibility_reasons"]
     assert "excessive_drawdown(score=30)" in by_code["09002"]["eligibility_reasons"]
@@ -640,6 +679,115 @@ def test_industry_selector_applies_documented_hard_filters_and_preserves_zero_co
     assert "extreme_pe(303)" in by_code["09002"]["eligibility_reasons"]
     assert by_code["09003"]["eligibility_pass"] is True
     assert by_code["09003"]["selected"] is True
+
+
+def test_industry_selector_relaxes_momentum_guards_for_strong_industry():
+    strong_industry_row = {
+        "stock_code": "09201",
+        "ranking_score": 88.0,
+        "current_signal_active": True,
+        "current_signal_actionable": False,
+        "liquidity_ok": True,
+        "setup_type": "sideways",
+        "signal_freshness_score": 90.0,
+        "signal_tier": "weak",
+        "quality_data_coverage": 1.0,
+        "drawdown_penalty_score": 45.0,
+        "downtrend_penalty_score": 0.0,
+        "overheat_penalty_score": 86.0,
+        "high_chase_score": 82.0,
+        "price_return_60d_pct": 120.0,
+        "price_return_120d_pct": 220.0,
+        "data_coverage_score": 100.0,
+        "pe_ratio": 20.0,
+        "pb_ratio": 2.0,
+        "industry_l1": "Tech",
+        "industry_l2": "Semiconductors",
+        "industry_ret_20d": 0.32,
+        "industry_ret_60d": 0.75,
+        "industry_rps_20d": 92.0,
+        "industry_rps_60d": 88.0,
+        "industry_breadth_20d": 0.72,
+        "cluster_rps": 90.0,
+    }
+    extreme_row = {
+        **strong_industry_row,
+        "stock_code": "09202",
+        "ranking_score": 90.0,
+        "price_return_120d_pct": 650.0,
+    }
+
+    selected = IndustryCandidateSelector(top_n=2).select([strong_industry_row, extreme_row])
+    by_code = {row["stock_code"]: row for row in selected}
+
+    assert by_code["09201"]["strong_industry"] is True
+    assert by_code["09201"]["eligibility_pass"] is True
+    assert by_code["09201"]["strong_industry_override"] is True
+    assert "weak_signal_tier(tier=weak)" in by_code["09201"]["eligibility_relaxed_reasons"]
+    assert by_code["09201"]["selection_layer"] in {"core_strong_industry", "strong_industry"}
+    assert by_code["09202"]["eligibility_pass"] is False
+    assert by_code["09202"]["strong_industry_extreme_chase_block"] is True
+
+
+def test_industry_selector_allocates_multiple_slots_to_strong_industry():
+    rows = []
+    for idx, score in enumerate([95.0, 90.0, 85.0], start=1):
+        rows.append(
+            {
+                "stock_code": f"0930{idx}",
+                "ranking_score": score,
+                "current_signal_actionable": True,
+                "liquidity_ok": True,
+                "setup_type": "pre_breakout",
+                "signal_freshness_score": 90.0,
+                "signal_tier": "medium",
+                "quality_data_coverage": 1.0,
+                "drawdown_penalty_score": 0.0,
+                "downtrend_penalty_score": 0.0,
+                "overheat_penalty_score": 0.0,
+                "data_coverage_score": 100.0,
+                "pe_ratio": 20.0,
+                "pb_ratio": 2.0,
+                "industry_l1": "Tech",
+                "industry_l2": "Semiconductors",
+                "industry_ret_20d": 0.35,
+                "industry_ret_60d": 0.80,
+                "industry_rps_20d": 94.0,
+                "industry_rps_60d": 90.0,
+                "industry_breadth_20d": 0.75,
+                "cluster_rps": 92.0,
+            }
+        )
+    for idx, score in enumerate([80.0, 75.0], start=1):
+        rows.append(
+            {
+                "stock_code": f"0940{idx}",
+                "ranking_score": score,
+                "current_signal_actionable": True,
+                "liquidity_ok": True,
+                "setup_type": "pre_breakout",
+                "signal_freshness_score": 90.0,
+                "signal_tier": "medium",
+                "quality_data_coverage": 1.0,
+                "drawdown_penalty_score": 0.0,
+                "downtrend_penalty_score": 0.0,
+                "overheat_penalty_score": 0.0,
+                "data_coverage_score": 100.0,
+                "pe_ratio": 20.0,
+                "pb_ratio": 2.0,
+                "industry_l1": "Utilities",
+                "industry_l2": "Power",
+            }
+        )
+
+    selected = IndustryCandidateSelector(top_n=5).select(rows)
+    strong_selected = [
+        row for row in selected
+        if row.get("selected") and row.get("industry_l2") == "Semiconductors"
+    ]
+
+    assert len(strong_selected) >= 2
+    assert all(row["industry_cap"] >= 2 for row in strong_selected)
 
 
 def test_industry_selector_treats_missing_industry_as_independent_unknown_groups():
@@ -1037,12 +1185,14 @@ if __name__ == "__main__":
     test_portfolio_builder_supports_score_weight_allocation()
     test_portfolio_builder_applies_theme_overlay_to_ranking_scores()
     test_lightgbm_theme_feature_merge_reads_standard_feature_rows()
-    test_portfolio_builder_excludes_ineligible_fallback_candidates_from_selected()
-    test_portfolio_builder_final_selection_comes_from_industry_shortlist()
+    test_portfolio_builder_allows_risk_managed_fallback_but_keeps_hard_blocks()
+    test_portfolio_builder_fills_topn_after_industry_shortlist()
     test_portfolio_builder_syncs_ranking_selected_flags_to_final_holdings()
     test_selection_eligibility_applies_documented_hard_filters()
     test_selection_eligibility_matches_selector_filter_reasons()
     test_industry_selector_applies_documented_hard_filters_and_preserves_zero_coverage()
+    test_industry_selector_relaxes_momentum_guards_for_strong_industry()
+    test_industry_selector_allocates_multiple_slots_to_strong_industry()
     test_portfolio_builder_compounds_portfolio_equity_curve_over_dates()
     test_portfolio_builder_replay_generates_real_trades()
     test_portfolio_builder_replay_applies_transaction_costs()

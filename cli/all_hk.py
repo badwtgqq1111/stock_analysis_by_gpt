@@ -198,8 +198,9 @@ def main_all_hk(
         return None
 
     analysis_results = portfolio_result.get("analysis_results", [])
+    actual_holding_count = len(portfolio_result.get("selected", []) or [])
     print(f"\n[INFO] 成功分析 {len(analysis_results)} 只股票")
-    print(f"[INFO] 组合预计持有 Top {portfolio_result['top_n']} 只股票")
+    print(f"[INFO] 组合目标持有 Top {portfolio_result['top_n']}，实际入选 {actual_holding_count} 只股票")
     print(f"[INFO] 组合估算收益率: {portfolio_result['estimated_portfolio_return']:.1f}%")
     print(f"[INFO] 组合估算胜率: {portfolio_result['estimated_portfolio_win_rate']:.1f}%")
     print(f"[INFO] 组合估算交易次数: {portfolio_result['estimated_trade_count']}")

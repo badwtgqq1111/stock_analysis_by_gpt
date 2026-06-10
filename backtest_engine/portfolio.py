@@ -416,7 +416,7 @@ class TopNPortfolioBuilder:
                 cnt = cluster_counts.get(cid, 0)
                 penalty = _concentration_penalty(cnt)
                 cluster_counts[cid] = cnt + 1
-                if penalty >= 15:  # Hard block at 4+ concentration
+                if cid != -1 and penalty >= 15:  # Hard block at 4+ concentration for known clusters
                     sector_demoted.append(item)
                 else:
                     capped_selected.append(item)
@@ -452,6 +452,9 @@ class TopNPortfolioBuilder:
             item for item in selected
             if item.get("industry_timing_bucket") != "Broken"
         ]
+        selected = self._fill_selected_to_top_n(selected, ranking, lightgbm_candidates)
+        for item in selected:
+            item["selected"] = True
 
         self.kelly_position_ratio = kelly_position_ratio
         self._apply_weights(selected)
@@ -514,6 +517,61 @@ class TopNPortfolioBuilder:
             tca_summary=tca_summary,
         )
         return result.to_dict()
+
+    def _fill_selected_to_top_n(self, selected, ranking, lightgbm_candidates):
+        if len(selected) >= self.top_n:
+            return selected
+
+        selected_codes = {str(item.get("stock_code", "")).zfill(5) for item in selected}
+
+        def _is_hard_blocked(item):
+            return (
+                item.get("industry_timing_bucket") == "Broken"
+                or not item.get("eligibility_pass", item.get("selection_eligible", False))
+                or not item.get("liquidity_ok", True)
+                or item.get("is_fund_like", False)
+                or not item.get("tradable_flag", True)
+            )
+
+        def _score(item):
+            return float(
+                item.get(
+                    "final_score",
+                    item.get("cost_adjusted_ranking_score", item.get("ranking_score", 0.0)),
+                ) or 0.0
+            )
+
+        base_candidates = []
+        low_win_candidates = []
+        has_lightgbm = bool(lightgbm_candidates)
+        for item in ranking:
+            code = str(item.get("stock_code", "")).zfill(5)
+            if code in selected_codes or _is_hard_blocked(item):
+                continue
+            if has_lightgbm and item.get("selection_source") == "lightgbm_ranker" and item.get("win_rate", 0) < 35.0:
+                low_win_candidates.append(item)
+            else:
+                base_candidates.append(item)
+
+        for pool, low_win in ((base_candidates, False), (low_win_candidates, True)):
+            pool.sort(key=_score, reverse=True)
+            for item in pool:
+                if len(selected) >= self.top_n:
+                    break
+                code = str(item.get("stock_code", "")).zfill(5)
+                if code in selected_codes:
+                    continue
+                chosen = dict(item)
+                chosen["selected"] = True
+                if low_win:
+                    chosen["low_win_rate_fallback"] = True
+                    chosen["selection_layer"] = "low_win_rate_fallback"
+                elif chosen.get("selection_layer") == "fallback":
+                    chosen["selection_layer"] = "topn_fill"
+                selected.append(chosen)
+                selected_codes.add(code)
+
+        return selected
 
     @staticmethod
     def _sync_final_selection_flags(ranking, selected):
@@ -582,7 +640,11 @@ class TopNPortfolioBuilder:
         n = len(selected)
         kelly_scale = getattr(self, "kelly_position_ratio", 1.0 / max(n, 1))
         max_single_weight = 0.08          # hard cap: no single stock > 8%
-        min_single_weight = 0.01          # floor: stocks below 1% get trimmed
+        avg_target_weight = max(float(kelly_scale) / max(n, 1), 0.0)
+        # A fixed 1% floor is too coarse when half-Kelly exposure is spread
+        # across Top-N names. Keep tiny dust positions out, but preserve valid
+        # high-volatility strong-industry sleeves.
+        min_single_weight = min(0.01, max(0.001, avg_target_weight * 0.35))
         liquidity_capacity_frac = 0.05    # max 5% of 20d median daily turnover
 
         # ---- Step 1: base weight ----
@@ -661,10 +723,15 @@ class TopNPortfolioBuilder:
         # ---- Step 6: assign weights + build weight_reason ----
         for i, item in enumerate(selected):
             w = weights[i]
+            pre_floor_weight = max(
+                min(base_weights[i] * kelly_scale * vol_scales[i], max_single_weight),
+                0.0,
+            )
             reasons = {
                 "method": weight_method,
                 "base_weight": round(base_weights[i], 6),
                 "kelly_scale": round(kelly_scale, 4),
+                "min_single_weight": round(min_single_weight, 6),
                 "vol_scale": round(vol_scales[i], 4),
                 "vol_input": round(float(vols[i]), 4) if vols[i] is not None and np.isfinite(vols[i]) else None,
                 "median_vol": round(median_vol, 4),
@@ -681,7 +748,7 @@ class TopNPortfolioBuilder:
                 reasons["liquidity_cap_binding"] = False
 
             reasons["hard_cap_binding"] = base_weights[i] > max_single_weight
-            reasons["floor_triggered"] = 0 < base_weights[i] * kelly_scale < min_single_weight
+            reasons["floor_triggered"] = 0 < pre_floor_weight < min_single_weight
             reasons["final_weight"] = round(w, 6)
 
             item["portfolio_weight"] = w
@@ -1445,11 +1512,38 @@ class TopNPortfolioBuilder:
             elif pb_float > 50:
                 reasons.append(f"extreme_pb({pb_float:.0f})")
 
+        relaxed_reasons = []
+        strong_industry = False
+        strong_industry_score = 0.0
+        strong_industry_extreme_chase_block = False
+        try:
+            from backtest_engine.industry_selector import IndustryCandidateSelector
+
+            strong_industry_score = IndustryCandidateSelector._strong_industry_score(item)
+            strong_industry = IndustryCandidateSelector._is_strong_industry(item, strong_industry_score)
+            strong_industry_extreme_chase_block = IndustryCandidateSelector._has_extreme_chase_risk(item)
+            if strong_industry and reasons and not strong_industry_extreme_chase_block:
+                kept = []
+                for reason in reasons:
+                    prefix = IndustryCandidateSelector._reason_prefix(reason)
+                    if prefix in IndustryCandidateSelector._STRONG_INDUSTRY_RELAXABLE_REASONS:
+                        relaxed_reasons.append(reason)
+                    else:
+                        kept.append(reason)
+                reasons = kept
+        except Exception:
+            pass
+
         reasons = list(dict.fromkeys(reasons))
 
         return {
             "selection_eligible": not reasons,
             "eligibility_reasons": reasons,
+            "eligibility_relaxed_reasons": list(dict.fromkeys(relaxed_reasons)),
+            "strong_industry": bool(strong_industry),
+            "strong_industry_score": float(strong_industry_score),
+            "strong_industry_override": bool(strong_industry and relaxed_reasons and not reasons),
+            "strong_industry_extreme_chase_block": bool(strong_industry_extreme_chase_block),
             "blocked_by_high_chase": blocked_by_high_chase,
             "blocked_by_multibagger": blocked_by_multibagger,
             "blocked_by_52w_ma_gap": blocked_by_52w_ma_gap,

@@ -13,6 +13,8 @@ Web3,theme,Web3,区块链;去中心化,Web3 related exposure,数字资产,True,2
 CXO,theme,CXO,CRO;CDMO;CMO,CXO related exposure,医药,True,2026-06-06T05:58:26.384936
 医疗器械,theme,医疗器械,高值耗材;诊断设备,医疗器械 related exposure,医药,True,2026-06-06T05:58:26.384939
 半导体,theme,半导体,芯片;集成电路,半导体 related exposure,科技,True,2026-06-06T05:58:26.384941
+MLCC,theme,MLCC,陶瓷电容;多层陶瓷电容器;片式多层陶瓷电容器,MLCC related exposure,科技,True,2026-06-10T00:00:00
+被动元件,theme,被动元件,电容;电阻;电感;无源器件,被动元件 related exposure,科技,True,2026-06-10T00:00:00
 光模块,theme,光模块,光通信模块;高速光模块,光模块 related exposure,算力,True,2026-06-06T05:58:26.384943
 低空经济,theme,低空经济,eVTOL;无人机,低空经济 related exposure,先进制造,True,2026-06-06T05:58:26.384946
 新能源车,theme,新能源车,电动车;智能电动车,新能源车 related exposure,汽车,True,2026-06-06T05:58:26.384948
@@ -68,6 +70,7 @@ IDC,value_chain,IDC,数据中心;机房,IDC related exposure,算力,True,2026-06
 半导体设备,value_chain,半导体设备,刻蚀;光刻;检测设备,半导体设备 related exposure,半导体,True,2026-06-06T05:58:26.385056
 半导体材料,value_chain,半导体材料,硅片;光刻胶;电子气体,半导体材料 related exposure,半导体,True,2026-06-06T05:58:26.385059
 封测,value_chain,封测,封装;测试,封测 related exposure,半导体,True,2026-06-06T05:58:26.385061
+电子元件,value_chain,电子元件,电子组件;电子零件;元器件,电子元件 related exposure,科技,True,2026-06-10T00:00:00
 电池材料,value_chain,电池材料,正极;负极;隔膜;电解液,电池材料 related exposure,新能源车,True,2026-06-06T05:58:26.385063
 动力电池,value_chain,动力电池,电池包;电芯,动力电池 related exposure,新能源车,True,2026-06-06T05:58:26.385065
 充电桩,value_chain,充电桩,充电设备;补能,充电桩 related exposure,新能源车,True,2026-06-06T05:58:26.385068

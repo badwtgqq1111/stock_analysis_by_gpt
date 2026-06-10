@@ -43,6 +43,33 @@ import numpy as np
 class IndustryCandidateSelector:
     """Industry-aware hard filter + Top-N candidate selector."""
 
+    _STRONG_INDUSTRY_RELAXABLE_REASONS = {
+        "signal_not_actionable",
+        "sideways_setup",
+        "stale_signal",
+        "weak_signal_tier",
+        "overheated",
+        "high_chase_score",
+        "recent_20d_spike",
+        "recent_60d_multibagger",
+        "recent_120d_multibagger",
+        "near_52w_high_ma60_gap",
+        "excessive_drawdown",
+    }
+    _RISK_MANAGED_FALLBACK_HARD_REASONS = {
+        "liquidity_not_ok",
+        "not_tradable",
+        "fund_like_instrument",
+        "low_data_coverage",
+        "insufficient_data_coverage",
+        "low_quality_coverage",
+        "severe_downtrend",
+        "negative_pe",
+        "extreme_pe",
+        "negative_pb",
+        "extreme_pb",
+    }
+
     def __init__(
         self,
         *,
@@ -149,13 +176,18 @@ class IndustryCandidateSelector:
 
         # ---- Phase 1: Hard filter ----
         for row in ranking_rows:
+            self._annotate_strong_industry(row)
             reasons = list(row.get("eligibility_reasons") or [])
             self._check_eligibility(row, reasons)
             reasons = self._normalize_reasons(reasons)
+            reasons = self._apply_strong_industry_override(row, reasons)
             row["eligibility_pass"] = len(reasons) == 0
             row["eligibility_reasons"] = reasons
 
         eligible = [r for r in ranking_rows if r.get("eligibility_pass")]
+        if len(eligible) < self.top_n:
+            self._promote_risk_managed_fallbacks(ranking_rows, eligible)
+            eligible = [r for r in ranking_rows if r.get("eligibility_pass")]
 
         # ---- Phase 2: Within-industry scoring ----
         industries = self._group_by_industry(eligible, industry_map)
@@ -190,6 +222,7 @@ class IndustryCandidateSelector:
             )
             bucket = self._industry_timing_bucket(members[0]) if members else "Neutral"
             overlay_cap = self._candidate_cap_with_overlay(base_cap, bucket)
+            overlay_cap = self._candidate_cap_with_strong_industry(members, overlay_cap, bucket)
             for i, row in enumerate(members):
                 row["candidate_cap_base"] = base_cap
                 row["candidate_cap_overlay"] = overlay_cap
@@ -198,6 +231,10 @@ class IndustryCandidateSelector:
                 row["industry_weight_budget"] = self._industry_weight_budget(bucket)
                 row["industry_budget_reason"] = self._industry_budget_reason(bucket)
                 row["selection_layer"] = self._selection_layer(i, base_cap, overlay_cap)
+                if row.get("strong_industry") and i < overlay_cap:
+                    row["selection_layer"] = "core_strong_industry" if i < base_cap else "strong_industry"
+                elif row.get("risk_managed_fallback") and i < overlay_cap:
+                    row["selection_layer"] = "risk_managed_fallback"
                 row["selected"] = i < overlay_cap and bucket != "Broken"
 
         # ---- Phase 4: Cross-industry final ranking ----
@@ -227,12 +264,41 @@ class IndustryCandidateSelector:
                 + float(row.get("industry_opportunity_score", 50.0)) * self._effective_overlay_strength()
                 + float(row.get("ranking_score", 0)) * 0.10
                 - penalty
+                - self._strong_industry_risk_penalty(row)
             )
             industry_pick_counts[ind] = count + 1
 
         # Re-sort after penalty and take top_n
         selected.sort(key=lambda r: -float(r.get("final_score", r.get("ranking_score_adjusted", 0))))
         final_pool = selected[: self.top_n]
+
+        if len(final_pool) < self.top_n:
+            existing_codes = {str(row.get("stock_code", "")).zfill(5) for row in final_pool}
+            fill_pool = [
+                row for row in eligible
+                if str(row.get("stock_code", "")).zfill(5) not in existing_codes
+                and row.get("industry_timing_bucket", "Neutral") != "Broken"
+            ]
+            fill_pool.sort(
+                key=lambda r: -float(
+                    r.get("final_score", r.get("combined_selection_score", r.get("ranking_score", 0)))
+                )
+            )
+            for row in fill_pool:
+                if len(final_pool) >= self.top_n:
+                    break
+                row.setdefault("industry_concentration_penalty", 0.0)
+                row["final_score"] = float(
+                    row.get("final_score", row.get("combined_selection_score", row.get("ranking_score", 0)))
+                ) - self._strong_industry_risk_penalty(row)
+                if row.get("strong_industry"):
+                    row["selection_layer"] = "strong_industry"
+                elif row.get("risk_managed_fallback"):
+                    row["selection_layer"] = "risk_managed_fallback"
+                else:
+                    row["selection_layer"] = "topn_fill"
+                final_pool.append(row)
+                existing_codes.add(str(row.get("stock_code", "")).zfill(5))
 
         # Mark final selection
         for row in ranking_rows:
@@ -350,6 +416,180 @@ class IndustryCandidateSelector:
                 reasons.append(f"negative_pb({pb_val:.1f})")
             elif pb_val > 50:
                 reasons.append(f"extreme_pb({pb_val:.0f})")
+
+    def _annotate_strong_industry(self, row: dict[str, Any]) -> None:
+        score = self._strong_industry_score(row)
+        row["strong_industry_score"] = score
+        row["strong_industry"] = bool(self._is_strong_industry(row, score))
+
+    def _apply_strong_industry_override(
+        self,
+        row: dict[str, Any],
+        reasons: list[str],
+    ) -> list[str]:
+        row["eligibility_relaxed_reasons"] = []
+        row["strong_industry_override"] = False
+        if not row.get("strong_industry") or not reasons:
+            return reasons
+
+        if self._has_extreme_chase_risk(row):
+            row["strong_industry_extreme_chase_block"] = True
+            return reasons
+
+        kept: list[str] = []
+        relaxed: list[str] = []
+        for reason in reasons:
+            prefix = self._reason_prefix(reason)
+            if prefix in self._STRONG_INDUSTRY_RELAXABLE_REASONS:
+                relaxed.append(reason)
+            else:
+                kept.append(reason)
+
+        row["eligibility_relaxed_reasons"] = relaxed
+        row["strong_industry_override"] = bool(relaxed and not kept)
+        row["strong_industry_extreme_chase_block"] = False
+        return kept
+
+    def _promote_risk_managed_fallbacks(
+        self,
+        ranking_rows: list[dict[str, Any]],
+        eligible: list[dict[str, Any]],
+    ) -> None:
+        target = min(len(ranking_rows), max(self.top_n, self.top_n * 2))
+        if len(eligible) >= target:
+            return
+
+        existing_codes = {str(row.get("stock_code", "")).zfill(5) for row in eligible}
+        candidates = []
+        for row in ranking_rows:
+            code = str(row.get("stock_code", "")).zfill(5)
+            if code in existing_codes or row.get("eligibility_pass"):
+                continue
+            reasons = list(row.get("eligibility_reasons") or [])
+            prefixes = {self._reason_prefix(reason) for reason in reasons}
+            if prefixes & self._RISK_MANAGED_FALLBACK_HARD_REASONS:
+                continue
+            if self._has_extreme_chase_risk(row):
+                continue
+            candidates.append(row)
+
+        candidates.sort(
+            key=lambda row: (
+                -float(row.get("strong_industry_score", 0.0) or 0.0),
+                -float(row.get("ranking_score", 0.0) or 0.0),
+            )
+        )
+        for row in candidates:
+            if len(eligible) >= target:
+                break
+            relaxed = list(dict.fromkeys((row.get("eligibility_relaxed_reasons") or []) + (row.get("eligibility_reasons") or [])))
+            row["eligibility_relaxed_reasons"] = relaxed
+            row["eligibility_reasons"] = []
+            row["eligibility_pass"] = True
+            row["selection_eligible"] = True
+            row["risk_managed_fallback"] = True
+            row["strong_industry_override"] = bool(row.get("strong_industry_override", False))
+            eligible.append(row)
+
+    @classmethod
+    def _strong_industry_score(cls, row: dict[str, Any]) -> float:
+        rps20 = cls._float_or_default(row.get("industry_rps_20d"), 50.0)
+        rps60 = cls._float_or_default(row.get("industry_rps_60d"), 50.0)
+        breadth20 = cls._float_or_default(row.get("industry_breadth_20d"), 0.5)
+        breadth_score = breadth20 * 100.0 if breadth20 <= 1.5 else breadth20
+        ret20_pct = cls._return_to_pct(row.get("industry_ret_20d"))
+        ret60_pct = cls._return_to_pct(row.get("industry_ret_60d"))
+        if not np.isfinite(ret20_pct):
+            ret20_pct = 0.0
+        if not np.isfinite(ret60_pct):
+            ret60_pct = 0.0
+        cluster_rps = cls._float_or_default(row.get("cluster_rps"), 50.0)
+
+        ret20_score = float(np.clip((ret20_pct + 5.0) * 2.5, 0.0, 100.0))
+        ret60_score = float(np.clip((ret60_pct + 10.0) * 1.5, 0.0, 100.0))
+        score = (
+            rps20 * 0.32
+            + rps60 * 0.22
+            + breadth_score * 0.16
+            + ret20_score * 0.16
+            + ret60_score * 0.06
+            + cluster_rps * 0.08
+        )
+        return float(np.clip(score, 0.0, 100.0))
+
+    @classmethod
+    def _is_strong_industry(cls, row: dict[str, Any], score: float | None = None) -> bool:
+        if score is None:
+            score = cls._strong_industry_score(row)
+        rps20 = cls._float_or_default(row.get("industry_rps_20d"), 50.0)
+        rps60 = cls._float_or_default(row.get("industry_rps_60d"), 50.0)
+        breadth20 = cls._float_or_default(row.get("industry_breadth_20d"), 0.5)
+        breadth_score = breadth20 * 100.0 if breadth20 <= 1.5 else breadth20
+        ret20_pct = cls._return_to_pct(row.get("industry_ret_20d"))
+        if not np.isfinite(ret20_pct):
+            ret20_pct = 0.0
+        return bool(
+            score >= 70.0
+            and breadth_score >= 45.0
+            and (rps20 >= 65.0 or ret20_pct >= 12.0)
+            and (rps60 >= 50.0 or ret20_pct >= 18.0)
+        )
+
+    @classmethod
+    def _has_extreme_chase_risk(cls, row: dict[str, Any]) -> bool:
+        high_chase = cls._float_or_default(row.get("high_chase_score"), 0.0)
+        overheat = cls._float_or_default(row.get("overheat_penalty_score"), 0.0)
+        downtrend = cls._float_or_default(row.get("downtrend_penalty_score"), 0.0)
+        drawdown = cls._float_or_default(row.get("drawdown_penalty_score"), 0.0)
+        ret20 = cls._return_to_pct(row.get("price_return_20d_pct"))
+        ret60 = cls._return_to_pct(row.get("price_return_60d_pct"))
+        ret120 = cls._return_to_pct(row.get("price_return_120d_pct"))
+        pos52w = cls._float_or_default(row.get("price_position_52w_high"), np.nan)
+        ma60_gap = cls._return_to_pct(row.get("ma60_gap_pct"))
+        return bool(
+            high_chase >= 95.0
+            or overheat >= 96.0
+            or downtrend >= 60.0
+            or drawdown >= 65.0
+            or (np.isfinite(ret20) and ret20 >= 150.0)
+            or (np.isfinite(ret60) and ret60 >= 220.0)
+            or (np.isfinite(ret120) and ret120 >= 500.0)
+            or (np.isfinite(pos52w) and pos52w >= 98.0 and np.isfinite(ma60_gap) and ma60_gap >= 85.0)
+        )
+
+    @classmethod
+    def _strong_industry_risk_penalty(cls, row: dict[str, Any]) -> float:
+        relaxed = row.get("eligibility_relaxed_reasons") or []
+        if not relaxed:
+            return 0.0
+        penalty = 0.0
+        weights = {
+            "signal_not_actionable": 6.0,
+            "sideways_setup": 6.0,
+            "stale_signal": 4.0,
+            "weak_signal_tier": 4.0,
+            "overheated": 8.0,
+            "high_chase_score": 10.0,
+            "recent_20d_spike": 10.0,
+            "recent_60d_multibagger": 8.0,
+            "recent_120d_multibagger": 10.0,
+            "near_52w_high_ma60_gap": 8.0,
+            "excessive_drawdown": 8.0,
+        }
+        for reason in relaxed:
+            penalty += weights.get(cls._reason_prefix(reason), 3.0)
+        return float(min(penalty, 28.0))
+
+    @staticmethod
+    def _reason_prefix(reason: Any) -> str:
+        return str(reason).split("(", 1)[0]
+
+    @staticmethod
+    def _return_to_pct(value: Any) -> float:
+        v = IndustryCandidateSelector._float_or_default(value, np.nan)
+        if not np.isfinite(v):
+            return v
+        return float(v * 100.0 if abs(v) <= 3.0 else v)
 
     @staticmethod
     def _float_or_default(value: Any, default: float) -> float:
@@ -517,6 +757,12 @@ class IndustryCandidateSelector:
                     + row["stock_vs_industry_rank"] * 0.05
                 )
                 opportunity = self._compute_industry_opportunity_score(row)
+                strong_score = self._strong_industry_score(row)
+                row["strong_industry_score"] = strong_score
+                row["strong_industry"] = bool(self._is_strong_industry(row, strong_score))
+                if row["strong_industry"]:
+                    opportunity = max(opportunity, strong_score)
+                    alpha = min(100.0, alpha + min(8.0, (strong_score - 70.0) * 0.35))
                 overlay_strength = self._effective_overlay_strength()
                 combined = alpha
                 if self.mode == "timing_only":
@@ -590,16 +836,19 @@ class IndustryCandidateSelector:
             return 0.0
         if self.mode == "timing_only":
             return 1.0
-        configured = self.overlay_strength
+        configured = self.overlay_strength if self.overlay_strength > 0 else 0.20
         if self.timing_oos_win_rate is None:
-            return 0.0
+            return min(configured, 0.15)
         win_rate = float(self.timing_oos_win_rate)
+        ir = self._float_or_default(self.timing_oos_ir, 0.0)
+        if win_rate < 0.55 and ir < 0.0:
+            return min(configured, 0.08)
         if win_rate < 0.60:
-            return 0.0
+            return min(configured, 0.12)
         if win_rate < 0.65:
-            return min(configured, 0.10)
+            return min(configured, 0.16)
         if win_rate < 0.70:
-            return min(configured, 0.20)
+            return min(configured, 0.22)
         return min(configured, 0.30)
 
     def _industry_timing_bucket(self, row: dict[str, Any]) -> str:
@@ -621,13 +870,30 @@ class IndustryCandidateSelector:
         if self.mode == "core":
             return int(base_cap)
         strength = self._effective_overlay_strength()
-        if bucket == "Hot" and strength >= 0.20:
+        if bucket == "Hot" and strength >= 0.10:
             return int(min(self.max_per_industry, base_cap + 1))
         if bucket == "Cold" and strength > 0:
             return int(max(self.min_industry_candidates, base_cap - 1))
         if bucket == "Broken":
             return int(max(0, min(base_cap, self.min_industry_candidates)))
         return int(base_cap)
+
+    def _candidate_cap_with_strong_industry(
+        self,
+        members: list[dict[str, Any]],
+        current_cap: int,
+        bucket: str,
+    ) -> int:
+        if not members or bucket == "Broken":
+            return int(current_cap)
+        strong_count = sum(1 for row in members if row.get("strong_industry"))
+        if strong_count <= 0 and bucket != "Hot":
+            return int(current_cap)
+        sleeve_cap = max(2, int(np.ceil(self.top_n * 0.15)))
+        desired = min(self.max_per_industry, sleeve_cap, len(members))
+        if strong_count > 0:
+            desired = min(self.max_per_industry, max(desired, min(strong_count, sleeve_cap)))
+        return int(max(current_cap, desired))
 
     def _industry_weight_budget(self, bucket: str) -> float:
         base = min(0.30, self.max_industry_weight)
@@ -645,9 +911,11 @@ class IndustryCandidateSelector:
         if self.mode == "core":
             return "core:overlay_disabled"
         if self.timing_oos_win_rate is None:
-            return "overlay_report_only:no_oos_gate"
+            return f"{bucket.lower()}:auto_overlay_no_oos_gate_strength={strength:.2f}"
         if strength <= 0:
             return "overlay_disabled:oos_win_rate_below_60pct"
+        if float(self.timing_oos_win_rate) < 0.60:
+            return f"{bucket.lower()}:reduced_overlay_oos_win_rate_below_60pct_strength={strength:.2f}"
         return f"{bucket.lower()}:overlay_strength={strength:.2f}"
 
     @staticmethod

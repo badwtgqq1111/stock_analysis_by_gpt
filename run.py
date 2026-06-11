@@ -99,7 +99,14 @@ def _run_backfill_industry(args):
     from data.model import normalize_bool
 
     if getattr(args, "disable_clickhouse", False):
-        for key in ("CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_DATABASE"):
+        for key in (
+            "CLICKHOUSE_HOST",
+            "CLICKHOUSE_PORT",
+            "CLICKHOUSE_HTTP_PORT",
+            "CLICKHOUSE_USER",
+            "CLICKHOUSE_PASSWORD",
+            "CLICKHOUSE_DATABASE",
+        ):
             os.environ.pop(key, None)
 
     service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)

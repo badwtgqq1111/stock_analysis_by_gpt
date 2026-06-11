@@ -312,6 +312,24 @@ def test_warehouse_skips_clickhouse_when_configured_endpoint_is_unreachable():
     assert "connection refused" in warehouse._clickhouse_disabled_reason
 
 
+def test_warehouse_uses_clickhouse_http_port_fallback():
+    with patch.dict(
+        "os.environ",
+        {
+            "CLICKHOUSE_HOST": "localhost",
+            "CLICKHOUSE_HTTP_PORT": "18123",
+            "CLICKHOUSE_PORT": "",
+        },
+    ):
+        with patch("socket.create_connection") as create_connection:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+
+    create_connection.assert_called_once()
+    assert create_connection.call_args.args[0] == ("localhost", 18123)
+    assert warehouse.clickhouse_store.port == 18123
+
+
 def test_clickhouse_insert_frame_chunks_large_stock_info_batches():
     class RecordingClient:
         def __init__(self):

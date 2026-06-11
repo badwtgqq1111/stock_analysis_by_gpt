@@ -10,26 +10,37 @@ This directory contains the local database/model services used by the LightRAG A
 ## Start
 
 ```bash
-cp deploy/lightrag/.env.example deploy/lightrag/.env
-docker compose --env-file deploy/lightrag/.env -f deploy/lightrag/docker-compose.yml up -d
+cp deploy/lightrag/server.env.example deploy/lightrag/server.env
+docker compose --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
 docker exec stock-lightrag-ollama ollama pull bge-m3
 ```
 
 Install and start the LightRAG API server:
 
 ```bash
-cd /Users/ccs/code/quant/LightRAG
+cd /home/yuxun/quant/LightRAG
 uv sync --extra api --extra offline-storage --extra offline-llm
 
-cd /Users/ccs/code/quant/stock_analysis_by_gpt
+cd /home/yuxun/quant/stock_analysis_by_gpt
 export DEEPSEEK_API_KEY=...
 bash deploy/lightrag/start-server.sh
+```
+
+Run it in the background with `tmux`:
+
+```bash
+cd /home/yuxun/quant/stock_analysis_by_gpt
+tmux new -d -s lightrag 'LIGHTRAG_PATH=/home/yuxun/quant/LightRAG DEEPSEEK_API_KEY=... bash deploy/lightrag/start-server.sh'
+
+tmux ls
+tmux attach -t lightrag
+tmux kill-session -t lightrag
 ```
 
 API health: `http://127.0.0.1:9621/health`
 API docs: `http://127.0.0.1:9621/docs`
 
-The server script reads `DEEPSEEK_API_KEY` from the shell and does not write secrets to disk. Override defaults by exporting variables from `deploy/lightrag/server.env.example`.
+The server script reads `DEEPSEEK_API_KEY` from the shell and does not write secrets to disk. Override defaults by copying `deploy/lightrag/server.env.example` to `deploy/lightrag/server.env` and editing that local file.
 
 Notes:
 

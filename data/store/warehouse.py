@@ -75,7 +75,7 @@ class MarketDataWarehouse:
             self.clickhouse_store = clickhouse_store
         elif os.environ.get("CLICKHOUSE_HOST"):
             host = os.environ.get("CLICKHOUSE_HOST", "localhost")
-            port = int(os.environ.get("CLICKHOUSE_PORT", "8123"))
+            port = int(os.environ.get("CLICKHOUSE_PORT") or os.environ.get("CLICKHOUSE_HTTP_PORT", "8123"))
             endpoint_error = self._check_clickhouse_endpoint(host, port)
             if endpoint_error:
                 self.clickhouse_store = None

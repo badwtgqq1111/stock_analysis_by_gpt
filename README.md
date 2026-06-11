@@ -18,6 +18,104 @@ brew install libomp
 
 项目通过 `pyproject.toml` 的 `[tool.uv.sources]` 将 `akshare` 指向同级目录 `../akshare`。如果本地目录结构不同，需要调整该路径。
 
+### ClickHouse 可选
+
+ClickHouse 可选。设置环境变量后，features 与 stock info registry 优先写入 ClickHouse；不可用时自动回退到 Parquet。
+
+```bash
+mkdir -p assets/clickhouse
+
+# 如果宿主机 9000 已被占用，把 CLICKHOUSE_NATIVE_PORT 改成 19000 等备用端口。
+export CLICKHOUSE_HTTP_PORT=${CLICKHOUSE_HTTP_PORT:-8123}
+export CLICKHOUSE_NATIVE_PORT=${CLICKHOUSE_NATIVE_PORT:-9000}
+
+docker run -d --name clickhouse \
+  --restart unless-stopped \
+  -p "${CLICKHOUSE_HTTP_PORT}:8123" -p "${CLICKHOUSE_NATIVE_PORT}:9000" \
+  -v "$(pwd)/assets/clickhouse:/var/lib/clickhouse" \
+  -e CLICKHOUSE_USER=default \
+  -e CLICKHOUSE_PASSWORD=quant2024 \
+  -e CLICKHOUSE_DB=quant \
+  clickhouse/clickhouse-server
+
+export CLICKHOUSE_HOST=localhost
+export CLICKHOUSE_PORT="${CLICKHOUSE_HTTP_PORT}"
+export CLICKHOUSE_USER=default
+export CLICKHOUSE_PASSWORD=quant2024
+export CLICKHOUSE_DATABASE=quant
+
+# 可选：应用侧 ClickHouse 批量写入分块行数，默认 50000
+export CLICKHOUSE_INSERT_CHUNK_ROWS=50000
+```
+
+`--restart unless-stopped` 会让 Docker 服务启动后自动拉起 ClickHouse 容器；`-v "$(pwd)/assets/clickhouse:/var/lib/clickhouse"` 将 ClickHouse 数据文件保存在项目的 `assets/clickhouse` 下，删除或重建容器时数据不会丢。`/var/lib/clickhouse` 是必须持久化的数据目录，应用侧数据库名使用 `CLICKHOUSE_DATABASE`，默认建议为 `quant`。本项目通过 HTTP 端口访问 ClickHouse，即容器内 `8123`；native 端口 `9000` 只给 clickhouse-client 或其他 native 协议工具使用。如果宿主机 `9000` 被占用，可以改用 `export CLICKHOUSE_NATIVE_PORT=19000` 后再执行 `docker run`，应用侧 `CLICKHOUSE_PORT` 仍然保持 HTTP 端口。
+
+ClickHouse 写入上限由应用侧分块控制，不需要先改 ClickHouse server 配置。`data/store/clickhouse_store.py` 的 `_insert_frame()` 会读取 `CLICKHOUSE_INSERT_CHUNK_ROWS`，把一次 DataFrame 写入拆成多次 `insert_df()`；未设置时默认每批 `50000` 行。建议本地单机先保持默认；如果导入 stock info、features 或 OHLCV 时出现内存压力、HTTP payload 过大、连接被代理中断等问题，把它降到 `10000` 或 `20000`；如果机器内存充足且 ClickHouse 在本机 Docker 中运行，可以试到 `100000`。这个值只影响每次发给 ClickHouse 的 insert 行数，不改变最终写入行数，也不改变 `ReplacingMergeTree` 的去重逻辑。
+
+`STOCK_INFO_LOOKUP_CHUNK_ROWS` 是股票元数据 upsert 前读取旧字段的查询分块，默认 `100`，和插入上限不是同一个配置。只有在回填行业/标的类型时查询条件过大或 ClickHouse 响应慢，才需要把它调小，例如：
+
+```bash
+export STOCK_INFO_LOOKUP_CHUNK_ROWS=50
+```
+
+### SearXNG 可选
+
+SearXNG 用于本地聚合搜索 evidence，是 `stock-intelligence-pipeline` 的推荐搜索入口。它不是离线搜索引擎，仍会请求 Bing、DuckDuckGo 等上游搜索源；优势是统一缓存、统一 JSON API，并避免全市场流程逐股打开浏览器。
+
+```bash
+mkdir -p deploy/searxng/searxng deploy/searxng/cache
+
+docker compose -f deploy/searxng/docker-compose.yml up -d
+
+curl 'http://127.0.0.1:8888/search?q=00700%20腾讯控股%20主营业务%20年报&format=json&language=zh-CN&categories=general'
+
+export SEARXNG_URL=http://127.0.0.1:8888
+```
+
+`deploy/searxng/docker-compose.yml` 默认只绑定 `127.0.0.1:8888`，不要直接暴露公网。`deploy/searxng/searxng/settings.yml` 已启用 `json` format，否则 `/search?format=json` 会返回 403；默认启用 Bing 和 DuckDuckGo，禁用 Google 以减少验证码和风控。若 `8888` 被占用，可以临时改 `deploy/searxng/docker-compose.yml` 的宿主机端口，例如 `127.0.0.1:18888:8080`，并同步设置 `SEARXNG_URL=http://127.0.0.1:18888`。完整说明和排障见 `docs/SEARXNG_SEARCH_INTEGRATION.md`。
+
+### LightRAG 可选
+
+LightRAG 只用于 evidence 索引、主题/股票画像召回和重点股票深挖；全市场生产流程默认用 `--profile-stage skip`，不逐股做昂贵问答。部署分两层：Docker 跑 PostgreSQL/pgvector/AGE 和 Ollama embedding 服务，宿主机运行上游 LightRAG API server。
+
+```bash
+# 1) 准备 LightRAG 运行环境变量
+cp deploy/lightrag/server.env.example deploy/lightrag/server.env
+# 编辑 deploy/lightrag/server.env，至少确认 POSTGRES_PASSWORD、LLM_MODEL 等配置
+
+# 2) 启动 PostgreSQL 和 Ollama
+docker compose --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
+docker exec stock-lightrag-ollama ollama pull bge-m3
+
+# 3) 安装上游 LightRAG API server
+cd ../LightRAG
+uv sync --extra api --extra offline-storage --extra offline-llm
+
+# 4) 回到本项目启动 LightRAG API
+cd ../stock_analysis_by_gpt
+export LIGHTRAG_PATH="$(cd ../LightRAG && pwd)"
+export DEEPSEEK_API_KEY=...
+bash deploy/lightrag/start-server.sh
+```
+
+如果不想占用当前终端，可以用 `tmux` 后台启动：
+
+```bash
+cd /home/yuxun/quant/stock_analysis_by_gpt
+tmux new -d -s lightrag 'LIGHTRAG_PATH=/home/yuxun/quant/LightRAG DEEPSEEK_API_KEY=... bash deploy/lightrag/start-server.sh'
+
+# 查看会话
+tmux ls
+
+# 进入会话查看日志；退出但不停止服务：Ctrl+b，然后按 d
+tmux attach -t lightrag
+
+# 停止服务
+tmux kill-session -t lightrag
+```
+
+启动后检查 `http://127.0.0.1:9621/health`，API 文档在 `http://127.0.0.1:9621/docs`。`start-server.sh` 会读取 `deploy/lightrag/server.env` 和当前 shell 中的 `DEEPSEEK_API_KEY`，不会把 API key 写入仓库。更完整的后端取舍和排障见 `docs/LIGHTRAG_DEPLOYMENT.md`，部署脚本说明见 `deploy/lightrag/README.md`。
+
 ## 推荐 Runbook
 
 README 以依赖顺序组织流程：基础行情、行业元数据和因子是生产选股硬依赖；画像、事件、微结构、新闻情绪是选股前可选特征层；模型诊断、TCA、执行模拟和组合策略评估都消费 `select` 的导出结果。基础标签流水线已经退出推荐流程；LightRAG 只用于 evidence 索引和重点股票深挖，不作为全市场逐股在线问答引擎。
@@ -211,28 +309,7 @@ uv run python run.py theme-feature-diagnostics \
 | 回测交易 | `assets/data/trade` |
 | ClickHouse 数据卷 | `assets/clickhouse` |
 
-ClickHouse 可选。设置环境变量后，features 与 stock info registry 优先写入 ClickHouse；不可用时自动回退到 Parquet。
-
-```bash
-mkdir -p assets/clickhouse
-
-docker run -d --name clickhouse \
-  --restart unless-stopped \
-  -p 8123:8123 -p 9000:9000 \
-  -v "$(pwd)/assets/clickhouse:/var/lib/clickhouse" \
-  -e CLICKHOUSE_USER=default \
-  -e CLICKHOUSE_PASSWORD=quant2024 \
-  -e CLICKHOUSE_DB=quant \
-  clickhouse/clickhouse-server
-
-export CLICKHOUSE_HOST=localhost
-export CLICKHOUSE_PORT=8123
-export CLICKHOUSE_USER=default
-export CLICKHOUSE_PASSWORD=quant2024
-export CLICKHOUSE_DATABASE=quant
-```
-
-`--restart unless-stopped` 会让 Docker 服务启动后自动拉起 ClickHouse 容器；`-v "$(pwd)/assets/clickhouse:/var/lib/clickhouse"` 将 ClickHouse 数据文件保存在项目的 `assets/clickhouse` 下，删除或重建容器时数据不会丢。`/var/lib/clickhouse` 是必须持久化的数据目录，应用侧数据库名使用 `CLICKHOUSE_DATABASE`，默认建议为 `quant`。
+ClickHouse 是可选加速后端，部署方式和写入分块配置见上面的环境部署章节。未设置 `CLICKHOUSE_HOST` 时项目只使用本地 Parquet。
 
 ## 行业分层选股
 

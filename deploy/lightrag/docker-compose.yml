@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: gzdaniel/postgres-for-rag:pg18-age-pgvector
+    image: ${LIGHTRAG_POSTGRES_IMAGE:-stock-lightrag-postgres:pg18-age-pgvector-local}
+    pull_policy: ${LIGHTRAG_POSTGRES_PULL_POLICY:-build}
+    build:
+      context: ${LIGHTRAG_POSTGRES_BUILD_CONTEXT:-../../../LightRAG}
+      dockerfile: Dockerfile.postgres
     platform: linux/amd64
     container_name: stock-lightrag-postgres
     environment:
@@ -19,7 +23,9 @@ services:
     restart: unless-stopped
 
   ollama:
-    image: ollama/ollama:latest
+    profiles:
+      - "ollama"
+    image: ${OLLAMA_IMAGE:-docker.m.daocloud.io/ollama/ollama:latest}
     container_name: stock-lightrag-ollama
     ports:
       - "${OLLAMA_PORT:-11434}:11434"

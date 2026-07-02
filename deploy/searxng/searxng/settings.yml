@@ -1,4 +1,8 @@
-use_default_settings: true
+use_default_settings:
+  engines:
+    keep_only:
+      - bing
+      - duckduckgo
 
 server:
   secret_key: "replace-with-random-secret"
@@ -14,11 +18,14 @@ search:
   safe_search: 0
   default_lang: "zh-CN"
 
+outgoing:
+  proxies:
+    all://:
+      - http://host.docker.internal:7897
+  extra_proxy_timeout: 10
+
 engines:
   - name: bing
     disabled: false
   - name: duckduckgo
     disabled: false
-  - name: google
-    disabled: true
-

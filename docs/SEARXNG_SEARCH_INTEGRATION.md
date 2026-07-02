@@ -89,7 +89,10 @@ services:
 ### settings.yml
 
 ```yaml
-use_default_settings: true
+use_default_settings:
+  engines:
+    keep_only:
+      - bing
 
 server:
   secret_key: "replace-with-random-secret"
@@ -108,17 +111,15 @@ search:
 engines:
   - name: bing
     disabled: false
-  - name: duckduckgo
-    disabled: false
-  - name: google
-    disabled: true
 ```
 
 说明：
 
 - `search.formats` 必须包含 `json`，否则 `/search?format=json` 会返回 403。
+- 不要把 `use_default_settings` 直接改成 `false` 再只保留最小字段；SearXNG 当前版本还依赖不少默认配置，过度精简后会直接触发 500。更稳的做法是保留默认设置，但用 `use_default_settings.engines.keep_only` 只留下需要的 engines。
+- 如果仅保留 `engines:` 里的 `bing` / `duckduckgo`，却没有加 `use_default_settings.engines.keep_only`，`general` 类默认启用的 `brave`、`startpage`、`wikipedia` 等仍可能参与查询，最终在返回里出现 `unresponsive_engines` timeout。
 - 本项目内部使用时 `limiter: false`，避免本地批处理被限流。仅当暴露公网时再开启 limiter / Valkey / 反代鉴权。
-- 先禁用 Google，减少风控和验证码；优先用 Bing / DuckDuckGo 这类相对稳定的 engine。
+- 本仓库当前默认只保留 `bing`，因为这台机器对 DuckDuckGo 连通性也会超时；如果你的网络环境可达，再把 `duckduckgo` 加回 `keep_only` 和 `engines:` 列表。
 
 ### Compose 启动
 

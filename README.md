@@ -18,6 +18,49 @@ brew install libomp
 
 项目通过 `pyproject.toml` 的 `[tool.uv.sources]` 将 `akshare` 指向同级目录 `../akshare`。如果本地目录结构不同，需要调整该路径。
 
+### 一键部署可选服务
+
+ClickHouse、SearXNG、LightRAG 本地依赖可以用统一脚本部署和校验。脚本会：
+
+- 自动创建 `assets/clickhouse`、`deploy/searxng/cache` 等本地持久化目录。
+- 自动执行 `cp deploy/lightrag/server.env.example deploy/lightrag/server.env`，但只在 `server.env` 不存在时创建，不覆盖已有本地配置。
+- 部署 ClickHouse、SearXNG、LightRAG PostgreSQL/Ollama，并逐项输出部署和健康检查结果。
+- 对 Docker Hub 拉取超时做重试，并在最终失败时提示是网络/镜像源问题还是服务健康检查问题。
+
+```bash
+# 默认部署 clickhouse,searxng,lightrag 并输出每部分结果
+bash scripts/deploy_local_services.sh
+
+# 只部署其中一部分
+bash scripts/deploy_local_services.sh up --components clickhouse,searxng
+bash scripts/deploy_local_services.sh up --components lightrag
+
+# 只做健康检查
+bash scripts/deploy_local_services.sh check
+
+# 镜像拉取网络不稳定时增加重试
+bash scripts/deploy_local_services.sh up --components lightrag --retries 5
+
+# 只拉镜像，适合先验证 Docker Hub/镜像代理连通性
+bash scripts/deploy_local_services.sh pull --components lightrag --retries 5
+
+# 如果暂时不想拉 bge-m3 embedding 模型
+bash scripts/deploy_local_services.sh up --components lightrag --skip-ollama-pull
+```
+
+脚本默认使用这些本地端口：ClickHouse HTTP `8123`、ClickHouse native `9000`、SearXNG `8888`、LightRAG PostgreSQL `15432`、Ollama `11434`、LightRAG API `9621`。端口被占用时可以在运行前覆盖环境变量，例如：
+
+```bash
+export CLICKHOUSE_HTTP_PORT=18123
+export CLICKHOUSE_NATIVE_PORT=19000
+export SEARXNG_PORT=18888
+export POSTGRES_PORT=25432
+export OLLAMA_PORT=21434
+bash scripts/deploy_local_services.sh up
+```
+
+如果看到类似 `Get "https://registry-1.docker.io/v2/": net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers)`，根因通常是 Docker Hub/网络代理/镜像源连通性超时，不是 LightRAG compose 配置本身坏了。先用 `bash scripts/deploy_local_services.sh pull --components lightrag --retries 5` 单独验证镜像拉取；仍失败时需要配置 Docker 代理或 registry mirror 后重跑。
+
 ### ClickHouse 可选
 
 ClickHouse 可选。设置环境变量后，features 与 stock info registry 优先写入 ClickHouse；不可用时自动回退到 Parquet。
@@ -62,6 +105,17 @@ export STOCK_INFO_LOOKUP_CHUNK_ROWS=50
 
 SearXNG 用于本地聚合搜索 evidence，是 `stock-intelligence-pipeline` 的推荐搜索入口。它不是离线搜索引擎，仍会请求 Bing、DuckDuckGo 等上游搜索源；优势是统一缓存、统一 JSON API，并避免全市场流程逐股打开浏览器。
 
+推荐优先使用一键脚本：
+
+```bash
+bash scripts/deploy_local_services.sh up --components searxng
+bash scripts/deploy_local_services.sh check --components searxng
+
+export SEARXNG_URL=http://127.0.0.1:8888
+```
+
+手动部署命令如下，适合排障时逐条执行：
+
 ```bash
 mkdir -p deploy/searxng/searxng deploy/searxng/cache
 
@@ -72,19 +126,61 @@ curl 'http://127.0.0.1:8888/search?q=00700%20腾讯控股%20主营业务%20年�
 export SEARXNG_URL=http://127.0.0.1:8888
 ```
 
-`deploy/searxng/docker-compose.yml` 默认只绑定 `127.0.0.1:8888`，不要直接暴露公网。`deploy/searxng/searxng/settings.yml` 已启用 `json` format，否则 `/search?format=json` 会返回 403；默认启用 Bing 和 DuckDuckGo，禁用 Google 以减少验证码和风控。若 `8888` 被占用，可以临时改 `deploy/searxng/docker-compose.yml` 的宿主机端口，例如 `127.0.0.1:18888:8080`，并同步设置 `SEARXNG_URL=http://127.0.0.1:18888`。完整说明和排障见 `docs/SEARXNG_SEARCH_INTEGRATION.md`。
+`deploy/searxng/docker-compose.yml` 默认只绑定 `127.0.0.1:8888`，不要直接暴露公网。`deploy/searxng/searxng/settings.yml` 已启用 `json` format，否则 `/search?format=json` 会返回 403；同时建议用 `use_default_settings.engines.keep_only` 明确收窄默认 engines，否则 SearXNG 会继续叠加默认 general engines，表现成 `brave`、`startpage`、`wikipedia` 等在 `unresponsive_engines` 里超时。本仓库默认只保留 `bing`；若你的网络对 DuckDuckGo 连通性稳定，再按需加回。若 `8888` 被占用，可以临时改 `deploy/searxng/docker-compose.yml` 的宿主机端口，例如 `127.0.0.1:18888:8080`，并同步设置 `SEARXNG_URL=http://127.0.0.1:18888`。完整说明和排障见 `docs/SEARXNG_SEARCH_INTEGRATION.md`。
 
 ### LightRAG 可选
 
-LightRAG 只用于 evidence 索引、主题/股票画像召回和重点股票深挖；全市场生产流程默认用 `--profile-stage skip`，不逐股做昂贵问答。部署分两层：Docker 跑 PostgreSQL/pgvector/AGE 和 Ollama embedding 服务，宿主机运行上游 LightRAG API server。
+LightRAG 只用于 evidence 索引、主题/股票画像召回和重点股票深挖；全市场生产流程默认用 `--profile-stage skip`，不逐股做昂贵问答。部署分两层：Docker 跑 PostgreSQL/pgvector/AGE；若需要本地 embedding，再显式启用 Ollama profile；宿主机运行上游 LightRAG API server。
+
+推荐先用一键脚本部署并校验 Docker 层：
+
+```bash
+bash scripts/deploy_local_services.sh up --components lightrag
+bash scripts/deploy_local_services.sh check --components lightrag
+
+# 可选：本地 Ollama 镜像约 3GB+，只在确实需要本地 embedding 时启用
+bash scripts/deploy_local_services.sh up --components lightrag --with-ollama
+```
+
+脚本会在缺少配置时自动创建：
+
+```bash
+cp deploy/lightrag/server.env.example deploy/lightrag/server.env
+```
+
+它不会覆盖已经存在的 `deploy/lightrag/server.env`。首次部署后仍建议打开这个文件确认 `POSTGRES_PASSWORD`、`LLM_MODEL`、`LLM_BINDING_HOST` 等本地配置。LightRAG API server 依赖上游 `../LightRAG` 和 `DEEPSEEK_API_KEY`，脚本只会把 API 健康检查列为单独结果；如果 API 未启动，会提示用 `deploy/lightrag/start-server.sh` 启动。
+
+`deploy/lightrag/docker-compose.yml` 默认不再拉取 `gzdaniel/postgres-for-rag:pg18-age-pgvector`，因为该自定义镜像容易受 Docker Hub/mirror 白名单影响。PostgreSQL 会从同级 `../LightRAG/Dockerfile.postgres` 本地构建 `stock-lightrag-postgres:pg18-age-pgvector-local`，第一次构建会下载 pgvector 基础镜像、Debian 编译依赖并编译 Apache AGE，耗时会比直接 pull 更长；构建完成后镜像会留在本机。若你已经有内部镜像，可以运行前覆盖：
+
+```bash
+export LIGHTRAG_POSTGRES_IMAGE=registry.example.com/postgres-for-rag:pg18-age-pgvector
+export LIGHTRAG_POSTGRES_PULL_POLICY=missing
+export OLLAMA_IMAGE=registry.example.com/ollama/ollama:latest
+```
+
+Ollama 被放在 compose profile 中，默认命令不会拉取 3GB+ 的 `ollama/ollama` 镜像：
+
+```bash
+# 默认只启动 PostgreSQL，不拉 Ollama
+docker compose --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
+
+# 确认需要本地 embedding 时再启用 Ollama
+docker compose --profile ollama --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
+docker exec stock-lightrag-ollama ollama pull bge-m3
+```
+
+手动部署流程如下，适合排障时逐条执行：
 
 ```bash
 # 1) 准备 LightRAG 运行环境变量
 cp deploy/lightrag/server.env.example deploy/lightrag/server.env
 # 编辑 deploy/lightrag/server.env，至少确认 POSTGRES_PASSWORD、LLM_MODEL 等配置
 
-# 2) 启动 PostgreSQL 和 Ollama
+# 2) 启动 PostgreSQL
 docker compose --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
+
+# 可选：启用本地 Ollama embedding 服务
+docker compose --profile ollama --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
 docker exec stock-lightrag-ollama ollama pull bge-m3
 
 # 3) 安装上游 LightRAG API server

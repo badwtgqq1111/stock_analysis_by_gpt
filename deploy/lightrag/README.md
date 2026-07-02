@@ -5,13 +5,20 @@ This directory contains the local database/model services used by the LightRAG A
 ## Services
 
 - `stock-lightrag-postgres`: PostgreSQL with pgvector and Apache AGE for LightRAG `PG*Storage`.
-- `stock-lightrag-ollama`: Ollama for local `bge-m3` embeddings.
+- `stock-lightrag-ollama`: optional Ollama profile for local `bge-m3` embeddings.
+
+`stock-lightrag-postgres` is built locally from `../LightRAG/Dockerfile.postgres` by default. This avoids pulling `gzdaniel/postgres-for-rag:pg18-age-pgvector` from Docker Hub, which is unreliable behind some mirrors. The first build downloads the `pgvector/pgvector:pg18-trixie` base image, Debian build dependencies, and compiles Apache AGE, so it can take several minutes on a slow network.
+
+Ollama is intentionally opt-in because the image is 3GB+. Default compose commands do not pull it.
 
 ## Start
 
 ```bash
 cp deploy/lightrag/server.env.example deploy/lightrag/server.env
 docker compose --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
+
+# Optional local embedding service:
+docker compose --profile ollama --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
 docker exec stock-lightrag-ollama ollama pull bge-m3
 ```
 

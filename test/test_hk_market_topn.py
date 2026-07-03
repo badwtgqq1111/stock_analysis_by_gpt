@@ -39,7 +39,7 @@ if "portfolio_strategy" not in sys.modules:
 
 from core import StockAnalyzer
 from core.lightgbm_analysis import LightGBMAnalysisMixin
-from data.model import normalize_ohlcv_frame
+from data.model import normalize_financial_statement_metrics, normalize_ohlcv_frame
 from data.store import DataLayout, MarketDataWarehouse
 
 
@@ -55,6 +55,114 @@ def test_lightgbm_stock_info_frame_to_map_handles_dataframe():
 
     assert info_map["00700"]["industry_l2"] == "软件服务"
     assert info_map["00005"]["industry_l1"] == "金融业"
+
+
+def test_lightgbm_valuation_data_uses_persisted_stock_info_fields():
+    info_map = LightGBMAnalysisMixin._stock_info_frame_to_map(
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": "700",
+                    "pe_ratio": "20.5",
+                    "pb_ratio": "3.2",
+                    "dividend_yield": "0.8",
+                },
+                {
+                    "stock_code": "00005",
+                    "pe_ratio": None,
+                    "pb_ratio": "0.9",
+                },
+            ]
+        )
+    )
+
+    pe_pb_data, valuation_payload = LightGBMAnalysisMixin._stock_info_map_to_valuation_data(
+        ["00700", "00005"],
+        info_map,
+    )
+
+    assert pe_pb_data["00700"] == (20.5, 3.2)
+    assert np.isnan(pe_pb_data["00005"][0])
+    assert pe_pb_data["00005"][1] == 0.9
+    assert valuation_payload["00700"]["dividend_yield"] == 0.8
+    assert np.isnan(valuation_payload["00005"]["pe_ratio"])
+
+
+def test_lightgbm_local_financial_quality_uses_persisted_statement_metrics():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        analyzer = StockAnalyzer(db_dir=tmp_dir, market_read_only=False)
+        try:
+            stock_info = pd.DataFrame(
+                [
+                    {
+                        "stock_code": "00700",
+                        "market": "HK",
+                        "exchange": "HKEX",
+                        "asset_type": "equity",
+                        "industry_l1": "资讯科技业",
+                        "industry_l2": "软件服务",
+                        "dividend_yield": 0.5,
+                        "ingest_time": pd.Timestamp("2026-01-02"),
+                    },
+                    {
+                        "stock_code": "00005",
+                        "market": "HK",
+                        "exchange": "HKEX",
+                        "asset_type": "equity",
+                        "industry_l1": "资讯科技业",
+                        "industry_l2": "软件服务",
+                        "dividend_yield": 0.1,
+                        "ingest_time": pd.Timestamp("2026-01-02"),
+                    },
+                ]
+            )
+            analyzer.market_warehouse.upsert_stock_info_batch(stock_info.to_dict(orient="records"))
+            financial = pd.DataFrame(
+                [
+                    normalize_financial_statement_metrics(
+                        {
+                            "report_date": "2025-12-31",
+                            "available_at": "2026-03-31",
+                            "roe": 0.20,
+                            "roa": 0.10,
+                            "gross_margin": 0.50,
+                            "revenue_yoy": 0.20,
+                            "debt_to_assets": 0.20,
+                        },
+                        stock_code="00700",
+                        market="HK",
+                        source="unit_test",
+                    ),
+                    normalize_financial_statement_metrics(
+                        {
+                            "report_date": "2025-12-31",
+                            "available_at": "2026-03-31",
+                            "roe": 0.05,
+                            "roa": 0.02,
+                            "gross_margin": 0.20,
+                            "revenue_yoy": -0.05,
+                            "debt_to_assets": 0.70,
+                        },
+                        stock_code="00005",
+                        market="HK",
+                        source="unit_test",
+                    ),
+                ]
+            )
+            analyzer.market_warehouse.upsert_financial_statement_metrics(financial)
+            info_map = LightGBMAnalysisMixin._stock_info_frame_to_map(stock_info)
+
+            quality_scores, quality_details = analyzer._load_local_financial_quality(
+                ["00700", "00005"],
+                info_map,
+                asof_date="2026-04-01",
+            )
+        finally:
+            analyzer.close()
+
+    assert quality_scores["00700"] > quality_scores["00005"]
+    assert quality_details["00700"]["quality_data_coverage"] > 0
+    assert "roe_ind_pct" in quality_details["00700"]
 
 
 def test_backtest_portfolio_uses_all_hk_stocks_when_stock_codes_missing():

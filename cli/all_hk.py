@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from core import StockAnalyzer
+from core.constants import DEFAULT_FACTOR_SET
 from cli.formatters import _format_factor_reason_lines, _safe_close_analyzer
 from cli.helpers import (
     _build_factor_scorecard_ridge,
@@ -30,7 +31,7 @@ def main_all_hk(
     batch_id=None,
     max_workers=1,
     analysis_mode="factor",
-    factor_set="qlib_alpha158",
+    factor_set=DEFAULT_FACTOR_SET,
     show_progress=False,
     fast_mode=False,
     validation_days=None,

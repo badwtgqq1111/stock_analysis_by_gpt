@@ -22,33 +22,15 @@
 
 ## 3. 总体架构
 
-可编辑的 draw.io 源文件见 [QUANT_SYSTEM_OVERALL_DESIGN.drawio](./QUANT_SYSTEM_OVERALL_DESIGN.drawio)。
+可编辑的 draw.io 源文件见 [QUANT_SYSTEM_OVERALL_DESIGN.drawio](../QUANT_SYSTEM_OVERALL_DESIGN.drawio)。
 
 SVG 版本：
 
-![工业级量化交易系统总体架构](./QUANT_SYSTEM_OVERALL_DESIGN.svg)
+![工业级量化交易系统总体架构](../QUANT_SYSTEM_OVERALL_DESIGN.svg)
 
 核心数据流：
 
-```mermaid
-flowchart LR
-    Data[数据源<br/>行情/企业行为/财务/公告] --> Ingest[data/ingest<br/>抓取与同步]
-    Ingest --> Model[data/model<br/>标准化/交易日历/质量校验]
-    Model --> Store[data/store<br/>raw/clean/meta]
-    Store --> Feature[feature 层<br/>Alpha158/Alpha360/自定义因子]
-    Feature --> Validation[factor_validation<br/>IC/RankIC/分组/衰减]
-    Feature --> Signals[factor_engine/signals<br/>条件与信号配方]
-    Signals --> Strategy[strategy_signals<br/>形态信号]
-    Feature --> ML[factor_engine/ml<br/>LightGBM Ranker]
-    ML --> Portfolio[backtest_engine<br/>TopN/组合回放]
-    Strategy --> Portfolio
-    Validation --> Portfolio
-    Portfolio --> SignalStore[signal 层<br/>批次信号/复盘]
-    Portfolio --> TradeStore[trade 层<br/>成交/持仓/净值]
-    SignalStore --> Web[web_app<br/>研究看板]
-    TradeStore --> Web
-    Portfolio --> Execution[execution/risk<br/>模拟交易/风控/实盘]
-```
+<p><img src="./diagrams/p0_01_diagram_01_core_data_flow.svg" alt="核心数据流" style="width: 100%; max-width: 1450px; display: block;" /></p>
 
 ## 4. 分层设计
 
@@ -79,48 +61,7 @@ flowchart LR
 
 **模块设计图：**
 
-```mermaid
-flowchart TB
-    subgraph Source[数据源]
-        AK[AKShare<br/>Sina/Eastmoney]
-        TC[Tencent]
-        FUT[未来: 财报/公告/另类数据]
-    end
-
-    subgraph Ingest[data/ingest]
-        Providers[providers<br/>多源抓取]
-        Service[service.py<br/>批量同步/增量补数/重采样]
-    end
-
-    subgraph Model[data/model]
-        Schema[schemas.py<br/>统一 schema]
-        Calendar[calendar.py<br/>交易日历]
-        Quality[quality.py<br/>质量巡检]
-        Adjust[adjustments.py<br/>复权口径]
-    end
-
-    subgraph Store[data/store]
-        Layout[layout.py<br/>分层目录]
-        Parquet[parquet_store.py<br/>Parquet IO]
-        Warehouse[warehouse.py<br/>查询与 upsert]
-        Meta[meta/market_data.duckdb]
-    end
-
-    Source --> Providers --> Service
-    Service --> Schema
-    Service --> Calendar
-    Service --> Quality
-    Service --> Adjust
-    Model --> Layout
-    Layout --> Parquet
-    Parquet --> Warehouse
-    Warehouse --> Meta
-    Warehouse --> Raw[raw 层]
-    Warehouse --> Clean[clean 层]
-    Warehouse --> Feature[feature 层]
-    Warehouse --> Signal[signal 层]
-    Warehouse --> Trade[trade 层]
-```
+<p><img src="./diagrams/p0_01_diagram_02_data_layer_modules.svg" alt="数据层模块设计图" style="width: 100%; max-width: 1350px; display: block;" /></p>
 
 #### 4.1.1 当前数据层架构
 
@@ -219,33 +160,7 @@ data/store
 
 **模块设计图：**
 
-```mermaid
-flowchart TB
-    Clean[clean OHLCV<br/>标准行情] --> Expr[factor_engine/expressions<br/>Alpha158/Alpha360/表达式因子]
-    Clean --> Signals[factor_engine/signals<br/>条件框架]
-    Expr --> FeatureStore[feature 层<br/>长表因子]
-    Signals --> Recipes[strategy_signals<br/>底部反弹/横盘突破/箱体回踩]
-    FeatureStore --> Valid[factor_validation<br/>IC/RankIC/分组收益/换手率]
-    FeatureStore --> ML[factor_engine/ml<br/>LightGBM Ranker]
-    FeatureStore --> Deep[factor_engine/deep<br/>Transformer]
-    FeatureStore --> LNN[factor_engine/lnn<br/>CfC/LTC 液态神经网络]
-    FeatureStore --> Phase[factor_engine/phase<br/>PhaseFormer 相位模型]
-    FeatureStore --> Symbolic[factor_engine/symbolic<br/>GP/gplearn]
-    Recipes --> SignalScore[pattern_scores<br/>可解释形态分]
-    ML --> ModelScore[model_score<br/>排序分数]
-    Deep --> SeqScore[sequence_score<br/>时序分数]
-    LNN --> LNNScore[return_score + vol_score<br/>连续时间分数]
-    Phase --> PhaseScore[direction_score<br/>相位周期分数]
-    Symbolic --> Candidate[候选公式因子]
-    Candidate --> Valid
-    SignalScore --> Post[postprocess<br/>标准化/中性化/合成]
-    ModelScore --> Post
-    SeqScore --> Post
-    LNNScore --> Post
-    PhaseScore --> Post
-    Valid --> Post
-    Post --> PortfolioInput[组合输入<br/>ranking_score]
-```
+<p><img src="./diagrams/p0_01_diagram_03_factor_research_modules.svg" alt="因子工厂模块设计图" style="width: 100%; max-width: 1350px; display: block;" /></p>
 
 #### 4.2.1 因子、条件、信号配方、策略与组合的边界
 
@@ -271,15 +186,7 @@ flowchart TB
 
 **层次关系图：**
 
-```mermaid
-flowchart LR
-    Factor[因子<br/>MA20/STD20/MAX20/VMA20] --> Condition[条件<br/>低波动/突破/放量/回踩]
-    Condition --> Recipe[信号配方<br/>底部反弹/横盘突破/箱体回踩]
-    Recipe --> Strategy[策略<br/>仓位/止损/止盈/调仓]
-    Strategy --> Portfolio[组合<br/>TopN/等权/评分加权/风险预算]
-    Portfolio --> SignalLayer[signal 层<br/>批次记录/复盘]
-    Portfolio --> TradeLayer[trade 层<br/>成交/持仓/净值]
-```
+<p><img src="./diagrams/p0_01_diagram_04_factor_signal_portfolio_layers.svg" alt="因子到组合层次关系图" style="width: 100%; max-width: 1250px; display: block;" /></p>
 
 **因子到信号的表达示例：**
 
@@ -295,21 +202,7 @@ flowchart LR
 
 **模块设计图：**
 
-```mermaid
-flowchart TB
-    Factors[基础因子<br/>ROC/STD/MAX/MIN/VMA] --> Conditions[factor_engine/signals/conditions.py]
-    Conditions --> Comb[factor_engine/signals/combinators.py<br/>AND/OR/加权/打分]
-    Base[factor_engine/signals/base.py<br/>SignalRecipe] --> Recipes[strategy_signals/]
-    Comb --> Recipes
-    Recipes --> BR[bottom_rebound_score]
-    Recipes --> RB[range_breakout_score]
-    Recipes --> BP[box_pullback_score]
-    BR --> SignalFrame[标准 signal frame]
-    RB --> SignalFrame
-    BP --> SignalFrame
-    SignalFrame --> Validation[factor_validation]
-    SignalFrame --> Backtest[backtest_engine]
-```
+<p><img src="./diagrams/p0_01_diagram_05_signal_recipe_modules.svg" alt="信号配方模块设计图" style="width: 100%; max-width: 1300px; display: block;" /></p>
 
 ```text
 factor_engine/signals/          # 框架层
@@ -357,28 +250,7 @@ Alpha158 / Alpha360 / 手工信号配方
 
 **ML / GP / LNN / PhaseFormer 研究流程图：**
 
-```mermaid
-flowchart LR
-    Feature[feature matrix<br/>Alpha158/信号配方/自定义因子] --> Label[labels.py<br/>forward_return/分位标签]
-    Feature --> Split[walk-forward split]
-    Label --> Split
-    Split --> LGBM[LightGBM Ranker<br/>LambdaRank/rank_xendcg]
-    Split --> GP[GP/gplearn<br/>表达式搜索]
-    Split --> LNN[CfC/LTC<br/>连续时间ODE]
-    Split --> Phase[PhaseFormer<br/>相位周期建模]
-    GP --> Candidate[候选公式因子]
-    Candidate --> Complexity[复杂度/相关性/换手率过滤]
-    LGBM --> ModelScore[model_score]
-    LNN --> LNNScore[return_score + vol_score]
-    Phase --> PhaseScore[direction_score]
-    Complexity --> NewFactor[注册候选因子]
-    ModelScore --> Validation[factor_validation]
-    LNNScore --> Validation
-    PhaseScore --> Validation
-    NewFactor --> Validation
-    Validation --> Select[select_stocks<br/>TopN 排序]
-    Select --> Portfolio[组合回测与 signal 落库]
-```
+<p><img src="./diagrams/p0_01_diagram_06_ml_research_flow.svg" alt="ML/GP/LNN/PhaseFormer 研究流程图" style="width: 100%; max-width: 1450px; display: block;" /></p>
 
 标签设计：
 
@@ -534,17 +406,7 @@ factor_engine/
 
 ##### 4.2.6.6 训练流水线
 
-```mermaid
-flowchart LR
-    Data[clean OHLCV + 技术指标] --> Norm[归一化<br/>MinMax/Z-Score]
-    Norm --> Window[滚动窗口<br/>2年训练/1周预测]
-    Window --> CfC[CfC 模型<br/>AdamW + Huber Loss]
-    CfC --> Pred[预测输出<br/>收益率 + 波动率]
-    Pred --> Signal[择时信号<br/>收益率>阈值→买入]
-    Pred --> Risk[风控信号<br/>高波动→降仓]
-    Signal --> Validation[factor_validation<br/>IC/夏普/最大回撤]
-    Risk --> Validation
-```
+<p><img src="./diagrams/p0_01_diagram_07_cfc_training_pipeline.svg" alt="CfC/LNN 训练流水线" style="width: 100%; max-width: 1250px; display: block;" /></p>
 
 训练规范：
 
@@ -696,16 +558,7 @@ PhaseFormer（2026 ICLR）是一种基于**相位建模**的极轻量时序预�
 
 ##### 4.2.7.6 训练流水线
 
-```mermaid
-flowchart LR
-    Data[clean OHLCV + 技术指标] --> Period[周期检测<br/>FFT/自相关]
-    Period --> Align[周期对齐<br/>Phase Token 构造]
-    Align --> Window[滚动窗口<br/>walk-forward]
-    Window --> PF[PhaseFormer<br/>AdamW + Focal Loss]
-    PF --> Pred[方向预测<br/>涨/跌概率]
-    Pred --> Signal[direction_score<br/>择时信号]
-    Signal --> Validation[factor_validation<br/>IC/胜率/盈亏比]
-```
+<p><img src="./diagrams/p0_01_diagram_08_phaseformer_training_pipeline.svg" alt="PhaseFormer 训练流水线" style="width: 100%; max-width: 1250px; display: block;" /></p>
 
 训练规范：
 
@@ -779,19 +632,7 @@ PhaseFormer 产出的 `direction_score` 与 LightGBM 的 `model_score`、LNN 的
 
 **模块设计图：**
 
-```mermaid
-flowchart LR
-    Signal[signal 层<br/>策略信号/模型分数] --> Portfolio[组合层<br/>权重/再平衡/约束]
-    Portfolio --> OrderIntent[目标订单<br/>target position/order intent]
-    OrderIntent --> Risk[risk<br/>限仓/黑名单/熔断/成本检查]
-    Risk --> Backtest[backtest_engine<br/>事件驱动撮合]
-    Risk --> Paper[模拟交易<br/>paper account]
-    Risk --> Broker[execution<br/>VeighNa/CTP/XTP]
-    Backtest --> Trade[trade 层<br/>成交/持仓/净值]
-    Paper --> Trade
-    Broker --> Trade
-    Trade --> Review[复盘与归因]
-```
+<p><img src="./diagrams/p0_01_diagram_09_execution_risk_flow.svg" alt="执行与风控模块设计图" style="width: 100%; max-width: 1300px; display: block;" /></p>
 
 ### 4.4 监控与 DevOps 层
 
@@ -805,18 +646,7 @@ flowchart LR
 
 **模块设计图：**
 
-```mermaid
-flowchart TB
-    CI[CI<br/>单元/集成/回测基准] --> Release[发布与版本记录]
-    DataJob[数据任务] --> Metrics[运行指标<br/>延迟/失败率/缺口]
-    ResearchJob[研究任务] --> Metrics
-    BacktestJob[回测任务] --> Metrics
-    TradingJob[交易/模拟任务] --> Metrics
-    Metrics --> Alert[告警<br/>任务失败/收益异常/订单异常]
-    Release --> Audit[审计链路<br/>代码版本/数据版本/模型版本/参数版本]
-    Alert --> Ops[运维处理]
-    Audit --> Replay[可回放复现]
-```
+<p><img src="./diagrams/p0_01_diagram_10_devops_monitoring.svg" alt="监控与 DevOps 模块设计图" style="width: 100%; max-width: 1250px; display: block;" /></p>
 
 ### 4.5 Web 展示与交互层
 
@@ -829,18 +659,7 @@ flowchart TB
 
 **模块设计图：**
 
-```mermaid
-flowchart LR
-    Store[data/store<br/>OHLCV/feature/signal/trade] --> API[后端查询接口]
-    Factor[factor_validation<br/>因子报告] --> API
-    Backtest[backtest_engine<br/>回测结果] --> API
-    API --> Dash[Dash Web App]
-    Dash --> Kline[K 线总览页]
-    Dash --> FactorPage[因子分析页]
-    Dash --> PortfolioPage[组合回测页]
-    Dash --> StrategyPage[策略诊断页]
-    Dash --> ModelPage[模型页]
-```
+<p><img src="./diagrams/p0_01_diagram_11_web_app_flow.svg" alt="Web 展示模块设计图" style="width: 100%; max-width: 1250px; display: block;" /></p>
 
 **建议展示能力：**
 
@@ -922,40 +741,13 @@ flowchart LR
 
 **目标模块关系图：**
 
-```mermaid
-flowchart TB
-    Data[data/] --> Factor[factor_engine/]
-    Data --> Validation[factor_validation/]
-    Factor --> Signals[strategy_signals/]
-    Factor --> Validation
-    Signals --> Backtest[backtest_engine/]
-    Validation --> Backtest
-    Backtest --> Research[research/]
-    Backtest --> Web[web_app/]
-    Backtest --> Execution[execution/]
-    Execution --> Risk[risk/]
-    Risk --> Data
-    Ops[ops/] --> Data
-    Ops --> Factor
-    Ops --> Backtest
-    Ops --> Execution
-```
+<p><img src="./diagrams/p0_01_diagram_12_target_module_relationship.svg" alt="目标模块关系图" style="width: 100%; max-width: 1250px; display: block;" /></p>
 
 ## 8. 分阶段实施路线
 
 **阶段路线图：**
 
-```mermaid
-flowchart LR
-    P1[Phase 1<br/>单机数据与研究底座] --> P2[Phase 2<br/>因子工厂与回测平台]
-    P2 --> P3[Phase 3<br/>模拟交易闭环]
-    P3 --> P4[Phase 4<br/>实时与实盘]
-
-    P1 --> P1a[数据治理<br/>feature 缓存<br/>信号配方框架]
-    P2 --> P2a[策略信号目录<br/>LightGBM Ranker<br/>组合优化]
-    P3 --> P3a[订单状态机<br/>风控拦截<br/>持仓快照]
-    P4 --> P4a[流式行情<br/>盘中因子<br/>券商网关]
-```
+<p><img src="./diagrams/p0_01_diagram_13_phase_roadmap.svg" alt="阶段路线图" style="width: 100%; max-width: 1250px; display: block;" /></p>
 
 ### Phase 1：夯实单机数据与研究底座
 

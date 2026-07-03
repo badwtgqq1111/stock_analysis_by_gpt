@@ -5,7 +5,9 @@
 
 from .schemas import (
     CLEAN_OHLCV_COLUMNS,
+    FINANCIAL_STATEMENT_METRIC_FIELDS,
     FEATURE_COLUMNS,
+    VALUATION_SNAPSHOT_FIELDS,
     SIGNAL_COLUMNS,
     STOCK_INFO_FIELDS,
     TRADE_COLUMNS,
@@ -13,12 +15,14 @@ from .schemas import (
     infer_instrument_type,
     is_fund_like_instrument,
     normalize_bool,
+    normalize_financial_statement_metrics,
     normalize_feature_frame,
     normalize_ohlcv_frame,
     normalize_signal_frame,
     normalize_stock_code,
     normalize_stock_info,
     normalize_trade_frame,
+    normalize_valuation_snapshot,
 )
 from .adjustments import (
     CORPORATE_ACTION_FIELDS,
@@ -69,6 +73,7 @@ __all__ = [
     "COMPANY_RESEARCH_EVIDENCE_FIELDS",
     "CORPORATE_ACTION_FIELDS",
     "ENTITY_ALIAS_FIELDS",
+    "FINANCIAL_STATEMENT_METRIC_FIELDS",
     "FEATURE_COLUMNS",
     "HK_MARKET_CALENDAR",
     "SIGNAL_COLUMNS",
@@ -84,6 +89,7 @@ __all__ = [
     "TAG_DICTIONARY_FIELDS",
     "THEME_OPPORTUNITY_SCORE_FIELDS",
     "TRADE_COLUMNS",
+    "VALUATION_SNAPSHOT_FIELDS",
     "get_adjustment_profile",
     "get_market_calendar",
     "infer_exchange",
@@ -96,6 +102,7 @@ __all__ = [
     "normalize_confidence",
     "normalize_corporate_actions_frame",
     "normalize_entity_alias_entry",
+    "normalize_financial_statement_metrics",
     "normalize_feature_frame",
     "normalize_ohlcv_frame",
     "normalize_signal_frame",
@@ -109,6 +116,7 @@ __all__ = [
     "normalize_tag_dictionary_entry",
     "normalize_theme_opportunity_score_entry",
     "normalize_trade_frame",
+    "normalize_valuation_snapshot",
     "split_semicolon_tags",
     "validate_ohlcv_frame",
 ]

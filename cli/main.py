@@ -11,6 +11,7 @@ from cli.review_batch import main_review_batch
 from cli.factor_report import main_factor_report, main_signal_report
 from cli.fetch_alt_data import main_fetch_alt_data
 from cli.strategy_suite import main_strategy_suite, analyze_single_stock_with_visualization
+from core.constants import DEFAULT_FACTOR_SET
 
 def run_cli(argv=None):
     """CLI 入口，便于脚本调用与测试。"""
@@ -38,8 +39,8 @@ def run_cli(argv=None):
     parser.add_argument('--analysis-mode', dest='analysis_mode', default='factor',
                         choices=['factor', 'strategy', 'lightgbm'],
                         help='全市场分析模式：factor / strategy / lightgbm，默认 factor')
-    parser.add_argument('--factor-set', dest='factor_set', default='alpha158_hk',
-                        help='因子/LightGBM 模式下使用的因子集，默认 alpha158_hk')
+    parser.add_argument('--factor-set', dest='factor_set', default=DEFAULT_FACTOR_SET,
+                        help=f'因子/LightGBM 模式下使用的因子集，默认 {DEFAULT_FACTOR_SET}')
     parser.add_argument('--max-features', dest='max_features', type=int, default=0,
                         help='LightGBM 模式下的最大因子数（先训练→按 importance 筛到 TopN→重训），0 表示使用全部因子')
     parser.add_argument('--model-objective', dest='model_objective', default='regression_csrank',

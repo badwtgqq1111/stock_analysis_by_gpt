@@ -7,6 +7,7 @@ import tempfile
 import sys
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -19,6 +20,7 @@ from data.ingest.providers.hk_industry import HKIndustryFetcher
 from data.ingest.service import MarketDataService
 from data.store import DataLayout, MarketDataWarehouse
 from data.store import DatabaseManager
+from core.market_filter import apply_filters, build_market_info_from_warehouse
 
 
 def test_hk_industry_fetcher_parses_eastmoney_profile_shape():
@@ -126,6 +128,188 @@ def test_stock_info_preserves_industry_metadata():
         warehouse.close()
 
 
+def test_stock_info_persists_richer_financial_fields_with_turnover_fallback():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        layout = DataLayout(base_dir=tmp_dir)
+        warehouse = MarketDataWarehouse(layout)
+
+        info = normalize_stock_info(
+            {
+                "name": "Tencent",
+                "current_price": 390.0,
+                "volume": 2_000_000.0,
+                "daily_turnover": 780_000_000.0,
+                "turnover_rate": None,
+                "market_cap": 3_600.0,
+                "pe_ratio": 22.4,
+                "pb_ratio": 3.1,
+                "dividend_yield": 0.82,
+                "total_shares": 9_600_000_000.0,
+                "circulating_shares": 8_000_000_000.0,
+            },
+            stock_code="700",
+            source="unit_test",
+        )
+        warehouse.upsert_stock_info(info)
+
+        loaded = warehouse.get_stock_info("00700", market="HK")
+
+        assert loaded["daily_turnover"] == 780_000_000.0
+        assert round(float(loaded["turnover_rate"]), 6) == 0.025
+        assert loaded["market_cap"] == 3_600.0
+        assert loaded["pe_ratio"] == 22.4
+        assert loaded["pb_ratio"] == 3.1
+        assert loaded["dividend_yield"] == 0.82
+        warehouse.close()
+
+
+def test_build_market_info_from_warehouse_prefers_stored_fields_and_computes_turnover_fallback():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        try:
+            service.warehouse.upsert_stock_info(
+                normalize_stock_info(
+                    {
+                        "name": "Tencent",
+                        "market_cap": 3_500.0,
+                        "pe_ratio": 20.0,
+                        "pb_ratio": 3.0,
+                        "volume": 2_000_000.0,
+                        "circulating_shares": 8_000_000_000.0,
+                        "daily_turnover": 780_000_000.0,
+                        "turnover_rate": 0.4,
+                    },
+                    stock_code="00700",
+                    source="unit_test",
+                )
+            )
+            service.warehouse.upsert_stock_info(
+                normalize_stock_info(
+                    {
+                        "name": "HSBC",
+                        "market_cap": 1_200.0,
+                        "pe_ratio": 9.0,
+                        "pb_ratio": 0.8,
+                        "volume": 1_000_000.0,
+                        "circulating_shares": 2_000_000_000.0,
+                        "daily_turnover": 150_000_000.0,
+                        "turnover_rate": None,
+                    },
+                    stock_code="00005",
+                    source="unit_test",
+                )
+            )
+
+            market_data = build_market_info_from_warehouse(
+                ["00700", "00005"],
+                service.warehouse,
+            )
+        finally:
+            service.close()
+
+    assert market_data["00700"].daily_turnover == 780_000_000.0
+    assert market_data["00700"].turnover_rate == 0.4
+    assert market_data["00005"].daily_turnover == 150_000_000.0
+    assert round(float(market_data["00005"].turnover_rate), 6) == 0.05
+    assert market_data["00005"].market_cap == 1_200.0
+
+
+def test_apply_filters_uses_warehouse_market_info_without_live_fetch():
+    stock_info_frame = pd.DataFrame(
+        [
+            {
+                "stock_code": "00700",
+                "name": "Tencent",
+                "market_cap": 3500.0,
+                "daily_turnover": 780_000_000.0,
+                "turnover_rate": 0.4,
+                "pe_ratio": 20.0,
+                "pb_ratio": 3.0,
+            },
+            {
+                "stock_code": "00005",
+                "name": "HSBC",
+                "market_cap": 1200.0,
+                "daily_turnover": 90_000.0,
+                "turnover_rate": 0.01,
+                "pe_ratio": 9.0,
+                "pb_ratio": 0.8,
+            },
+        ]
+    )
+    market_data = build_market_info_from_warehouse([], None, stock_info_frame=stock_info_frame)
+
+    result = apply_filters(
+        ["00700", "00005"],
+        market_data,
+        min_market_cap=1000.0,
+        min_daily_turnover=100_000.0,
+    )
+
+    assert result.passed == ["00700"]
+    assert result.excluded[0]["stock_code"] == "00005"
+
+
+def test_backtest_filters_prefer_warehouse_market_info_before_live_fetch(monkeypatch):
+    from core.backtest_ops import BacktestMixin
+
+    class DummyWarehouse:
+        def read_stock_info(self, stock_codes=None, market=None, columns=None, order_by=None):
+            return pd.DataFrame(
+                [
+                    {
+                        "stock_code": "00700",
+                        "name": "Tencent",
+                        "market_cap": 3500.0,
+                        "daily_turnover": 780_000_000.0,
+                        "turnover_rate": 0.4,
+                        "pe_ratio": 20.0,
+                        "pb_ratio": 3.0,
+                    }
+                ]
+            )
+
+        def read_ohlcv(self, stock_code=None, market=None, asset_type=None, frequency=None, adjust=None):
+            return pd.DataFrame({"trade_date": pd.date_range("2026-01-01", periods=300, freq="B")})
+
+    class DummyAnalyzer(BacktestMixin):
+        def __init__(self):
+            self.market_warehouse = DummyWarehouse()
+
+        def get_all_stocks(self):
+            return ["00700"]
+
+        def _resolve_safe_analysis_workers(self, requested_workers, analysis_mode="lightgbm"):
+            return 1
+
+        def _analyze_lightgbm_market(self, stock_codes, **kwargs):
+            assert stock_codes == ["00700"]
+            return []
+
+    analyzer = DummyAnalyzer()
+
+    monkeypatch.setattr(
+        "core.market_filter.fetch_market_data_batch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not use live fetch when warehouse has data")),
+    )
+    monkeypatch.setattr(
+        "backtest_engine.TopNPortfolioBuilder",
+        SimpleNamespace,
+        raising=False,
+    )
+
+    with patch("core.backtest_ops.time.time", side_effect=[0.0, 0.1]):
+        try:
+            analyzer.backtest_portfolio(
+                stock_codes=["00700"],
+                min_market_cap=1000.0,
+                min_daily_turnover=100.0,
+            )
+        except TypeError:
+            # We only care that the market filter stage succeeds without invoking live fetch.
+            pass
+
+
 def test_service_backfills_hk_industry_metadata(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp_dir:
         service = MarketDataService(base_dir=tmp_dir)
@@ -163,6 +347,36 @@ def test_service_backfills_hk_industry_metadata(monkeypatch):
     assert loaded["current_price"] == 380.0
     assert loaded["industry_l1"] == "Information Technology"
     assert loaded["industry_l2"] == "Internet Services"
+
+
+def test_service_refreshes_hk_stock_info_financial_fields(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        try:
+            def fake_fetch(self):
+                return {
+                    "name": "Tencent",
+                    "current_price": 390.0,
+                    "volume": 2_000_000.0,
+                    "daily_turnover": 780_000_000.0,
+                    "market_cap": 3500.0,
+                    "pe_ratio": 20.0,
+                    "pb_ratio": 3.0,
+                    "circulating_shares": 8_000_000_000.0,
+                }
+
+            monkeypatch.setattr("data.ingest.providers.hk_info.StockInfoFetcher.fetch", fake_fetch)
+
+            summary = service.refresh_hk_stock_info(stock_codes=["00700"], max_workers=1)
+            loaded = service.get_hk_stock_info("00700")
+        finally:
+            service.close()
+
+    assert summary["updated"] == 1
+    assert loaded["daily_turnover"] == 780_000_000.0
+    assert round(float(loaded["turnover_rate"]), 6) == 0.025
+    assert loaded["market_cap"] == 3500.0
+    assert loaded["pe_ratio"] == 20.0
 
 
 def test_service_imports_hk_industry_registry_csv_without_network_fetch():

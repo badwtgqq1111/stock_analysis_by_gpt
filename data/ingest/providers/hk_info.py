@@ -48,6 +48,9 @@ class StockInfoFetcher:
             "high": safe_float(row.get(mapping.get("high"))),
             "low": safe_float(row.get(mapping.get("low"))),
             "volume": safe_float(row.get(mapping.get("volume"))),
+            "amount": safe_float(row.get(mapping.get("amount"))),
+            "daily_turnover": safe_float(row.get(mapping.get("daily_turnover"))),
+            "turnover_rate": safe_float(row.get(mapping.get("turnover_rate"))),
             "market_cap": safe_float(row.get(mapping.get("market_cap"))),
             "pe_ratio": safe_float(row.get(mapping.get("pe_ratio"))),
             "pb_ratio": safe_float(row.get(mapping.get("pb_ratio"))),
@@ -77,6 +80,9 @@ class StockInfoFetcher:
                 "high": "最高",
                 "low": "最低",
                 "volume": "成交量",
+                "amount": "成交额",
+                "daily_turnover": "成交额",
+                "turnover_rate": "换手率",
             },
         )
 
@@ -99,7 +105,15 @@ class StockInfoFetcher:
                 "high": "最高",
                 "low": "最低",
                 "volume": "成交量",
+                "amount": "成交额",
+                "daily_turnover": "成交额",
+                "turnover_rate": "换手率",
+                "market_cap": "总市值",
                 "pe_ratio": "市盈率-动态",
+                "pb_ratio": "市净率",
+                "dividend_yield": "股息率",
+                "total_shares": "总股本",
+                "circulating_shares": "流通股本",
             },
         )
 
@@ -132,6 +146,7 @@ class StockInfoFetcher:
             "high": safe_float(parts[33] if len(parts) > 33 else None),
             "low": safe_float(parts[34] if len(parts) > 34 else None),
             "volume": safe_float(parts[6] if len(parts) > 6 else None),
+            "daily_turnover": safe_float(parts[37] if len(parts) > 37 else None),
             "market_cap": safe_float(parts[44] if len(parts) > 44 else None),
             "pe_ratio": safe_float(parts[40] if len(parts) > 40 else None),
             "pb_ratio": safe_float(parts[57] if len(parts) > 57 else None),
@@ -175,3 +190,108 @@ class StockInfoFetcher:
 
     def get_info(self):
         return self.info
+
+
+class HKFinancialMetricsFetcher:
+    """Fetch HK financial statement metrics from AkShare when available."""
+
+    FIELD_ALIASES = {
+        "report_date": ("报告期", "日期", "REPORT_DATE", "SECURITY_CODE"),
+        "roe": ("净资产收益率", "加权净资产收益率", "ROE"),
+        "roa": ("总资产收益率", "ROA"),
+        "gross_margin": ("销售毛利率", "毛利率"),
+        "net_margin": ("销售净利率", "净利率"),
+        "operating_margin": ("营业利润率",),
+        "revenue_yoy": ("营业收入同比增长率", "营业总收入同比增长率", "营收同比"),
+        "net_profit_yoy": ("净利润同比增长率", "归母净利润同比增长率", "净利同比"),
+        "eps_yoy": ("基本每股收益同比增长率", "EPS同比"),
+        "debt_to_assets": ("资产负债率",),
+        "current_ratio": ("流动比率",),
+        "interest_coverage": ("利息保障倍数",),
+        "ocf_to_net_income": ("经营现金流量净额/净利润", "经营现金流净额/净利润"),
+        "eps": ("基本每股收益", "每股收益"),
+        "revenue": ("营业收入", "营业总收入"),
+        "net_profit": ("净利润", "归母净利润"),
+        "operating_cash_flow": ("经营现金流量净额",),
+    }
+
+    def __init__(self, stock_code, indicator="年度", verbose=True):
+        self.stock_code = normalize_hk_stock_code(stock_code)
+        self.indicator = indicator
+        self.verbose = bool(verbose)
+        self.last_successful_source = None
+
+    @staticmethod
+    def _find_column(frame, aliases):
+        columns = {str(column).strip(): column for column in frame.columns}
+        for alias in aliases:
+            for column_name, column in columns.items():
+                if alias == column_name or alias in column_name:
+                    return column
+        return None
+
+    @staticmethod
+    def _safe_percent(value):
+        parsed = safe_float(value)
+        if parsed is None:
+            return None
+        # Most Eastmoney ratio fields are percentages. Store normalized decimal.
+        return parsed / 100.0 if abs(parsed) > 1.5 else parsed
+
+    def _row_to_metrics(self, frame, row):
+        payload = {}
+        for field, aliases in self.FIELD_ALIASES.items():
+            column = self._find_column(frame, aliases)
+            if column is None:
+                continue
+            value = row.get(column)
+            if field == "report_date":
+                payload[field] = value
+            elif field in {
+                "roe", "roa", "gross_margin", "net_margin", "operating_margin",
+                "revenue_yoy", "net_profit_yoy", "eps_yoy", "debt_to_assets",
+                "ocf_to_net_income",
+            }:
+                payload[field] = self._safe_percent(value)
+            else:
+                payload[field] = safe_float(value)
+        if "report_date" not in payload:
+            first_column = frame.columns[0] if len(frame.columns) else None
+            if first_column is not None:
+                payload["report_date"] = row.get(first_column)
+        payload["period_type"] = "annual" if self.indicator == "年度" else "quarterly"
+        payload["ttm_flag"] = False
+        return payload
+
+    def fetch(self):
+        if ak is None:
+            raise ImportError("akshare 未安装")
+
+        fetch_attempts = [
+            ("stock_hk_financial_indicator_em", lambda: ak.stock_hk_financial_indicator_em(symbol=self.stock_code)),
+            (
+                "stock_financial_hk_analysis_indicator_em",
+                lambda: ak.stock_financial_hk_analysis_indicator_em(symbol=self.stock_code, indicator=self.indicator),
+            ),
+        ]
+        last_error = None
+        for source_name, fetcher in fetch_attempts:
+            try:
+                frame = fetcher()
+                if frame is None or frame.empty:
+                    continue
+                rows = []
+                for _, row in frame.iterrows():
+                    metrics = self._row_to_metrics(frame, row)
+                    if metrics.get("report_date"):
+                        rows.append(metrics)
+                if rows:
+                    self.last_successful_source = source_name
+                    return rows
+            except Exception as exc:
+                last_error = exc
+                if self.verbose:
+                    print(f"[WARNING] {source_name} 获取港股财务指标失败：{exc}")
+        if last_error and self.verbose:
+            print(f"[ERROR] 港股财务指标获取失败：{last_error}")
+        return []

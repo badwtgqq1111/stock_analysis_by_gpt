@@ -1,7 +1,7 @@
 # 第三方项目整合分析：Flowsint / FinceptTerminal / OpenBB
 
 > 分析日期：2026-06-07
-> 分析对象：[stock_analysis_by_gpt](../README.md) 与三个外部开源项目的整合可行性与收益评估
+> 分析对象：[stock_analysis_by_gpt](../../README.md) 与三个外部开源项目的整合可行性与收益评估
 
 ---
 

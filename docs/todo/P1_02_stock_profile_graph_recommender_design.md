@@ -626,7 +626,7 @@ attention_signal
 LightRAG 的安装、数据库后端选择、DeepSeek LLM 配置和 evidence 写入流程单独维护在：
 
 ```text
-docs/LIGHTRAG_DEPLOYMENT.md
+docs/done/P0_02_lightrag_deployment.md
 ```
 
 本设计文档只保留架构取舍：LightRAG 负责 RAG 和通用图谱召回，本项目负责股票强 schema、选股排序和回测。

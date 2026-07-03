@@ -13,6 +13,7 @@ from data.model import (
     COMPANY_RESEARCH_EVIDENCE_FIELDS,
     CORPORATE_ACTION_FIELDS,
     ENTITY_ALIAS_FIELDS,
+    FINANCIAL_STATEMENT_METRIC_FIELDS,
     FEATURE_COLUMNS,
     SIGNAL_COLUMNS,
     STOCK_DEEP_TAG_FIELDS,
@@ -25,6 +26,7 @@ from data.model import (
     TAG_DICTIONARY_FIELDS,
     THEME_OPPORTUNITY_SCORE_FIELDS,
     TRADE_COLUMNS,
+    VALUATION_SNAPSHOT_FIELDS,
 )
 import os
 
@@ -37,7 +39,9 @@ class MarketDataWarehouse:
     OHLCV_DATASET = "ohlcv"
     CORPORATE_ACTIONS_DATASET = "corporate_actions"
     FEATURES_DATASET = "features"
+    FINANCIAL_STATEMENT_METRICS_DATASET = "financial_statement_metrics"
     SIGNALS_DATASET = "signals"
+    VALUATION_SNAPSHOT_DATASET = "valuation_snapshot"
     TRADES_DATASET = "trades"
     TAG_DICTIONARY_DATASET = "tag_dictionary"
     STOCK_TAG_DATASET = "stock_tag_registry"
@@ -62,6 +66,8 @@ class MarketDataWarehouse:
         "feature_config_hash",
         "year",
     )
+    FINANCIAL_STATEMENT_METRICS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "period_type", "year")
+    VALUATION_SNAPSHOT_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "year")
     SIGNALS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "signal_set", "year")
     TRADES_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "frequency", "adjust", "account_id", "year")
 
@@ -187,6 +193,9 @@ class MarketDataWarehouse:
             "theme_tags",
             "industry_source",
             "industry_updated_at",
+            "amount",
+            "daily_turnover",
+            "turnover_rate",
             "instrument_type",
             "is_fund_like",
             "tradable_flag",
@@ -406,6 +415,38 @@ class MarketDataWarehouse:
             raise last_error
         return {"rows": len(payload), "dataset_path": str(target)}
 
+    def upsert_valuation_snapshots(self, frame, dataset_name=VALUATION_SNAPSHOT_DATASET):
+        """Upsert valuation/liquidity daily snapshots."""
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
+        payload = frame[VALUATION_SNAPSHOT_FIELDS].copy()
+        target = self._upsert_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "trade_date"],
+            sort_by=["market", "stock_code", "trade_date", "ingest_time"],
+            date_column="trade_date",
+            partition_columns=self.VALUATION_SNAPSHOT_PARTITION_COLUMNS,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
+    def upsert_financial_statement_metrics(self, frame, dataset_name=FINANCIAL_STATEMENT_METRICS_DATASET):
+        """Upsert PIT financial statement metrics."""
+        self._ensure_writable()
+        if frame is None or frame.empty:
+            return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
+        payload = frame[FINANCIAL_STATEMENT_METRIC_FIELDS].copy()
+        target = self._upsert_meta_frame(
+            dataset_name=dataset_name,
+            frame=payload,
+            dedupe_keys=["market", "stock_code", "report_date", "period_type", "source"],
+            sort_by=["market", "stock_code", "report_date", "period_type", "ingest_time"],
+            date_column="report_date",
+            partition_columns=self.FINANCIAL_STATEMENT_METRICS_PARTITION_COLUMNS,
+        )
+        return {"rows": len(payload), "dataset_path": str(target)}
+
     def append_features(self, frame, dataset_name=FEATURES_DATASET):
         """Append feature batches without reading and rewriting the full dataset."""
         self._ensure_writable()
@@ -527,6 +568,84 @@ class MarketDataWarehouse:
             frame = frame.loc[frame["trade_date"] <= pd.to_datetime(end_date)]
         frame.reset_index(drop=True, inplace=True)
         return frame
+
+    def read_valuation_snapshots(
+        self,
+        stock_codes=None,
+        market=None,
+        start_date=None,
+        end_date=None,
+        columns=None,
+        order_by=None,
+        dataset_name=VALUATION_SNAPSHOT_DATASET,
+    ):
+        """Read persisted valuation/liquidity snapshots."""
+        filters = {"market": market}
+        if stock_codes:
+            filters["stock_code"] = list(dict.fromkeys(stock_codes))
+        range_filters = {}
+        if start_date or end_date:
+            range_filters["trade_date"] = {"gte": start_date, "lte": end_date}
+        frame = pd.DataFrame()
+        for store in self._meta_store_candidates():
+            try:
+                frame = store.read_frame(
+                    dataset_name=dataset_name,
+                    layer="meta",
+                    filters=filters,
+                    columns=columns or VALUATION_SNAPSHOT_FIELDS,
+                    order_by=order_by or "market, stock_code, trade_date",
+                    range_filters=range_filters,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                frame = pd.DataFrame(columns=columns or VALUATION_SNAPSHOT_FIELDS)
+            if frame is not None and not frame.empty:
+                break
+        return frame if frame is not None else pd.DataFrame(columns=columns or VALUATION_SNAPSHOT_FIELDS)
+
+    def read_financial_statement_metrics(
+        self,
+        stock_codes=None,
+        market=None,
+        report_start_date=None,
+        report_end_date=None,
+        available_at=None,
+        columns=None,
+        order_by=None,
+        dataset_name=FINANCIAL_STATEMENT_METRICS_DATASET,
+    ):
+        """Read PIT financial statement metrics."""
+        filters = {"market": market}
+        if stock_codes:
+            filters["stock_code"] = list(dict.fromkeys(stock_codes))
+        range_filters = {}
+        if report_start_date or report_end_date:
+            range_filters["report_date"] = {"gte": report_start_date, "lte": report_end_date}
+        frame = pd.DataFrame()
+        for store in self._meta_store_candidates():
+            try:
+                frame = store.read_frame(
+                    dataset_name=dataset_name,
+                    layer="meta",
+                    filters=filters,
+                    columns=columns or FINANCIAL_STATEMENT_METRIC_FIELDS,
+                    order_by=order_by or "market, stock_code, report_date",
+                    range_filters=range_filters,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                frame = pd.DataFrame(columns=columns or FINANCIAL_STATEMENT_METRIC_FIELDS)
+            if frame is not None and not frame.empty:
+                break
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=columns or FINANCIAL_STATEMENT_METRIC_FIELDS)
+        if available_at and "available_at" in frame.columns:
+            frame["available_at"] = pd.to_datetime(frame["available_at"], errors="coerce")
+            frame = frame.loc[frame["available_at"] <= pd.to_datetime(available_at)]
+        return frame.reset_index(drop=True)
 
     def upsert_signals(self, frame, dataset_name=SIGNALS_DATASET):
         """将标准信号数据 upsert 到 signal 层 parquet 数据集。"""

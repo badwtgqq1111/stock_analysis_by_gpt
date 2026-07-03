@@ -46,6 +46,79 @@ FEATURE_COLUMNS = [
     "ingest_time",
 ]
 
+VALUATION_SNAPSHOT_FIELDS = [
+    "trade_date",
+    "stock_code",
+    "market",
+    "exchange",
+    "asset_type",
+    "currency",
+    "market_cap",
+    "circulating_market_cap",
+    "free_float_market_cap",
+    "pe_ratio",
+    "pb_ratio",
+    "ps_ratio",
+    "ev",
+    "ev_ebitda",
+    "dividend_yield",
+    "fcf_yield",
+    "volume",
+    "amount",
+    "daily_turnover",
+    "turnover_rate",
+    "total_shares",
+    "circulating_shares",
+    "free_float_shares",
+    "source",
+    "ingest_time",
+]
+
+FINANCIAL_STATEMENT_METRIC_FIELDS = [
+    "stock_code",
+    "market",
+    "exchange",
+    "asset_type",
+    "currency",
+    "report_date",
+    "announce_date",
+    "available_at",
+    "period_type",
+    "ttm_flag",
+    "revenue",
+    "revenue_ttm",
+    "revenue_yoy",
+    "gross_profit",
+    "operating_profit",
+    "net_profit",
+    "net_profit_ttm",
+    "net_profit_yoy",
+    "eps",
+    "eps_yoy",
+    "total_assets",
+    "total_liabilities",
+    "total_equity",
+    "cash_and_equivalents",
+    "short_term_debt",
+    "long_term_debt",
+    "operating_cash_flow",
+    "free_cash_flow",
+    "roe",
+    "roa",
+    "gross_margin",
+    "net_margin",
+    "operating_margin",
+    "ocf_to_net_income",
+    "debt_to_assets",
+    "net_debt_to_equity",
+    "current_ratio",
+    "cash_to_short_debt",
+    "interest_coverage",
+    "source",
+    "raw_payload",
+    "ingest_time",
+]
+
 SIGNAL_COLUMNS = [
     "trade_date",
     "stock_code",
@@ -98,6 +171,9 @@ STOCK_INFO_FIELDS = [
     "high",
     "low",
     "volume",
+    "amount",
+    "daily_turnover",
+    "turnover_rate",
     "market_cap",
     "pe_ratio",
     "pb_ratio",
@@ -510,6 +586,109 @@ def normalize_feature_frame(
     return long_frame
 
 
+def normalize_valuation_snapshot(
+    snapshot,
+    stock_code,
+    market="HK",
+    exchange=None,
+    asset_type="equity",
+    trade_date=None,
+    source=None,
+    currency=None,
+):
+    """Normalize a persisted valuation/liquidity daily snapshot."""
+    payload = dict(snapshot or {})
+    normalized_market = (market or payload.get("market") or "HK").upper()
+    normalized_code = normalize_stock_code(stock_code or payload.get("stock_code"), market=normalized_market)
+    normalized_exchange = (exchange or payload.get("exchange") or infer_exchange(normalized_code, market=normalized_market)).upper()
+    normalized_currency = (currency or payload.get("currency") or DEFAULT_CURRENCY_BY_MARKET.get(normalized_market, normalized_market)).upper()
+    snapshot_date = pd.to_datetime(trade_date or payload.get("trade_date") or datetime.utcnow().date(), errors="coerce")
+
+    volume = pd.to_numeric(payload.get("volume"), errors="coerce")
+    amount = pd.to_numeric(payload.get("amount"), errors="coerce")
+    daily_turnover = pd.to_numeric(payload.get("daily_turnover", payload.get("turnover")), errors="coerce")
+    if pd.isna(daily_turnover):
+        daily_turnover = amount
+    circulating_shares = pd.to_numeric(payload.get("circulating_shares"), errors="coerce")
+    turnover_rate = pd.to_numeric(payload.get("turnover_rate"), errors="coerce")
+    if pd.isna(turnover_rate) and pd.notna(volume) and pd.notna(circulating_shares) and circulating_shares > 0:
+        turnover_rate = float(volume / circulating_shares * 100.0)
+
+    row = {
+        "trade_date": snapshot_date,
+        "stock_code": normalized_code,
+        "market": normalized_market,
+        "exchange": normalized_exchange,
+        "asset_type": payload.get("asset_type") or asset_type,
+        "currency": normalized_currency,
+        "source": source or payload.get("source") or "unknown",
+        "ingest_time": datetime.utcnow().isoformat(),
+    }
+    for field in VALUATION_SNAPSHOT_FIELDS:
+        if field in row:
+            continue
+        value = payload.get(field)
+        if field == "daily_turnover":
+            value = daily_turnover
+        elif field == "turnover_rate":
+            value = turnover_rate
+        row[field] = None if pd.isna(pd.to_numeric(value, errors="coerce")) else float(value) if field not in {"source"} else value
+    return {field: row.get(field) for field in VALUATION_SNAPSHOT_FIELDS}
+
+
+def normalize_financial_statement_metrics(
+    metrics,
+    stock_code,
+    market="HK",
+    exchange=None,
+    asset_type="equity",
+    source=None,
+    currency=None,
+):
+    """Normalize point-in-time financial statement metrics."""
+    import json
+
+    payload = dict(metrics or {})
+    normalized_market = (market or payload.get("market") or "HK").upper()
+    normalized_code = normalize_stock_code(stock_code or payload.get("stock_code"), market=normalized_market)
+    normalized_exchange = (exchange or payload.get("exchange") or infer_exchange(normalized_code, market=normalized_market)).upper()
+    normalized_currency = (currency or payload.get("currency") or DEFAULT_CURRENCY_BY_MARKET.get(normalized_market, normalized_market)).upper()
+
+    report_date = pd.to_datetime(payload.get("report_date") or payload.get("date"), errors="coerce")
+    announce_date = pd.to_datetime(payload.get("announce_date") or payload.get("announcement_date"), errors="coerce")
+    available_at = pd.to_datetime(payload.get("available_at"), errors="coerce")
+    if pd.isna(available_at):
+        available_at = announce_date if pd.notna(announce_date) else report_date
+
+    row = {
+        "stock_code": normalized_code,
+        "market": normalized_market,
+        "exchange": normalized_exchange,
+        "asset_type": payload.get("asset_type") or asset_type,
+        "currency": normalized_currency,
+        "report_date": report_date,
+        "announce_date": None if pd.isna(announce_date) else announce_date,
+        "available_at": available_at,
+        "period_type": payload.get("period_type") or "unknown",
+        "ttm_flag": normalize_bool(payload.get("ttm_flag"), default=False),
+        "source": source or payload.get("source") or "unknown",
+        "raw_payload": payload.get("raw_payload") or json.dumps(payload, ensure_ascii=False, default=str),
+        "ingest_time": datetime.utcnow().isoformat(),
+    }
+    numeric_fields = [
+        field for field in FINANCIAL_STATEMENT_METRIC_FIELDS
+        if field not in {
+            "stock_code", "market", "exchange", "asset_type", "currency",
+            "report_date", "announce_date", "available_at", "period_type",
+            "ttm_flag", "source", "raw_payload", "ingest_time",
+        }
+    ]
+    for field in numeric_fields:
+        value = pd.to_numeric(payload.get(field), errors="coerce")
+        row[field] = None if pd.isna(value) else float(value)
+    return {field: row.get(field) for field in FINANCIAL_STATEMENT_METRIC_FIELDS}
+
+
 def normalize_signal_frame(
     frame,
     stock_code,
@@ -692,6 +871,21 @@ def normalize_stock_info(
     theme_tags = payload.get("theme_tags")
     if isinstance(theme_tags, (list, tuple, set)):
         theme_tags = ";".join(str(tag).strip() for tag in theme_tags if str(tag).strip())
+    volume = pd.to_numeric(payload.get("volume"), errors="coerce")
+    amount = pd.to_numeric(payload.get("amount"), errors="coerce")
+    daily_turnover = pd.to_numeric(
+        payload.get("daily_turnover", payload.get("turnover")),
+        errors="coerce",
+    )
+    if pd.isna(daily_turnover):
+        daily_turnover = amount
+
+    turnover_rate = pd.to_numeric(payload.get("turnover_rate"), errors="coerce")
+    if pd.isna(turnover_rate):
+        circulating_shares = pd.to_numeric(payload.get("circulating_shares"), errors="coerce")
+        if pd.notna(volume) and pd.notna(circulating_shares) and circulating_shares > 0:
+            turnover_rate = float(volume / circulating_shares * 100.0)
+
     return {
         "stock_code": normalized_code,
         "market": normalized_market,
@@ -703,7 +897,10 @@ def normalize_stock_info(
         "open_price": payload.get("open_price"),
         "high": payload.get("high"),
         "low": payload.get("low"),
-        "volume": payload.get("volume"),
+        "volume": None if pd.isna(volume) else float(volume),
+        "amount": None if pd.isna(amount) else float(amount),
+        "daily_turnover": None if pd.isna(daily_turnover) else float(daily_turnover),
+        "turnover_rate": None if pd.isna(turnover_rate) else float(turnover_rate),
         "market_cap": payload.get("market_cap"),
         "pe_ratio": payload.get("pe_ratio"),
         "pb_ratio": payload.get("pb_ratio"),

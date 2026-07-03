@@ -27,12 +27,14 @@ from data.model import (
     normalize_adjust,
     normalize_corporate_actions_frame,
     normalize_feature_frame,
+    normalize_financial_statement_metrics,
     normalize_ohlcv_frame,
     normalize_signal_frame,
     normalize_bool,
     normalize_stock_code,
     normalize_stock_info,
     normalize_trade_frame,
+    normalize_valuation_snapshot,
     validate_ohlcv_frame,
 )
 from data.store.layout import DataLayout
@@ -84,6 +86,7 @@ def _factor_compute_worker(payload: dict) -> dict:
         adjust=payload.get("adjust", "qfq"),
         exchange=payload.get("exchange"),
         asset_type=payload.get("asset_type", "equity"),
+        extra=payload.get("factor_context_extra"),
     )
     feature_frame = factor.transform(ohlcv, context=context)
     feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
@@ -349,6 +352,105 @@ class MarketDataService:
             for row in frame.itertuples(index=False)
         }
 
+    def refresh_hk_stock_info(
+        self,
+        stock_codes=None,
+        limit=None,
+        max_workers=20,
+        data_source=None,
+        show_progress=False,
+    ):
+        """Refresh HK stock financial/liquidity snapshots into stock_info_registry."""
+        from data.ingest.providers import StockInfoFetcher
+
+        if stock_codes:
+            codes = [normalize_stock_code(code, market="HK") for code in stock_codes]
+        else:
+            codes = self.get_all_stock_codes(market="HK", asset_type="equity", frequency="daily", adjust="qfq")
+            if not codes:
+                stocks = HKMarketListFetcher().fetch(limit=limit)
+                codes = [normalize_stock_code(stock["code"], market="HK") for stock in stocks]
+
+        codes = list(dict.fromkeys(codes))
+        if limit:
+            codes = codes[: int(limit)]
+        if not codes:
+            return {
+                "status": "completed",
+                "requested": 0,
+                "updated": 0,
+                "failed": 0,
+                "failed_codes": [],
+            }
+
+        effective_data_source = data_source or self.data_source
+        workers = max(1, min(int(max_workers or 1), len(codes)))
+        payloads = []
+        failed = []
+        completed = 0
+        started_at = time.time()
+
+        def fetch_one(code):
+            fetcher = StockInfoFetcher(
+                code,
+                data_source=effective_data_source,
+                verbose=not show_progress,
+            )
+            fetched = fetcher.fetch()
+            if not fetched:
+                return None
+            return normalize_stock_info(
+                fetched,
+                stock_code=code,
+                market="HK",
+                exchange="HKEX",
+                source=fetcher.last_successful_source or effective_data_source,
+            )
+
+        if show_progress:
+            print(f"[STOCK_INFO] 开始刷新港股财务/流动性快照: total={len(codes)}", file=sys.stderr)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(fetch_one, code): code for code in codes}
+            for future in as_completed(future_map):
+                code = future_map[future]
+                try:
+                    payload = future.result()
+                    if payload:
+                        payloads.append(payload)
+                    else:
+                        failed.append(code)
+                except Exception:
+                    failed.append(code)
+                completed += 1
+                if show_progress:
+                    elapsed = max(time.time() - started_at, 1e-9)
+                    rate = completed / elapsed
+                    remaining = len(codes) - completed
+                    eta = remaining / rate if rate > 0 else 0.0
+                    print(
+                        f"\r[STOCK_INFO] {completed}/{len(codes)} "
+                        f"({completed / max(len(codes), 1):.1%}) "
+                        f"updated={len(payloads)} failed={len(failed)} elapsed={elapsed:.1f}s eta={eta:.1f}s",
+                        end="",
+                        flush=True,
+                        file=sys.stderr,
+                    )
+        if show_progress:
+            print(file=sys.stderr)
+
+        if payloads:
+            self.warehouse.upsert_stock_info_batch(payloads)
+
+        return {
+            "status": "completed",
+            "requested": len(codes),
+            "updated": len(payloads),
+            "failed": len(failed),
+            "failed_codes": failed,
+            "data_source": effective_data_source,
+        }
+
     def backfill_hk_industry(
         self,
         stock_codes=None,
@@ -419,6 +521,9 @@ class MarketDataService:
                 "high": existing.get("high"),
                 "low": existing.get("low"),
                 "volume": existing.get("volume"),
+                "amount": existing.get("amount"),
+                "daily_turnover": existing.get("daily_turnover"),
+                "turnover_rate": existing.get("turnover_rate"),
                 "market_cap": existing.get("market_cap"),
                 "pe_ratio": existing.get("pe_ratio"),
                 "pb_ratio": existing.get("pb_ratio"),
@@ -1324,6 +1429,150 @@ class MarketDataService:
             )
             summary["evidence"] = method(frame)
         return summary
+
+    def refresh_hk_financial_metrics(
+        self,
+        stock_codes=None,
+        limit=None,
+        max_workers=8,
+        show_progress=False,
+    ):
+        """Refresh persisted valuation snapshots and financial metric placeholders.
+
+        This command intentionally reads local stock_info/OHLCV data and writes
+        warehouse tables. It does not fetch live data during selection.
+        """
+        codes = [normalize_stock_code(code, market="HK") for code in (stock_codes or []) if str(code).strip()]
+        if not codes:
+            codes = self.get_all_stock_codes(market="HK", asset_type="equity", frequency="daily", adjust="qfq")
+        if limit:
+            codes = codes[: int(limit)]
+        info_frame = self.warehouse.read_stock_info(stock_codes=codes, market="HK")
+        info_map = {}
+        if info_frame is not None and not info_frame.empty:
+            info_frame = info_frame.drop_duplicates(subset=["market", "stock_code"], keep="last")
+            info_map = {str(row.stock_code): row._asdict() for row in info_frame.itertuples(index=False)}
+
+        from data.ingest.providers.hk_info import HKFinancialMetricsFetcher
+
+        valuation_rows = []
+        financial_rows = []
+        failed = []
+
+        def build_one(code):
+            info = info_map.get(code) or {}
+            latest_ohlcv = self.warehouse.read_ohlcv(
+                stock_code=code,
+                market="HK",
+                asset_type="equity",
+                frequency="daily",
+                adjust="qfq",
+            )
+            trade_date = None
+            if latest_ohlcv is not None and not latest_ohlcv.empty:
+                trade_date = pd.to_datetime(latest_ohlcv["trade_date"], errors="coerce").max()
+            valuation = (
+                normalize_valuation_snapshot(
+                    {
+                        **info,
+                        "trade_date": trade_date or pd.Timestamp.utcnow().date(),
+                        "source": info.get("source") or "stock_info_registry",
+                    },
+                    stock_code=code,
+                    market="HK",
+                    source="stock_info_registry",
+                )
+            )
+
+            metrics_rows = []
+            try:
+                fetcher = HKFinancialMetricsFetcher(code, verbose=not show_progress)
+                fetched_rows = fetcher.fetch()
+                for item in fetched_rows:
+                    metrics_rows.append(
+                        normalize_financial_statement_metrics(
+                            item,
+                            stock_code=code,
+                            market="HK",
+                            source=fetcher.last_successful_source or "akshare",
+                        )
+                    )
+            except Exception:
+                fetched_rows = []
+
+            if not metrics_rows and any(pd.notna(info.get(field)) for field in ("roe", "roa", "gross_margin", "net_margin")):
+                metrics_rows.append(
+                    normalize_financial_statement_metrics(
+                        info,
+                        stock_code=code,
+                        market="HK",
+                        source=info.get("source") or "stock_info_registry",
+                    )
+                )
+            return valuation, metrics_rows
+
+        workers = max(1, min(int(max_workers or 1), len(codes) or 1))
+        completed = 0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(build_one, code): code for code in codes}
+            for future in as_completed(future_map):
+                code = future_map[future]
+                try:
+                    valuation, metrics_rows = future.result()
+                    valuation_rows.append(valuation)
+                    financial_rows.extend(metrics_rows)
+                except Exception:
+                    failed.append(code)
+                completed += 1
+                if show_progress:
+                    print(f"\r[FINANCIAL] {completed}/{len(codes)} code={code}", end="", flush=True, file=sys.stderr)
+            if show_progress:
+                pass
+        if show_progress:
+            print("", file=sys.stderr)
+
+        valuation_result = self.warehouse.upsert_valuation_snapshots(pd.DataFrame(valuation_rows)) if valuation_rows else {"rows": 0}
+        financial_result = (
+            self.warehouse.upsert_financial_statement_metrics(pd.DataFrame(financial_rows))
+            if financial_rows else {"rows": 0}
+        )
+        return {
+            "stocks": len(codes),
+            "valuation_snapshot": valuation_result,
+            "financial_statement_metrics": financial_result,
+            "failed": len(failed),
+            "failed_codes": failed,
+            "note": "financial_statement_metrics requires statement data source; valuation snapshots are populated from local stock_info_registry",
+        }
+
+    def financial_coverage_report(self, stock_codes=None, market="HK"):
+        """Report field coverage for financial and valuation datasets."""
+        normalized_codes = [normalize_stock_code(code, market=market) for code in (stock_codes or []) if str(code).strip()]
+        valuation = self.warehouse.read_valuation_snapshots(stock_codes=normalized_codes or None, market=market)
+        financial = self.warehouse.read_financial_statement_metrics(stock_codes=normalized_codes or None, market=market)
+        rows = []
+        for dataset_name, frame in (
+            ("valuation_snapshot", valuation),
+            ("financial_statement_metrics", financial),
+        ):
+            if frame is None or frame.empty:
+                continue
+            stock_count = max(int(frame["stock_code"].nunique()) if "stock_code" in frame.columns else len(frame), 1)
+            for column in frame.columns:
+                if column in {"stock_code", "market", "exchange", "asset_type", "source", "ingest_time", "raw_payload"}:
+                    continue
+                non_null = int(frame[column].notna().sum())
+                rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "field": column,
+                        "non_null_rows": non_null,
+                        "rows": len(frame),
+                        "stock_count": stock_count,
+                        "coverage": non_null / max(len(frame), 1),
+                    }
+                )
+        return {"field_coverage": rows}
 
     def import_stock_profile_graph_csvs(
         self,
@@ -3013,6 +3262,11 @@ class MarketDataService:
             adjust=normalized_adjust,
             exchange=exchange,
             asset_type=asset_type,
+            extra=self._build_factor_context_extra(
+                stock_code=normalized_code,
+                market=normalized_market,
+                asof_date=end_date,
+            ),
         )
         feature_frame = factor.transform(ohlcv, context=context)
         feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
@@ -3048,6 +3302,174 @@ class MarketDataService:
             "write_result": write_result,
             "metadata": metadata,
         }
+
+    def _build_factor_context_extra(self, stock_code, market="HK", asof_date=None):
+        """Build local persisted context for valuation/financial factors."""
+        normalized_market = (market or "HK").upper()
+        normalized_code = normalize_stock_code(stock_code, market=normalized_market)
+        payload = {}
+
+        info = self.warehouse.get_stock_info(normalized_code, market=normalized_market) or {}
+        for key, value in info.items():
+            if value is not None:
+                payload[key] = value
+
+        valuation = self.warehouse.read_valuation_snapshots(
+            stock_codes=[normalized_code],
+            market=normalized_market,
+            end_date=asof_date,
+            order_by="trade_date DESC, ingest_time DESC",
+        )
+        if valuation is not None and not valuation.empty:
+            row = valuation.iloc[0].to_dict()
+            for key, value in row.items():
+                if value is not None and not pd.isna(value):
+                    payload[key] = value
+
+        financial = self.warehouse.read_financial_statement_metrics(
+            stock_codes=[normalized_code],
+            market=normalized_market,
+            available_at=asof_date,
+            order_by="available_at DESC, report_date DESC, ingest_time DESC",
+        )
+        if financial is not None and not financial.empty:
+            row = financial.iloc[0].to_dict()
+            for key, value in row.items():
+                if value is not None and not pd.isna(value):
+                    payload[key] = value
+        return payload
+
+    def _build_factor_context_extra_map(self, stock_codes, market="HK", asof_date=None):
+        """Build local persisted factor context for a stock universe in one pass."""
+        normalized_market = (market or "HK").upper()
+        codes = [
+            normalize_stock_code(code, market=normalized_market)
+            for code in (stock_codes or [])
+            if str(code).strip()
+        ]
+        codes = list(dict.fromkeys(codes))
+        if not codes:
+            return {}
+
+        payloads: dict[str, dict] = {code: {} for code in codes}
+        info_frame = self.warehouse.read_stock_info(stock_codes=codes, market=normalized_market)
+        if info_frame is not None and not info_frame.empty:
+            info_frame = info_frame.drop_duplicates(subset=["market", "stock_code"], keep="last")
+            for _, row in info_frame.iterrows():
+                code = normalize_stock_code(row.get("stock_code"), market=normalized_market)
+                payload = payloads.setdefault(code, {})
+                for key, value in row.to_dict().items():
+                    if value is not None and not pd.isna(value):
+                        payload[key] = value
+
+        valuation = self.warehouse.read_valuation_snapshots(
+            stock_codes=codes,
+            market=normalized_market,
+            end_date=asof_date,
+            order_by="market, stock_code, trade_date DESC, ingest_time DESC",
+        )
+        if valuation is not None and not valuation.empty:
+            valuation = valuation.sort_values(["stock_code", "trade_date", "ingest_time"])
+            valuation = valuation.drop_duplicates(subset=["market", "stock_code"], keep="last")
+            for _, row in valuation.iterrows():
+                code = normalize_stock_code(row.get("stock_code"), market=normalized_market)
+                payload = payloads.setdefault(code, {})
+                for key, value in row.to_dict().items():
+                    if value is not None and not pd.isna(value):
+                        payload[key] = value
+
+        financial = self.warehouse.read_financial_statement_metrics(
+            stock_codes=codes,
+            market=normalized_market,
+            available_at=asof_date,
+            order_by="market, stock_code, available_at DESC, report_date DESC, ingest_time DESC",
+        )
+        if financial is not None and not financial.empty:
+            financial = financial.sort_values(["stock_code", "available_at", "report_date", "ingest_time"])
+            financial = financial.drop_duplicates(subset=["market", "stock_code"], keep="last")
+            for _, row in financial.iterrows():
+                code = normalize_stock_code(row.get("stock_code"), market=normalized_market)
+                payload = payloads.setdefault(code, {})
+                for key, value in row.to_dict().items():
+                    if value is not None and not pd.isna(value):
+                        payload[key] = value
+
+        try:
+            from core.industry_scoring import compute_industry_quality_scores, compute_industry_valuation_scores
+
+            industry_l2_map = {code: payloads.get(code, {}).get("industry_l2") for code in codes}
+            industry_l1_map = {code: payloads.get(code, {}).get("industry_l1") for code in codes}
+            valuation_payload = {
+                code: {
+                    "pe_ratio": payloads.get(code, {}).get("pe_ratio"),
+                    "pb_ratio": payloads.get(code, {}).get("pb_ratio"),
+                    "ps_ratio": payloads.get(code, {}).get("ps_ratio"),
+                    "ev_ebitda": payloads.get(code, {}).get("ev_ebitda"),
+                    "dividend_yield": payloads.get(code, {}).get("dividend_yield"),
+                }
+                for code in codes
+            }
+            quality_payload = {
+                code: {
+                    "roe": payloads.get(code, {}).get("roe"),
+                    "roa": payloads.get(code, {}).get("roa"),
+                    "gross_margin": payloads.get(code, {}).get("gross_margin"),
+                    "net_margin": payloads.get(code, {}).get("net_margin"),
+                    "ocf_to_assets": None,
+                    "revenue_yoy": payloads.get(code, {}).get("revenue_yoy"),
+                    "profit_yoy": payloads.get(code, {}).get("net_profit_yoy"),
+                    "debt_ratio": payloads.get(code, {}).get("debt_to_assets"),
+                    "current_ratio": payloads.get(code, {}).get("current_ratio"),
+                    "interest_coverage": payloads.get(code, {}).get("interest_coverage"),
+                    "dividend_yield": payloads.get(code, {}).get("dividend_yield"),
+                }
+                for code in codes
+            }
+            valuation_scores = compute_industry_valuation_scores(
+                valuation_payload,
+                industry_l2_map,
+                industry_l1_map,
+            )
+            quality_scores = compute_industry_quality_scores(
+                quality_payload,
+                industry_l2_map,
+                industry_l1_map,
+            )
+            valuation_map = {str(row["stock_code"]): row.to_dict() for _, row in valuation_scores.iterrows()}
+            quality_map = {str(row["stock_code"]): row.to_dict() for _, row in quality_scores.iterrows()}
+            for code in codes:
+                payload = payloads.setdefault(code, {})
+                val = valuation_map.get(code, {})
+                qual = quality_map.get(code, {})
+                payload.update(
+                    {
+                        "pe_ind_pct": val.get("pe_percentile"),
+                        "pb_ind_pct": val.get("pb_percentile"),
+                        "ps_ind_pct": val.get("ps_percentile"),
+                        "ev_ebitda_ind_pct": val.get("ev_ebitda_percentile"),
+                        "dividend_yield_ind_pct": val.get("dividend_yield_percentile"),
+                        "roe_ind_pct": qual.get("roe_ind_pct"),
+                        "gross_margin_ind_pct": qual.get("gross_margin_ind_pct"),
+                        "debt_ratio_ind_pct": qual.get("debt_ratio_ind_pct"),
+                        "revenue_yoy_ind_pct": qual.get("revenue_yoy_ind_pct"),
+                        "financial_quality_score": qual.get("quality_score"),
+                        "financial_coverage_score": qual.get("quality_data_coverage"),
+                    }
+                )
+                valuation_score = pd.to_numeric(val.get("valuation_score"), errors="coerce")
+                quality_score = pd.to_numeric(qual.get("quality_score"), errors="coerce")
+                growth_score = pd.to_numeric(qual.get("revenue_yoy_ind_pct"), errors="coerce")
+                coverage = pd.to_numeric(qual.get("quality_data_coverage"), errors="coerce")
+                if pd.notna(valuation_score) and pd.notna(quality_score):
+                    payload["quality_value_score"] = float((valuation_score + quality_score) / 2.0)
+                if pd.notna(growth_score) and pd.notna(quality_score):
+                    payload["growth_quality_score"] = float((growth_score + quality_score) / 2.0)
+                if pd.notna(coverage):
+                    payload["financial_coverage_score"] = float(coverage)
+        except Exception:
+            pass
+
+        return payloads
 
     def sync_factor_set(
         self,
@@ -3128,6 +3550,11 @@ class MarketDataService:
         start_ts = end_ts - pd.Timedelta(days=history_window_days)
         start_date = start_ts.strftime("%Y-%m-%d")
         end_date = end_ts.strftime("%Y-%m-%d")
+        factor_context_extra_map = self._build_factor_context_extra_map(
+            normalized_codes,
+            market=normalized_market,
+            asof_date=end_date,
+        )
         requested_workers = int(max_workers or 0)
         resource_plan = self._resolve_factor_generation_resource_plan(
             requested_workers=requested_workers,
@@ -3464,6 +3891,7 @@ class MarketDataService:
                         "adjust": normalized_adjust,
                         "exchange": exchange,
                         "asset_type": asset_type,
+                        "factor_context_extra": factor_context_extra_map.get(stock_code) or {},
                     },
                 }
             except Exception as exc:

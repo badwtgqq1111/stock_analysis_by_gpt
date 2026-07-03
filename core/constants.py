@@ -1,6 +1,6 @@
 """Constants used across the analyzer core modules."""
 
-DEFAULT_FACTOR_SET = "qlib_alpha158"
+DEFAULT_FACTOR_SET = "alpha_zoo_hk"
 DEFAULT_FACTOR_SCORE_CONFIG = {
     "trend": {
         "MA5": {"weight": 0.14, "higher_is_better": False},

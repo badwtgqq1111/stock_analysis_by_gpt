@@ -117,7 +117,7 @@ def test_model_manifest_feature_hash_is_stable():
     )
 
 
-def test_run_cli_select_lightgbm_defaults_to_alpha158_hk():
+def test_run_cli_select_lightgbm_defaults_to_alpha_zoo_hk():
     from cli import main as cli_main
 
     captured = {}
@@ -134,7 +134,7 @@ def test_run_cli_select_lightgbm_defaults_to_alpha158_hk():
         cli_main.main_select_stocks = original
 
     assert result == {"ok": True}
-    assert captured["factor_set"] == "alpha158_hk"
+    assert captured["factor_set"] == "alpha_zoo_hk"
     assert captured["analysis_mode"] == "lightgbm"
     assert captured["stock_limit"] is None
 
@@ -324,5 +324,5 @@ def test_theme_ablation_uses_no_theme_flag_for_without_theme_run():
     assert len(calls) == 2
     assert "--no-theme-features" not in calls[0]
     assert "--no-theme-features" in calls[1]
-    assert calls[0][calls[0].index("--factor-set") + 1] == "alpha158_hk"
+    assert calls[0][calls[0].index("--factor-set") + 1] == "alpha_zoo_hk"
     assert calls[1][calls[1].index("--export-csv") + 1] == "output/theme_test_theme_without_theme"

@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1232" height="1412" viewBox="0 0 1232 1412" role="img" aria-labelledby="title desc">
+<title>数据层模块设计图</title>
+<desc>数据层模块设计图 balanced architecture diagram.</desc>
+<defs>
+<linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#f8fafc"/><stop offset="1" stop-color="#eef2ff"/></linearGradient>
+<linearGradient id="card" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f8fafc"/></linearGradient>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/></marker>
+<filter id="shadow" x="-12%" y="-15%" width="140%" height="150%"><feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+</defs>
+<rect width="100%" height="100%" rx="22" fill="url(#bg)"/>
+<text x="54" y="42" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="27" font-weight="900" fill="#0f172a">数据层模块设计图</text>
+<text x="54" y="72" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="14" fill="#475569">balanced vertical layout · no horizontal scroll</text>
+<rect x="34.0" y="66.0" width="282.0" height="390.0" rx="22" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.4" opacity="0.84"/>
+<text x="52.0" y="90.0" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="14" font-weight="900" fill="#334155">数据源</text>
+<rect x="328.0" y="66.0" width="576.0" height="146.0" rx="22" fill="#f0fdf4" stroke="#86efac" stroke-width="1.4" opacity="0.84"/>
+<text x="346.0" y="90.0" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="14" font-weight="900" fill="#334155">data/ingest</text>
+<rect x="916.0" y="66.0" width="282.0" height="512.0" rx="22" fill="#fff7ed" stroke="#fdba74" stroke-width="1.4" opacity="0.84"/>
+<text x="934.0" y="90.0" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="14" font-weight="900" fill="#334155">data/model</text>
+<rect x="34.0" y="582.0" width="1164.0" height="146.0" rx="22" fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.4" opacity="0.84"/>
+<text x="52.0" y="606.0" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="14" font-weight="900" fill="#334155">data/store</text>
+<path d="M 296.0 148.0 C 322.0 148.0, 322.0 148.0, 348.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 296.0 270.0 C 322.0 270.0, 322.0 148.0, 348.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 296.0 392.0 C 322.0 392.0, 322.0 148.0, 348.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 590.0 148.0 C 616.0 148.0, 616.0 148.0, 642.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 148.0, 936.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 270.0, 936.0 270.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 392.0, 936.0 392.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 514.0, 936.0 514.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 1057.0 192.0 C 1057.0 406.0, 175.0 406.0, 175.0 620.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 1057.0 314.0 C 1057.0 467.0, 175.0 467.0, 175.0 620.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 1057.0 436.0 C 1057.0 528.0, 175.0 528.0, 175.0 620.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 1057.0 558.0 C 1057.0 589.0, 175.0 589.0, 175.0 620.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 296.0 664.0 C 322.0 664.0, 322.0 664.0, 348.0 664.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 590.0 664.0 C 616.0 664.0, 616.0 664.0, 642.0 664.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 664.0 C 910.0 664.0, 910.0 664.0, 936.0 664.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 664.0 C 910.0 664.0, 910.0 786.0, 936.0 786.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 664.0 C 910.0 664.0, 910.0 908.0, 936.0 908.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 664.0 C 910.0 664.0, 910.0 1030.0, 936.0 1030.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 664.0 C 910.0 664.0, 910.0 1152.0, 936.0 1152.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 664.0 C 910.0 664.0, 910.0 1274.0, 936.0 1274.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<g filter="url(#shadow)">
+<rect x="54.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="54.0" y="104.0" width="242" height="8" rx="4" fill="#2563eb"/>
+<circle cx="76.0" cy="132.0" r="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+</g>
+<text x="175.0" y="145.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="175.0" dy="0.0" font-weight="800">AKShare</tspan>
+<tspan x="175.0" dy="19.2">Sina/Eastmoney</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="54.0" y="226.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="54.0" y="226.0" width="242" height="8" rx="4" fill="#2563eb"/>
+<circle cx="76.0" cy="254.0" r="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+</g>
+<text x="175.0" y="277.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="175.0" dy="0.0" font-weight="800">Tencent</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="54.0" y="348.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="54.0" y="348.0" width="242" height="8" rx="4" fill="#2563eb"/>
+<circle cx="76.0" cy="376.0" r="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+</g>
+<text x="175.0" y="399.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="175.0" dy="0.0" font-weight="800">未来: 财报/公告/另类数据</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="348.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="348.0" y="104.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="370.0" cy="132.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="469.0" y="145.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="469.0" dy="0.0" font-weight="800">providers</tspan>
+<tspan x="469.0" dy="19.2">多源抓取</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="642.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="642.0" y="104.0" width="242" height="8" rx="4" fill="#d97706"/>
+<circle cx="664.0" cy="132.0" r="6" fill="#fef3c7" stroke="#d97706" stroke-width="1.4"/>
+</g>
+<text x="763.0" y="145.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="763.0" dy="0.0" font-weight="800">service.py</tspan>
+<tspan x="763.0" dy="19.2">批量同步/增量补数/重采样</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="104.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="132.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="145.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">schemas.py</tspan>
+<tspan x="1057.0" dy="19.2">统一 schema</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="226.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="226.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="254.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="267.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">calendar.py</tspan>
+<tspan x="1057.0" dy="19.2">交易日历</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="348.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="348.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="376.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="389.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">quality.py</tspan>
+<tspan x="1057.0" dy="19.2">质量巡检</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="470.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="470.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="498.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="511.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">adjustments.py</tspan>
+<tspan x="1057.0" dy="19.2">复权口径</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="54.0" y="620.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="54.0" y="620.0" width="242" height="8" rx="4" fill="#dc2626"/>
+<circle cx="76.0" cy="648.0" r="6" fill="#fee2e2" stroke="#dc2626" stroke-width="1.4"/>
+</g>
+<text x="175.0" y="661.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="175.0" dy="0.0" font-weight="800">layout.py</tspan>
+<tspan x="175.0" dy="19.2">分层目录</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="348.0" y="620.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="348.0" y="620.0" width="242" height="8" rx="4" fill="#0f766e"/>
+<circle cx="370.0" cy="648.0" r="6" fill="#ccfbf1" stroke="#0f766e" stroke-width="1.4"/>
+</g>
+<text x="469.0" y="661.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="469.0" dy="0.0" font-weight="800">parquet_store.py</tspan>
+<tspan x="469.0" dy="19.2">Parquet IO</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="642.0" y="620.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="642.0" y="620.0" width="242" height="8" rx="4" fill="#2563eb"/>
+<circle cx="664.0" cy="648.0" r="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+</g>
+<text x="763.0" y="661.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="763.0" dy="0.0" font-weight="800">warehouse.py</tspan>
+<tspan x="763.0" dy="19.2">查询与 upsert</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="620.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="620.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="958.0" cy="648.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="661.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">meta/</tspan>
+<tspan x="1057.0" dy="19.2">market_data.duckdb</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="742.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="742.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="958.0" cy="770.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="793.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">raw 层</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="864.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="864.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="958.0" cy="892.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="915.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">clean 层</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="986.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="986.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="958.0" cy="1014.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="1037.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">feature 层</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="1108.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="1108.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="958.0" cy="1136.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="1159.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">signal 层</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="1230.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="1230.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="958.0" cy="1258.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="1281.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">trade 层</tspan>
+</text>
+</svg>

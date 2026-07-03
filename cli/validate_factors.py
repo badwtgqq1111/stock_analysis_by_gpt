@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.constants import DEFAULT_FACTOR_SET
 from core import StockAnalyzer
 from cli.formatters import _safe_close_analyzer
 from cli.helpers import (
@@ -21,7 +22,7 @@ from cli.helpers import (
 
 def main_validate_factors(
     days=365,
-    factor_set="qlib_alpha158",
+    factor_set=DEFAULT_FACTOR_SET,
     max_workers=1,
     show_progress=False,
     validation_horizons=(1, 5, 10, 20),

@@ -3,6 +3,7 @@
 
 """Qlib 风格因子引擎本地测试。"""
 
+import inspect
 import sys
 import tempfile
 from pathlib import Path
@@ -17,11 +18,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.ingest.service import MarketDataService, _factor_compute_worker
-from data.model import FEATURE_COLUMNS, normalize_ohlcv_frame
+from data.model import (
+    FEATURE_COLUMNS,
+    normalize_financial_statement_metrics,
+    normalize_ohlcv_frame,
+    normalize_valuation_snapshot,
+)
 from data.store.clickhouse_store import ClickHouseStore
 from data.store.layout import DataLayout
 from data.store.warehouse import MarketDataWarehouse
-from factor_engine import create_factor_set, list_factor_sets
+from factor_engine import create_factor_set, export_factor_manifest, list_factor_sets, show_factor
 from factor_engine.ml.lightgbm_ranker import LightGBMRankerPipeline, _load_lightgbm_regressor_class
 
 
@@ -45,6 +51,11 @@ def test_factor_registry_contains_qlib_sets():
     assert "qlib_alpha158" in list_factor_sets()
     assert "qlib_alpha360" in list_factor_sets()
     assert "gtja_alpha191" in list_factor_sets()
+    assert "alpha101" in list_factor_sets()
+    assert "academic_hk" in list_factor_sets()
+    assert "valuation_hk" in list_factor_sets()
+    assert "financial_quality_hk" in list_factor_sets()
+    assert "alpha_zoo_hk" in list_factor_sets()
 
 
 def test_alpha360_shape_and_basics():
@@ -106,6 +117,199 @@ def test_gtja_alpha191_shape_metadata_and_representative_values():
     assert abs(latest["GTJA018"] - (close.iloc[-1] / close.shift(5).iloc[-1])) < 1e-9
     assert pd.notna(latest["GTJA041"])
     assert pd.notna(latest["GTJA191"])
+
+
+def test_alpha101_academic_and_alpha_zoo_metadata():
+    normalized = normalize_ohlcv_frame(_make_ohlcv_frame(rows=280), stock_code="00700", market="HK")
+
+    alpha101 = create_factor_set("alpha101")
+    alpha101_frame = alpha101.transform(normalized)
+    assert alpha101_frame.shape[1] == 101
+    assert {"ALPHA101_001", "ALPHA101_101"}.issubset(alpha101_frame.columns)
+
+    academic = create_factor_set("academic_hk")
+    academic_frame = academic.transform(normalized)
+    assert academic_frame.shape[1] == 6
+    assert "academic_carhart_mom" in academic_frame.columns
+
+    manifest = export_factor_manifest("alpha101")
+    assert manifest["factor_sets"][0]["feature_count"] == 101
+    shown = show_factor("ALPHA101_001", factor_set="alpha101")
+    assert shown["factor"]["factor_id"] == "ALPHA101_001"
+
+    zoo_meta = create_factor_set("alpha_zoo_hk").metadata().to_dict()
+    assert zoo_meta["extra"]["feature_count"] > 500
+    assert any(item["factor_set"] == "alpha101" for item in zoo_meta["extra"]["components"])
+    assert any(item["factor_set"] == "financial_cross_section_hk" for item in zoo_meta["extra"]["components"])
+    assert "roe_ind_pct" in zoo_meta["extra"]["feature_names"]
+
+
+def test_native_factor_zoo_has_no_external_reference_repo_runtime_dependency():
+    import factor_engine.expressions.academic as academic
+    import factor_engine.expressions.alpha101 as alpha101
+    import factor_engine.expressions.alpha_zoo as alpha_zoo
+    import factor_engine.expressions.financial_factors as financial_factors
+
+    forbidden_markers = (
+        "Vibe-Trading",
+        "Vibe_Trading",
+        "vibe_trading",
+        "vide_trading",
+        "HKUDS",
+    )
+    for module in (academic, alpha101, alpha_zoo, financial_factors):
+        source = inspect.getsource(module)
+        assert not any(marker in source for marker in forbidden_markers)
+
+
+def test_financial_snapshot_normalizers_and_store_roundtrip():
+    valuation = normalize_valuation_snapshot(
+        {
+            "trade_date": "2026-01-02",
+            "market_cap": 100_000_000,
+            "pe_ratio": 12.3,
+            "pb_ratio": 1.4,
+            "volume": 1_000_000,
+            "amount": 5_000_000,
+            "circulating_shares": 10_000_000,
+        },
+        stock_code="700",
+        market="HK",
+        source="unit_test",
+    )
+    financial = normalize_financial_statement_metrics(
+        {
+            "report_date": "2025-12-31",
+            "announce_date": "2026-03-20",
+            "period_type": "annual",
+            "roe": 0.18,
+            "roa": 0.08,
+            "gross_margin": 0.45,
+            "revenue_yoy": 0.12,
+        },
+        stock_code="700",
+        market="HK",
+        source="unit_test",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+        valuation_result = warehouse.upsert_valuation_snapshots(pd.DataFrame([valuation]))
+        financial_result = warehouse.upsert_financial_statement_metrics(pd.DataFrame([financial]))
+        assert valuation_result["rows"] == 1
+        assert financial_result["rows"] == 1
+
+        loaded_valuation = warehouse.read_valuation_snapshots(stock_codes=["00700"], market="HK")
+        loaded_financial = warehouse.read_financial_statement_metrics(stock_codes=["00700"], market="HK")
+        assert not loaded_valuation.empty
+        assert not loaded_financial.empty
+        assert loaded_valuation.iloc[0]["turnover_rate"] == 10.0
+        assert loaded_financial.iloc[0]["roe"] == 0.18
+
+
+def test_financial_cross_section_factor_uses_context_values():
+    from factor_engine.context import FactorContext
+
+    normalized = normalize_ohlcv_frame(_make_ohlcv_frame(rows=90), stock_code="00700", market="HK")
+    factor_set = create_factor_set("financial_cross_section_hk")
+    context = FactorContext(
+        stock_code="00700",
+        market="HK",
+        extra={
+            "pe_ind_pct": 80.0,
+            "roe_ind_pct": 90.0,
+            "quality_value_score": 85.0,
+            "growth_quality_score": 75.0,
+        },
+    )
+    feature_frame = factor_set.transform(normalized, context=context)
+
+    assert feature_frame.shape[1] == 11
+    assert feature_frame.iloc[-1]["pe_ind_pct"] == 80.0
+    assert feature_frame.iloc[-1]["roe_ind_pct"] == 90.0
+    assert feature_frame.iloc[-1]["quality_value_score"] == 85.0
+
+
+def test_service_factor_context_extra_map_adds_financial_cross_section_scores():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        try:
+            stock_info = pd.DataFrame(
+                [
+                    {
+                        "stock_code": "00700",
+                        "market": "HK",
+                        "exchange": "HKEX",
+                        "asset_type": "equity",
+                        "industry_l1": "资讯科技业",
+                        "industry_l2": "软件服务",
+                        "pe_ratio": 20.0,
+                        "pb_ratio": 3.0,
+                        "ps_ratio": 5.0,
+                        "dividend_yield": 0.5,
+                        "ingest_time": pd.Timestamp("2026-01-02"),
+                    },
+                    {
+                        "stock_code": "00005",
+                        "market": "HK",
+                        "exchange": "HKEX",
+                        "asset_type": "equity",
+                        "industry_l1": "资讯科技业",
+                        "industry_l2": "软件服务",
+                        "pe_ratio": 30.0,
+                        "pb_ratio": 5.0,
+                        "ps_ratio": 8.0,
+                        "dividend_yield": 0.1,
+                        "ingest_time": pd.Timestamp("2026-01-02"),
+                    },
+                ]
+            )
+            service.warehouse.upsert_stock_info_batch(stock_info.to_dict(orient="records"))
+            financial = pd.DataFrame(
+                [
+                    normalize_financial_statement_metrics(
+                        {
+                            "report_date": "2025-12-31",
+                            "available_at": "2026-03-31",
+                            "roe": 0.20,
+                            "roa": 0.10,
+                            "gross_margin": 0.50,
+                            "revenue_yoy": 0.20,
+                            "debt_to_assets": 0.20,
+                        },
+                        stock_code="00700",
+                        market="HK",
+                        source="unit_test",
+                    ),
+                    normalize_financial_statement_metrics(
+                        {
+                            "report_date": "2025-12-31",
+                            "available_at": "2026-03-31",
+                            "roe": 0.05,
+                            "roa": 0.02,
+                            "gross_margin": 0.20,
+                            "revenue_yoy": -0.05,
+                            "debt_to_assets": 0.70,
+                        },
+                        stock_code="00005",
+                        market="HK",
+                        source="unit_test",
+                    ),
+                ]
+            )
+            service.warehouse.upsert_financial_statement_metrics(financial)
+
+            context_map = service._build_factor_context_extra_map(
+                ["00700", "00005"],
+                market="HK",
+                asof_date="2026-04-01",
+            )
+        finally:
+            service.close()
+
+    assert context_map["00700"]["roe_ind_pct"] > context_map["00005"]["roe_ind_pct"]
+    assert context_map["00700"]["pe_ind_pct"] > context_map["00005"]["pe_ind_pct"]
+    assert context_map["00700"]["quality_value_score"] > context_map["00005"]["quality_value_score"]
 
 
 def test_factor_compute_worker_uses_trade_date_payload_with_range_index():
@@ -367,6 +571,24 @@ def test_clickhouse_insert_frame_chunks_large_stock_info_batches():
         )
 
     assert client.chunk_sizes == [2, 1]
+
+
+def test_clickhouse_ensure_stock_info_table_adds_financial_columns_for_existing_tables():
+    class RecordingClient:
+        def __init__(self):
+            self.commands = []
+
+        def command(self, sql):
+            self.commands.append(sql)
+
+    client = RecordingClient()
+
+    table = ClickHouseStore()._ensure_table(client, "stock_info_registry", "meta")
+
+    assert table == "stock_info_registry_meta"
+    assert any("ADD COLUMN IF NOT EXISTS amount Nullable(Float64)" in sql for sql in client.commands)
+    assert any("ADD COLUMN IF NOT EXISTS daily_turnover Nullable(Float64)" in sql for sql in client.commands)
+    assert any("ADD COLUMN IF NOT EXISTS turnover_rate Nullable(Float64)" in sql for sql in client.commands)
 
 
 def test_warehouse_append_features_uses_append_only_store_path():

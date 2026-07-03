@@ -2,6 +2,7 @@
 
 import sys
 import time
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -63,6 +64,7 @@ class BacktestMixin:
         if min_market_cap or min_daily_turnover or min_ipo_days:
             from core.market_filter import (
                 apply_filters,
+                build_market_info_from_warehouse,
                 compute_trading_days_batch,
                 fetch_market_data_batch,
                 print_filter_report,
@@ -71,21 +73,43 @@ class BacktestMixin:
             # CLI passes turnover in 万港元, convert to 港元 for filter
             turnover_hkd = min_daily_turnover * 1e4 if min_daily_turnover else None
 
-            print("[FILTER] 正在获取市场数据以进行质量过滤...")
+            print("[FILTER] 正在从本地仓库读取市场数据以进行质量过滤...")
             t0 = time.time()
-            market_data = fetch_market_data_batch(
+            market_data = build_market_info_from_warehouse(
                 stock_codes,
-                max_workers=min(max_workers or 20, 30),
-                progress_callback=(
-                    lambda done, total: print(
-                        f"\r[FILTER] 市场数据获取 {done}/{total} ({done/total*100:.0f}%)",
-                        end="", file=sys.stderr,
-                    )
-                    if show_progress else None
-                ),
+                self.market_warehouse,
             )
-            if show_progress:
-                print(file=sys.stderr)
+            allow_live_market_filter_fetch = str(
+                os.environ.get("ALLOW_LIVE_MARKET_FILTER_FETCH", "")
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            missing_market_data_codes = [
+                code for code in stock_codes
+                if code not in market_data
+                or (
+                    market_data[code].market_cap <= 0
+                    and market_data[code].daily_turnover <= 0
+                    and market_data[code].pe_ratio <= 0
+                    and market_data[code].pb_ratio <= 0
+                )
+            ]
+            if missing_market_data_codes and allow_live_market_filter_fetch:
+                print(f"[FILTER] 本地仓库缺少 {len(missing_market_data_codes)} 只股票的市场数据，回退实时抓取...")
+                live_market_data = fetch_market_data_batch(
+                    missing_market_data_codes,
+                    max_workers=min(max_workers or 20, 30),
+                    progress_callback=(
+                        lambda done, total: print(
+                            f"\r[FILTER] 实时市场数据获取 {done}/{total} ({done/total*100:.0f}%)",
+                            end="", file=sys.stderr,
+                        )
+                        if show_progress else None
+                    ),
+                )
+                market_data.update(live_market_data)
+                if show_progress:
+                    print(file=sys.stderr)
+            elif missing_market_data_codes:
+                print(f"[FILTER] 本地仓库缺少 {len(missing_market_data_codes)} 只股票的市场数据，未启用实时抓取兜底")
 
             trading_days = None
             if min_ipo_days is not None:

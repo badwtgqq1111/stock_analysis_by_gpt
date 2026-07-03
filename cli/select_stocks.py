@@ -16,6 +16,7 @@ from cli.helpers import (
     _write_run_manifest,
 )
 from core.llm.report import run_auto_report
+from core.constants import DEFAULT_FACTOR_SET
 from data.ingest.service import MarketDataService
 
 
@@ -28,7 +29,7 @@ def main_select_stocks(
     batch_id=None,
     max_workers=1,
     analysis_mode="factor",
-    factor_set="alpha158_hk",
+    factor_set=DEFAULT_FACTOR_SET,
     stock_codes=None,
     stock_limit=None,
     show_progress=False,

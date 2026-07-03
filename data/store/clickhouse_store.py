@@ -42,6 +42,114 @@ PARTITION BY (feature_set, feature_config_hash)
 ORDER BY ({order_by})
 """
 
+_VALUATION_SNAPSHOT_COLUMNS = [
+    "trade_date", "stock_code", "market", "exchange", "asset_type", "currency",
+    "market_cap", "circulating_market_cap", "free_float_market_cap",
+    "pe_ratio", "pb_ratio", "ps_ratio", "ev", "ev_ebitda",
+    "dividend_yield", "fcf_yield", "volume", "amount", "daily_turnover",
+    "turnover_rate", "total_shares", "circulating_shares", "free_float_shares",
+    "source", "ingest_time",
+]
+
+_VALUATION_SNAPSHOT_ORDER_BY = ["market", "stock_code", "trade_date"]
+
+_VALUATION_SNAPSHOT_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    trade_date Date,
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    exchange LowCardinality(String),
+    asset_type LowCardinality(String),
+    currency LowCardinality(String),
+    market_cap Nullable(Float64),
+    circulating_market_cap Nullable(Float64),
+    free_float_market_cap Nullable(Float64),
+    pe_ratio Nullable(Float64),
+    pb_ratio Nullable(Float64),
+    ps_ratio Nullable(Float64),
+    ev Nullable(Float64),
+    ev_ebitda Nullable(Float64),
+    dividend_yield Nullable(Float64),
+    fcf_yield Nullable(Float64),
+    volume Nullable(Float64),
+    amount Nullable(Float64),
+    daily_turnover Nullable(Float64),
+    turnover_rate Nullable(Float64),
+    total_shares Nullable(Float64),
+    circulating_shares Nullable(Float64),
+    free_float_shares Nullable(Float64),
+    source String,
+    ingest_time DateTime
+) ENGINE = ReplacingMergeTree(ingest_time)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
+_FINANCIAL_STATEMENT_METRICS_COLUMNS = [
+    "stock_code", "market", "exchange", "asset_type", "currency",
+    "report_date", "announce_date", "available_at", "period_type", "ttm_flag",
+    "revenue", "revenue_ttm", "revenue_yoy", "gross_profit",
+    "operating_profit", "net_profit", "net_profit_ttm", "net_profit_yoy",
+    "eps", "eps_yoy", "total_assets", "total_liabilities", "total_equity",
+    "cash_and_equivalents", "short_term_debt", "long_term_debt",
+    "operating_cash_flow", "free_cash_flow", "roe", "roa",
+    "gross_margin", "net_margin", "operating_margin", "ocf_to_net_income",
+    "debt_to_assets", "net_debt_to_equity", "current_ratio",
+    "cash_to_short_debt", "interest_coverage", "source", "raw_payload",
+    "ingest_time",
+]
+
+_FINANCIAL_STATEMENT_METRICS_ORDER_BY = ["market", "stock_code", "report_date", "period_type", "source"]
+
+_FINANCIAL_STATEMENT_METRICS_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    stock_code LowCardinality(String),
+    market LowCardinality(String),
+    exchange LowCardinality(String),
+    asset_type LowCardinality(String),
+    currency LowCardinality(String),
+    report_date Date,
+    announce_date Nullable(Date),
+    available_at Date,
+    period_type LowCardinality(String),
+    ttm_flag Bool,
+    revenue Nullable(Float64),
+    revenue_ttm Nullable(Float64),
+    revenue_yoy Nullable(Float64),
+    gross_profit Nullable(Float64),
+    operating_profit Nullable(Float64),
+    net_profit Nullable(Float64),
+    net_profit_ttm Nullable(Float64),
+    net_profit_yoy Nullable(Float64),
+    eps Nullable(Float64),
+    eps_yoy Nullable(Float64),
+    total_assets Nullable(Float64),
+    total_liabilities Nullable(Float64),
+    total_equity Nullable(Float64),
+    cash_and_equivalents Nullable(Float64),
+    short_term_debt Nullable(Float64),
+    long_term_debt Nullable(Float64),
+    operating_cash_flow Nullable(Float64),
+    free_cash_flow Nullable(Float64),
+    roe Nullable(Float64),
+    roa Nullable(Float64),
+    gross_margin Nullable(Float64),
+    net_margin Nullable(Float64),
+    operating_margin Nullable(Float64),
+    ocf_to_net_income Nullable(Float64),
+    debt_to_assets Nullable(Float64),
+    net_debt_to_equity Nullable(Float64),
+    current_ratio Nullable(Float64),
+    cash_to_short_debt Nullable(Float64),
+    interest_coverage Nullable(Float64),
+    source String,
+    raw_payload String,
+    ingest_time DateTime
+) ENGINE = ReplacingMergeTree(ingest_time)
+PARTITION BY market
+ORDER BY ({order_by})
+"""
+
 _OHLCV_COLUMNS = [
     "trade_date", "stock_code", "market", "exchange", "asset_type",
     "frequency", "adjust", "open", "high", "low", "close", "volume",
@@ -77,7 +185,8 @@ ORDER BY ({order_by})
 _STOCK_INFO_COLUMNS = [
     "stock_code", "market", "exchange", "asset_type", "name",
     "current_price", "close_price", "open_price", "high", "low",
-    "volume", "market_cap", "pe_ratio", "pb_ratio", "dividend_yield",
+    "volume", "amount", "daily_turnover", "turnover_rate",
+    "market_cap", "pe_ratio", "pb_ratio", "dividend_yield",
     "total_shares", "circulating_shares", "week_52_high", "week_52_low",
     "industry_l1", "industry_l2", "industry_l3", "theme_tags",
     "industry_source", "industry_updated_at", "instrument_type",
@@ -100,6 +209,9 @@ CREATE TABLE IF NOT EXISTS {table} (
     high Nullable(Float64),
     low Nullable(Float64),
     volume Nullable(Float64),
+    amount Nullable(Float64),
+    daily_turnover Nullable(Float64),
+    turnover_rate Nullable(Float64),
     market_cap Nullable(Float64),
     pe_ratio Nullable(Float64),
     pb_ratio Nullable(Float64),
@@ -406,6 +518,16 @@ DATASET_SCHEMA = {
         "ddl": _FEATURES_DDL,
         "order_by": _FEATURES_ORDER_BY,
     },
+    "valuation_snapshot": {
+        "columns": _VALUATION_SNAPSHOT_COLUMNS,
+        "ddl": _VALUATION_SNAPSHOT_DDL,
+        "order_by": _VALUATION_SNAPSHOT_ORDER_BY,
+    },
+    "financial_statement_metrics": {
+        "columns": _FINANCIAL_STATEMENT_METRICS_COLUMNS,
+        "ddl": _FINANCIAL_STATEMENT_METRICS_DDL,
+        "order_by": _FINANCIAL_STATEMENT_METRICS_ORDER_BY,
+    },
     "ohlcv": {
         "columns": _OHLCV_COLUMNS,
         "ddl": _OHLCV_DDL,
@@ -505,6 +627,13 @@ class ClickHouseStore:
             return table
         ddl = schema["ddl"].format(table=table, order_by=", ".join(schema["order_by"]))
         client.command(ddl)
+        if dataset_name == "stock_info_registry":
+            for column, column_type in {
+                "amount": "Nullable(Float64)",
+                "daily_turnover": "Nullable(Float64)",
+                "turnover_rate": "Nullable(Float64)",
+            }.items():
+                client.command(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
         return table
 
     # ---- public interface (matches ParquetDataStore) ----
@@ -801,12 +930,20 @@ class ClickHouseStore:
         if "ingest_time" not in prepared.columns:
             prepared["ingest_time"] = pd.Timestamp.utcnow()
 
-        for column in ["industry_updated_at", "instrument_updated_at", "ingest_time", "updated_at", "fetched_at"]:
+        for column in [
+            "industry_updated_at", "instrument_updated_at", "ingest_time",
+            "updated_at", "fetched_at", "available_at",
+        ]:
+            if column in prepared.columns:
+                prepared[column] = pd.to_datetime(prepared[column], errors="coerce")
+        for column in ["trade_date", "report_date", "announce_date"]:
             if column in prepared.columns:
                 prepared[column] = pd.to_datetime(prepared[column], errors="coerce")
         for column in ["is_fund_like", "tradable_flag", "is_primary", "active"]:
             if column in prepared.columns:
                 prepared[column] = prepared[column].fillna(False).astype(bool)
+        if "ttm_flag" in prepared.columns:
+            prepared["ttm_flag"] = prepared["ttm_flag"].fillna(False).astype(bool)
         for column in ["confidence"]:
             if column in prepared.columns:
                 prepared[column] = pd.to_numeric(prepared[column], errors="coerce").fillna(0.0).astype(float)
@@ -815,7 +952,7 @@ class ClickHouseStore:
             "industry_source", "instrument_type", "instrument_source", "source",
             "tag", "tag_type", "canonical_tag", "aliases", "description", "parent_tag",
             "evidence", "evidence_url", "review_status", "review_note",
-            "title", "summary", "url", "raw_text",
+            "title", "summary", "url", "raw_text", "currency", "period_type", "raw_payload",
         ]:
             if column in prepared.columns:
                 prepared[column] = prepared[column].fillna("").astype(str)

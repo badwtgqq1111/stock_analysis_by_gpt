@@ -24,6 +24,7 @@ class MarketInfo:
     market_cap: float = 0.0  # billion HKD
     daily_turnover: float = 0.0  # HKD (today)
     avg_turnover_20d: float = 0.0  # HKD (20-day average)
+    turnover_rate: float = 0.0  # percent
     pe_ratio: float = 0.0
     pb_ratio: float = 0.0
     trading_days: int = 0
@@ -37,6 +38,13 @@ class FilterResult:
 
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+
+
+def _safe_float(value, default=0.0):
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return float(default)
+    return float(numeric)
 
 
 def fetch_market_data_batch(
@@ -77,6 +85,56 @@ def fetch_market_data_batch(
     return result
 
 
+def build_market_info_from_warehouse(
+    stock_codes: list[str],
+    warehouse,
+    stock_info_frame: pd.DataFrame | None = None,
+) -> dict[str, MarketInfo]:
+    """Build market filter inputs from persisted stock_info_registry data.
+
+    Prefers stored daily_turnover / turnover_rate. If turnover_rate is missing,
+    derives it from volume / circulating_shares * 100 when possible.
+    """
+    if stock_info_frame is None:
+        if warehouse is None:
+            return {}
+        stock_info_frame = warehouse.read_stock_info(stock_codes=stock_codes, market="HK")
+
+    if stock_info_frame is None or stock_info_frame.empty:
+        return {}
+
+    working = stock_info_frame.copy()
+    if "stock_code" not in working.columns:
+        return {}
+    working["stock_code"] = working["stock_code"].astype(str).str.zfill(5)
+    working = working.drop_duplicates(subset=["stock_code"], keep="last")
+
+    result: dict[str, MarketInfo] = {}
+    for _, row in working.iterrows():
+        code = str(row.get("stock_code", "")).zfill(5)
+        volume = pd.to_numeric(row.get("volume"), errors="coerce")
+        circulating_shares = pd.to_numeric(row.get("circulating_shares"), errors="coerce")
+        turnover_rate = pd.to_numeric(row.get("turnover_rate"), errors="coerce")
+        if pd.isna(turnover_rate) and pd.notna(volume) and pd.notna(circulating_shares) and circulating_shares > 0:
+            turnover_rate = float(volume / circulating_shares * 100.0)
+
+        daily_turnover = pd.to_numeric(row.get("daily_turnover"), errors="coerce")
+        if pd.isna(daily_turnover):
+            daily_turnover = pd.to_numeric(row.get("amount"), errors="coerce")
+
+        result[code] = MarketInfo(
+            stock_code=code,
+            name=str(row.get("name") or ""),
+            market_cap=_safe_float(row.get("market_cap")),
+            daily_turnover=float(daily_turnover) if pd.notna(daily_turnover) else 0.0,
+            avg_turnover_20d=0.0,
+            turnover_rate=float(turnover_rate) if pd.notna(turnover_rate) else 0.0,
+            pe_ratio=_safe_float(row.get("pe_ratio")),
+            pb_ratio=_safe_float(row.get("pb_ratio")),
+        )
+    return result
+
+
 def _fetch_single(code: str) -> MarketInfo:
     url = f"https://qt.gtimg.cn/q=r_hk{code}"
     r = requests.get(url, headers={"User-Agent": UA}, timeout=10)
@@ -94,6 +152,7 @@ def _fetch_single(code: str) -> MarketInfo:
         name=fields[1],
         market_cap=float(fields[44]) if fields[44] else 0.0,  # 亿港元
         daily_turnover=float(fields[37]) if fields[37] else 0.0,  # 港元
+        turnover_rate=0.0,
         pe_ratio=float(fields[39]) if len(fields) > 39 and fields[39] else 0.0,
         pb_ratio=float(fields[43]) if len(fields) > 43 and fields[43] else 0.0,
     )

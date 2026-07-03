@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1232" height="774" viewBox="0 0 1232 774" role="img" aria-labelledby="title desc">
+<title>Web 展示模块设计图</title>
+<desc>Web 展示模块设计图 balanced architecture diagram.</desc>
+<defs>
+<linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#f8fafc"/><stop offset="1" stop-color="#eef2ff"/></linearGradient>
+<linearGradient id="card" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f8fafc"/></linearGradient>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/></marker>
+<filter id="shadow" x="-12%" y="-15%" width="140%" height="150%"><feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#0f172a" flood-opacity="0.12"/></filter>
+</defs>
+<rect width="100%" height="100%" rx="22" fill="url(#bg)"/>
+<text x="54" y="42" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="27" font-weight="900" fill="#0f172a">Web 展示模块设计图</text>
+<text x="54" y="72" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="14" fill="#475569">balanced vertical layout · no horizontal scroll</text>
+<path d="M 296.0 148.0 C 322.0 148.0, 322.0 148.0, 348.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 296.0 270.0 C 322.0 270.0, 322.0 148.0, 348.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 296.0 392.0 C 322.0 392.0, 322.0 148.0, 348.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 590.0 148.0 C 616.0 148.0, 616.0 148.0, 642.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 148.0, 936.0 148.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 270.0, 936.0 270.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 392.0, 936.0 392.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 514.0, 936.0 514.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<path d="M 884.0 148.0 C 910.0 148.0, 910.0 636.0, 936.0 636.0" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" opacity="0.58" marker-end="url(#arrow)"/>
+<g filter="url(#shadow)">
+<rect x="54.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="54.0" y="104.0" width="242" height="8" rx="4" fill="#2563eb"/>
+<circle cx="76.0" cy="132.0" r="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+</g>
+<text x="175.0" y="138.9" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="13" fill="#0f172a">
+<tspan x="175.0" dy="0.0" font-weight="800">data/store</tspan>
+<tspan x="175.0" dy="16.6">OHLCV/feature/</tspan>
+<tspan x="175.0" dy="16.6">signal/trade</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="348.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="348.0" y="104.0" width="242" height="8" rx="4" fill="#16a34a"/>
+<circle cx="370.0" cy="132.0" r="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+</g>
+<text x="469.0" y="155.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="469.0" dy="0.0" font-weight="800">后端查询接口</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="54.0" y="226.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="54.0" y="226.0" width="242" height="8" rx="4" fill="#2563eb"/>
+<circle cx="76.0" cy="254.0" r="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+</g>
+<text x="175.0" y="267.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="175.0" dy="0.0" font-weight="800">factor_validation</tspan>
+<tspan x="175.0" dy="19.2">因子报告</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="54.0" y="348.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="54.0" y="348.0" width="242" height="8" rx="4" fill="#2563eb"/>
+<circle cx="76.0" cy="376.0" r="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+</g>
+<text x="175.0" y="389.7" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="175.0" dy="0.0" font-weight="800">backtest_engine</tspan>
+<tspan x="175.0" dy="19.2">回测结果</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="642.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="642.0" y="104.0" width="242" height="8" rx="4" fill="#d97706"/>
+<circle cx="664.0" cy="132.0" r="6" fill="#fef3c7" stroke="#d97706" stroke-width="1.4"/>
+</g>
+<text x="763.0" y="155.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="763.0" dy="0.0" font-weight="800">Dash Web App</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="104.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="104.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="132.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="155.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">K 线总览页</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="226.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="226.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="254.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="277.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">因子分析页</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="348.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="348.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="376.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="399.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">组合回测页</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="470.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="470.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="498.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="521.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">策略诊断页</tspan>
+</text>
+<g filter="url(#shadow)">
+<rect x="936.0" y="592.0" width="242" height="88" rx="17" fill="url(#card)" stroke="#cbd5e1" stroke-width="1.15"/>
+<rect x="936.0" y="592.0" width="242" height="8" rx="4" fill="#7c3aed"/>
+<circle cx="958.0" cy="620.0" r="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+</g>
+<text x="1057.0" y="643.0" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif" font-size="15" fill="#0f172a">
+<tspan x="1057.0" dy="0.0" font-weight="800">模型页</tspan>
+</text>
+</svg>

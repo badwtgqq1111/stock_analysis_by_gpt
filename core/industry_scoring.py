@@ -264,6 +264,10 @@ def compute_industry_quality_scores(
             "stock_code": code,
             "quality_score": float(np.clip(quality_score, 0.0, 100.0)),
             "quality_data_coverage": float(comp_coverage),
+            "roe_ind_pct": float(component_scores.get("roe", {}).get(code, 50.0)),
+            "gross_margin_ind_pct": float(component_scores.get("gross_margin", {}).get(code, 50.0)),
+            "debt_ratio_ind_pct": float(component_scores.get("debt_ratio", {}).get(code, 50.0)),
+            "revenue_yoy_ind_pct": float(component_scores.get("revenue_yoy", {}).get(code, 50.0)),
             "quality_missing_fields": [
                 n for n in sorted(component_names)
                 if component_dicts.get(code, {}).get(n) is None
@@ -409,6 +413,8 @@ def compute_industry_valuation_scores(
             "pe_percentile": float(metric_scores.get("pe_ratio", {}).get(code, 50.0)),
             "pb_percentile": float(metric_scores.get("pb_ratio", {}).get(code, 50.0)),
             "ps_percentile": float(metric_scores.get("ps_ratio", {}).get(code, 50.0)),
+            "ev_ebitda_percentile": float(metric_scores.get("ev_ebitda", {}).get(code, 50.0)),
+            "dividend_yield_percentile": float(metric_scores.get("dividend_yield", {}).get(code, 50.0)),
             "valuation_data_coverage": coverage,
             "valuation_peer_group": peer_group,
         })

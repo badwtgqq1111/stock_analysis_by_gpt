@@ -278,7 +278,7 @@ class LightGBMAnalysisMixin:
             return {}
         if isinstance(info_frame, dict):
             return {
-                str(code): dict(info or {})
+                normalize_stock_code(code): dict(info or {})
                 for code, info in info_frame.items()
             }
         if isinstance(info_frame, pd.DataFrame):
@@ -286,18 +286,103 @@ class LightGBMAnalysisMixin:
                 return {}
             deduped = info_frame.drop_duplicates(subset=["stock_code"], keep="last")
             return {
-                str(row.get("stock_code", "")): row.to_dict()
+                normalize_stock_code(row.get("stock_code", "")): row.to_dict()
                 for _, row in deduped.iterrows()
                 if row.get("stock_code") is not None
             }
         try:
             return {
-                str(row.get("stock_code", "")): dict(row)
+                normalize_stock_code(row.get("stock_code", "")): dict(row)
                 for row in info_frame
                 if row and row.get("stock_code") is not None
             }
         except Exception:
             return {}
+
+    @staticmethod
+    def _stock_info_map_to_valuation_data(stock_codes, stock_info_map):
+        """Build persisted valuation inputs from stock_info_registry rows."""
+        valuation_payload = {}
+        pe_pb_data = {}
+        for stock_code in stock_codes:
+            normalized_code = normalize_stock_code(stock_code)
+            info = stock_info_map.get(normalized_code) or stock_info_map.get(str(stock_code)) or {}
+            pe_ratio = pd.to_numeric(info.get("pe_ratio"), errors="coerce")
+            pb_ratio = pd.to_numeric(info.get("pb_ratio"), errors="coerce")
+            dividend_yield = pd.to_numeric(info.get("dividend_yield"), errors="coerce")
+            ps_ratio = pd.to_numeric(info.get("ps_ratio"), errors="coerce")
+            ev_ebitda = pd.to_numeric(info.get("ev_ebitda"), errors="coerce")
+
+            pe_pb_data[normalized_code] = (
+                float(pe_ratio) if pd.notna(pe_ratio) else np.nan,
+                float(pb_ratio) if pd.notna(pb_ratio) else np.nan,
+            )
+            valuation_payload[normalized_code] = {
+                "pe_ratio": float(pe_ratio) if pd.notna(pe_ratio) else np.nan,
+                "pb_ratio": float(pb_ratio) if pd.notna(pb_ratio) else np.nan,
+                "ps_ratio": float(ps_ratio) if pd.notna(ps_ratio) else np.nan,
+                "dividend_yield": float(dividend_yield) if pd.notna(dividend_yield) else np.nan,
+                "ev_ebitda": float(ev_ebitda) if pd.notna(ev_ebitda) else np.nan,
+            }
+        return pe_pb_data, valuation_payload
+
+    def _load_local_financial_quality(self, stock_codes, stock_info_map, asof_date=None, show_progress=False):
+        """Load local PIT financial metrics and compute industry-standardized quality."""
+        normalized_codes = [normalize_stock_code(code) for code in stock_codes]
+        quality_scores: dict[str, float] = {}
+        quality_details: dict[str, dict] = {}
+        try:
+            financial = self.market_warehouse.read_financial_statement_metrics(
+                stock_codes=normalized_codes,
+                market="HK",
+                available_at=asof_date,
+                order_by="market, stock_code, available_at DESC, report_date DESC, ingest_time DESC",
+            )
+            if financial is None or financial.empty:
+                if show_progress:
+                    print("[QUALITY] 本地 financial_statement_metrics 暂无数据，使用中性质量分")
+                return {}, {}
+
+            financial = financial.sort_values(["stock_code", "available_at", "report_date", "ingest_time"])
+            latest = financial.drop_duplicates(subset=["market", "stock_code"], keep="last")
+            raw_components = {}
+            for _, row in latest.iterrows():
+                code = normalize_stock_code(row.get("stock_code"))
+                raw_components[code] = {
+                    "roe": row.get("roe"),
+                    "roa": row.get("roa"),
+                    "gross_margin": row.get("gross_margin"),
+                    "net_margin": row.get("net_margin"),
+                    "revenue_yoy": row.get("revenue_yoy"),
+                    "profit_yoy": row.get("net_profit_yoy"),
+                    "debt_ratio": row.get("debt_to_assets"),
+                    "current_ratio": row.get("current_ratio"),
+                    "interest_coverage": row.get("interest_coverage"),
+                    "dividend_yield": (stock_info_map.get(code) or {}).get("dividend_yield"),
+                }
+            for code in normalized_codes:
+                raw_components.setdefault(code, {})
+
+            from core.industry_scoring import compute_industry_quality_scores
+
+            industry_l2_map = {code: (stock_info_map.get(code) or {}).get("industry_l2") for code in normalized_codes}
+            industry_l1_map = {code: (stock_info_map.get(code) or {}).get("industry_l1") for code in normalized_codes}
+            quality_df = compute_industry_quality_scores(raw_components, industry_l2_map, industry_l1_map)
+            for _, row in quality_df.iterrows():
+                code = str(row["stock_code"])
+                quality_scores[code] = float(row.get("quality_score", 50.0))
+                quality_details[code] = row.to_dict()
+            if show_progress:
+                covered = sum(
+                    1 for item in quality_details.values()
+                    if pd.to_numeric(item.get("quality_data_coverage"), errors="coerce") > 0
+                )
+                print(f"[QUALITY] 使用本地 financial_statement_metrics 质量评分: {covered}/{len(normalized_codes)} 只有覆盖")
+            return quality_scores, quality_details
+        except Exception as exc:
+            if show_progress:
+                print(f"[QUALITY] 本地财务质量评分失败，使用中性质量分: {exc}")
+            return {}, {}
 
     @staticmethod
     def _merge_alt_sentiment_features(panel_features, stock_codes, show_progress=False):
@@ -575,8 +660,8 @@ class LightGBMAnalysisMixin:
         stock_info_map = {}
         try:
             stock_info_frame = self.market_warehouse.read_stock_info(
-                stock_codes=stock_codes, market="HK",
-                columns=["stock_code", "industry_l1", "industry_l2"],
+                stock_codes=stock_codes,
+                market="HK",
             )
             stock_info_map = self._stock_info_frame_to_map(stock_info_frame)
         except Exception:
@@ -813,15 +898,18 @@ class LightGBMAnalysisMixin:
             for code in batch_codes
         }
 
-        # Fetch fundamental quality scores for all stocks in batch
+        # Fetch local persisted fundamental quality scores for all stocks in batch
         quality_scores: dict[str, float] = {}
         quality_details: dict[str, dict] = {}
         try:
             from core.quality import enrich_with_quality
 
-            if show_progress:
-                print("[QUALITY] 跳过 live 基本面抓取，使用中性质量分（避免外部请求拖慢/崩溃主流程）")
-            quality_raw = {}
+            quality_raw, quality_details = self._load_local_financial_quality(
+                batch_codes,
+                stock_info_map,
+                asof_date=backtest_date,
+                show_progress=show_progress,
+            )
             quality_scores = enrich_with_quality(
                 batch_codes,
                 quality_raw,
@@ -839,17 +927,15 @@ class LightGBMAnalysisMixin:
             from core.industry_scoring import compute_industry_valuation_scores
             from core.sector_valuation import compute_sector_valuation
 
+            pe_pb_data, valuation_payload = self._stock_info_map_to_valuation_data(batch_codes, stock_info_map)
             if show_progress:
-                print("[VALUATION] 跳过 live 估值抓取，使用中性估值分（避免外部请求拖慢/崩溃主流程）")
-            pe_pb_data = {code: (np.nan, np.nan) for code in batch_codes}
+                valid_pe_inputs = sum(1 for values in pe_pb_data.values() if pd.notna(values[0]) and values[0] > 0)
+                valid_pb_inputs = sum(1 for values in pe_pb_data.values() if pd.notna(values[1]) and values[1] > 0)
+                print(
+                    f"[VALUATION] 使用本地 stock_info_registry 估值数据: "
+                    f"{valid_pe_inputs} 只PE有效, {valid_pb_inputs} 只PB有效"
+                )
             valuation_df = compute_sector_valuation(batch_data_map, pe_pb_data, sector_features)
-            valuation_payload = {
-                code: {
-                    "pe_ratio": values[0] if isinstance(values, tuple) and len(values) > 0 else np.nan,
-                    "pb_ratio": values[1] if isinstance(values, tuple) and len(values) > 1 else np.nan,
-                }
-                for code, values in pe_pb_data.items()
-            }
             industry_valuation_df = compute_industry_valuation_scores(
                 valuation_payload,
                 industry_l2_map,
@@ -862,7 +948,9 @@ class LightGBMAnalysisMixin:
                 }
             for _, row in valuation_df.iterrows():
                 row_dict = row.to_dict()
-                ind_val = industry_valuation_details.get(str(row["stock_code"]), {})
+                row_code = str(row["stock_code"])
+                row_dict.update(valuation_payload.get(row_code) or {})
+                ind_val = industry_valuation_details.get(row_code, {})
                 if ind_val:
                     row_dict.update(
                         {
@@ -874,6 +962,8 @@ class LightGBMAnalysisMixin:
                             "industry_pe_percentile": ind_val.get("pe_percentile"),
                             "industry_pb_percentile": ind_val.get("pb_percentile"),
                             "industry_ps_percentile": ind_val.get("ps_percentile"),
+                            "industry_ev_ebitda_percentile": ind_val.get("ev_ebitda_percentile"),
+                            "industry_dividend_yield_percentile": ind_val.get("dividend_yield_percentile"),
                         }
                     )
                 valuation_scores[row["stock_code"]] = row_dict
@@ -1144,6 +1234,9 @@ class LightGBMAnalysisMixin:
             _hsv_score = _val.get("hot_sector_value_score", 50.0)
             _pe = _val.get("pe_ratio", np.nan)
             _pb = _val.get("pb_ratio", np.nan)
+            _ps = _val.get("ps_ratio", np.nan)
+            _ev_ebitda = _val.get("ev_ebitda", np.nan)
+            _dividend_yield = _val.get("dividend_yield", np.nan)
             _value_score = _val.get("value_score", _val.get("valuation_score", 50.0))
             _valuation_metric_used = _val.get("valuation_metric_used")
             _valuation_data_coverage = _val.get("valuation_data_coverage")
@@ -1197,6 +1290,10 @@ class LightGBMAnalysisMixin:
                     "quality_data_coverage": _quality_detail.get("quality_data_coverage"),
                     "quality_peer_group": _quality_detail.get("quality_peer_group"),
                     "quality_missing_fields": _quality_detail.get("quality_missing_fields", []),
+                    "roe_ind_pct": _quality_detail.get("roe_ind_pct"),
+                    "gross_margin_ind_pct": _quality_detail.get("gross_margin_ind_pct"),
+                    "debt_ratio_ind_pct": _quality_detail.get("debt_ratio_ind_pct"),
+                    "revenue_yoy_ind_pct": _quality_detail.get("revenue_yoy_ind_pct"),
                     "latest_entry_type": "lightgbm_rank",
                     "latest_signal_tier": latest_signal["signal_tier"] if latest_signal is not None else None,
                     "latest_signal_date": latest_signal_date,
@@ -1250,6 +1347,14 @@ class LightGBMAnalysisMixin:
                     "valuation_peer_group": _valuation_peer_group,
                     "pe_ratio": _pe,
                     "pb_ratio": _pb,
+                    "ps_ratio": _ps,
+                    "ev_ebitda": _ev_ebitda,
+                    "dividend_yield": _dividend_yield,
+                    "pe_ind_pct": _val.get("industry_pe_percentile"),
+                    "pb_ind_pct": _val.get("industry_pb_percentile"),
+                    "ps_ind_pct": _val.get("industry_ps_percentile"),
+                    "ev_ebitda_ind_pct": _val.get("industry_ev_ebitda_percentile"),
+                    "dividend_yield_ind_pct": _val.get("industry_dividend_yield_percentile"),
                     # Industry metadata and data quality
                     "industry_l1": _industry_l1,
                     "industry_l2": _industry_l2,

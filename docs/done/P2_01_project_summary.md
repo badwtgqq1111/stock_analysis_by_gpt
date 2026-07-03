@@ -205,7 +205,7 @@ output_dir = './output'  # 改为所需目录
 
 ## 知识库文档
 
-详见 [README.md](README.md) 了解：
+详见 [README.md](../../README.md) 了解：
 - 完整的模块说明
 - 代码示例
 - 扩展指南

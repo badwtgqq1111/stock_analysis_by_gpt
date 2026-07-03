@@ -10,7 +10,7 @@ from data.ingest.service import MarketDataService
 
 def main_generate_factors(
     days=365,
-    factor_set="qlib_alpha158",
+    factor_set="alpha_zoo_hk",
     stock_limit=None,
     max_workers=1,
     show_progress=False,

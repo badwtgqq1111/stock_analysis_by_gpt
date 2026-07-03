@@ -2,7 +2,7 @@
 
 基于 `ClickHouse + Parquet` 的本地港股量化研究工具箱，支持数据同步、因子生成、LightGBM 排序选股、行业分层候选池、组合回测和 Web 看板。
 
-架构详见 [QUANT_SYSTEM_OVERALL_DESIGN.md](./QUANT_SYSTEM_OVERALL_DESIGN.md)。
+架构详见 [P0_01_quant_system_overall_design.md](./docs/todo/P0_01_quant_system_overall_design.md)，文档目录见 [docs/README.md](./docs/README.md)。
 
 ## 环境部署
 
@@ -126,7 +126,7 @@ curl 'http://127.0.0.1:8888/search?q=00700%20腾讯控股%20主营业务%20年�
 export SEARXNG_URL=http://127.0.0.1:8888
 ```
 
-`deploy/searxng/docker-compose.yml` 默认只绑定 `127.0.0.1:8888`，不要直接暴露公网。`deploy/searxng/searxng/settings.yml` 已启用 `json` format，否则 `/search?format=json` 会返回 403；同时建议用 `use_default_settings.engines.keep_only` 明确收窄默认 engines，否则 SearXNG 会继续叠加默认 general engines，表现成 `brave`、`startpage`、`wikipedia` 等在 `unresponsive_engines` 里超时。本仓库默认只保留 `bing`；若你的网络对 DuckDuckGo 连通性稳定，再按需加回。若 `8888` 被占用，可以临时改 `deploy/searxng/docker-compose.yml` 的宿主机端口，例如 `127.0.0.1:18888:8080`，并同步设置 `SEARXNG_URL=http://127.0.0.1:18888`。完整说明和排障见 `docs/SEARXNG_SEARCH_INTEGRATION.md`。
+`deploy/searxng/docker-compose.yml` 默认只绑定 `127.0.0.1:8888`，不要直接暴露公网。`deploy/searxng/searxng/settings.yml` 已启用 `json` format，否则 `/search?format=json` 会返回 403；默认启用 Bing 和 DuckDuckGo，禁用 Google 以减少验证码和风控。若 `8888` 被占用，可以临时改 `deploy/searxng/docker-compose.yml` 的宿主机端口，例如 `127.0.0.1:18888:8080`，并同步设置 `SEARXNG_URL=http://127.0.0.1:18888`。完整说明和排障见 `docs/done/P0_03_searxng_search_integration.md`。
 
 ### LightRAG 可选
 
@@ -210,7 +210,7 @@ tmux attach -t lightrag
 tmux kill-session -t lightrag
 ```
 
-启动后检查 `http://127.0.0.1:9621/health`，API 文档在 `http://127.0.0.1:9621/docs`。`start-server.sh` 会读取 `deploy/lightrag/server.env` 和当前 shell 中的 `DEEPSEEK_API_KEY`，不会把 API key 写入仓库。更完整的后端取舍和排障见 `docs/LIGHTRAG_DEPLOYMENT.md`，部署脚本说明见 `deploy/lightrag/README.md`。
+启动后检查 `http://127.0.0.1:9621/health`，API 文档在 `http://127.0.0.1:9621/docs`。`start-server.sh` 会读取 `deploy/lightrag/server.env` 和当前 shell 中的 `DEEPSEEK_API_KEY`，不会把 API key 写入仓库。更完整的后端取舍和排障见 `docs/done/P0_02_lightrag_deployment.md`，部署脚本说明见 `deploy/lightrag/README.md`。
 
 ## 推荐 Runbook
 
@@ -247,24 +247,28 @@ README 以依赖顺序组织流程：基础行情、行业元数据和因子是�
 |---|---|---|---|
 | 第一次部署 | 无 | `uv sync --dev`，可选部署 ClickHouse、SearXNG、LightRAG | 只跑一次 |
 | 第一次建库或行情更新 | 无 | `sync` | 初次全量，之后按交易日增量 |
+| 财务/流动性快照刷新 | `sync` 产生代码池 | `refresh-stock-info` | 每个交易日收盘后，或选股前 |
+| 财务因子面板刷新 | `refresh-stock-info` 已落库 | `refresh-financial-metrics`、`financial-coverage` | 每个交易日收盘后，或财务数据更新后 |
 | 行业、标的类型、可交易性刷新 | `sync` 产生代码池 | `backfill-industry`、`industry-coverage` | 新股票或元数据过期时 |
-| 因子刷新 | `sync` 产生 OHLCV | `generate-factors --factor-set alpha158_hk` | 每次重训/选股前 |
+| 因子刷新 | `sync` 产生 OHLCV | `generate-factors --factor-set alpha_zoo_hk` | 每次重训/选股前 |
 | 智能画像/主题特征刷新 | SearXNG、LightRAG、别名/evidence | `stock-intelligence-pipeline --import-to-warehouse` | 按周/月，或研究主题变化时 |
 | 事件/微结构实验特征 | 外部事件 CSV 或分钟线 CSV | `export-event-features`、`export-microstructure-features`，再接入特征仓库 | 研究需要时，在 `select` 前 |
-| 生产选股 | `sync`、`generate-factors`；强烈建议先 `backfill-industry`；可叠加特征层 | `select --analysis-mode lightgbm --export-csv output/results` | 每次要出组合 |
+| 生产选股 | `sync`、`refresh-stock-info`、`generate-factors`；强烈建议先 `backfill-industry`；可叠加特征层 | `select --analysis-mode lightgbm --export-csv output/results` | 每次要出组合 |
 | 选股后验收 | `select` 导出的 ranking/selected/feature artifacts | `lightgbm-model-diagnostics`、`theme-feature-diagnostics`、Purged CV、A/B、TCA/RL | 每次模型或特征变化后 |
 
 ### 日常选股
 
 ```bash
 uv run python run.py sync --start-date 2014-01-01 --frequencies daily --skip-existing --max-workers 24 --show-progress
+uv run python run.py refresh-stock-info --max-workers 16 --show-progress
+uv run python run.py refresh-financial-metrics --max-workers 8 --show-progress
 uv run python run.py backfill-industry --force --normalize-existing --max-workers 8 --show-progress
-uv run python run.py generate-factors --days 365 --factor-set alpha158_hk --max-workers 8 --show-progress
+uv run python run.py generate-factors --days 365 --factor-set alpha_zoo_hk --max-workers 8 --show-progress
 uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --min-market-cap 30 \
   --min-daily-turnover 500 \
   --max-workers 8 \
@@ -272,32 +276,36 @@ uv run python run.py select \
   --show-progress
 ```
 
-`select --analysis-mode lightgbm` 会在单次命令内训练和预测，不依赖 `validate-factors`。生产默认 `--factor-set alpha158_hk`、`--model-objective regression_csrank`、`industry_size` 中性化；`lambdarank` 和 `rank_xendcg` 只作为对照实验。只有旧的 `select --analysis-mode factor` 才需要先跑 `validate-factors`。
+`select --analysis-mode lightgbm` 会在单次命令内训练和预测，不依赖 `validate-factors`。生产默认 `--factor-set alpha_zoo_hk`、`--model-objective regression_csrank`、`industry_size` 中性化；`lambdarank` 和 `rank_xendcg` 只作为对照实验。只有旧的 `select --analysis-mode factor` 才需要先跑 `validate-factors`。
+
+`refresh-stock-info` 会把 PB、PE、市值、成交额、成交量、总股本、流通股本、股息率和换手率等快照写入 `stock_info_registry`。换手率字段有原始数据时直接入库；缺失时按 `成交量 / 流通股本 * 100` 换算后入库。生产选股默认优先使用仓库里的财务/流动性快照做流动性过滤和 LightGBM 估值评分，不再临时抓 live 数据；仅当显式设置 `ALLOW_LIVE_MARKET_FILTER_FETCH=1` 时，市场过滤才会对缺失股票启用实时兜底。
+
+`refresh-financial-metrics` 会把本地 `stock_info_registry` 的估值/流动性字段转存到 `valuation_snapshot`，并写入 `financial_statement_metrics` 的 PIT 财务面板；`financial-coverage` 用于检查字段覆盖率。因子目录已支持 `factor-list`、`factor-show`、`factor-manifest`，生产默认 `alpha_zoo_hk` 包含 `alpha101`、`academic_hk`、`valuation_hk`、`financial_quality_hk` 和 `financial_cross_section_hk`。其中 `financial_cross_section_hk` 会生成 `pe_ind_pct`、`pb_ind_pct`、`roe_ind_pct`、`quality_value_score` 等行业相对财务因子。这些实现只参考 Alpha Zoo 的组织形态，代码、公式代理、manifest 和落库流程都在本项目内原生实现，不读取、不导入、也不要求存在 `Vibe-Trading/` 目录。
 
 `select --export-csv output/results` 会同时导出排名、持仓、候选池、观察名单、行业归因、流动性容量、模拟 TCA、模型 manifest、特征重要性和 SHAP 解释文件。后续诊断、成本模型和组合策略评估都应消费这些产物，不要反向依赖选股前的原始特征文件。
 
 ### 国泰君安 191 因子
 
-`alpha158_hk` 已经合并国泰君安 191 因子，生产选股继续只需要跑 `alpha158_hk`。输出中会同时包含 Qlib Alpha158、9 个港股定制因子，以及 `GTJA001` 到 `GTJA191`：
+生产默认使用更完整的 `alpha_zoo_hk`。它包含 `alpha158_hk`，并额外加入 `alpha101`、`academic_hk`、`valuation_hk`、`financial_quality_hk` 和 `financial_cross_section_hk`；`alpha158_hk` 继续保留为轻量回退包，适合小样本调试或需要更快生成因子时使用。`alpha158_hk` 本身已经合并国泰君安 191 因子，输出中会同时包含 Qlib Alpha158、9 个港股定制因子，以及 `GTJA001` 到 `GTJA191`：
 
 ```bash
 uv run python run.py generate-factors \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --max-workers 8 \
   --show-progress
 
 uv run python run.py factor-report \
   --days 365 \
-  --factor-set alpha158_hk \
-  --export-csv output/factor_report_alpha158_hk \
+  --factor-set alpha_zoo_hk \
+  --export-csv output/factor_report_alpha_zoo_hk \
   --show-progress
 
 uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --max-workers 8 \
   --export-csv output/results \
   --show-progress
@@ -357,7 +365,7 @@ uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --theme-feature-set theme_opportunity \
   --theme-overlay-strength 0.05 \
   --export-csv output/results \
@@ -370,13 +378,13 @@ uv run python run.py select \
 
 ```bash
 uv run python run.py lightgbm-model-diagnostics \
-  --ranking-csv output/results_alpha158_hk_ranking.csv \
-  --selected-csv output/results_alpha158_hk_selected.csv \
+  --ranking-csv output/results_alpha_zoo_hk_ranking.csv \
+  --selected-csv output/results_alpha_zoo_hk_selected.csv \
   --output-json output/lightgbm_model_diagnostics.json
 
 uv run python run.py theme-feature-diagnostics \
-  --ranking-csv output/results_alpha158_hk_ranking.csv \
-  --selected-csv output/results_alpha158_hk_selected.csv \
+  --ranking-csv output/results_alpha_zoo_hk_ranking.csv \
+  --selected-csv output/results_alpha_zoo_hk_selected.csv \
   --theme-feature-csv output/theme_opportunity_features.csv
 ```
 
@@ -455,7 +463,7 @@ uv run python run.py industry-coverage --show-missing
 
 这是推荐主流程。它把别名、source-aware 搜索、LightRAG 索引/召回、强 schema 图谱、热度、主题机会分、LightGBM 标准特征串在一条命令里。DeepSeek 不再对每只股票做基础 tag 抽取，只在 LightRAG 服务内部用于文档索引/图谱抽取和必要召回，因此比 `extract-stock-tags-llm` 全量逐股抽 tag 更省 token，也更容易复用历史索引。
 
-SearXNG 部署见 `docs/SEARXNG_SEARCH_INTEGRATION.md`，LightRAG 部署见 `docs/LIGHTRAG_DEPLOYMENT.md`。
+SearXNG 部署见 `docs/done/P0_03_searxng_search_integration.md`，LightRAG 部署见 `docs/done/P0_02_lightrag_deployment.md`。
 
 全市场建议分两段：先全量搜索和索引，再按 `--profile-limit` 或候选池分批做画像召回。不要直接对 3000+ 只股票一次性做多维画像召回。
 
@@ -537,7 +545,7 @@ LightGBM 选股默认会读取 `theme_opportunity` 标准特征进入训练面�
 ```bash
 uv run python run.py select \
   --analysis-mode lightgbm \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --theme-feature-set theme_opportunity \
   --theme-overlay-strength 0.05 \
   --top-n 10 \
@@ -571,7 +579,7 @@ uv run python run.py select \
   --stock-limit 50 \
   --top-n 3 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --export-csv output/industry_smoke \
   --show-progress
 ```
@@ -591,7 +599,7 @@ uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --min-market-cap 30 \
   --min-daily-turnover 500 \
   --max-workers 8 \
@@ -604,10 +612,10 @@ uv run python run.py select \
 
 | 文件 | 检查项 |
 |---|---|
-| `output/results_alpha158_hk_ranking.csv` | 包含 `selection_eligible`、`eligibility_reasons`、`industry_rank`、`industry_score`、`industry_cap` |
-| `output/results_alpha158_hk_selected.csv` | 全部 `selection_eligible=True` 且 `industry_rank <= industry_cap`；重点检查 `high_chase_score`、`price_return_60d_pct`、`price_return_120d_pct` |
-| `output/results_alpha158_hk_industry_weights.csv` | 行业权重、预算和 HHI 是否过度集中 |
-| `output/results_alpha158_hk_industry_attribution.csv` | 行业内 Alpha、行业机会分、Hot/Cold bucket、OOS gate |
+| `output/results_alpha_zoo_hk_ranking.csv` | 包含 `selection_eligible`、`eligibility_reasons`、`industry_rank`、`industry_score`、`industry_cap` |
+| `output/results_alpha_zoo_hk_selected.csv` | 全部 `selection_eligible=True` 且 `industry_rank <= industry_cap`；重点检查 `high_chase_score`、`price_return_60d_pct`、`price_return_120d_pct` |
+| `output/results_alpha_zoo_hk_industry_weights.csv` | 行业权重、预算和 HHI 是否过度集中 |
+| `output/results_alpha_zoo_hk_industry_attribution.csv` | 行业内 Alpha、行业机会分、Hot/Cold bucket、OOS gate |
 | `docs/report/{日期}_llm.md` | 入选/剔除理由是否能解释行业、质量、估值、流动性 |
 
 行业 Core/Overlay AB test 可按需跑：
@@ -618,7 +626,7 @@ uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --industry-selection-mode core \
   --export-csv output/ab_core \
   --llm-report \
@@ -629,7 +637,7 @@ uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --industry-selection-mode core_overlay \
   --industry-overlay-strength 0.2 \
   --export-csv output/ab_core_overlay \
@@ -641,7 +649,7 @@ uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --industry-selection-mode timing_only \
   --industry-overlay-strength 1.0 \
   --export-csv output/ab_timing_only \
@@ -654,9 +662,10 @@ uv run python run.py select \
 | 命令 | 依赖 | 用途 |
 |---|---|---|
 | `sync` | 无 | 拉取 OHLCV，产生代码池 |
+| `refresh-stock-info` | `sync` | 刷新 PB/PE、市值、成交额/成交量、换手率、股本等财务/流动性快照到 `stock_info_registry` |
 | `backfill-industry` | `sync` | 补行业、标的类型、fund-like、可交易性 |
-| `generate-factors` | `sync` | 生成 `alpha158_hk` 等因子 |
-| `select --analysis-mode lightgbm` | `sync`、`generate-factors`，建议先 `backfill-industry` | 推荐选股模式，单次命令内训练和预测 |
+| `generate-factors` | `sync` | 默认生成 `alpha_zoo_hk`，可显式指定 `alpha158_hk` 轻量包 |
+| `select --analysis-mode lightgbm` | `sync`、`refresh-stock-info`、`generate-factors`，建议先 `backfill-industry` | 推荐选股模式，单次命令内训练和预测 |
 | `validate-factors` | `generate-factors` | 仅供 factor 模式选股使用 |
 | `select --analysis-mode factor` | `generate-factors`、`validate-factors` | 验证权重驱动的选股模式 |
 | `signal-report` | `generate-factors` | 验证信号 recipe 触发后的未来收益 |
@@ -691,14 +700,14 @@ uv run python run.py select \
 ```bash
 uv run python run.py sync --start-date 2014-01-01 --frequencies daily --skip-existing --max-workers 24 --show-progress
 uv run python run.py backfill-industry --force --normalize-existing --max-workers 8 --show-progress
-uv run python run.py generate-factors --days 365 --factor-set alpha158_hk --max-workers 8 --show-progress
-uv run python run.py validate-factors --days 365 --factor-set alpha158_hk --export-csv output/validation_scorecard --show-progress
+uv run python run.py generate-factors --days 365 --factor-set alpha_zoo_hk --max-workers 8 --show-progress
+uv run python run.py validate-factors --days 365 --factor-set alpha_zoo_hk --export-csv output/validation_scorecard --show-progress
 uv run python run.py signal-report --days 365 --signal-recipes low_price_setup,range_breakout,box_pullback --horizons 20,40,60 --export-csv output/signal_report --show-progress
-uv run python run.py factor-report --days 365 --factor-set alpha158_hk --export-csv output/factor_report --show-progress
+uv run python run.py factor-report --days 365 --factor-set alpha_zoo_hk --export-csv output/factor_report --show-progress
 uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progress
 ```
 
-刚补完行业或 instrument 元数据后，不需要重跑 `sync`，但需要重跑 `select`。`alpha158_hk` 在 `qlib_alpha158` 基础上加入港股定制因子，推荐显式指定。
+刚补完行业或 instrument 元数据后，不需要重跑 `sync`，但需要重跑 `select`。生产默认是 `alpha_zoo_hk`；若只是快速调试，可显式指定轻量回退包 `alpha158_hk`。
 
 生成物放置规则：小型 registry 和设计文档可放 `docs/`；上千只股票的报告、LightRAG context、临时图谱、主题评分 CSV 放 `output/`；会参与选股和回测的结构化结果用 `--import-to-warehouse` 写入 Parquet/ClickHouse。
 
@@ -764,7 +773,7 @@ uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --min-market-cap 30 \
   --min-daily-turnover 500 \
   --max-workers 8 \
@@ -773,21 +782,21 @@ uv run python run.py select \
 
 # C. 选股后验收：模型追高/动量诊断
 uv run python run.py lightgbm-model-diagnostics \
-  --ranking-csv output/results_alpha158_hk_ranking.csv \
-  --selected-csv output/results_alpha158_hk_selected.csv \
+  --ranking-csv output/results_alpha_zoo_hk_ranking.csv \
+  --selected-csv output/results_alpha_zoo_hk_selected.csv \
   --feature-importance-json output/lightgbm_feature_importance.json \
   --output-json output/lightgbm_model_diagnostics.json
 
 # C. 选股后验收：主题画像诊断（如果启用了智能画像）
 uv run python run.py theme-feature-diagnostics \
-  --ranking-csv output/results_alpha158_hk_ranking.csv \
-  --selected-csv output/results_alpha158_hk_selected.csv \
+  --ranking-csv output/results_alpha_zoo_hk_ranking.csv \
+  --selected-csv output/results_alpha_zoo_hk_selected.csv \
   --theme-feature-csv output/theme_opportunity_features.csv \
   --theme-score-csv output/theme_opportunities.csv
 
 # C. 研究协议：Purged CV fold-level 报告
 uv run python run.py lightgbm-purged-cv-report \
-  --predictions-csv output/results_alpha158_hk_ranking.csv \
+  --predictions-csv output/results_alpha_zoo_hk_ranking.csv \
   --score-col model_score \
   --target-col forward_return_20 \
   --output-csv output/lightgbm_purged_cv_report.csv \
@@ -811,7 +820,7 @@ uv run python run.py select \
   --analysis-mode lightgbm \
   --top-n 10 \
   --days 365 \
-  --factor-set alpha158_hk \
+  --factor-set alpha_zoo_hk \
   --model-objective lambdarank \
   --export-csv output/results_lambdarank \
   --show-progress
@@ -828,13 +837,13 @@ uv run python run.py execution-simulate \
 
 # E. 组合 RL sandbox：expert / imitation policy 离线评估
 uv run python run.py portfolio-policy-eval \
-  --panel-csv output/results_alpha158_hk_ranking.csv \
+  --panel-csv output/results_alpha_zoo_hk_ranking.csv \
   --policy expert \
   --output-json output/portfolio_policy_eval.json
 
 # E. 执行成本模型：simulated/real TCA -> 监督成本模型
 uv run python run.py fit-execution-cost-model \
-  --tca-csv output/results_alpha158_hk_tca_simulated_report.csv \
+  --tca-csv output/results_alpha_zoo_hk_tca_simulated_report.csv \
   --output-json output/execution_cost_model.json
 ```
 
@@ -905,7 +914,7 @@ result = analyzer.backtest_hk_market(
     initial_capital=100000,
     max_workers=8,
     analysis_mode="lightgbm",
-    factor_set="alpha158_hk",
+    factor_set="alpha_zoo_hk",
 )
 ```
 

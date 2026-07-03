@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -18,3 +19,4 @@ class FactorContext:
     adjust: str = "qfq"
     exchange: str | None = None
     asset_type: str = "equity"
+    extra: dict[str, Any] | None = None

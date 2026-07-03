@@ -4,8 +4,8 @@
 用法:
   uv run python run.py sync --start-date 2014-01-01 --max-workers 24
   uv run python run.py backfill-industry --stock-codes 00700 00005 --show-progress
-  uv run python run.py generate-factors --days 365 --factor-set qlib_alpha158
-  uv run python run.py validate-factors --days 365 --factor-set qlib_alpha158
+  uv run python run.py generate-factors --days 365 --factor-set alpha_zoo_hk
+  uv run python run.py validate-factors --days 365 --factor-set alpha_zoo_hk
   uv run python run.py select --analysis-mode lightgbm --top-n 10 --days 365
   uv run python run.py fetch-alt --stock-limit 100
   uv run python run.py research-stock-tags --industry-registry-csv docs/hk_industry_registry.csv
@@ -27,6 +27,8 @@
 
 import sys
 from pathlib import Path
+
+from core.constants import DEFAULT_FACTOR_SET
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -90,6 +92,68 @@ def _run_sync(args):
         print(f"同步完成: {summary}")
     finally:
         service.close()
+
+
+def _run_refresh_stock_info(args):
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        summary = service.refresh_hk_stock_info(
+            stock_codes=args.stock_codes,
+            limit=args.limit,
+            max_workers=args.max_workers,
+            data_source=args.data_source,
+            show_progress=args.show_progress,
+        )
+        print(f"港股财务/流动性快照刷新完成: {summary}")
+    finally:
+        service.close()
+
+
+def _run_refresh_financial_metrics(args):
+    from cli.financial_metrics import main_refresh_financial_metrics
+
+    return main_refresh_financial_metrics(
+        stock_codes=args.stock_codes,
+        limit=args.limit,
+        max_workers=args.max_workers,
+        show_progress=args.show_progress,
+        base_dir=args.base_dir,
+        data_source=args.data_source,
+    )
+
+
+def _run_financial_coverage(args):
+    from cli.financial_metrics import main_financial_coverage
+
+    return main_financial_coverage(
+        stock_codes=args.stock_codes,
+        base_dir=args.base_dir,
+        export_csv=args.export_csv,
+    )
+
+
+def _run_factor_list(args):
+    from cli.factor_catalog import main_factor_list
+
+    return main_factor_list(export_csv=args.export_csv)
+
+
+def _run_factor_manifest(args):
+    from cli.factor_catalog import main_factor_manifest
+
+    return main_factor_manifest(
+        factor_set=args.factor_set,
+        export_json=args.export_json,
+        export_csv=args.export_csv,
+    )
+
+
+def _run_factor_show(args):
+    from cli.factor_catalog import main_factor_show
+
+    return main_factor_show(factor_id=args.factor_id, factor_set=args.factor_set)
 
 
 def _run_backfill_industry(args):
@@ -1645,7 +1709,7 @@ def _run_lightgbm_abtest(args):
     import subprocess
     import sys as _sys
 
-    factor_set = args.factor_set or "alpha158_hk"
+    factor_set = args.factor_set or DEFAULT_FACTOR_SET
     compare_modes = args.compare.split(",") if args.compare else ["none", "industry_size"]
     results = {}
     base_args = [
@@ -1893,7 +1957,7 @@ def _run_theme_ablation(args):
     import subprocess
     import sys as _sys
 
-    factor_set = args.factor_set or "alpha158_hk"
+    factor_set = args.factor_set or DEFAULT_FACTOR_SET
     overlay_weights = [float(w) for w in args.overlay_weights.split(",")] if args.overlay_weights else [0.0, 0.05, 0.10]
     results = {}
     base_args = [
@@ -2106,6 +2170,74 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_backfill_industry(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "refresh-stock-info":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py refresh-stock-info", description="刷新港股财务/流动性快照到 stock_info_registry"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源 (akshare / tencent)")
+        parser.add_argument("--max-workers", type=int, default=20, help="并发线程数")
+        parser.add_argument("--limit", type=int, default=None, help="限制刷新股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_refresh_stock_info(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "refresh-financial-metrics":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py refresh-financial-metrics",
+            description="刷新港股估值快照和财务指标到 valuation_snapshot / financial_statement_metrics",
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源")
+        parser.add_argument("--max-workers", type=int, default=8, help="并发线程数")
+        parser.add_argument("--limit", type=int, default=None, help="限制刷新股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_refresh_financial_metrics(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "financial-coverage":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py financial-coverage",
+            description="查看估值/财务指标覆盖率",
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--export-csv", default=None, help="导出覆盖率 CSV")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_financial_coverage(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "factor-list":
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="run.py factor-list", description="列出已注册因子集")
+        parser.add_argument("--export-csv", default=None, help="导出 CSV")
+        args = parser.parse_args(sys.argv[2:])
+        _run_factor_list(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "factor-manifest":
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="run.py factor-manifest", description="导出因子 manifest")
+        parser.add_argument("--factor-set", default=None, help="指定因子集；默认导出全部")
+        parser.add_argument("--export-json", default=None, help="导出 JSON")
+        parser.add_argument("--export-csv", default=None, help="导出 CSV")
+        args = parser.parse_args(sys.argv[2:])
+        _run_factor_manifest(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "factor-show":
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="run.py factor-show", description="查看单个因子 metadata")
+        parser.add_argument("factor_id", help="因子 ID，例如 ALPHA101_001")
+        parser.add_argument("--factor-set", default=None, help="限制搜索的因子集")
+        args = parser.parse_args(sys.argv[2:])
+        _run_factor_show(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "research-stock-tags":
         import argparse
 
@@ -2628,8 +2760,8 @@ def main():
         parser = argparse.ArgumentParser(
             prog="run.py theme-feature-diagnostics", description="诊断智能画像主题特征覆盖率、分桶表现和持仓贡献"
         )
-        parser.add_argument("--ranking-csv", default="output/results_alpha158_hk_ranking.csv", help="select 导出的全市场 ranking CSV")
-        parser.add_argument("--selected-csv", default="output/results_alpha158_hk_selected.csv", help="select 导出的当前持有 CSV")
+        parser.add_argument("--ranking-csv", default="output/results_alpha_zoo_hk_ranking.csv", help="select 导出的全市场 ranking CSV")
+        parser.add_argument("--selected-csv", default="output/results_alpha_zoo_hk_selected.csv", help="select 导出的当前持有 CSV")
         parser.add_argument("--theme-feature-csv", default="output/theme_opportunity_features.csv", help="主题机会标准特征 CSV")
         parser.add_argument("--theme-score-csv", default="output/theme_opportunities.csv", help="主题机会评分 CSV，用于诊断相关性闸门和证据噪声")
         parser.add_argument("--json", action="store_true", help="JSON 输出")
@@ -2643,8 +2775,8 @@ def main():
             prog="run.py lightgbm-model-diagnostics",
             description="诊断 LightGBM 排名/持仓的追高、动量和高位暴露",
         )
-        parser.add_argument("--ranking-csv", default="output/results_alpha158_hk_ranking.csv", help="select 导出的全市场 ranking CSV")
-        parser.add_argument("--selected-csv", default="output/results_alpha158_hk_selected.csv", help="select 导出的当前持有 CSV")
+        parser.add_argument("--ranking-csv", default="output/results_alpha_zoo_hk_ranking.csv", help="select 导出的全市场 ranking CSV")
+        parser.add_argument("--selected-csv", default="output/results_alpha_zoo_hk_selected.csv", help="select 导出的当前持有 CSV")
         parser.add_argument("--feature-importance-json", default=None, help="LightGBM 特征重要性 JSON 文件")
         parser.add_argument("--high-chase-threshold", type=float, default=80.0, help="追高综合分红旗阈值")
         parser.add_argument("--multibagger-60d-threshold", type=float, default=100.0, help="60 日涨幅红旗阈值，单位百分比")
@@ -2663,7 +2795,7 @@ def main():
         )
         parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
         parser.add_argument("--data-source", default="akshare", help="数据源")
-        parser.add_argument("--factor-set", default=None, help="因子集，默认 alpha158_hk")
+        parser.add_argument("--factor-set", default=None, help=f"因子集，默认 {DEFAULT_FACTOR_SET}")
         parser.add_argument("--days", type=int, default=365, help="分析周期")
         parser.add_argument("--top-n", type=int, default=10, help="持仓数量")
         parser.add_argument("--stock-limit", type=int, default=200, help="限制股票数量")
@@ -2688,7 +2820,7 @@ def main():
             prog="run.py lightgbm-purged-cv-report",
             description="基于 select/ranking 导出生成 Purged CV fold-level 报告",
         )
-        parser.add_argument("--predictions-csv", default="output/results_alpha158_hk_ranking.csv", help="含 score/target 的预测 CSV")
+        parser.add_argument("--predictions-csv", default="output/results_alpha_zoo_hk_ranking.csv", help="含 score/target 的预测 CSV")
         parser.add_argument("--score-col", default="model_score", help="预测分数字段")
         parser.add_argument("--target-col", default="forward_return_20", help="未来收益字段")
         parser.add_argument("--date-col", default="trade_date", help="日期字段")
@@ -2799,7 +2931,7 @@ def main():
         )
         parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
         parser.add_argument("--data-source", default="akshare", help="数据源")
-        parser.add_argument("--factor-set", default=None, help="因子集，默认 alpha158_hk")
+        parser.add_argument("--factor-set", default=None, help=f"因子集，默认 {DEFAULT_FACTOR_SET}")
         parser.add_argument("--days", type=int, default=365, help="分析周期")
         parser.add_argument("--top-n", type=int, default=10, help="持仓数量")
         parser.add_argument("--stock-limit", type=int, default=200, help="限制股票数量")

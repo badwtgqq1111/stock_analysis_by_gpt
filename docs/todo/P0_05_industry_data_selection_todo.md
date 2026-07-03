@@ -3,7 +3,7 @@
 > 生成日期：2026-05-31  
 > 背景：当前 LightGBM 选股已实现 quality、valuation、overheat、liquidity、cluster concentration 等优化，但 `cluster_id` 来自收益相关性聚类，不等同于真实行业。下一阶段目标是先补全行业/基本面/流动性数据，再把选股逻辑重构为“行业内选潜力股 + 组合层风险预算”。
 
-> 延伸设计：关于“分行业选股核心层”与“行业择时增强层”的拆分、打分字段和回测验收，见 [sector_neutral_vs_timing_optimization.md](./sector_neutral_vs_timing_optimization.md)。
+> 延伸设计：关于“分行业选股核心层”与“行业择时增强层”的拆分、打分字段和回测验收，见 [P0_06_sector_neutral_vs_timing_optimization.md](./P0_06_sector_neutral_vs_timing_optimization.md)。
 
 ---
 

@@ -85,15 +85,20 @@ def normalize_history_dataframe(df, column_mapping):
     working_df["date"] = pd.to_datetime(working_df["date"], errors="coerce")
     working_df.dropna(subset=["date"], inplace=True)
 
-    required_columns = ["date", "open", "close", "high", "low", "volume"]
+    required_columns = ["date", "open", "high", "low", "close", "volume"]
+    optional_columns = ["amount", "turnover", "vwap"]
     missing_columns = [column for column in required_columns if column not in working_df.columns]
     if missing_columns:
         raise ValueError(f"缺少必要字段: {', '.join(missing_columns)}")
 
     for column in required_columns[1:]:
         working_df[column] = pd.to_numeric(working_df[column], errors="coerce")
+    for column in optional_columns:
+        if column in working_df.columns:
+            working_df[column] = pd.to_numeric(working_df[column], errors="coerce")
 
-    working_df = working_df[required_columns].copy()
+    selected_columns = required_columns + [column for column in optional_columns if column in working_df.columns]
+    working_df = working_df[selected_columns].copy()
     working_df.dropna(subset=["open", "close", "high", "low"], inplace=True)
     working_df["volume"] = working_df["volume"].fillna(0)
     working_df.sort_values("date", inplace=True)
@@ -102,9 +107,9 @@ def normalize_history_dataframe(df, column_mapping):
     working_df.rename(
         columns={
             "open": "Open",
-            "close": "Close",
             "high": "High",
             "low": "Low",
+            "close": "Close",
             "volume": "Volume",
         },
         inplace=True,

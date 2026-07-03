@@ -656,6 +656,11 @@ class ClickHouseStore:
             return pd.DataFrame()
 
         table = self._table_name(dataset_name, layer)
+        client = self._connect()
+        try:
+            self._ensure_table(client, dataset_name, layer)
+        finally:
+            client.close()
         select_sql = ", ".join(columns) if columns else "*"
         query = f"SELECT {select_sql} FROM {table}"
         params = {}

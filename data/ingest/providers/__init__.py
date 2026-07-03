@@ -13,6 +13,7 @@ from .cn_baostock import (
 from .cn_history import CNHistoryDataFetcher
 from .cn_info import CNStockInfoFetcher
 from .cn_universe import CNMarketListFetcher
+from .cn_valuation_history import CNEastmoneyValuationHistoryFetcher
 from .hk_corporate_actions import HKCorporateActionsFetcher
 from .hk_history import HistoryDataFetcher
 from .hk_industry import HKIndustryFetcher
@@ -28,6 +29,7 @@ __all__ = [
     "CNHistoryDataFetcher",
     "CNMarketListFetcher",
     "CNStockInfoFetcher",
+    "CNEastmoneyValuationHistoryFetcher",
     "HKCorporateActionsFetcher",
     "HKIndustryFetcher",
     "HistoryDataFetcher",

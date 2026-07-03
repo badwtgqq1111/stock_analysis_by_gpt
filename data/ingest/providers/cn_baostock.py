@@ -164,11 +164,13 @@ class CNBaoStockHistoryFetcher:
                 "low": "low",
                 "close": "close",
                 "volume": "volume",
+                "amount": "amount",
+                "turn": "turnover",
             },
         )
         self.last_successful_source = "baostock"
         normalized = apply_date_filters(normalized, start_date, end_date, num_records)
-        return normalized[["Open", "High", "Low", "Close", "Volume"]] if not normalized.empty else normalized
+        return normalized
 
 
 class CNBaoStockIndustryFetcher:
@@ -241,20 +243,44 @@ class CNBaoStockFinancialFetcher:
     def _first_row(frame):
         return {} if frame is None or frame.empty else frame.iloc[0].to_dict()
 
-    def fetch_latest(self, year=None, quarter=None):
-        target_year, target_quarter = self._latest_quarter()
-        year = int(year or target_year)
-        quarter = int(quarter or target_quarter)
-        with BaoStockSession(verbose=self.verbose):
-            profit = self._first_row(baostock_result_to_frame(bs.query_profit_data(self.baostock_code, year, quarter)))
-            operation = self._first_row(baostock_result_to_frame(bs.query_operation_data(self.baostock_code, year, quarter)))
-            growth = self._first_row(baostock_result_to_frame(bs.query_growth_data(self.baostock_code, year, quarter)))
-            balance = self._first_row(baostock_result_to_frame(bs.query_balance_data(self.baostock_code, year, quarter)))
-            cashflow = self._first_row(baostock_result_to_frame(bs.query_cash_flow_data(self.baostock_code, year, quarter)))
+    @staticmethod
+    def _quarter_candidates(year, quarter, lookback=8):
+        current_year = int(year)
+        current_quarter = int(quarter)
+        for _ in range(max(1, int(lookback))):
+            yield current_year, current_quarter
+            current_quarter -= 1
+            if current_quarter < 1:
+                current_quarter = 4
+                current_year -= 1
+
+    def _fetch_quarter_in_session(self, year, quarter):
+        profit = self._first_row(baostock_result_to_frame(bs.query_profit_data(self.baostock_code, year, quarter)))
+        operation = self._first_row(baostock_result_to_frame(bs.query_operation_data(self.baostock_code, year, quarter)))
+        growth = self._first_row(baostock_result_to_frame(bs.query_growth_data(self.baostock_code, year, quarter)))
+        balance = self._first_row(baostock_result_to_frame(bs.query_balance_data(self.baostock_code, year, quarter)))
+        cashflow = self._first_row(baostock_result_to_frame(bs.query_cash_flow_data(self.baostock_code, year, quarter)))
 
         merged = {}
         for item in (profit, operation, growth, balance, cashflow):
             merged.update({key: value for key, value in item.items() if value not in (None, "")})
+        return merged
+
+    def fetch_latest(self, year=None, quarter=None):
+        target_year, target_quarter = self._latest_quarter()
+        resolved_year = int(year or target_year)
+        resolved_quarter = int(quarter or target_quarter)
+        candidates = (
+            [(resolved_year, resolved_quarter)]
+            if year is not None or quarter is not None
+            else list(self._quarter_candidates(resolved_year, resolved_quarter))
+        )
+        merged = {}
+        with BaoStockSession(verbose=self.verbose):
+            for candidate_year, candidate_quarter in candidates:
+                merged = self._fetch_quarter_in_session(candidate_year, candidate_quarter)
+                if merged:
+                    break
         if not merged:
             return None
         report_date = merged.get("statDate")

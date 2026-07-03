@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.model import normalize_ohlcv_frame, normalize_stock_info
+from data.model import normalize_ohlcv_frame, normalize_stock_info, normalize_valuation_snapshot
 from data.store import DataLayout, MarketDataWarehouse
 
 
@@ -125,6 +125,170 @@ def test_baostock_code_conversion_and_result_frame(monkeypatch):
     assert frame.to_dict(orient="records") == [{"code": "sh.600000", "code_name": "浦发银行"}]
 
 
+def test_cn_ohlcv_normalization_preserves_amount_turnover_and_vwap():
+    raw = pd.DataFrame(
+        {
+            "trade_date": ["2024-01-02"],
+            "open": [10.0],
+            "high": [11.0],
+            "low": [9.8],
+            "close": [10.8],
+            "volume": [1000],
+            "amount": [10800],
+            "turnover": [1.23],
+        }
+    )
+
+    normalized = normalize_ohlcv_frame(raw, stock_code="600000.SH", market="CN", source="unit_test")
+
+    assert normalized.iloc[0]["amount"] == 10800
+    assert normalized.iloc[0]["turnover"] == 1.23
+    assert normalized.iloc[0]["vwap"] == 10.8
+
+
+def test_cn_eastmoney_valuation_history_fetcher_normalizes_daily_fields(monkeypatch):
+    from data.ingest.providers import cn_valuation_history
+
+    class FakeAk:
+        def stock_zh_a_hist(self, symbol, period, start_date, end_date, adjust, timeout=None):
+            assert symbol == "600000"
+            assert period == "daily"
+            assert start_date == "20240101"
+            assert end_date == "20240131"
+            return pd.DataFrame(
+                {
+                    "日期": ["2024-01-02", "2024-01-03"],
+                    "股票代码": ["600000", "600000"],
+                    "开盘": [10.0, 10.2],
+                    "收盘": [10.2, 10.4],
+                    "最高": [10.5, 10.6],
+                    "最低": [9.9, 10.1],
+                    "成交量": [1000, 1200],
+                    "成交额": [10200, 12480],
+                    "换手率": [0.31, 0.35],
+                    "市盈率-动态": [6.1, 6.2],
+                    "市净率": [0.7, 0.71],
+                }
+            )
+
+    monkeypatch.setattr(cn_valuation_history, "ak", FakeAk())
+
+    frame = cn_valuation_history.CNEastmoneyValuationHistoryFetcher("600000.SH").fetch(
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+    )
+
+    assert list(frame["trade_date"].dt.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-03"]
+    assert set(frame["stock_code"]) == {"600000.SH"}
+    assert frame.iloc[0]["daily_turnover"] == 10200
+    assert frame.iloc[0]["turnover_rate"] == 0.31
+    assert frame.iloc[0]["pe_ratio"] == 6.1
+    assert frame.iloc[0]["pb_ratio"] == 0.7
+
+
+def test_refresh_cn_valuation_history_writes_daily_panel(monkeypatch):
+    from data.ingest import service as service_module
+    from data.ingest.service import MarketDataService
+
+    for key in ("CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_HTTP_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+    class FakeValuationHistoryFetcher:
+        def __init__(self, stock_code, adjust="qfq", verbose=True):
+            self.stock_code = stock_code
+
+        def fetch(self, start_date=None, end_date=None):
+            return pd.DataFrame(
+                [
+                    normalize_valuation_snapshot(
+                        {
+                            "trade_date": "2024-01-02",
+                            "amount": 10200,
+                            "daily_turnover": 10200,
+                            "turnover_rate": 0.31,
+                            "pe_ratio": 6.1,
+                            "pb_ratio": 0.7,
+                        },
+                        stock_code=self.stock_code,
+                        market="CN",
+                        source="unit_test_valuation_history",
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(service_module, "CNEastmoneyValuationHistoryFetcher", FakeValuationHistoryFetcher)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        try:
+            summary = service.refresh_cn_valuation_history(
+                stock_codes=["600000.SH"],
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                max_workers=1,
+                show_progress=False,
+            )
+            loaded = service.warehouse.read_valuation_snapshots(stock_codes=["600000.SH"], market="CN")
+
+            assert summary["success_count"] == 1
+            assert summary["rows_written"] == 1
+            assert loaded.iloc[0]["pe_ratio"] == 6.1
+            assert loaded.iloc[0]["turnover_rate"] == 0.31
+        finally:
+            service.close()
+
+
+def test_baostock_financial_fetcher_falls_back_to_latest_available_quarter(monkeypatch):
+    from data.ingest.providers import cn_baostock
+
+    class LaggingFinancialBaoStock(FakeBaoStockModule):
+        def _financial_result(self, code, year, quarter, fields, values):
+            if int(year) == 2026 and int(quarter) == 2:
+                return FakeBaoStockResult(fields, [])
+            return FakeBaoStockResult(fields, values)
+
+        def query_profit_data(self, code, year, quarter):
+            fields = ["code", "pubDate", "statDate", "roeAvg", "npMargin", "gpMargin", "netProfit", "epsTTM", "MBRevenue"]
+            return self._financial_result(
+                code,
+                year,
+                quarter,
+                fields,
+                [[code, "2026-04-30", "2026-03-31", "8.5", "18.0", "35.0", "1200000000", "0.55", "6500000000"]],
+            )
+
+        def query_operation_data(self, code, year, quarter):
+            fields = ["code", "pubDate", "statDate"]
+            return self._financial_result(code, year, quarter, fields, [[code, "2026-04-30", "2026-03-31"]])
+
+        def query_growth_data(self, code, year, quarter):
+            fields = ["code", "pubDate", "statDate", "YOYNI", "YOYEPSBasic"]
+            return self._financial_result(code, year, quarter, fields, [[code, "2026-04-30", "2026-03-31", "12.0", "10.0"]])
+
+        def query_balance_data(self, code, year, quarter):
+            fields = ["code", "pubDate", "statDate", "totalAssets", "totalLiability"]
+            return self._financial_result(
+                code,
+                year,
+                quarter,
+                fields,
+                [[code, "2026-04-30", "2026-03-31", "100000000000", "85000000000"]],
+            )
+
+        def query_cash_flow_data(self, code, year, quarter):
+            fields = ["code", "pubDate", "statDate", "CAToAsset"]
+            return self._financial_result(code, year, quarter, fields, [[code, "2026-04-30", "2026-03-31", "11.0"]])
+
+    monkeypatch.setattr(cn_baostock, "bs", LaggingFinancialBaoStock())
+    monkeypatch.setattr(cn_baostock.CNBaoStockFinancialFetcher, "_latest_quarter", staticmethod(lambda: (2026, 2)))
+
+    metrics = cn_baostock.CNBaoStockFinancialFetcher("600000.SH", verbose=False).fetch_latest()
+
+    assert metrics["report_date"] == "2026-03-31"
+    assert metrics["announce_date"] == "2026-04-30"
+    assert metrics["net_profit"] == "1200000000"
+
+
 def test_baostock_history_and_universe_fetchers(monkeypatch):
     from data.ingest.providers import cn_baostock
     from data.ingest.providers.cn_universe import CNMarketListFetcher
@@ -136,7 +300,9 @@ def test_baostock_history_and_universe_fetchers(monkeypatch):
         end_date="2024-01-10",
         adjust="qfq",
     )
-    assert list(history.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    assert list(history.columns[:5]) == ["Open", "High", "Low", "Close", "Volume"]
+    assert "amount" in history.columns
+    assert "turnover" in history.columns
     assert len(history) == 2
     assert history.index[0] == pd.Timestamp("2024-01-02")
 
@@ -445,6 +611,60 @@ def test_bulk_sync_cn_history_skips_stock_info_by_default(monkeypatch):
             service.close()
 
 
+def test_bulk_sync_cn_history_filters_unsupported_920_codes(monkeypatch):
+    from data.ingest.service import MarketDataService
+
+    for key in ("CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_HTTP_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+    class HistoryOnlyLoader:
+        def __init__(self):
+            self.requested_codes = []
+
+        def fetch_history(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily"):
+            self.requested_codes.append(stock_code)
+            return normalize_ohlcv_frame(
+                pd.DataFrame(
+                    {
+                        "trade_date": pd.to_datetime(["2024-01-02"]),
+                        "open": [10.0],
+                        "high": [10.8],
+                        "low": [9.8],
+                        "close": [10.5],
+                        "volume": [1200000],
+                    }
+                ),
+                stock_code=stock_code,
+                market="CN",
+                frequency=period,
+                adjust=adjust,
+                source="unit_test",
+                currency="CNY",
+            )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        loader = HistoryOnlyLoader()
+        service.cn_loader = loader
+        try:
+            summary = service.bulk_sync_cn_history(
+                stock_codes=["600000.SH", "920000.SH", "920992.SH"],
+                start_date="2024-01-01",
+                end_date="2024-01-05",
+                max_workers=1,
+                show_progress=False,
+            )
+
+            assert loader.requested_codes == ["600000.SH"]
+            assert summary["total_stocks"] == 1
+            assert summary["original_total_stocks"] == 3
+            assert summary["unsupported_count"] == 2
+            assert summary["unsupported_codes"] == ["920000.SH", "920992.SH"]
+            assert summary["success_count"] == 1
+        finally:
+            service.close()
+
+
 def test_bulk_sync_cn_history_flushes_batches_before_completion(monkeypatch):
     from data.ingest.service import MarketDataService
 
@@ -735,11 +955,16 @@ def test_bulk_sync_cn_history_complete_data_runs_metadata_stages(monkeypatch):
             calls.append(("financial", kwargs))
             return {"valuation_snapshot": {"rows": len(kwargs["stock_codes"])}, "failed_count": 0}
 
+        def fake_valuation_history(**kwargs):
+            calls.append(("valuation_history", kwargs))
+            return {"success_count": len(kwargs["stock_codes"]), "failed_count": 0, "rows_written": 1}
+
         def fake_industry(**kwargs):
             calls.append(("industry", kwargs))
             return {"updated_count": len(kwargs["stock_codes"])}
 
         service.refresh_cn_stock_info = fake_stock_info
+        service.refresh_cn_valuation_history = fake_valuation_history
         service.refresh_cn_financial_metrics = fake_financial
         service.backfill_cn_industry = fake_industry
         try:
@@ -752,9 +977,75 @@ def test_bulk_sync_cn_history_complete_data_runs_metadata_stages(monkeypatch):
                 show_progress=False,
             )
             assert summary["success_count"] == 1
-            assert [name for name, _ in calls] == ["stock_info", "financial", "industry"]
+            assert [name for name, _ in calls] == ["stock_info", "valuation_history", "financial", "industry"]
             assert calls[0][1]["stock_codes"] == ["600000.SH"]
+            assert calls[1][1]["start_date"] == "2024-01-01"
+            assert calls[1][1]["end_date"] == "2024-01-05"
             assert summary["completion"]["failed_stages"] == []
+        finally:
+            service.close()
+
+
+def test_refresh_cn_financial_metrics_writes_valuation_before_financial_fetch(monkeypatch):
+    from data.ingest import service as service_module
+    from data.ingest.service import MarketDataService
+
+    for key in ("CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_HTTP_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+    holder = {}
+
+    class FakeFinancialFetcher:
+        def __init__(self, stock_code, verbose=True):
+            self.stock_code = stock_code
+            self.verbose = verbose
+
+        def fetch_latest(self, year=None, quarter=None):
+            service = holder["service"]
+            valuation = service.warehouse.read_valuation_snapshots(stock_codes=[self.stock_code], market="CN")
+            assert len(valuation) == 1
+            return {
+                "report_date": "2024-03-31",
+                "announce_date": "2024-04-30",
+                "period_type": "quarterly",
+                "revenue": 6500000000,
+                "net_profit": 1200000000,
+                "roe": 8.5,
+                "net_profit_yoy": 12.0,
+            }
+
+    monkeypatch.setattr(service_module, "CNBaoStockFinancialFetcher", FakeFinancialFetcher)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        holder["service"] = service
+        try:
+            service.warehouse.upsert_stock_info(
+                normalize_stock_info(
+                    {
+                        "name": "浦发银行",
+                        "current_price": 11.0,
+                        "amount": 14000000,
+                        "turnover_rate": 0.8,
+                        "market_cap": 320000000000,
+                        "pe_ratio": 6.5,
+                        "pb_ratio": 0.7,
+                    },
+                    stock_code="600000.SH",
+                    market="CN",
+                    source="unit_test",
+                )
+            )
+
+            summary = service.refresh_cn_financial_metrics(
+                stock_codes=["600000.SH"],
+                max_workers=1,
+                show_progress=False,
+            )
+
+            assert summary["failed_count"] == 0
+            assert summary["valuation_snapshot"]["rows"] == 1
+            assert summary["financial_statement_metrics"]["rows"] == 1
         finally:
             service.close()
 

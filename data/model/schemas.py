@@ -23,6 +23,9 @@ CLEAN_OHLCV_COLUMNS = [
     "low",
     "close",
     "volume",
+    "amount",
+    "turnover",
+    "vwap",
     "source",
     "adjust",
     "currency",
@@ -419,11 +422,20 @@ def normalize_ohlcv_frame(
         "Low": "low",
         "Close": "close",
         "Volume": "volume",
+        "Amount": "amount",
+        "Turnover": "turnover",
+        "VWAP": "vwap",
         "open": "open",
         "high": "high",
         "low": "low",
         "close": "close",
         "volume": "volume",
+        "amount": "amount",
+        "turnover": "turnover",
+        "turn": "turnover",
+        "vwap": "vwap",
+        "成交额": "amount",
+        "换手率": "turnover",
     }
     working.rename(columns=rename_mapping, inplace=True)
 
@@ -445,9 +457,20 @@ def normalize_ohlcv_frame(
 
     for column in ["open", "high", "low", "close", "volume"]:
         working[column] = pd.to_numeric(working[column], errors="coerce")
+    for column in ["amount", "turnover", "vwap"]:
+        if column in working.columns:
+            working[column] = pd.to_numeric(working[column], errors="coerce")
+        else:
+            working[column] = 0.0
 
     working.dropna(subset=["open", "high", "low", "close"], inplace=True)
     working["volume"] = working["volume"].fillna(0)
+    working["amount"] = working["amount"].fillna(0)
+    working["turnover"] = working["turnover"].fillna(0)
+    missing_vwap = working["vwap"].isna() | (working["vwap"] == 0)
+    can_compute_vwap = missing_vwap & (working["amount"] > 0) & (working["volume"] > 0)
+    working.loc[can_compute_vwap, "vwap"] = working.loc[can_compute_vwap, "amount"] / working.loc[can_compute_vwap, "volume"]
+    working["vwap"] = working["vwap"].fillna(0)
     working["stock_code"] = normalized_code
     working["market"] = normalized_market
     working["exchange"] = normalized_exchange

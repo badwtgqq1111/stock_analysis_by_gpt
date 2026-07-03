@@ -294,6 +294,7 @@ uv run python run.py select \
 ```bash
 uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 12 --show-progress
 uv run python run.py refresh-cn-stock-info --max-workers 8 --show-progress
+uv run python run.py refresh-cn-valuation-history --start-date 2014-01-01 --max-workers 12 --show-progress
 uv run python run.py refresh-cn-financial-metrics --max-workers 4 --show-progress
 uv run python run.py backfill-cn-industry --show-progress
 uv run python run.py generate-factors --market CN --days 365 --factor-set alpha_zoo_hk --max-workers 8 --show-progress
@@ -314,13 +315,16 @@ uv run python run.py select \
 uv run python run.py cn-coverage-check --min-ohlcv-rows 120 --json
 ```
 
-`sync-cn --complete-data` 会在行情同步后继续补齐 `stock_info_registry`、`valuation_snapshot`、`financial_statement_metrics` 和行业字段；补全阶段失败会进入 summary，不回滚已经写入的 OHLCV。只想快速补行情时可以去掉 `--complete-data`；只有临时调试需要旧逐股行为时，才额外加 `--include-stock-info`。
+`sync-cn --complete-data` 会在行情同步后继续补齐 `stock_info_registry`、历史日频 `valuation_snapshot`、`financial_statement_metrics` 和行业字段；补全阶段失败会进入 summary，不回滚已经写入的 OHLCV。只想快速补行情时可以去掉 `--complete-data`；只有临时调试需要旧逐股行为时，才额外加 `--include-stock-info`。如果东方财富历史估值接口临时不可达，可以稍后单独重跑 `refresh-cn-valuation-history`，不需要重跑 OHLCV。
+
+当前 `920xxx` 北交所代码暂无稳定免费历史 OHLCV 源：腾讯、AkShare 新浪、东方财富和 BaoStock 均不能稳定返回 2014 至今的标准日线数据，BaoStock 对 `bj.*` 历史查询也会报不支持。因此 `sync-cn` 会先过滤这批代码，并在 summary 输出 `unsupported_count` / `unsupported_codes`；A 股因子、选股和回测暂以沪深主板、创业板、科创板及可获取日线的标的为覆盖口径。后续接入北交所专用历史行情源后，再恢复 `920xxx`。
 
 小样本先跑指定股票，确认腾讯优先链路、AkShare 新浪/BaoStock/东方财富兜底、仓库写入、因子落库和选股都通：
 
 ```bash
 uv run python run.py sync-cn --stock-codes 600000.SH 000001.SZ --start-date 2020-01-01 --frequencies daily --complete-data --max-workers 2 --show-progress
 uv run python run.py refresh-cn-stock-info --stock-codes 600000.SH 000001.SZ --max-workers 2 --show-progress
+uv run python run.py refresh-cn-valuation-history --stock-codes 600000.SH 000001.SZ --start-date 2020-01-01 --max-workers 2 --show-progress
 uv run python run.py refresh-cn-financial-metrics --stock-codes 600000.SH 000001.SZ --max-workers 2 --show-progress
 uv run python run.py backfill-cn-industry --stock-codes 600000.SH 000001.SZ --show-progress
 uv run python run.py generate-factors --market CN --stock-codes 600000.SH 000001.SZ --days 365 --factor-set alpha_zoo_hk --max-workers 2 --show-progress
@@ -335,15 +339,15 @@ uv run python run.py cn-coverage-check --stock-codes 600000.SH 000001.SZ --min-o
 
 `select --analysis-mode lightgbm` 会在单次命令内训练和预测，不依赖 `validate-factors`。生产默认 `--factor-set alpha_zoo_hk`、`--model-objective regression_csrank`、`industry_size` 中性化；`lambdarank` 和 `rank_xendcg` 只作为对照实验。只有旧的 `select --analysis-mode factor` 才需要先跑 `validate-factors`。
 
-`refresh-stock-info` 会把 PB、PE、市值、成交额、成交量、总股本、流通股本、股息率和换手率等快照写入 `stock_info_registry`。换手率字段有原始数据时直接入库；缺失时按 `成交量 / 流通股本 * 100` 换算后入库。生产选股默认优先使用仓库里的财务/流动性快照做流动性过滤和 LightGBM 估值评分，不再临时抓 live 数据；仅当显式设置 `ALLOW_LIVE_MARKET_FILTER_FETCH=1` 时，市场过滤才会对缺失股票启用实时兜底。
+`refresh-stock-info` 会把 PB、PE、市值、成交额、成交量、总股本、流通股本、股息率和换手率等当前快照写入 `stock_info_registry`。换手率字段有原始数据时直接入库；缺失时按 `成交量 / 流通股本 * 100` 换算后入库。`refresh-cn-valuation-history` 会把东方财富历史日线中能稳定取得的成交额、换手率，以及源数据存在时的 PE/PB，按 `trade_date + stock_code` 写入 `valuation_snapshot`；字段缺失时留空，不用今天的估值回填过去。生产选股默认优先使用仓库里的财务/流动性快照做流动性过滤和 LightGBM 估值评分，不再临时抓 live 数据；仅当显式设置 `ALLOW_LIVE_MARKET_FILTER_FETCH=1` 时，市场过滤才会对缺失股票启用实时兜底。
 
-`refresh-financial-metrics` 会把本地 `stock_info_registry` 的估值/流动性字段转存到 `valuation_snapshot`，并写入 `financial_statement_metrics` 的 PIT 财务面板；`financial-coverage` 用于检查字段覆盖率。因子目录已支持 `factor-list`、`factor-show`、`factor-manifest`，生产默认 `alpha_zoo_hk` 包含 `alpha101`、`academic_hk`、`valuation_hk`、`financial_quality_hk` 和 `financial_cross_section_hk`。其中 `financial_cross_section_hk` 会生成 `pe_ind_pct`、`pb_ind_pct`、`roe_ind_pct`、`quality_value_score` 等行业相对财务因子。这些实现只参考 Alpha Zoo 的组织形态，代码、公式代理、manifest 和落库流程都在本项目内原生实现，不读取、不导入、也不要求存在 `Vibe-Trading/` 目录。
+`refresh-financial-metrics` 会把本地 `stock_info_registry` 的当前估值/流动性字段转存成当日 `valuation_snapshot`，并写入 `financial_statement_metrics` 的 PIT 财务面板；`financial-coverage` 用于检查字段覆盖率。因子目录已支持 `factor-list`、`factor-show`、`factor-manifest`，生产默认 `alpha_zoo_hk` 包含 `alpha101`、`academic_hk`、`valuation_hk`、`financial_quality_hk` 和 `financial_cross_section_hk`。其中 `financial_cross_section_hk` 会生成 `pe_ind_pct`、`pb_ind_pct`、`roe_ind_pct`、`quality_value_score` 等行业相对财务因子。这些实现只参考 Alpha Zoo 的组织形态，代码、公式代理、manifest 和落库流程都在本项目内原生实现，不读取、不导入、也不要求存在 `Vibe-Trading/` 目录。
 
 `select --export-csv output/results` 会同时导出排名、持仓、候选池、观察名单、行业归因、流动性容量、模拟 TCA、模型 manifest、特征重要性和 SHAP 解释文件。后续诊断、成本模型和组合策略评估都应消费这些产物，不要反向依赖选股前的原始特征文件。
 
 ### A 股回测入口说明
 
-A 股日线基础行情默认优先使用腾讯，再回退 AkShare 新浪、BaoStock，最后才短超时回退东方财富；分钟线继续走 AkShare/Eastmoney。A 股流程先把 `CN` 分区的数据补齐，再用 `cn-coverage-check` 判断是否达到回测条件。只有明确要压测或排查 BaoStock 时，才给 `sync-cn` 显式加 `--data-source baostock`；只有明确要排查东方财富时，才显式加 `--data-source eastmoney`。
+A 股日线基础行情默认优先使用腾讯，再回退 AkShare 新浪、BaoStock，最后才短超时回退东方财富；分钟线继续走 AkShare/Eastmoney。OHLCV clean 层会保留可得的 `amount`、`turnover` 和 `vwap`，历史估值/流动性单独落在 `valuation_snapshot`。A 股流程先把 `CN` 分区的数据补齐，再用 `cn-coverage-check` 判断是否达到回测条件。`920xxx` 北交所代码当前会被 `sync-cn` 过滤，不计入历史 OHLCV 回测覆盖。只有明确要压测或排查 BaoStock 时，才给 `sync-cn` 显式加 `--data-source baostock`；只有明确要排查东方财富时，才显式加 `--data-source eastmoney`。
 
 `sync-cn` 会给 AkShare 内部未显式设置 timeout 的 HTTP 请求补默认超时，避免坏 IP 把尾部股票长时间挂在 `SYN-SENT`。默认 `CN_SYNC_SOCKET_TIMEOUT=5` 秒；网络较差时可以调大，想更快跳过坏连接时可以调小，例如：
 
@@ -355,6 +359,12 @@ A 股 OHLCV 同步会按完成结果分批落库，默认每 `64` 只股票或 `
 
 ```bash
 CN_SYNC_SOCKET_TIMEOUT=3 CN_SYNC_FLUSH_STOCKS=32 uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 24 --show-progress
+```
+
+A 股历史估值/流动性补全默认每 `250000` 行 flush 一次，可通过 `CN_VALUATION_HISTORY_FLUSH_ROWS` 调整：
+
+```bash
+CN_VALUATION_HISTORY_FLUSH_ROWS=100000 uv run python run.py refresh-cn-valuation-history --start-date 2014-01-01 --max-workers 24 --show-progress
 ```
 
 `sync-cn --show-progress` 的进度条会显示最近完成的股票和来源简写，例如 `last=600000.SH:tx`，并累计来源分布 `src=tx:92,sn:31,bs:5,em:0`。简写含义：`tx` 腾讯，`sn` 新浪，`bs` BaoStock，`em` 东方财富。
@@ -534,6 +544,33 @@ uv run python run.py theme-feature-diagnostics \
 | ClickHouse 数据卷 | `assets/clickhouse` |
 
 ClickHouse 是可选加速后端，部署方式和写入分块配置见上面的环境部署章节。未设置 `CLICKHOUSE_HOST` 时项目只使用本地 Parquet。
+
+### 百度网盘数据备份/恢复
+
+换机器或重建环境时，不需要重新同步一遍历史数据。先把百度网盘应用凭证放到环境变量里，不要写入仓库：
+
+```bash
+export BAIDU_PAN_APP_ID="..."
+export BAIDU_PAN_APP_KEY="..."
+export BAIDU_PAN_SECRET_KEY="..."
+export BAIDU_PAN_SIGN_KEY="..."
+```
+
+上传当前数据快照：
+
+```bash
+uv run python run.py data-backup-upload --name stock-data-$(date +%Y%m%d) --show-progress
+```
+
+在新环境下载并恢复最新快照：
+
+```bash
+uv run python run.py data-backup-download --latest --show-progress
+```
+
+上传默认会打包 `assets/data`，并在 `assets/clickhouse` 存在时一起打包 ClickHouse 数据卷，避免只存在 ClickHouse 后端的数据丢失。备份包超过 2GB 时会自动生成 `*.tar.gz.part001`、`*.tar.gz.part002` 等分卷，并上传 `*.manifest.json`；下载时会按 manifest 拉取全部分卷、校验 sha256、合并成原始 `.tar.gz` 后再解压。需要调整分卷大小时可在上传命令加 `--split-size-gb 3`。
+
+第一次运行需要完成一次百度 OAuth 设备授权；授权后的 token 会缓存在 `~/.config/stock_analysis_by_gpt/baidu_pan_token.json`，后续上传/下载会自动刷新。
 
 ## 行业分层选股
 
@@ -785,6 +822,7 @@ uv run python run.py select \
 | `sync-cn` | 无 | 拉取 A 股 OHLCV，产生 CN 代码池 |
 | `refresh-stock-info` | `sync` | 刷新 PB/PE、市值、成交额/成交量、换手率、股本等财务/流动性快照到 `stock_info_registry` |
 | `refresh-cn-stock-info` | `sync-cn` | 刷新 A 股 PB/PE、市值、成交额/成交量、换手率、股本等快照到 `stock_info_registry` |
+| `refresh-cn-valuation-history` | `sync-cn` | 刷新 A 股历史日频成交额、换手率及可得 PE/PB 到 `valuation_snapshot` |
 | `backfill-industry` | `sync` | 补行业、标的类型、fund-like、可交易性 |
 | `backfill-cn-industry` | `sync-cn` | 使用 BaoStock 补 A 股行业分类 |
 | `refresh-cn-financial-metrics` | `refresh-cn-stock-info` | 刷新 A 股 `valuation_snapshot` 和 `financial_statement_metrics` |
@@ -834,6 +872,7 @@ uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progre
 # A 股日常选股
 uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 12 --show-progress
 uv run python run.py refresh-cn-stock-info --max-workers 8 --show-progress
+uv run python run.py refresh-cn-valuation-history --start-date 2014-01-01 --max-workers 12 --show-progress
 uv run python run.py refresh-cn-financial-metrics --max-workers 4 --show-progress
 uv run python run.py backfill-cn-industry --show-progress
 uv run python run.py generate-factors --market CN --days 365 --factor-set alpha_zoo_hk --max-workers 8 --show-progress

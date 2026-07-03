@@ -188,6 +188,25 @@ def _run_refresh_cn_financial_metrics(args):
         service.close()
 
 
+def _run_refresh_cn_valuation_history(args):
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        summary = service.refresh_cn_valuation_history(
+            stock_codes=args.stock_codes,
+            limit=args.limit,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            adjust=args.adjust,
+            max_workers=args.max_workers,
+            show_progress=args.show_progress,
+        )
+        print(f"A 股历史估值/流动性补全完成: {summary}")
+    finally:
+        service.close()
+
+
 def _run_cn_coverage_check(args):
     import json as _json
 
@@ -2191,6 +2210,41 @@ def _run_tag_coverage(args):
         service.close()
 
 
+def _run_data_backup_upload(args):
+    from data.backup.baidu_pan import upload_project_backup
+
+    archive, remote_path = upload_project_backup(
+        base_dir=args.base_dir,
+        output_dir=args.output_dir,
+        remote_dir=args.remote_dir,
+        name=args.name,
+        include_clickhouse=not args.no_clickhouse_volume,
+        split_size_bytes=int(args.split_size_gb * 1024 * 1024 * 1024),
+        show_progress=args.show_progress,
+    )
+    print("[OK] 数据备份已上传到百度网盘")
+    print(f"     本地包: {archive.path}")
+    print(f"     远端路径: {remote_path}")
+    print(f"     大小: {archive.size} bytes")
+    print(f"     sha256: {archive.sha256}")
+
+
+def _run_data_backup_download(args):
+    from data.backup.baidu_pan import download_project_backup
+
+    archive_path = download_project_backup(
+        remote_dir=args.remote_dir,
+        output_dir=args.output_dir,
+        restore_dir=args.restore_dir,
+        name=args.name,
+        latest=args.latest or not args.name,
+        show_progress=args.show_progress,
+    )
+    print("[OK] 数据备份已下载并解压")
+    print(f"     本地包: {archive_path}")
+    print(f"     解压目录: {args.restore_dir}")
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "sync":
         import argparse
@@ -2239,6 +2293,37 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_sync_cn(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "data-backup-upload":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py data-backup-upload", description="打包本地量化数据并上传到百度网盘"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--output-dir", default="output/backups", help="本地备份包输出目录")
+        parser.add_argument("--remote-dir", default="/apps/stock_analysis_by_gpt/backups", help="百度网盘远端目录")
+        parser.add_argument("--name", default=None, help="备份名称；默认自动生成时间戳")
+        parser.add_argument("--no-clickhouse-volume", action="store_true", help="只备份 assets/data，不打包 assets/clickhouse")
+        parser.add_argument("--split-size-gb", type=float, default=2.0, help="单个备份分卷大小，默认 2GB")
+        parser.add_argument("--show-progress", action="store_true", help="显示上传进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_data_backup_upload(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "data-backup-download":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py data-backup-download", description="从百度网盘下载并恢复本地量化数据"
+        )
+        parser.add_argument("--remote-dir", default="/apps/stock_analysis_by_gpt/backups", help="百度网盘远端目录")
+        parser.add_argument("--output-dir", default="output/backups", help="本地备份包下载目录")
+        parser.add_argument("--restore-dir", default=".", help="解压恢复目录，默认当前项目根")
+        parser.add_argument("--name", default=None, help="指定备份名称；不传则下载最新备份")
+        parser.add_argument("--latest", action="store_true", help="下载远端最新备份")
+        parser.add_argument("--show-progress", action="store_true", help="显示下载进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_data_backup_download(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "industry-coverage":
         import argparse
 
@@ -2398,6 +2483,25 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_refresh_cn_financial_metrics(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "refresh-cn-valuation-history":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py refresh-cn-valuation-history",
+            description="刷新 A 股历史日频估值/流动性到 valuation_snapshot",
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="eastmoney", help="数据源")
+        parser.add_argument("--start-date", default="2014-01-01", help="起始日期 YYYY-MM-DD")
+        parser.add_argument("--end-date", default=None, help="结束日期 YYYY-MM-DD")
+        parser.add_argument("--adjust", default="qfq", help="复权方式 (qfq / hfq / raw)")
+        parser.add_argument("--max-workers", type=int, default=12, help="并发线程数")
+        parser.add_argument("--limit", type=int, default=None, help="限制刷新股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_refresh_cn_valuation_history(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "financial-coverage":
         import argparse
 

@@ -24,6 +24,7 @@ from data.ingest.hk_stock_loader import HKStockDataLoader
 from data.ingest.providers import (
     CNBaoStockFinancialFetcher,
     CNBaoStockIndustryFetcher,
+    CNEastmoneyValuationHistoryFetcher,
     CNMarketListFetcher,
     CNStockInfoFetcher,
     HKCorporateActionsFetcher,
@@ -186,6 +187,13 @@ def _temporary_requests_default_timeout(timeout):
             yield
         finally:
             requests.sessions.Session.request = original_request
+
+
+def _is_unsupported_cn_ohlcv_code(stock_code):
+    """Return True for CN codes that currently have no reliable daily OHLCV source."""
+    normalized = normalize_stock_code(stock_code, market="CN")
+    digits = "".join(ch for ch in normalized if ch.isdigit())
+    return len(digits) == 6 and digits.startswith("920")
 
 
 CN_SOURCE_PROGRESS_ORDER = ("tencent", "akshare_sina", "baostock", "akshare_eastmoney")
@@ -647,10 +655,28 @@ class MarketDataService:
         if limit and stock_codes:
             stocks = stocks[:limit]
 
+        original_total_stocks = len(stocks)
+        unsupported_stocks = [
+            {"code": normalize_stock_code(stock["code"], market="CN"), "name": stock.get("name") or stock["code"]}
+            for stock in stocks
+            if _is_unsupported_cn_ohlcv_code(stock["code"])
+        ]
+        if unsupported_stocks:
+            unsupported_codes = {stock["code"] for stock in unsupported_stocks}
+            stocks = [
+                stock for stock in stocks
+                if normalize_stock_code(stock["code"], market="CN") not in unsupported_codes
+            ]
+        unsupported_codes = [stock["code"] for stock in unsupported_stocks]
+
         if not stocks:
             return {
                 "status": "completed",
                 "market": "CN",
+                "original_total_stocks": original_total_stocks,
+                "total_stocks": 0,
+                "unsupported_count": len(unsupported_codes),
+                "unsupported_codes": unsupported_codes,
                 "success_count": 0,
                 "skipped_count": 0,
                 "failed_count": 0,
@@ -854,7 +880,10 @@ class MarketDataService:
             "start_date": start_date,
             "end_date": target_end_date,
             "adjust": normalized_adjust,
+            "original_total_stocks": original_total_stocks,
             "total_stocks": len(stocks),
+            "unsupported_count": len(unsupported_codes),
+            "unsupported_codes": unsupported_codes,
             "success_count": success_count,
             "skipped_count": skipped_count,
             "failed_count": len(failed),
@@ -869,7 +898,13 @@ class MarketDataService:
         if compact_result:
             summary["compacted_dataset_path"] = compact_result["dataset_path"]
         if complete_data:
-            completion = {"stock_info": None, "financial_metrics": None, "industry": None, "failed_stages": []}
+            completion = {
+                "stock_info": None,
+                "valuation_history": None,
+                "financial_metrics": None,
+                "industry": None,
+                "failed_stages": [],
+            }
             metadata_workers = max(1, min(int(metadata_max_workers or max_workers or 1), 16))
             financial_workers = max(1, min(int(financial_max_workers or max_workers or 1), 8))
             try:
@@ -881,6 +916,17 @@ class MarketDataService:
                 )
             except Exception as exc:
                 completion["failed_stages"].append({"stage": "stock_info", "error": str(exc)})
+            try:
+                completion["valuation_history"] = self.refresh_cn_valuation_history(
+                    stock_codes=all_codes,
+                    start_date=start_date,
+                    end_date=target_end_date,
+                    adjust=normalized_adjust,
+                    max_workers=metadata_workers,
+                    show_progress=show_progress,
+                )
+            except Exception as exc:
+                completion["failed_stages"].append({"stage": "valuation_history", "error": str(exc)})
             try:
                 completion["financial_metrics"] = self.refresh_cn_financial_metrics(
                     stock_codes=all_codes,
@@ -1004,6 +1050,95 @@ class MarketDataService:
             print(f"[SUMMARY] A 股行业补全完成 updated={len(payloads)}")
         return {"market": "CN", "updated_count": len(payloads), "rows": len(industry_frame)}
 
+    def refresh_cn_valuation_history(
+        self,
+        stock_codes=None,
+        limit=None,
+        start_date=None,
+        end_date=None,
+        adjust="qfq",
+        max_workers=8,
+        show_progress=False,
+    ):
+        """刷新 A 股历史日频估值/流动性面板。"""
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self.get_all_stock_codes(market="CN", frequency="daily", adjust=normalize_adjust(adjust))[:limit or None]
+        if limit and stock_codes:
+            codes = codes[:limit]
+        codes = [code for code in codes if not _is_unsupported_cn_ohlcv_code(code)]
+        if not codes:
+            return {
+                "market": "CN",
+                "success_count": 0,
+                "failed_count": 0,
+                "rows_written": 0,
+                "failed": [],
+                "dataset_path": str(self.layout.dataset_path("valuation_snapshot", layer="meta")),
+            }
+
+        failed = []
+        frames = []
+        success_count = 0
+        rows_written = 0
+        flush_row_count = max(1, int(os.environ.get("CN_VALUATION_HISTORY_FLUSH_ROWS", "250000")))
+
+        def _fetch_one(code):
+            frame = CNEastmoneyValuationHistoryFetcher(
+                code,
+                adjust=adjust,
+                verbose=not show_progress,
+            ).fetch(start_date=start_date, end_date=end_date)
+            return {"code": code, "frame": frame}
+
+        def _flush_frames():
+            nonlocal frames, rows_written
+            if not frames:
+                return
+            batch = pd.concat(frames, ignore_index=True)
+            rows_written += int(self.warehouse.upsert_valuation_snapshots(batch)["rows"])
+            frames = []
+
+        with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), len(codes)))) as executor:
+            future_map = {executor.submit(_fetch_one, code): code for code in codes}
+            iterator = as_completed(future_map)
+            pbar = None
+            if show_progress:
+                pbar = tqdm(total=len(future_map), desc="refresh CN valuation history", unit="stock", file=sys.stderr)
+            try:
+                for future in iterator:
+                    code = future_map[future]
+                    try:
+                        result = future.result()
+                        frame = result.get("frame")
+                        if frame is not None and not frame.empty:
+                            frames.append(frame)
+                            success_count += 1
+                            if sum(len(item) for item in frames) >= flush_row_count:
+                                _flush_frames()
+                    except Exception as exc:
+                        failed.append({"code": code, "error": str(exc)})
+                    finally:
+                        if pbar is not None:
+                            pbar.update(1)
+            finally:
+                if pbar is not None:
+                    pbar.close()
+        _flush_frames()
+        if show_progress:
+            print(
+                f"[SUMMARY] A 股历史估值补全完成 success={success_count} "
+                f"rows={rows_written} failed={len(failed)}"
+            )
+        return {
+            "market": "CN",
+            "success_count": success_count,
+            "failed_count": len(failed),
+            "rows_written": rows_written,
+            "failed": failed,
+            "dataset_path": str(self.layout.dataset_path("valuation_snapshot", layer="meta")),
+        }
+
     def refresh_cn_financial_metrics(
         self,
         stock_codes=None,
@@ -1043,6 +1178,10 @@ class MarketDataService:
                         source=info.get("source") or "stock_info_registry",
                     )
                 )
+        valuation_result = (
+            self.warehouse.upsert_valuation_snapshots(pd.DataFrame(valuation_rows))
+            if valuation_rows else {"rows": 0}
+        )
 
         def _fetch_financial(code):
             metrics = CNBaoStockFinancialFetcher(code, verbose=not show_progress).fetch_latest(year=year, quarter=quarter)
@@ -1055,25 +1194,47 @@ class MarketDataService:
                 source=metrics.get("source") or "baostock_financial",
             )
 
+        financial_result = {
+            "rows": 0,
+            "dataset_path": str(self.layout.dataset_path("financial_statement_metrics", layer="meta")),
+        }
+        total_financial_rows = 0
+        financial_flush_rows = max(1, int(os.environ.get("CN_FINANCIAL_FLUSH_ROWS", "256")))
+
+        def _flush_financial_rows():
+            nonlocal financial_rows, financial_result, total_financial_rows
+            if not financial_rows:
+                return
+            batch_result = self.warehouse.upsert_financial_statement_metrics(pd.DataFrame(financial_rows))
+            total_financial_rows += int(batch_result.get("rows", 0))
+            financial_result = dict(batch_result)
+            financial_result["rows"] = total_financial_rows
+            financial_rows = []
+
         with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), len(codes) or 1))) as executor:
             future_map = {executor.submit(_fetch_financial, code): code for code in codes}
-            for future in as_completed(future_map):
-                code = future_map[future]
-                try:
-                    row = future.result()
-                    if row:
-                        financial_rows.append(row)
-                except Exception as exc:
-                    failed.append({"code": code, "error": str(exc)})
-
-        valuation_result = (
-            self.warehouse.upsert_valuation_snapshots(pd.DataFrame(valuation_rows))
-            if valuation_rows else {"rows": 0}
-        )
-        financial_result = (
-            self.warehouse.upsert_financial_statement_metrics(pd.DataFrame(financial_rows))
-            if financial_rows else {"rows": 0}
-        )
+            iterator = as_completed(future_map)
+            pbar = None
+            if show_progress:
+                pbar = tqdm(total=len(future_map), desc="refresh CN financial", unit="stock", file=sys.stderr)
+            try:
+                for future in iterator:
+                    code = future_map[future]
+                    try:
+                        row = future.result()
+                        if row:
+                            financial_rows.append(row)
+                            if len(financial_rows) >= financial_flush_rows:
+                                _flush_financial_rows()
+                    except Exception as exc:
+                        failed.append({"code": code, "error": str(exc)})
+                    finally:
+                        if pbar is not None:
+                            pbar.update(1)
+            finally:
+                if pbar is not None:
+                    pbar.close()
+        _flush_financial_rows()
         if show_progress:
             print(
                 f"[SUMMARY] A 股财务刷新完成 valuation={valuation_result.get('rows', 0)} "

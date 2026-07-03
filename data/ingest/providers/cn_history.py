@@ -99,7 +99,16 @@ class CNHistoryDataFetcher:
         )
         normalized_df = normalize_history_dataframe(
             df,
-            {"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume"},
+            {
+                "日期": "date",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume",
+                "成交额": "amount",
+                "换手率": "turnover",
+            },
         )
         return apply_date_filters(normalized_df, start_date, end_date, num_records)
 

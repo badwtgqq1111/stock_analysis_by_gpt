@@ -24,6 +24,7 @@ def main_select_stocks(
     days=365,
     top_n=10,
     initial_capital=100000,
+    market="HK",
     export_csv=None,
     persist_signals=False,
     batch_id=None,
@@ -59,15 +60,17 @@ def main_select_stocks(
     llm_report=False,
     llm_model="deepseek-v4-pro",
 ):
-    """执行全港股 TopN 选股+回测。factor 模式读取验证权重缓存，lightgbm 模式直接训练排序模型。"""
+    """执行指定市场 TopN 选股+回测。factor 模式读取验证权重缓存，lightgbm 模式直接训练排序模型。"""
+    normalized_market = (market or "HK").upper()
+    market_label = "港股" if normalized_market == "HK" else "A 股" if normalized_market == "CN" else normalized_market
     print("=" * 80)
     if str(analysis_mode).strip().lower() == "lightgbm":
-        print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选（LightGBM Ranker）")
+        print(f"{market_label}技术分析系统 - 全市场 Top {top_n} 组合筛选（LightGBM Ranker）")
     else:
-        print(f"港股技术分析系统 - 全港股 Top {top_n} 组合筛选（基于验证权重）")
+        print(f"{market_label}技术分析系统 - 全市场 Top {top_n} 组合筛选（基于验证权重）")
     print("=" * 80)
 
-    analyzer = StockAnalyzer()
+    analyzer = StockAnalyzer(market=normalized_market)
     try:
         cached_payload = None
         normalized_mode = str(analysis_mode or "factor").strip().lower()
@@ -169,12 +172,12 @@ def main_select_stocks(
             backtest_kwargs["signal_recipes"] = signal_recipes
         if ridge_factors is not None:
             backtest_kwargs["ridge_factors"] = ridge_factors
-        portfolio_result = analyzer.backtest_hk_market(**backtest_kwargs)
+        portfolio_result = analyzer.backtest_portfolio(**backtest_kwargs)
     finally:
         _safe_close_analyzer(analyzer)
 
     if portfolio_result is None:
-        print("[ERROR] 全港股组合分析失败")
+        print(f"[ERROR] {market_label}全市场组合分析失败")
         return None
 
     analysis_results = portfolio_result.get("analysis_results", [])
@@ -304,9 +307,9 @@ def main_select_stocks(
         try:
             persist_result = service.persist_portfolio_result(
                 portfolio_result=portfolio_result,
-                market="HK",
-                signal_set="all_hk_topn",
-                strategy_name="all_hk_topn",
+                market=normalized_market,
+                signal_set=f"all_{normalized_market.lower()}_topn",
+                strategy_name=f"all_{normalized_market.lower()}_topn",
                 batch_id=batch_id,
                 source="stock_analyzer_cli",
             )
@@ -324,6 +327,7 @@ def main_select_stocks(
             "days": int(days),
             "top_n": int(top_n),
             "initial_capital": float(initial_capital),
+            "market": normalized_market,
             "analysis_mode": normalized_mode,
             "factor_set": factor_set,
             "max_workers": int(max_workers),
@@ -383,7 +387,7 @@ def main_select_stocks(
             print(line)
 
     print("\n" + "=" * 80)
-    print("全港股 TopN 分析完成！")
+    print(f"{market_label}全市场 TopN 分析完成！")
     print("=" * 80)
     portfolio_result["manifest_path"] = str(manifest_path)
     return portfolio_result

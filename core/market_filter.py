@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 import pandas as pd
 import requests
 
+from data.model import normalize_stock_code
+
 
 @dataclass
 class MarketInfo:
@@ -89,6 +91,7 @@ def build_market_info_from_warehouse(
     stock_codes: list[str],
     warehouse,
     stock_info_frame: pd.DataFrame | None = None,
+    market: str = "HK",
 ) -> dict[str, MarketInfo]:
     """Build market filter inputs from persisted stock_info_registry data.
 
@@ -98,7 +101,7 @@ def build_market_info_from_warehouse(
     if stock_info_frame is None:
         if warehouse is None:
             return {}
-        stock_info_frame = warehouse.read_stock_info(stock_codes=stock_codes, market="HK")
+        stock_info_frame = warehouse.read_stock_info(stock_codes=stock_codes, market=(market or "HK").upper())
 
     if stock_info_frame is None or stock_info_frame.empty:
         return {}
@@ -106,12 +109,15 @@ def build_market_info_from_warehouse(
     working = stock_info_frame.copy()
     if "stock_code" not in working.columns:
         return {}
-    working["stock_code"] = working["stock_code"].astype(str).str.zfill(5)
+    normalized_market = (market or "HK").upper()
+    working["stock_code"] = working["stock_code"].astype(str).map(
+        lambda code: normalize_stock_code(code, market=normalized_market)
+    )
     working = working.drop_duplicates(subset=["stock_code"], keep="last")
 
     result: dict[str, MarketInfo] = {}
     for _, row in working.iterrows():
-        code = str(row.get("stock_code", "")).zfill(5)
+        code = normalize_stock_code(row.get("stock_code", ""), market=normalized_market)
         volume = pd.to_numeric(row.get("volume"), errors="coerce")
         circulating_shares = pd.to_numeric(row.get("circulating_shares"), errors="coerce")
         turnover_rate = pd.to_numeric(row.get("turnover_rate"), errors="coerce")
@@ -162,6 +168,7 @@ def compute_trading_days_batch(
     stock_codes: list[str],
     warehouse,  # MarketDataWarehouse
     max_workers: int = 8,
+    market: str = "HK",
 ) -> dict[str, int]:
     """Count trading days per stock from warehouse OHLCV data."""
     result: dict[str, int] = {}
@@ -170,7 +177,7 @@ def compute_trading_days_batch(
         try:
             df = warehouse.read_ohlcv(
                 stock_code=code,
-                market="HK",
+                market=(market or "HK").upper(),
                 asset_type="equity",
                 frequency="daily",
                 adjust="qfq",

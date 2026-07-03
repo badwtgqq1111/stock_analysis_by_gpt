@@ -201,6 +201,17 @@ class MarketDataWarehouse:
             "tradable_flag",
             "instrument_source",
             "instrument_updated_at",
+            "current_price",
+            "close_price",
+            "open_price",
+            "high",
+            "low",
+            "market_cap",
+            "pe_ratio",
+            "pb_ratio",
+            "dividend_yield",
+            "total_shares",
+            "circulating_shares",
         ))
         available_fields = [field for field in preserve_fields if field in payload.columns]
         if not available_fields:

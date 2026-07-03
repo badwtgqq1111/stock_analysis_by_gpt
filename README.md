@@ -1,6 +1,6 @@
-# 港股量化研究与回测工具
+# 港股 / A 股量化研究与回测工具
 
-基于 `ClickHouse + Parquet` 的本地港股量化研究工具箱，支持数据同步、因子生成、LightGBM 排序选股、行业分层候选池、组合回测和 Web 看板。
+基于 `ClickHouse + Parquet` 的本地量化研究工具箱，支持港股生产选股、A 股数据补全、因子生成、LightGBM 排序选股、行业分层候选池、组合回测和 Web 看板。
 
 架构详见 [P0_01_quant_system_overall_design.md](./docs/todo/P0_01_quant_system_overall_design.md)，文档目录见 [docs/README.md](./docs/README.md)。
 
@@ -214,12 +214,19 @@ tmux kill-session -t lightrag
 
 ## 推荐 Runbook
 
-README 以依赖顺序组织流程：基础行情、行业元数据和因子是生产选股硬依赖；画像、事件、微结构、新闻情绪是选股前可选特征层；模型诊断、TCA、执行模拟和组合策略评估都消费 `select` 的导出结果。基础标签流水线已经退出推荐流程；LightRAG 只用于 evidence 索引和重点股票深挖，不作为全市场逐股在线问答引擎。
+README 以依赖顺序组织流程：基础行情、行业元数据和因子是生产选股硬依赖；画像、事件、微结构、新闻情绪是选股前可选特征层；模型诊断、TCA、执行模拟和组合策略评估都消费 `select` 的导出结果。港股链路是当前生产选股主路径；A 股链路先按腾讯、AkShare 新浪、BaoStock、东方财富的顺序补齐日线数据，再用 `--market CN` 生成因子、LightGBM 排序选股和研究回测。基础标签流水线已经退出推荐流程；LightRAG 只用于 evidence 索引和重点股票深挖，不作为全市场逐股在线问答引擎。
 
 ```text
 基础数据:
   sync -> backfill-industry
        -> generate-factors
+
+A 股选股:
+  sync-cn -> refresh-cn-stock-info
+          -> refresh-cn-financial-metrics
+          -> backfill-cn-industry
+          -> generate-factors --market CN
+          -> select --market CN --analysis-mode lightgbm
 
 选股前可选特征层:
   stock-intelligence-pipeline -> theme_opportunity features
@@ -247,16 +254,22 @@ README 以依赖顺序组织流程：基础行情、行业元数据和因子是�
 |---|---|---|---|
 | 第一次部署 | 无 | `uv sync --dev`，可选部署 ClickHouse、SearXNG、LightRAG | 只跑一次 |
 | 第一次建库或行情更新 | 无 | `sync` | 初次全量，之后按交易日增量 |
+| A 股第一次建库或行情更新 | 无 | `sync-cn` | 初次全量，之后按交易日增量 |
 | 财务/流动性快照刷新 | `sync` 产生代码池 | `refresh-stock-info` | 每个交易日收盘后，或选股前 |
+| A 股财务/流动性快照刷新 | `sync-cn` 产生代码池 | `refresh-cn-stock-info` | 每个交易日收盘后，或回测前 |
 | 财务因子面板刷新 | `refresh-stock-info` 已落库 | `refresh-financial-metrics`、`financial-coverage` | 每个交易日收盘后，或财务数据更新后 |
+| A 股估值/财务面板刷新 | `refresh-cn-stock-info` 已落库 | `refresh-cn-financial-metrics`、`cn-coverage-check` | 每个交易日收盘后，或财务数据更新后 |
 | 行业、标的类型、可交易性刷新 | `sync` 产生代码池 | `backfill-industry`、`industry-coverage` | 新股票或元数据过期时 |
+| A 股行业刷新 | `sync-cn` 产生代码池 | `backfill-cn-industry`、`cn-coverage-check` | 新股票或元数据过期时 |
 | 因子刷新 | `sync` 产生 OHLCV | `generate-factors --factor-set alpha_zoo_hk` | 每次重训/选股前 |
+| A 股因子刷新 | `sync-cn` 产生 CN OHLCV，建议先过 `cn-coverage-check` | `generate-factors --market CN --factor-set alpha_zoo_hk` | 每次重训/选股前 |
 | 智能画像/主题特征刷新 | SearXNG、LightRAG、别名/evidence | `stock-intelligence-pipeline --import-to-warehouse` | 按周/月，或研究主题变化时 |
 | 事件/微结构实验特征 | 外部事件 CSV 或分钟线 CSV | `export-event-features`、`export-microstructure-features`，再接入特征仓库 | 研究需要时，在 `select` 前 |
 | 生产选股 | `sync`、`refresh-stock-info`、`generate-factors`；强烈建议先 `backfill-industry`；可叠加特征层 | `select --analysis-mode lightgbm --export-csv output/results` | 每次要出组合 |
+| A 股研究选股 | `sync-cn`、`refresh-cn-stock-info`、`refresh-cn-financial-metrics`、`backfill-cn-industry`、`generate-factors --market CN` | `select --market CN --analysis-mode lightgbm --export-csv output/results_cn` | 每次要出 A 股研究组合 |
 | 选股后验收 | `select` 导出的 ranking/selected/feature artifacts | `lightgbm-model-diagnostics`、`theme-feature-diagnostics`、Purged CV、A/B、TCA/RL | 每次模型或特征变化后 |
 
-### 日常选股
+### 港股日常选股
 
 ```bash
 uv run python run.py sync --start-date 2014-01-01 --frequencies daily --skip-existing --max-workers 24 --show-progress
@@ -276,6 +289,50 @@ uv run python run.py select \
   --show-progress
 ```
 
+### A 股日常选股
+
+```bash
+uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 12 --show-progress
+uv run python run.py refresh-cn-stock-info --max-workers 8 --show-progress
+uv run python run.py refresh-cn-financial-metrics --max-workers 4 --show-progress
+uv run python run.py backfill-cn-industry --show-progress
+uv run python run.py generate-factors --market CN --days 365 --factor-set alpha_zoo_hk --max-workers 8 --show-progress
+uv run python run.py select \
+  --market CN \
+  --analysis-mode lightgbm \
+  --top-n 10 \
+  --days 365 \
+  --factor-set alpha_zoo_hk \
+  --max-workers 8 \
+  --export-csv output/results_cn \
+  --show-progress
+```
+
+如果要在生成因子前先验收 A 股数据链路，可以在第 4 步后插入：
+
+```bash
+uv run python run.py cn-coverage-check --min-ohlcv-rows 120 --json
+```
+
+`sync-cn --complete-data` 会在行情同步后继续补齐 `stock_info_registry`、`valuation_snapshot`、`financial_statement_metrics` 和行业字段；补全阶段失败会进入 summary，不回滚已经写入的 OHLCV。只想快速补行情时可以去掉 `--complete-data`；只有临时调试需要旧逐股行为时，才额外加 `--include-stock-info`。
+
+小样本先跑指定股票，确认腾讯优先链路、AkShare 新浪/BaoStock/东方财富兜底、仓库写入、因子落库和选股都通：
+
+```bash
+uv run python run.py sync-cn --stock-codes 600000.SH 000001.SZ --start-date 2020-01-01 --frequencies daily --complete-data --max-workers 2 --show-progress
+uv run python run.py refresh-cn-stock-info --stock-codes 600000.SH 000001.SZ --max-workers 2 --show-progress
+uv run python run.py refresh-cn-financial-metrics --stock-codes 600000.SH 000001.SZ --max-workers 2 --show-progress
+uv run python run.py backfill-cn-industry --stock-codes 600000.SH 000001.SZ --show-progress
+uv run python run.py generate-factors --market CN --stock-codes 600000.SH 000001.SZ --days 365 --factor-set alpha_zoo_hk --max-workers 2 --show-progress
+uv run python run.py select --market CN --analysis-mode lightgbm --stock-codes 600000.SH 000001.SZ --top-n 2 --days 365 --factor-set alpha_zoo_hk --max-workers 2 --export-csv output/results_cn_smoke --show-progress
+```
+
+小样本验链路同样可以在第 4 步后插入：
+
+```bash
+uv run python run.py cn-coverage-check --stock-codes 600000.SH 000001.SZ --min-ohlcv-rows 120 --json
+```
+
 `select --analysis-mode lightgbm` 会在单次命令内训练和预测，不依赖 `validate-factors`。生产默认 `--factor-set alpha_zoo_hk`、`--model-objective regression_csrank`、`industry_size` 中性化；`lambdarank` 和 `rank_xendcg` 只作为对照实验。只有旧的 `select --analysis-mode factor` 才需要先跑 `validate-factors`。
 
 `refresh-stock-info` 会把 PB、PE、市值、成交额、成交量、总股本、流通股本、股息率和换手率等快照写入 `stock_info_registry`。换手率字段有原始数据时直接入库；缺失时按 `成交量 / 流通股本 * 100` 换算后入库。生产选股默认优先使用仓库里的财务/流动性快照做流动性过滤和 LightGBM 估值评分，不再临时抓 live 数据；仅当显式设置 `ALLOW_LIVE_MARKET_FILTER_FETCH=1` 时，市场过滤才会对缺失股票启用实时兜底。
@@ -283,6 +340,69 @@ uv run python run.py select \
 `refresh-financial-metrics` 会把本地 `stock_info_registry` 的估值/流动性字段转存到 `valuation_snapshot`，并写入 `financial_statement_metrics` 的 PIT 财务面板；`financial-coverage` 用于检查字段覆盖率。因子目录已支持 `factor-list`、`factor-show`、`factor-manifest`，生产默认 `alpha_zoo_hk` 包含 `alpha101`、`academic_hk`、`valuation_hk`、`financial_quality_hk` 和 `financial_cross_section_hk`。其中 `financial_cross_section_hk` 会生成 `pe_ind_pct`、`pb_ind_pct`、`roe_ind_pct`、`quality_value_score` 等行业相对财务因子。这些实现只参考 Alpha Zoo 的组织形态，代码、公式代理、manifest 和落库流程都在本项目内原生实现，不读取、不导入、也不要求存在 `Vibe-Trading/` 目录。
 
 `select --export-csv output/results` 会同时导出排名、持仓、候选池、观察名单、行业归因、流动性容量、模拟 TCA、模型 manifest、特征重要性和 SHAP 解释文件。后续诊断、成本模型和组合策略评估都应消费这些产物，不要反向依赖选股前的原始特征文件。
+
+### A 股回测入口说明
+
+A 股日线基础行情默认优先使用腾讯，再回退 AkShare 新浪、BaoStock，最后才短超时回退东方财富；分钟线继续走 AkShare/Eastmoney。A 股流程先把 `CN` 分区的数据补齐，再用 `cn-coverage-check` 判断是否达到回测条件。只有明确要压测或排查 BaoStock 时，才给 `sync-cn` 显式加 `--data-source baostock`；只有明确要排查东方财富时，才显式加 `--data-source eastmoney`。
+
+`sync-cn` 会给 AkShare 内部未显式设置 timeout 的 HTTP 请求补默认超时，避免坏 IP 把尾部股票长时间挂在 `SYN-SENT`。默认 `CN_SYNC_SOCKET_TIMEOUT=5` 秒；网络较差时可以调大，想更快跳过坏连接时可以调小，例如：
+
+```bash
+CN_SYNC_SOCKET_TIMEOUT=3 uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 24 --show-progress
+```
+
+A 股 OHLCV 同步会按完成结果分批落库，默认每 `64` 只股票或 `250000` 行 flush 一次，避免全市场数据全部堆在内存里等最后才写。需要更频繁看到数据库增长时可以调小 `CN_SYNC_FLUSH_STOCKS` 或 `CN_SYNC_FLUSH_ROWS`：
+
+```bash
+CN_SYNC_SOCKET_TIMEOUT=3 CN_SYNC_FLUSH_STOCKS=32 uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 24 --show-progress
+```
+
+`sync-cn --show-progress` 的进度条会显示最近完成的股票和来源简写，例如 `last=600000.SH:tx`，并累计来源分布 `src=tx:92,sn:31,bs:5,em:0`。简写含义：`tx` 腾讯，`sn` 新浪，`bs` BaoStock，`em` 东方财富。
+
+`cn-coverage-check` 会检查 A 股股票池、`daily/qfq` OHLCV、`stock_info_registry`、行业字段、`valuation_snapshot`、`financial_statement_metrics`、feature 层以及 `StockAnalyzer(market="CN")` 的样本读取结果。报告里的 `backtest_ready` 为 `false` 时，先看 `blocking_reasons`；常见阻断包括 `cn_universe_empty`、`cn_ohlcv_rows_below_threshold` 和 `stock_analyzer_cn_load_failed`。
+
+小样本调试时可以指定股票池，避免首次直接全市场跑：
+
+```bash
+uv run python run.py sync-cn \
+  --stock-codes 600000.SH 000001.SZ \
+  --start-date 2020-01-01 \
+  --frequencies daily \
+  --max-workers 2 \
+  --show-progress
+
+uv run python run.py cn-coverage-check \
+  --stock-codes 600000.SH 000001.SZ \
+  --min-ohlcv-rows 120 \
+  --json
+```
+
+`generate-factors` 和 `select` 默认市场仍是 `HK`；A 股需要显式加 `--market CN`。如需在 notebook 或脚本里做更细的研究回测，也可以直接构造 `StockAnalyzer(market="CN")`：
+
+```python
+from core import StockAnalyzer
+
+analyzer = StockAnalyzer(market="CN")
+try:
+    result = analyzer.backtest_portfolio(
+        stock_codes=["600000.SH", "000001.SZ"],
+        days=365,
+        top_n=2,
+        analysis_mode="lightgbm",
+        factor_set="alpha_zoo_hk",
+        max_workers=2,
+        show_progress=True,
+    )
+finally:
+    analyzer.close()
+```
+
+如果本地设置了 `CLICKHOUSE_HOST`，A 股数据会和港股一样优先写 ClickHouse，不可用时回退 Parquet。只想检查本地 Parquet 时，可以临时清掉 ClickHouse 环境变量：
+
+```bash
+env -u CLICKHOUSE_HOST -u CLICKHOUSE_PORT -u CLICKHOUSE_HTTP_PORT \
+  uv run python run.py cn-coverage-check --limit 20 --json
+```
 
 ### 国泰君安 191 因子
 
@@ -662,10 +782,15 @@ uv run python run.py select \
 | 命令 | 依赖 | 用途 |
 |---|---|---|
 | `sync` | 无 | 拉取 OHLCV，产生代码池 |
+| `sync-cn` | 无 | 拉取 A 股 OHLCV，产生 CN 代码池 |
 | `refresh-stock-info` | `sync` | 刷新 PB/PE、市值、成交额/成交量、换手率、股本等财务/流动性快照到 `stock_info_registry` |
+| `refresh-cn-stock-info` | `sync-cn` | 刷新 A 股 PB/PE、市值、成交额/成交量、换手率、股本等快照到 `stock_info_registry` |
 | `backfill-industry` | `sync` | 补行业、标的类型、fund-like、可交易性 |
-| `generate-factors` | `sync` | 默认生成 `alpha_zoo_hk`，可显式指定 `alpha158_hk` 轻量包 |
-| `select --analysis-mode lightgbm` | `sync`、`refresh-stock-info`、`generate-factors`，建议先 `backfill-industry` | 推荐选股模式，单次命令内训练和预测 |
+| `backfill-cn-industry` | `sync-cn` | 使用 BaoStock 补 A 股行业分类 |
+| `refresh-cn-financial-metrics` | `refresh-cn-stock-info` | 刷新 A 股 `valuation_snapshot` 和 `financial_statement_metrics` |
+| `cn-coverage-check` | `sync-cn`，建议先刷新 stock info、行业和财务 | 检查 A 股数据链路是否满足本地因子/回测 |
+| `generate-factors` | `sync` 或 `sync-cn` 对应市场的 OHLCV | 默认生成 `alpha_zoo_hk`，A 股显式加 `--market CN`，可显式指定 `alpha158_hk` 轻量包 |
+| `select --analysis-mode lightgbm` | `sync`/`sync-cn`、stock info、行业、`generate-factors`；A 股显式加 `--market CN` | 推荐选股模式，单次命令内训练和预测 |
 | `validate-factors` | `generate-factors` | 仅供 factor 模式选股使用 |
 | `select --analysis-mode factor` | `generate-factors`、`validate-factors` | 验证权重驱动的选股模式 |
 | `signal-report` | `generate-factors` | 验证信号 recipe 触发后的未来收益 |
@@ -705,6 +830,14 @@ uv run python run.py validate-factors --days 365 --factor-set alpha_zoo_hk --exp
 uv run python run.py signal-report --days 365 --signal-recipes low_price_setup,range_breakout,box_pullback --horizons 20,40,60 --export-csv output/signal_report --show-progress
 uv run python run.py factor-report --days 365 --factor-set alpha_zoo_hk --export-csv output/factor_report --show-progress
 uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progress
+
+# A 股日常选股
+uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 12 --show-progress
+uv run python run.py refresh-cn-stock-info --max-workers 8 --show-progress
+uv run python run.py refresh-cn-financial-metrics --max-workers 4 --show-progress
+uv run python run.py backfill-cn-industry --show-progress
+uv run python run.py generate-factors --market CN --days 365 --factor-set alpha_zoo_hk --max-workers 8 --show-progress
+uv run python run.py select --market CN --analysis-mode lightgbm --top-n 10 --days 365 --factor-set alpha_zoo_hk --max-workers 8 --export-csv output/results_cn --show-progress
 ```
 
 刚补完行业或 instrument 元数据后，不需要重跑 `sync`，但需要重跑 `select`。生产默认是 `alpha_zoo_hk`；若只是快速调试，可显式指定轻量回退包 `alpha158_hk`。

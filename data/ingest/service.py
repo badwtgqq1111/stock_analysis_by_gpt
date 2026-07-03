@@ -4,21 +4,32 @@
 """统一的数据服务入口。"""
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from datetime import datetime
 import os
 from pathlib import Path
 import platform
 import signal
+import socket
 import sys
 import threading
 import time
 
 import numpy as np
 import pandas as pd
+import requests
 
 from data.ingest.cn_stock_loader import CNStockDataLoader
 from data.ingest.hk_stock_loader import HKStockDataLoader
-from data.ingest.providers import HKCorporateActionsFetcher, HKMarketListFetcher, HistoryDataFetcher
+from data.ingest.providers import (
+    CNBaoStockFinancialFetcher,
+    CNBaoStockIndustryFetcher,
+    CNMarketListFetcher,
+    CNStockInfoFetcher,
+    HKCorporateActionsFetcher,
+    HKMarketListFetcher,
+    HistoryDataFetcher,
+)
 from data.ingest.providers.hk_history import set_akshare_sina_history_concurrency
 from tqdm import tqdm
 from data.ingest.providers.history_utils import normalize_period
@@ -28,6 +39,7 @@ from data.model import (
     normalize_corporate_actions_frame,
     normalize_feature_frame,
     normalize_financial_statement_metrics,
+    infer_exchange,
     normalize_ohlcv_frame,
     normalize_signal_frame,
     normalize_bool,
@@ -98,6 +110,292 @@ def _factor_compute_worker(payload: dict) -> dict:
         "feature_index": list(feature_frame.index.astype(str)),
         "feature_columns": list(feature_frame.columns),
     }
+
+
+def _should_use_cn_history_process_pool(data_source, frequencies, include_stock_info=False):
+    """Use process isolation for BaoStock daily bulk fetches."""
+    normalized_source = str(data_source or "").strip().lower()
+    normalized_frequencies = [normalize_period(frequency) for frequency in (frequencies or ("daily",))]
+    return (
+        normalized_source == "baostock"
+        and not include_stock_info
+        and normalized_frequencies
+        and all(frequency == "daily" for frequency in normalized_frequencies)
+    )
+
+
+def _chunk_sequence(items, chunk_size):
+    """Split items into non-empty chunks."""
+    size = max(1, int(chunk_size or 1))
+    return [list(items[index:index + size]) for index in range(0, len(items), size)]
+
+
+def _cn_incremental_start_date(base_start, latest_trade_date, frequency):
+    """Compute CN incremental fetch start with an overlap window."""
+    if latest_trade_date is None:
+        return base_start
+    base_timestamp = pd.to_datetime(base_start)
+    latest_timestamp = pd.to_datetime(latest_trade_date)
+    overlap_days = MarketDataService.INCREMENTAL_OVERLAP_DAYS.get(normalize_period(frequency), 7)
+    effective_start = max(base_timestamp, latest_timestamp - pd.Timedelta(days=overlap_days))
+    if normalize_period(frequency) == "daily":
+        effective_start = effective_start.normalize()
+    return effective_start.strftime("%Y-%m-%d")
+
+
+def _cn_sync_socket_timeout():
+    """Process-wide default timeout for CN providers that do not expose timeout args."""
+    raw_timeout = os.environ.get("CN_SYNC_SOCKET_TIMEOUT", "5")
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return 5.0
+    return timeout if timeout > 0 else None
+
+
+@contextmanager
+def _temporary_default_socket_timeout(timeout):
+    previous_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
+
+
+_REQUESTS_TIMEOUT_PATCH_LOCK = threading.RLock()
+
+
+@contextmanager
+def _temporary_requests_default_timeout(timeout):
+    """Inject a timeout into requests calls from providers that omit one."""
+    if timeout is None:
+        yield
+        return
+
+    with _REQUESTS_TIMEOUT_PATCH_LOCK:
+        original_request = requests.sessions.Session.request
+
+        def request_with_default_timeout(self, method, url, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = timeout
+            return original_request(self, method, url, **kwargs)
+
+        requests.sessions.Session.request = request_with_default_timeout
+        try:
+            yield
+        finally:
+            requests.sessions.Session.request = original_request
+
+
+CN_SOURCE_PROGRESS_ORDER = ("tencent", "akshare_sina", "baostock", "akshare_eastmoney")
+CN_SOURCE_SHORT_LABELS = {
+    "tencent": "tx",
+    "akshare_sina": "sn",
+    "sina": "sn",
+    "baostock": "bs",
+    "akshare_eastmoney": "em",
+    "eastmoney": "em",
+}
+
+
+def _cn_source_key(source):
+    value = str(source or "").strip().lower()
+    if value.startswith("tencent"):
+        return "tencent"
+    if value.startswith("akshare_sina") or value.startswith("sina"):
+        return "akshare_sina"
+    if value.startswith("baostock"):
+        return "baostock"
+    if value.startswith("akshare_eastmoney") or value.startswith("eastmoney"):
+        return "akshare_eastmoney"
+    return value or "unknown"
+
+
+def _cn_source_short(source):
+    source_key = _cn_source_key(source)
+    return CN_SOURCE_SHORT_LABELS.get(source_key, source_key[:2] or "na")
+
+
+def _cn_frame_source_counts(frame):
+    if frame is None or frame.empty or "source" not in frame.columns:
+        return {}
+    counts = {}
+    for source, count in frame["source"].fillna("unknown").astype(str).value_counts().items():
+        source_key = _cn_source_key(source)
+        counts[source_key] = counts.get(source_key, 0) + int(count)
+    return counts
+
+
+def _cn_frame_primary_source(frame, fallback=None):
+    counts = _cn_frame_source_counts(frame)
+    if not counts:
+        return fallback or "unknown"
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def _cn_progress_postfix(
+    success_count,
+    skipped_count,
+    failed_count,
+    row_count,
+    rows_written,
+    last_stock_code=None,
+    last_source=None,
+    source_counts=None,
+):
+    source_counts = source_counts or {}
+    source_stats = ",".join(
+        f"{_cn_source_short(source)}:{int(source_counts.get(source, 0))}"
+        for source in CN_SOURCE_PROGRESS_ORDER
+    )
+    last = ""
+    if last_stock_code:
+        last = f" last={last_stock_code}:{_cn_source_short(last_source)}"
+    return (
+        f"ok={success_count} skip={skipped_count} fail={failed_count} "
+        f"rows={row_count} written={rows_written}{last} src={source_stats}"
+    )
+
+
+def _cn_history_fetch_worker(payload: dict) -> dict:
+    """Fetch one CN stock history payload in a subprocess."""
+    from contextlib import redirect_stderr, redirect_stdout
+    import io
+
+    if not bool(payload.get("verbose")):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return _cn_history_fetch_worker_inner(payload)
+    return _cn_history_fetch_worker_inner(payload)
+
+
+def _cn_history_fetch_worker_inner(payload: dict) -> dict:
+    """Fetch one CN stock history payload in a subprocess."""
+    from data.ingest.providers.cn_history import CNHistoryDataFetcher
+
+    code = normalize_stock_code(payload["code"], market="CN")
+    start_date = payload.get("start_date")
+    target_end_date = payload.get("end_date")
+    normalized_adjust = normalize_adjust(payload.get("adjust") or "qfq")
+    frequency_list = [normalize_period(frequency) for frequency in payload.get("frequencies") or ("daily",)]
+    latest_trade_dates = payload.get("latest_trade_dates") or {}
+    skip_existing = bool(payload.get("skip_existing"))
+    data_source = payload.get("data_source") or "baostock"
+    db_dir = payload.get("db_dir") or "./assets"
+
+    frames = []
+    rows_by_frequency = {}
+    for frequency in frequency_list:
+        latest = latest_trade_dates.get(f"{code}|{frequency}")
+        if skip_existing and latest is not None and pd.to_datetime(latest) >= pd.to_datetime(target_end_date):
+            rows_by_frequency[frequency] = 0
+            continue
+        fetch_start_date = _cn_incremental_start_date(start_date, latest, frequency)
+
+        source_priority = ["baostock"] if str(data_source).strip().lower() == "baostock" and frequency == "daily" else None
+        fetcher = CNHistoryDataFetcher(
+            code,
+            db_dir=db_dir,
+            data_source=data_source,
+            adjust=normalized_adjust,
+            source_priority=source_priority,
+            verbose=False,
+        )
+        frame = fetcher.fetch(
+            start_date=fetch_start_date,
+            end_date=target_end_date,
+            adjust=normalized_adjust,
+            period=frequency,
+        )
+        if frame is not None and not frame.empty:
+            normalized = normalize_ohlcv_frame(
+                frame,
+                stock_code=code,
+                market="CN",
+                exchange=infer_exchange(code, market="CN"),
+                asset_type="equity",
+                frequency=frequency,
+                source=fetcher.last_successful_source or data_source,
+                adjust=normalized_adjust,
+                currency="CNY",
+            )
+            frames.append(normalized)
+            rows_by_frequency[frequency] = len(normalized)
+        else:
+            rows_by_frequency[frequency] = 0
+
+    merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return {"code": code, "frame": merged, "info": None, "rows_by_frequency": rows_by_frequency}
+
+
+def _cn_history_fetch_chunk_worker(payload: dict) -> list[dict]:
+    """Fetch a chunk of CN stock histories in one subprocess."""
+    from contextlib import redirect_stderr, redirect_stdout
+    import io
+
+    if not bool(payload.get("verbose")):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return _cn_history_fetch_chunk_worker_inner(payload)
+    return _cn_history_fetch_chunk_worker_inner(payload)
+
+
+def _cn_history_fetch_chunk_worker_inner(payload: dict) -> list[dict]:
+    """Fetch a chunk of BaoStock daily histories with one BaoStock session."""
+    from data.ingest.providers.cn_baostock import BaoStockSession, CNBaoStockHistoryFetcher
+
+    codes = [normalize_stock_code(code, market="CN") for code in payload.get("codes") or []]
+    start_date = payload.get("start_date")
+    target_end_date = payload.get("end_date")
+    normalized_adjust = normalize_adjust(payload.get("adjust") or "qfq")
+    latest_trade_dates = payload.get("latest_trade_dates") or {}
+    skip_existing = bool(payload.get("skip_existing"))
+    data_source = payload.get("data_source") or "baostock"
+
+    results = []
+    with BaoStockSession(verbose=False):
+        for code in codes:
+            rows_by_frequency = {}
+            latest = latest_trade_dates.get(f"{code}|daily")
+            if skip_existing and latest is not None and pd.to_datetime(latest) >= pd.to_datetime(target_end_date):
+                rows_by_frequency["daily"] = 0
+                results.append({"code": code, "frame": pd.DataFrame(), "info": None, "rows_by_frequency": rows_by_frequency})
+                continue
+            fetch_start_date = _cn_incremental_start_date(start_date, latest, "daily")
+
+            try:
+                fetcher = CNBaoStockHistoryFetcher(code, verbose=False)
+                frame = fetcher.fetch_in_session(
+                    start_date=fetch_start_date,
+                    end_date=target_end_date,
+                    adjust=normalized_adjust,
+                )
+                if frame is not None and not frame.empty:
+                    normalized = normalize_ohlcv_frame(
+                        frame,
+                        stock_code=code,
+                        market="CN",
+                        exchange=infer_exchange(code, market="CN"),
+                        asset_type="equity",
+                        frequency="daily",
+                        source=fetcher.last_successful_source or data_source,
+                        adjust=normalized_adjust,
+                        currency="CNY",
+                    )
+                    rows_by_frequency["daily"] = len(normalized)
+                    results.append({"code": code, "frame": normalized, "info": None, "rows_by_frequency": rows_by_frequency})
+                else:
+                    rows_by_frequency["daily"] = 0
+                    results.append({"code": code, "frame": pd.DataFrame(), "info": None, "rows_by_frequency": rows_by_frequency})
+            except Exception as exc:
+                rows_by_frequency["daily"] = 0
+                results.append({
+                    "code": code,
+                    "frame": pd.DataFrame(),
+                    "info": None,
+                    "rows_by_frequency": rows_by_frequency,
+                    "error": str(exc),
+                })
+    return results
 
 
 class MarketDataService:
@@ -309,6 +607,626 @@ class MarketDataService:
             period=period,
             include_info=True,
         )
+
+    def bulk_sync_cn_history(
+        self,
+        start_date="2014-01-01",
+        end_date=None,
+        adjust="qfq",
+        max_workers=None,
+        limit=None,
+        stock_codes=None,
+        include_stock_info=False,
+        complete_data=False,
+        metadata_max_workers=None,
+        financial_max_workers=None,
+        compact_after=True,
+        data_source=None,
+        skip_existing=False,
+        frequencies=("daily",),
+        show_progress=True,
+    ):
+        """批量抓取 A 股多周期历史数据并落库。"""
+        normalized_adjust = normalize_adjust(adjust)
+        target_end_date = end_date or datetime.now().strftime("%Y-%m-%d")
+        effective_data_source = data_source or self.data_source or "baostock"
+        max_workers = max(1, int(max_workers or min(12, max(4, os.cpu_count() or 4))))
+        frequency_list = []
+        for frequency in frequencies or ("daily",):
+            normalized_frequency = normalize_period(frequency)
+            if normalized_frequency not in frequency_list:
+                frequency_list.append(normalized_frequency)
+
+        if stock_codes:
+            stocks = [
+                {"code": normalize_stock_code(code, market="CN"), "name": normalize_stock_code(code, market="CN")}
+                for code in stock_codes
+            ]
+        else:
+            stocks = CNMarketListFetcher(data_source=effective_data_source, verbose=not show_progress).fetch(limit=limit)
+        if limit and stock_codes:
+            stocks = stocks[:limit]
+
+        if not stocks:
+            return {
+                "status": "completed",
+                "market": "CN",
+                "success_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0,
+                "rows_written": 0,
+                "rows_by_frequency": {frequency: 0 for frequency in frequency_list},
+                "dataset_path": str(self.layout.dataset_path("ohlcv", layer="clean")),
+            }
+
+        all_codes = [normalize_stock_code(stock["code"], market="CN") for stock in stocks]
+        latest_trade_dates = self.warehouse.get_latest_trade_dates(
+            stock_codes=all_codes,
+            market="CN",
+            asset_type="equity",
+            frequencies=frequency_list,
+            adjust=normalized_adjust,
+        )
+
+        def _is_fresh(code, frequency):
+            latest = latest_trade_dates.get((code, frequency))
+            if latest is None:
+                return False
+            return pd.to_datetime(latest) >= pd.to_datetime(target_end_date)
+
+        def _fetch_one(stock):
+            code = normalize_stock_code(stock["code"], market="CN")
+            frames = []
+            rows_by_frequency = {}
+            for frequency in frequency_list:
+                latest = latest_trade_dates.get((code, frequency))
+                if skip_existing and _is_fresh(code, frequency):
+                    rows_by_frequency[frequency] = 0
+                    continue
+                fetch_start_date = _cn_incremental_start_date(start_date, latest, frequency)
+                fetch_kwargs = {
+                    "stock_code": code,
+                    "start_date": fetch_start_date,
+                    "end_date": target_end_date,
+                    "adjust": normalized_adjust,
+                    "period": frequency,
+                }
+                if show_progress:
+                    fetch_kwargs["verbose"] = False
+                frame = self.cn_loader.fetch_history(
+                    **fetch_kwargs,
+                )
+                if frame is not None and not frame.empty:
+                    frames.append(frame)
+                    rows_by_frequency[frequency] = len(frame)
+                else:
+                    rows_by_frequency[frequency] = 0
+            info = None
+            if include_stock_info:
+                info_kwargs = {"stock_code": code}
+                if show_progress:
+                    info_kwargs["verbose"] = False
+                info = self.cn_loader.fetch_info(**info_kwargs)
+            merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            return {"code": code, "frame": merged, "info": info, "rows_by_frequency": rows_by_frequency}
+
+        history_frames = []
+        info_payloads = []
+        pending_history_rows = 0
+        pending_history_stocks = 0
+        success_count = 0
+        skipped_count = 0
+        failed = []
+        rows_written = 0
+        write_flush_count = 0
+        source_counts = {source: 0 for source in CN_SOURCE_PROGRESS_ORDER}
+        last_stock_code = None
+        last_source = None
+        rows_by_frequency = {frequency: 0 for frequency in frequency_list}
+        use_process_pool = _should_use_cn_history_process_pool(
+            effective_data_source,
+            frequency_list,
+            include_stock_info=include_stock_info,
+        )
+
+        latest_trade_dates_payload = {
+            f"{code}|{frequency}": str(latest)
+            for (code, frequency), latest in latest_trade_dates.items()
+            if latest is not None
+        }
+
+        configured_baostock_chunk_size = max(1, int(os.environ.get("CN_BAOSTOCK_CHUNK_SIZE", "16")))
+        target_chunk_size = max(1, (len(stocks) + (max_workers * 4) - 1) // (max_workers * 4))
+        baostock_chunk_size = min(configured_baostock_chunk_size, target_chunk_size)
+        flush_stock_count = max(1, int(os.environ.get("CN_SYNC_FLUSH_STOCKS", "64")))
+        flush_row_count = max(1, int(os.environ.get("CN_SYNC_FLUSH_ROWS", "250000")))
+
+        def _flush_history_batch():
+            nonlocal history_frames, info_payloads, pending_history_rows, pending_history_stocks
+            nonlocal rows_written, write_flush_count
+            if history_frames:
+                batch = pd.concat(history_frames, ignore_index=True)
+                rows_written += int(self.warehouse.append_ohlcv(batch)["rows"])
+                history_frames = []
+                pending_history_rows = 0
+                pending_history_stocks = 0
+                write_flush_count += 1
+            if info_payloads:
+                self.warehouse.upsert_stock_info_batch(info_payloads)
+                info_payloads = []
+
+        def _build_process_chunk_payload(stock_chunk):
+            return {
+                "codes": [normalize_stock_code(stock["code"], market="CN") for stock in stock_chunk],
+                "start_date": start_date,
+                "end_date": target_end_date,
+                "adjust": normalized_adjust,
+                "data_source": effective_data_source,
+                "skip_existing": skip_existing,
+                "latest_trade_dates": latest_trade_dates_payload,
+                "verbose": False,
+            }
+
+        executor_cls = ProcessPoolExecutor if use_process_pool else ThreadPoolExecutor
+        cn_network_timeout = _cn_sync_socket_timeout()
+        with (
+            _temporary_default_socket_timeout(cn_network_timeout),
+            _temporary_requests_default_timeout(cn_network_timeout),
+        ):
+            with executor_cls(max_workers=min(max_workers, len(stocks))) as executor:
+                if use_process_pool:
+                    stock_chunks = _chunk_sequence(stocks, baostock_chunk_size)
+                    future_map = {
+                        executor.submit(_cn_history_fetch_chunk_worker, _build_process_chunk_payload(chunk)): chunk
+                        for chunk in stock_chunks
+                    }
+                else:
+                    future_map = {executor.submit(_fetch_one, stock): stock for stock in stocks}
+                iterator = as_completed(future_map)
+                pbar = None
+                if show_progress:
+                    pbar = tqdm(
+                        total=len(stocks),
+                        desc="sync CN OHLCV",
+                        unit="stock",
+                        file=sys.stderr,
+                        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+                        "[{elapsed}<{remaining}, {rate_fmt}]",
+                    )
+                for future in iterator:
+                    stock_or_chunk = future_map[future]
+                    try:
+                        future_result = future.result()
+                    except Exception as exc:
+                        failed_stocks = stock_or_chunk if use_process_pool else [stock_or_chunk]
+                        for failed_stock in failed_stocks:
+                            failed.append({"code": normalize_stock_code(failed_stock["code"], market="CN"), "error": str(exc)})
+                        if pbar is not None:
+                            pbar.update(len(failed_stocks))
+                        continue
+
+                    results = future_result if use_process_pool else [future_result]
+                    for result in results:
+                        if result.get("error"):
+                            failed.append({"code": result.get("code"), "error": result["error"]})
+                            continue
+                        frame = result["frame"]
+                        if frame is None or frame.empty:
+                            skipped_count += 1
+                        else:
+                            history_frames.append(frame)
+                            pending_history_rows += len(frame)
+                            pending_history_stocks += 1
+                            success_count += 1
+                            last_stock_code = result.get("code")
+                            last_source = _cn_frame_primary_source(frame, fallback=effective_data_source)
+                            source_key = _cn_source_key(last_source)
+                            source_counts[source_key] = source_counts.get(source_key, 0) + 1
+                            for frequency, count in result["rows_by_frequency"].items():
+                                rows_by_frequency[frequency] = rows_by_frequency.get(frequency, 0) + int(count)
+                        if result.get("info"):
+                            info_payloads.append(result["info"])
+                    if pending_history_stocks >= flush_stock_count or pending_history_rows >= flush_row_count:
+                        _flush_history_batch()
+                    if pbar is not None:
+                        pbar.update(len(results))
+                        pbar.set_postfix_str(
+                            _cn_progress_postfix(
+                                success_count=success_count,
+                                skipped_count=skipped_count,
+                                failed_count=len(failed),
+                                row_count=sum(rows_by_frequency.values()),
+                                rows_written=rows_written,
+                                last_stock_code=last_stock_code,
+                                last_source=last_source,
+                                source_counts=source_counts,
+                            )
+                        )
+                if pbar is not None:
+                    pbar.close()
+
+        _flush_history_batch()
+        compact_result = self.warehouse.compact_ohlcv() if compact_after and rows_written else None
+
+        summary = {
+            "status": "completed",
+            "market": "CN",
+            "start_date": start_date,
+            "end_date": target_end_date,
+            "adjust": normalized_adjust,
+            "total_stocks": len(stocks),
+            "success_count": success_count,
+            "skipped_count": skipped_count,
+            "failed_count": len(failed),
+            "rows_written": rows_written,
+            "rows_by_frequency": rows_by_frequency,
+            "dataset_path": str(self.layout.dataset_path("ohlcv", layer="clean")),
+            "failed": failed,
+            "fetch_mode": "process_pool" if use_process_pool else "thread_pool",
+            "write_flush_count": write_flush_count,
+            "source_counts": dict(source_counts),
+        }
+        if compact_result:
+            summary["compacted_dataset_path"] = compact_result["dataset_path"]
+        if complete_data:
+            completion = {"stock_info": None, "financial_metrics": None, "industry": None, "failed_stages": []}
+            metadata_workers = max(1, min(int(metadata_max_workers or max_workers or 1), 16))
+            financial_workers = max(1, min(int(financial_max_workers or max_workers or 1), 8))
+            try:
+                completion["stock_info"] = self.refresh_cn_stock_info(
+                    stock_codes=all_codes,
+                    max_workers=metadata_workers,
+                    data_source=effective_data_source,
+                    show_progress=show_progress,
+                )
+            except Exception as exc:
+                completion["failed_stages"].append({"stage": "stock_info", "error": str(exc)})
+            try:
+                completion["financial_metrics"] = self.refresh_cn_financial_metrics(
+                    stock_codes=all_codes,
+                    max_workers=financial_workers,
+                    show_progress=show_progress,
+                )
+            except Exception as exc:
+                completion["failed_stages"].append({"stage": "financial_metrics", "error": str(exc)})
+            try:
+                completion["industry"] = self.backfill_cn_industry(
+                    stock_codes=all_codes,
+                    show_progress=show_progress,
+                )
+            except Exception as exc:
+                completion["failed_stages"].append({"stage": "industry", "error": str(exc)})
+            summary["completion"] = completion
+        if show_progress:
+            print("[SUMMARY] A 股批量下载完成")
+            print(f"  总股票数: {summary['total_stocks']}")
+            print(f"  成功: {summary['success_count']}")
+            print(f"  跳过: {summary['skipped_count']}")
+            print(f"  失败: {summary['failed_count']}")
+            print(f"  写入行数: {summary['rows_written']}")
+            if complete_data:
+                failed_stages = summary.get("completion", {}).get("failed_stages") or []
+                print(f"  补全阶段失败数: {len(failed_stages)}")
+        return summary
+
+    def refresh_cn_stock_info(self, stock_codes=None, limit=None, max_workers=8, data_source=None, show_progress=False):
+        """刷新 A 股 stock_info_registry。"""
+        if stock_codes:
+            codes = [normalize_stock_code(code, market="CN") for code in stock_codes]
+        else:
+            codes = self.get_all_stock_codes(market="CN")[:limit or None]
+            if not codes:
+                codes = [item["code"] for item in CNMarketListFetcher(data_source=data_source or "baostock").fetch(limit=limit)]
+        if limit and stock_codes:
+            codes = codes[:limit]
+
+        payloads = []
+        failed = []
+
+        def _fetch(code):
+            fetcher_kwargs = {"stock_code": code, "data_source": data_source or self.data_source}
+            if show_progress:
+                fetcher_kwargs["verbose"] = False
+            fetcher = CNStockInfoFetcher(**fetcher_kwargs)
+            info = fetcher.fetch() or {}
+            return normalize_stock_info(
+                info,
+                stock_code=code,
+                market="CN",
+                exchange=infer_exchange(code, market="CN"),
+                source=getattr(fetcher, "last_successful_source", None) or info.get("source") or "cn_stock_info",
+            )
+
+        with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), len(codes) or 1))) as executor:
+            future_map = {executor.submit(_fetch, code): code for code in codes}
+            iterator = as_completed(future_map)
+            pbar = None
+            if show_progress:
+                pbar = tqdm(
+                    iterator,
+                    total=len(future_map),
+                    desc="refresh CN stock_info",
+                    unit="stock",
+                    file=sys.stderr,
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+                    "[{elapsed}<{remaining}, {rate_fmt}]",
+                )
+                iterator = pbar
+            for future in iterator:
+                code = future_map[future]
+                try:
+                    payloads.append(future.result())
+                except Exception as exc:
+                    failed.append({"code": code, "error": str(exc)})
+                if pbar is not None:
+                    pbar.set_postfix_str(f"ok={len(payloads)} fail={len(failed)}")
+            if pbar is not None:
+                pbar.close()
+        if payloads:
+            self.warehouse.upsert_stock_info_batch(payloads)
+        if show_progress:
+            print(f"[SUMMARY] A 股 stock_info 刷新完成 success={len(payloads)} failed={len(failed)}")
+        return {"market": "CN", "success_count": len(payloads), "failed_count": len(failed), "failed": failed}
+
+    def backfill_cn_industry(self, stock_codes=None, limit=None, show_progress=False):
+        """使用 BaoStock 补全 A 股行业分类。"""
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self.get_all_stock_codes(market="CN")[:limit or None]
+        if limit and stock_codes:
+            codes = codes[:limit]
+        industry_frame = CNBaoStockIndustryFetcher(verbose=not show_progress).fetch(stock_codes=codes or None)
+        if industry_frame is None or industry_frame.empty:
+            return {"market": "CN", "updated_count": 0, "rows": 0}
+        if codes:
+            industry_frame = industry_frame[industry_frame["stock_code"].isin(set(codes))].copy()
+        payloads = []
+        updated_at = datetime.utcnow().isoformat()
+        for _, row in industry_frame.iterrows():
+            code = normalize_stock_code(row.get("stock_code"), market="CN")
+            payloads.append(
+                normalize_stock_info(
+                    {
+                        "name": row.get("name"),
+                        "industry_l1": row.get("industry_l1"),
+                        "industry_l2": row.get("industry_l2"),
+                        "industry_source": row.get("industry_source") or "baostock",
+                        "industry_updated_at": updated_at,
+                    },
+                    stock_code=code,
+                    market="CN",
+                    source=row.get("industry_source") or "baostock_industry",
+                )
+            )
+        if payloads:
+            self.warehouse.upsert_stock_info_batch(payloads)
+        if show_progress:
+            print(f"[SUMMARY] A 股行业补全完成 updated={len(payloads)}")
+        return {"market": "CN", "updated_count": len(payloads), "rows": len(industry_frame)}
+
+    def refresh_cn_financial_metrics(
+        self,
+        stock_codes=None,
+        limit=None,
+        max_workers=4,
+        year=None,
+        quarter=None,
+        show_progress=False,
+    ):
+        """刷新 A 股 valuation_snapshot 与 financial_statement_metrics。"""
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self.get_all_stock_codes(market="CN")[:limit or None]
+        if limit and stock_codes:
+            codes = codes[:limit]
+        info_frame = self.warehouse.read_stock_info(stock_codes=codes or None, market="CN")
+        info_map = {}
+        if info_frame is not None and not info_frame.empty:
+            info_map = {
+                str(row["stock_code"]): row.to_dict()
+                for _, row in info_frame.drop_duplicates(subset=["stock_code"], keep="last").iterrows()
+            }
+
+        valuation_rows = []
+        financial_rows = []
+        failed = []
+        today = datetime.utcnow().date().isoformat()
+        for code in codes:
+            info = info_map.get(code)
+            if info:
+                valuation_rows.append(
+                    normalize_valuation_snapshot(
+                        info,
+                        stock_code=code,
+                        market="CN",
+                        trade_date=today,
+                        source=info.get("source") or "stock_info_registry",
+                    )
+                )
+
+        def _fetch_financial(code):
+            metrics = CNBaoStockFinancialFetcher(code, verbose=not show_progress).fetch_latest(year=year, quarter=quarter)
+            if not metrics:
+                return None
+            return normalize_financial_statement_metrics(
+                metrics,
+                stock_code=code,
+                market="CN",
+                source=metrics.get("source") or "baostock_financial",
+            )
+
+        with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), len(codes) or 1))) as executor:
+            future_map = {executor.submit(_fetch_financial, code): code for code in codes}
+            for future in as_completed(future_map):
+                code = future_map[future]
+                try:
+                    row = future.result()
+                    if row:
+                        financial_rows.append(row)
+                except Exception as exc:
+                    failed.append({"code": code, "error": str(exc)})
+
+        valuation_result = (
+            self.warehouse.upsert_valuation_snapshots(pd.DataFrame(valuation_rows))
+            if valuation_rows else {"rows": 0}
+        )
+        financial_result = (
+            self.warehouse.upsert_financial_statement_metrics(pd.DataFrame(financial_rows))
+            if financial_rows else {"rows": 0}
+        )
+        if show_progress:
+            print(
+                f"[SUMMARY] A 股财务刷新完成 valuation={valuation_result.get('rows', 0)} "
+                f"financial={financial_result.get('rows', 0)} failed={len(failed)}"
+            )
+        return {
+            "market": "CN",
+            "valuation_snapshot": valuation_result,
+            "financial_statement_metrics": financial_result,
+            "failed_count": len(failed),
+            "failed": failed,
+        }
+
+    @staticmethod
+    def _field_coverage(frame, fields):
+        coverage = {}
+        total = 0 if frame is None else len(frame)
+        for field in fields:
+            if frame is None or frame.empty or field not in frame.columns:
+                non_null = 0
+            else:
+                series = frame[field]
+                non_null = int((series.notna() & (series.astype(str).str.strip() != "")).sum())
+            coverage[field] = {
+                "non_null_count": non_null,
+                "total": int(total),
+                "coverage": float(non_null / total) if total else 0.0,
+            }
+        return coverage
+
+    def cn_backtest_coverage_report(
+        self,
+        stock_codes=None,
+        limit=None,
+        min_ohlcv_rows=120,
+        adjust="qfq",
+        frequency="daily",
+    ):
+        """检查 A 股数据是否足够支撑本地因子/回测链路。"""
+        normalized_adjust = normalize_adjust(adjust)
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self.get_all_stock_codes(market="CN", frequency=frequency, adjust=normalized_adjust)
+        if limit:
+            codes = codes[:limit]
+
+        ohlcv = self.warehouse.read_ohlcv(
+            stock_code=codes or None,
+            market="CN",
+            asset_type="equity",
+            frequency=frequency,
+            adjust=normalized_adjust,
+        )
+        if (not codes) and ohlcv is not None and not ohlcv.empty:
+            codes = sorted(ohlcv["stock_code"].astype(str).unique().tolist())
+
+        info = self.warehouse.read_stock_info(stock_codes=codes or None, market="CN")
+        valuation = self.warehouse.read_valuation_snapshots(stock_codes=codes or None, market="CN")
+        financial = self.warehouse.read_financial_statement_metrics(stock_codes=codes or None, market="CN")
+        features = self.warehouse.read_features(
+            stock_code=codes or None,
+            market="CN",
+            asset_type="equity",
+            frequency=frequency,
+            adjust=normalized_adjust,
+        )
+
+        row_counts = {}
+        latest_dates = {}
+        if ohlcv is not None and not ohlcv.empty:
+            grouped = ohlcv.groupby("stock_code")
+            row_counts = {str(code): int(len(frame)) for code, frame in grouped}
+            latest_dates = {str(code): str(pd.to_datetime(frame["trade_date"]).max().date()) for code, frame in grouped}
+        covered_codes = [code for code, count in row_counts.items() if count >= int(min_ohlcv_rows)]
+
+        info_coverage = self._field_coverage(
+            info,
+            ["name", "current_price", "amount", "turnover_rate", "market_cap", "pe_ratio", "pb_ratio"],
+        )
+        industry_l1_count = 0
+        industry_l2_count = 0
+        if info is not None and not info.empty:
+            industry_l1_count = int((info.get("industry_l1").notna() & (info.get("industry_l1").astype(str).str.strip() != "")).sum()) if "industry_l1" in info else 0
+            industry_l2_count = int((info.get("industry_l2").notna() & (info.get("industry_l2").astype(str).str.strip() != "")).sum()) if "industry_l2" in info else 0
+
+        blocking_reasons = []
+        if not codes:
+            blocking_reasons.append("cn_universe_empty")
+        if codes and len(covered_codes) < len(codes):
+            blocking_reasons.append("cn_ohlcv_rows_below_threshold")
+
+        analyzer_sample = {"ok": False, "stock_code": None, "rows": 0, "error": None}
+        if codes:
+            try:
+                from core import StockAnalyzer
+
+                analyzer = StockAnalyzer(
+                    db_dir=str(self.layout.base_path.parent),
+                    data_base_dir=str(self.layout.base_path),
+                    market="CN",
+                )
+                try:
+                    sample_end_date = latest_dates.get(codes[0])
+                    sample = analyzer.load_stock_data(
+                        codes[0],
+                        days=max(365, int(min_ohlcv_rows)),
+                        end_date=sample_end_date,
+                    )
+                    analyzer_sample = {
+                        "ok": sample is not None and not sample.empty,
+                        "stock_code": codes[0],
+                        "rows": 0 if sample is None else int(len(sample)),
+                        "error": None,
+                    }
+                finally:
+                    analyzer.close()
+            except Exception as exc:
+                analyzer_sample = {"ok": False, "stock_code": codes[0], "rows": 0, "error": str(exc)}
+        if codes and not analyzer_sample["ok"]:
+            blocking_reasons.append("stock_analyzer_cn_load_failed")
+
+        return {
+            "market": "CN",
+            "stock_count": len(codes),
+            "ohlcv": {
+                "frequency": frequency,
+                "adjust": normalized_adjust,
+                "row_count": int(len(ohlcv)) if ohlcv is not None else 0,
+                "covered_stock_count": len(covered_codes),
+                "min_required_rows": int(min_ohlcv_rows),
+                "row_counts": row_counts,
+                "latest_trade_dates": latest_dates,
+            },
+            "stock_info": {
+                "row_count": int(len(info)) if info is not None else 0,
+                "coverage": info_coverage,
+            },
+            "industry": {
+                "industry_l1_count": industry_l1_count,
+                "industry_l2_count": industry_l2_count,
+            },
+            "financial": {
+                "valuation_stock_count": int(valuation["stock_code"].nunique()) if valuation is not None and not valuation.empty and "stock_code" in valuation else 0,
+                "financial_stock_count": int(financial["stock_code"].nunique()) if financial is not None and not financial.empty and "stock_code" in financial else 0,
+            },
+            "features": {
+                "row_count": int(len(features)) if features is not None else 0,
+                "stock_count": int(features["stock_code"].nunique()) if features is not None and not features.empty and "stock_code" in features else 0,
+            },
+            "analyzer_sample": analyzer_sample,
+            "backtest_ready": not blocking_reasons,
+            "blocking_reasons": blocking_reasons,
+        }
 
     def get_hk_ohlcv(self, stock_code, start_date=None, end_date=None, frequency="daily", adjust="qfq"):
         """读取统一 clean 层中的港股 OHLCV 数据。"""

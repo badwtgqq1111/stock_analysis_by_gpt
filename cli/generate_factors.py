@@ -11,31 +11,37 @@ from data.ingest.service import MarketDataService
 def main_generate_factors(
     days=365,
     factor_set="alpha_zoo_hk",
+    market="HK",
+    stock_codes=None,
     stock_limit=None,
     max_workers=1,
     show_progress=False,
     export_csv=None,
 ):
     """独立批量生成因子并落库到 feature 层。"""
+    normalized_market = (market or "HK").upper()
     print("=" * 80)
-    print("港股技术分析系统 - 因子生成（独立模式）")
+    print(f"{normalized_market} 技术分析系统 - 因子生成（独立模式）")
     print("=" * 80)
 
     service = MarketDataService()
     try:
-        stock_codes = service.get_all_stock_codes(
-            market="HK",
-            asset_type="equity",
-            frequency="daily",
-            adjust="qfq",
-        )
+        if stock_codes is None:
+            stock_codes = service.get_all_stock_codes(
+                market=normalized_market,
+                asset_type="equity",
+                frequency="daily",
+                adjust="qfq",
+            )
+        else:
+            stock_codes = [str(code).strip() for code in stock_codes if str(code).strip()]
         if stock_limit is not None:
             stock_codes = stock_codes[: max(int(stock_limit), 0)]
 
         generation_result = service.generate_factor_set(
             stock_codes=stock_codes,
             factor_set=factor_set,
-            market="HK",
+            market=normalized_market,
             frequency="daily",
             adjust="qfq",
             days=days,
@@ -71,9 +77,10 @@ def main_generate_factors(
             params={
                 "days": int(days),
                 "factor_set": factor_set,
+                "stock_codes": list(stock_codes or []),
                 "stock_limit": None if stock_limit is None else int(stock_limit),
                 "max_workers": int(max_workers),
-                "market": "HK",
+                "market": normalized_market,
                 "frequency": "daily",
                 "adjust": "qfq",
                 "warmup_days": int(generation_result.get("warmup_days", 0)),

@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover
     ak = None
 
 
-DEFAULT_SOURCE_PRIORITY = ["akshare_sina", "akshare_eastmoney", "tencent"]
+DEFAULT_SOURCE_PRIORITY = ["tencent", "akshare_sina", "baostock", "akshare_eastmoney"]
 
 
 def normalize_cn_stock_code(stock_code):
@@ -60,11 +60,13 @@ def build_source_priority(data_source=None, source_priority=None):
     normalized = str(data_source).strip().lower()
     if normalized == "akshare":
         return list(DEFAULT_SOURCE_PRIORITY)
+    if normalized == "baostock":
+        return ["baostock", "tencent", "akshare_sina", "akshare_eastmoney"]
     if normalized in {"sina", "akshare_sina"}:
-        return ["akshare_sina", "akshare_eastmoney", "tencent"]
+        return ["akshare_sina", "tencent", "baostock", "akshare_eastmoney"]
     if normalized in {"eastmoney", "akshare_eastmoney", "em"}:
-        return ["akshare_eastmoney", "akshare_sina", "tencent"]
+        return ["akshare_eastmoney", "tencent", "akshare_sina", "baostock"]
     if normalized == "tencent":
-        return ["tencent", "akshare_sina", "akshare_eastmoney"]
+        return ["tencent", "akshare_sina", "baostock", "akshare_eastmoney"]
 
     return list(DEFAULT_SOURCE_PRIORITY)

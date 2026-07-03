@@ -22,7 +22,16 @@ class CNStockDataLoader(BaseMarketDataLoader):
         self.data_source = data_source
         self.warehouse = warehouse or MarketDataWarehouse(self.layout)
 
-    def fetch_history(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily"):
+    def fetch_history(
+        self,
+        stock_code,
+        start_date=None,
+        end_date=None,
+        num_records=None,
+        adjust="qfq",
+        period="daily",
+        verbose=True,
+    ):
         """抓取并标准化 A 股历史数据。"""
         normalized_code = normalize_stock_code(stock_code, market="CN")
         normalized_period = normalize_period(period)
@@ -31,6 +40,7 @@ class CNStockDataLoader(BaseMarketDataLoader):
             db_dir=self.db_dir,
             data_source=self.data_source,
             adjust=adjust,
+            verbose=verbose,
         )
         frame = fetcher.fetch(
             start_date=start_date,
@@ -54,10 +64,10 @@ class CNStockDataLoader(BaseMarketDataLoader):
             currency="CNY",
         )
 
-    def fetch_info(self, stock_code):
+    def fetch_info(self, stock_code, verbose=True):
         """抓取并标准化 A 股基础信息。"""
         normalized_code = normalize_stock_code(stock_code, market="CN")
-        fetcher = CNStockInfoFetcher(normalized_code, data_source=self.data_source)
+        fetcher = CNStockInfoFetcher(normalized_code, data_source=self.data_source, verbose=verbose)
         info = fetcher.fetch()
         if info is None:
             return None
@@ -70,7 +80,17 @@ class CNStockDataLoader(BaseMarketDataLoader):
             source=source,
         )
 
-    def sync(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily", include_info=True):
+    def sync(
+        self,
+        stock_code,
+        start_date=None,
+        end_date=None,
+        num_records=None,
+        adjust="qfq",
+        period="daily",
+        include_info=True,
+        verbose=True,
+    ):
         """抓取 A 股数据并写入新数据层。"""
         history = self.fetch_history(
             stock_code,
@@ -79,6 +99,7 @@ class CNStockDataLoader(BaseMarketDataLoader):
             num_records=num_records,
             adjust=adjust,
             period=period,
+            verbose=verbose,
         )
         result = {"history_rows": 0, "info_rows": 0, "parquet_path": None}
         if history is not None and not history.empty:
@@ -87,7 +108,7 @@ class CNStockDataLoader(BaseMarketDataLoader):
             result["parquet_path"] = warehouse_result["dataset_path"]
 
         if include_info:
-            info = self.fetch_info(stock_code)
+            info = self.fetch_info(stock_code, verbose=verbose)
             if info:
                 result["info_rows"] = self.warehouse.upsert_stock_info(info)["rows"]
 

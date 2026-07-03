@@ -8,7 +8,7 @@ import pandas as pd
 class DataLoaderMixin:
     """Methods for loading stock OHLCV data from the warehouse."""
 
-    def load_stock_data(self, stock_code, days=365):
+    def load_stock_data(self, stock_code, days=365, end_date=None):
         """
         加载股票的历史数据
 
@@ -20,9 +20,7 @@ class DataLoaderMixin:
             DataFrame: 股票数据
         """
         try:
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=days)
-            batch_map = self.load_stock_data_batch([stock_code], days=days)
+            batch_map = self.load_stock_data_batch([stock_code], days=days, end_date=end_date)
             return batch_map.get(stock_code)
         except Exception as e:
             print(f"[ERROR] 加载股票 {stock_code} 数据失败: {e}")
@@ -55,10 +53,10 @@ class DataLoaderMixin:
         start_date = end_dt - timedelta(days=days)
         warehouse_df = self.market_warehouse.read_ohlcv(
             stock_code=normalized_codes,
-            market="HK",
-            asset_type="equity",
-            frequency="daily",
-            adjust="qfq",
+            market=getattr(self, "market", "HK"),
+            asset_type=getattr(self, "asset_type", "equity"),
+            frequency=getattr(self, "frequency", "daily"),
+            adjust=getattr(self, "adjust", "qfq"),
             start_date=start_date.strftime('%Y-%m-%d'),
             end_date=end_dt.strftime('%Y-%m-%d'),
         )

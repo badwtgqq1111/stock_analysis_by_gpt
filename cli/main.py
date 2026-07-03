@@ -41,6 +41,9 @@ def run_cli(argv=None):
                         help='全市场分析模式：factor / strategy / lightgbm，默认 factor')
     parser.add_argument('--factor-set', dest='factor_set', default=DEFAULT_FACTOR_SET,
                         help=f'因子/LightGBM 模式下使用的因子集，默认 {DEFAULT_FACTOR_SET}')
+    parser.add_argument('--market', dest='market', default='HK',
+                        choices=['HK', 'CN', 'hk', 'cn'],
+                        help='市场分区：HK / CN，默认 HK')
     parser.add_argument('--max-features', dest='max_features', type=int, default=0,
                         help='LightGBM 模式下的最大因子数（先训练→按 importance 筛到 TopN→重训），0 表示使用全部因子')
     parser.add_argument('--model-objective', dest='model_objective', default='regression_csrank',
@@ -166,6 +169,8 @@ def run_cli(argv=None):
         return main_generate_factors(
             days=args.days,
             factor_set=args.factor_set,
+            market=args.market,
+            stock_codes=args.stock_codes,
             stock_limit=args.stock_limit,
             max_workers=args.max_workers,
             show_progress=args.show_progress,
@@ -176,6 +181,7 @@ def run_cli(argv=None):
             days=args.days,
             top_n=args.top_n,
             initial_capital=args.initial_capital,
+            market=args.market,
             export_csv=args.export_csv,
             persist_signals=args.persist_signals,
             batch_id=args.batch_id,

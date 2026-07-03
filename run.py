@@ -94,6 +94,33 @@ def _run_sync(args):
         service.close()
 
 
+def _run_sync_cn(args):
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        kwargs = dict(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            adjust=args.adjust,
+            max_workers=args.max_workers,
+            limit=args.limit,
+            stock_codes=args.stock_codes,
+            skip_existing=args.skip_existing,
+            show_progress=args.show_progress,
+            include_stock_info=args.include_stock_info,
+            complete_data=args.complete_data,
+            metadata_max_workers=args.metadata_max_workers,
+            financial_max_workers=args.financial_max_workers,
+        )
+        if args.frequencies:
+            kwargs["frequencies"] = tuple(args.frequencies.split(","))
+        summary = service.bulk_sync_cn_history(**kwargs)
+        print(f"A 股同步完成: {summary}")
+    finally:
+        service.close()
+
+
 def _run_refresh_stock_info(args):
     from data.ingest.service import MarketDataService
 
@@ -107,6 +134,105 @@ def _run_refresh_stock_info(args):
             show_progress=args.show_progress,
         )
         print(f"港股财务/流动性快照刷新完成: {summary}")
+    finally:
+        service.close()
+
+
+def _run_refresh_cn_stock_info(args):
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        summary = service.refresh_cn_stock_info(
+            stock_codes=args.stock_codes,
+            limit=args.limit,
+            max_workers=args.max_workers,
+            data_source=args.data_source,
+            show_progress=args.show_progress,
+        )
+        print(f"A 股 stock_info 刷新完成: {summary}")
+    finally:
+        service.close()
+
+
+def _run_backfill_cn_industry(args):
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        summary = service.backfill_cn_industry(
+            stock_codes=args.stock_codes,
+            limit=args.limit,
+            show_progress=args.show_progress,
+        )
+        print(f"A 股行业补全完成: {summary}")
+    finally:
+        service.close()
+
+
+def _run_refresh_cn_financial_metrics(args):
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        summary = service.refresh_cn_financial_metrics(
+            stock_codes=args.stock_codes,
+            limit=args.limit,
+            max_workers=args.max_workers,
+            year=args.year,
+            quarter=args.quarter,
+            show_progress=args.show_progress,
+        )
+        print(f"A 股估值/财务刷新完成: {summary}")
+    finally:
+        service.close()
+
+
+def _run_cn_coverage_check(args):
+    import json as _json
+
+    from data.ingest.service import MarketDataService
+
+    service = MarketDataService(base_dir=args.base_dir, data_source=args.data_source)
+    try:
+        report = service.cn_backtest_coverage_report(
+            stock_codes=args.stock_codes,
+            limit=args.limit,
+            min_ohlcv_rows=args.min_ohlcv_rows,
+            adjust=args.adjust,
+            frequency=args.frequency,
+        )
+        if args.output_json:
+            print(_json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        else:
+            print("=" * 60)
+            print("A 股回测链路完整性检查")
+            print("=" * 60)
+            print(f"股票数: {report['stock_count']}")
+            print(
+                f"OHLCV 覆盖: {report['ohlcv']['covered_stock_count']}/{report['stock_count']} "
+                f"rows={report['ohlcv']['row_count']} min_rows={report['ohlcv']['min_required_rows']}"
+            )
+            print(f"stock_info rows: {report['stock_info']['row_count']}")
+            print(
+                f"行业覆盖: l1={report['industry']['industry_l1_count']} "
+                f"l2={report['industry']['industry_l2_count']}"
+            )
+            print(
+                f"财务覆盖: valuation={report['financial']['valuation_stock_count']} "
+                f"financial={report['financial']['financial_stock_count']}"
+            )
+            print(
+                f"features: rows={report['features']['row_count']} "
+                f"stocks={report['features']['stock_count']}"
+            )
+            print(f"Analyzer 样本: {report['analyzer_sample']}")
+            print(f"backtest_ready: {report['backtest_ready']}")
+            if report["blocking_reasons"]:
+                print("blocking_reasons:")
+                for reason in report["blocking_reasons"]:
+                    print(f"  - {reason}")
+            print("=" * 60)
     finally:
         service.close()
 
@@ -2089,6 +2215,30 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_sync(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "sync-cn":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py sync-cn", description="同步 A 股多周期历史数据到本地仓库"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源 (akshare / eastmoney / sina / tencent / baostock)")
+        parser.add_argument("--start-date", default="2014-01-01", help="起始日期 YYYY-MM-DD")
+        parser.add_argument("--end-date", default=None, help="结束日期 YYYY-MM-DD，默认今天")
+        parser.add_argument("--adjust", default="qfq", help="复权方式 (qfq / hfq / raw)")
+        parser.add_argument("--max-workers", type=int, default=12, help="并发线程数")
+        parser.add_argument("--limit", type=int, default=None, help="限制同步股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--skip-existing", action="store_true", help="跳过已有数据")
+        parser.add_argument("--include-stock-info", action="store_true", help="同步行情时同时刷新 stock_info；默认建议用 refresh-cn-stock-info 单独补")
+        parser.add_argument("--complete-data", action="store_true", help="行情同步后继续补齐 stock_info、财务和行业数据")
+        parser.add_argument("--metadata-max-workers", type=int, default=None, help="--complete-data 下 stock_info 补齐并发数")
+        parser.add_argument("--financial-max-workers", type=int, default=None, help="--complete-data 下财务指标补齐并发数")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+        parser.add_argument("--frequencies", default=None, help="同步频率，逗号分隔 (daily,1min,5min,15min,30min,60min)")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_sync_cn(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "industry-coverage":
         import argparse
 
@@ -2170,6 +2320,20 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_backfill_industry(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "backfill-cn-industry":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py backfill-cn-industry", description="使用 BaoStock 补全 A 股行业分类字段"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="baostock", help="数据源")
+        parser.add_argument("--limit", type=int, default=None, help="限制补全股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_backfill_cn_industry(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "refresh-stock-info":
         import argparse
 
@@ -2185,6 +2349,21 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_refresh_stock_info(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "refresh-cn-stock-info":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py refresh-cn-stock-info", description="刷新 A 股行情/估值快照到 stock_info_registry"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="akshare", help="数据源 (akshare / baostock)")
+        parser.add_argument("--max-workers", type=int, default=8, help="并发线程数")
+        parser.add_argument("--limit", type=int, default=None, help="限制刷新股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_refresh_cn_stock_info(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "refresh-financial-metrics":
         import argparse
 
@@ -2201,6 +2380,24 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_refresh_financial_metrics(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "refresh-cn-financial-metrics":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py refresh-cn-financial-metrics",
+            description="刷新 A 股估值快照和财务指标到 valuation_snapshot / financial_statement_metrics",
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="baostock", help="数据源")
+        parser.add_argument("--max-workers", type=int, default=4, help="并发线程数")
+        parser.add_argument("--limit", type=int, default=None, help="限制刷新股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--year", type=int, default=None, help="财报年份")
+        parser.add_argument("--quarter", type=int, default=None, help="财报季度 1-4")
+        parser.add_argument("--show-progress", action="store_true", help="显示进度")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_refresh_cn_financial_metrics(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "financial-coverage":
         import argparse
 
@@ -2214,6 +2411,23 @@ def main():
 
         args = parser.parse_args(sys.argv[2:])
         _run_financial_coverage(args)
+    elif len(sys.argv) > 1 and sys.argv[1] == "cn-coverage-check":
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="run.py cn-coverage-check", description="检查 A 股数据链路是否满足本地因子/回测"
+        )
+        parser.add_argument("--base-dir", default="./assets/data", help="数据根目录")
+        parser.add_argument("--data-source", default="baostock", help="数据源")
+        parser.add_argument("--limit", type=int, default=None, help="限制检查股票数量")
+        parser.add_argument("--stock-codes", nargs="*", default=None, help="指定股票代码列表")
+        parser.add_argument("--min-ohlcv-rows", type=int, default=120, help="每只股票最少 OHLCV 行数")
+        parser.add_argument("--frequency", default="daily", help="检查频率")
+        parser.add_argument("--adjust", default="qfq", help="复权方式")
+        parser.add_argument("--json", dest="output_json", action="store_true", help="JSON 格式输出")
+
+        args = parser.parse_args(sys.argv[2:])
+        _run_cn_coverage_check(args)
     elif len(sys.argv) > 1 and sys.argv[1] == "factor-list":
         import argparse
 

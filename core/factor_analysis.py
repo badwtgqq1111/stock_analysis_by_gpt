@@ -29,6 +29,9 @@ class FactorAnalysisMixin:
         stock_codes = list(stock_codes or [])
         if not stock_codes:
             return []
+        market = getattr(self, "market", "HK")
+        frequency = getattr(self, "frequency", "daily")
+        adjust = getattr(self, "adjust", "qfq")
 
         warmup_days = max(days + 180, days)
         batch_results = []
@@ -51,12 +54,12 @@ class FactorAnalysisMixin:
 
             ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
 
-            stock_info = self.market_warehouse.get_stock_info(stock_code)
+            stock_info = self.market_warehouse.get_stock_info(stock_code, market=market)
             if stock_info and stock_info.get("total_shares"):
                 ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
 
             factor = create_factor_set(factor_set)
-            context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
+            context = FactorContext(stock_code=stock_code, market=market, frequency=frequency, adjust=adjust)
             feature_frame = factor.transform(ohlcv_frame, context=context)
             if feature_frame is None or feature_frame.empty:
                 if callable(progress_callback):
@@ -287,7 +290,12 @@ class FactorAnalysisMixin:
             ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
 
         factor = create_factor_set(factor_set)
-        context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
+        context = FactorContext(
+            stock_code=stock_code,
+            market=getattr(self, "market", "HK"),
+            frequency=getattr(self, "frequency", "daily"),
+            adjust=getattr(self, "adjust", "qfq"),
+        )
         feature_frame = factor.transform(ohlcv_frame, context=context)
         if feature_frame is None or feature_frame.empty:
             return None

@@ -78,6 +78,7 @@ class BacktestMixin:
             market_data = build_market_info_from_warehouse(
                 stock_codes,
                 self.market_warehouse,
+                market=getattr(self, "market", "HK"),
             )
             allow_live_market_filter_fetch = str(
                 os.environ.get("ALLOW_LIVE_MARKET_FILTER_FETCH", "")
@@ -92,7 +93,7 @@ class BacktestMixin:
                     and market_data[code].pb_ratio <= 0
                 )
             ]
-            if missing_market_data_codes and allow_live_market_filter_fetch:
+            if missing_market_data_codes and allow_live_market_filter_fetch and getattr(self, "market", "HK") == "HK":
                 print(f"[FILTER] 本地仓库缺少 {len(missing_market_data_codes)} 只股票的市场数据，回退实时抓取...")
                 live_market_data = fetch_market_data_batch(
                     missing_market_data_codes,
@@ -115,7 +116,10 @@ class BacktestMixin:
             if min_ipo_days is not None:
                 print("[FILTER] 正在统计各股票上市天数...")
                 trading_days = compute_trading_days_batch(
-                    stock_codes, self.market_warehouse, max_workers=8,
+                    stock_codes,
+                    self.market_warehouse,
+                    max_workers=8,
+                    market=getattr(self, "market", "HK"),
                 )
 
             filter_result = apply_filters(

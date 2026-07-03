@@ -104,10 +104,10 @@ class ValidationMixin:
 
         feature_long = self.market_warehouse.read_features(
             stock_code=stock_code,
-            market="HK",
-            asset_type="equity",
-            frequency="daily",
-            adjust="qfq",
+            market=getattr(self, "market", "HK"),
+            asset_type=getattr(self, "asset_type", "equity"),
+            frequency=getattr(self, "frequency", "daily"),
+            adjust=getattr(self, "adjust", "qfq"),
             feature_set=factor_set,
             feature_version=feature_version,
             feature_config_hash=feature_config_hash,
@@ -147,6 +147,9 @@ class ValidationMixin:
         stock_codes = list(stock_codes or [])
         if not stock_codes:
             return
+        market = getattr(self, "market", "HK")
+        frequency = getattr(self, "frequency", "daily")
+        adjust = getattr(self, "adjust", "qfq")
 
         validated_feature_names = [str(item) for item in (validated_feature_names or []) if str(item).strip()]
         validated_feature_name_set = set(validated_feature_names)
@@ -190,9 +193,9 @@ class ValidationMixin:
                 ohlcv_frame = normalize_ohlcv_frame(
                     full_data.reset_index(),
                     stock_code=stock_code,
-                    market="HK",
+                    market=market,
                 )
-                stock_info = self.market_warehouse.get_stock_info(stock_code)
+                stock_info = self.market_warehouse.get_stock_info(stock_code, market=market)
                 if stock_info and stock_info.get("total_shares"):
                     ohlcv_frame["total_shares"] = float(stock_info["total_shares"])
                 # Compute forward returns here (in the worker thread) so we
@@ -211,7 +214,7 @@ class ValidationMixin:
                 )
                 if feature_long.empty:
                     factor = create_factor_set(factor_set, config=factor_set_config)
-                    context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
+                    context = FactorContext(stock_code=stock_code, market=market, frequency=frequency, adjust=adjust)
                     feature_frame = factor.transform(ohlcv_frame, context=context)
                     if feature_frame is None or feature_frame.empty:
                         return None
@@ -225,9 +228,9 @@ class ValidationMixin:
                     feature_long = normalize_feature_frame(
                         feature_frame.reset_index().rename(columns={feature_frame.index.name or "index": "trade_date"}),
                         stock_code=stock_code,
-                        market="HK",
-                        frequency="daily",
-                        adjust="qfq",
+                        market=market,
+                        frequency=frequency,
+                        adjust=adjust,
                         feature_set=factor_set,
                         feature_version=materialization["feature_version"],
                         feature_config_hash=materialization["feature_config_hash"],

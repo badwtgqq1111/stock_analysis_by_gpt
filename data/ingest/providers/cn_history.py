@@ -12,6 +12,7 @@ from data.ingest.providers.cn_common import (
     normalize_cn_symbol,
     to_sina_symbol,
 )
+from data.ingest.providers.cn_baostock import CNBaoStockHistoryFetcher
 from data.ingest.providers.history_utils import (
     apply_date_filters,
     call_with_retries,
@@ -28,12 +29,21 @@ from data.store.database_manager import DatabaseManager
 class CNHistoryDataFetcher:
     """获取 A 股历史数据，支持日线与分钟线。"""
 
-    def __init__(self, stock_code, db_dir="./assets", data_source=None, adjust="qfq", source_priority=None):
+    def __init__(
+        self,
+        stock_code,
+        db_dir="./assets",
+        data_source=None,
+        adjust="qfq",
+        source_priority=None,
+        verbose=True,
+    ):
         self.stock_code = normalize_cn_stock_code(stock_code)
         self.symbol = normalize_cn_symbol(stock_code)
         self.prefixed_symbol = to_sina_symbol(stock_code)
         self.default_adjust = normalize_adjust(adjust)
         self.source_priority = build_source_priority(data_source, source_priority)
+        self.verbose = verbose
         self.data = None
         self.last_successful_source = None
         self.db_manager = DatabaseManager(db_dir)
@@ -60,6 +70,15 @@ class CNHistoryDataFetcher:
         )
         return apply_date_filters(normalized_df, start_date, end_date, num_records)
 
+    def _fetch_baostock_daily_hist(self, start_date=None, end_date=None, num_records=None, adjust=None):
+        fetcher = CNBaoStockHistoryFetcher(self.stock_code, verbose=self.verbose)
+        return fetcher.fetch(
+            start_date=start_date,
+            end_date=end_date,
+            num_records=num_records,
+            adjust=adjust or self.default_adjust,
+        )
+
     def _fetch_akshare_eastmoney_daily_hist(self, start_date=None, end_date=None, num_records=None, adjust=None):
         if ak is None:
             raise ImportError("akshare 未安装")
@@ -73,9 +92,10 @@ class CNHistoryDataFetcher:
                 start_date=start_date_str,
                 end_date=end_date_str,
                 adjust=adjust or self.default_adjust,
+                timeout=3,
             ),
-            attempts=3,
-            sleep_seconds=1.0,
+            attempts=1,
+            sleep_seconds=0.2,
         )
         normalized_df = normalize_history_dataframe(
             df,
@@ -95,9 +115,10 @@ class CNHistoryDataFetcher:
                 start_date=start_date_str,
                 end_date=end_date_str,
                 adjust=adjust or self.default_adjust,
+                timeout=4,
             ),
-            attempts=2,
-            sleep_seconds=0.5,
+            attempts=1,
+            sleep_seconds=0.2,
         )
         normalized_df = normalize_history_dataframe(
             df,
@@ -167,7 +188,8 @@ class CNHistoryDataFetcher:
     def fetch(self, start_date=None, end_date=None, num_records=None, adjust=None, period="daily"):
         normalized_period = normalize_period(period)
         normalized_adjust = normalize_adjust(adjust or self.default_adjust)
-        print(f"[INFO] 正在获取 {self.stock_code} 的 {normalized_period} 历史数据...")
+        if self.verbose:
+            print(f"[INFO] 正在获取 {self.stock_code} 的 {normalized_period} 历史数据...")
 
         if is_intraday_period(normalized_period):
             fetchers = {
@@ -188,6 +210,12 @@ class CNHistoryDataFetcher:
             }
         else:
             fetchers = {
+                "baostock": lambda: self._fetch_baostock_daily_hist(
+                    start_date,
+                    end_date,
+                    num_records,
+                    normalized_adjust,
+                ),
                 "akshare_sina": lambda: self._fetch_akshare_sina_daily_hist(
                     start_date,
                     end_date,
@@ -215,18 +243,22 @@ class CNHistoryDataFetcher:
             try:
                 df = fetcher()
                 if df is None or df.empty:
-                    print(f"[WARNING] {source_name} 未返回有效历史数据")
+                    if self.verbose:
+                        print(f"[WARNING] {source_name} 未返回有效历史数据")
                     continue
 
                 self.data = df
                 self.last_successful_source = source_name
-                print()
-                print(f"[OK] 成功获取 {len(df)} 条记录，来源：{source_name}")
-                print(f"     周期：{normalized_period}")
-                print(f"     时间范围：{df.index[0].strftime('%Y-%m-%d %H:%M:%S')} 至 {df.index[-1].strftime('%Y-%m-%d %H:%M:%S')}")
+                if self.verbose:
+                    print()
+                    print(f"[OK] 成功获取 {len(df)} 条记录，来源：{source_name}")
+                    print(f"     周期：{normalized_period}")
+                    print(f"     时间范围：{df.index[0].strftime('%Y-%m-%d %H:%M:%S')} 至 {df.index[-1].strftime('%Y-%m-%d %H:%M:%S')}")
                 return df
             except Exception as exc:
-                print(f"[WARNING] {source_name} 获取历史数据失败：{exc}")
+                if self.verbose:
+                    print(f"[WARNING] {source_name} 获取历史数据失败：{exc}")
 
-        print(f"[ERROR] 未能获取 {self.stock_code} 的 {normalized_period} 历史数据")
+        if self.verbose:
+            print(f"[ERROR] 未能获取 {self.stock_code} 的 {normalized_period} 历史数据")
         return None

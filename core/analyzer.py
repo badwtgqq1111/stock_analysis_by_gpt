@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from backtest_engine import backtest_strategy as _backtest_strategy_fn
+from data.model import infer_exchange, normalize_adjust
 from data.store import DataLayout, MarketDataWarehouse
 from factor_engine.signals import DEFAULT_SIGNAL_RECIPES, SignalRecipeRunner
 
@@ -41,6 +42,11 @@ class StockAnalyzer(
         db_dir="./assets",
         signal_recipes=None,
         market_read_only=True,
+        market="HK",
+        asset_type="equity",
+        frequency="daily",
+        adjust="qfq",
+        data_base_dir=None,
     ):
         """
         初始化分析器
@@ -50,8 +56,13 @@ class StockAnalyzer(
             signal_recipes: 信号 recipe 名称列表
         """
         self.db_dir = Path(db_dir)
-        self.data_layout = DataLayout(base_dir=str(self.db_dir / "data"))
+        self.data_layout = DataLayout(base_dir=str(data_base_dir or (self.db_dir / "data")))
         self.market_warehouse = MarketDataWarehouse(self.data_layout, read_only=market_read_only)
+        self.market = (market or "HK").upper()
+        self.asset_type = asset_type or "equity"
+        self.frequency = frequency or "daily"
+        self.adjust = normalize_adjust(adjust)
+        self.exchange = infer_exchange("000001" if self.market == "CN" else "00001", market=self.market)
         self.signal_recipes = tuple(signal_recipes or DEFAULT_SIGNAL_RECIPES)
         self.signal_recipe_runner = SignalRecipeRunner(self.signal_recipes)
 
@@ -64,10 +75,10 @@ class StockAnalyzer(
         """
         try:
             return self.market_warehouse.get_all_stock_codes(
-                market="HK",
-                asset_type="equity",
-                frequency="daily",
-                adjust="qfq",
+                market=self.market,
+                asset_type=self.asset_type,
+                frequency=self.frequency,
+                adjust=self.adjust,
             )
         except Exception as e:
             print(f"[ERROR] 获取股票列表失败: {e}")

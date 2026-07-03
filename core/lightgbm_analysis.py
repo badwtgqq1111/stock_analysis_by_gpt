@@ -328,13 +328,14 @@ class LightGBMAnalysisMixin:
 
     def _load_local_financial_quality(self, stock_codes, stock_info_map, asof_date=None, show_progress=False):
         """Load local PIT financial metrics and compute industry-standardized quality."""
-        normalized_codes = [normalize_stock_code(code) for code in stock_codes]
+        market = getattr(self, "market", "HK")
+        normalized_codes = [normalize_stock_code(code, market=market) for code in stock_codes]
         quality_scores: dict[str, float] = {}
         quality_details: dict[str, dict] = {}
         try:
             financial = self.market_warehouse.read_financial_statement_metrics(
                 stock_codes=normalized_codes,
-                market="HK",
+                market=market,
                 available_at=asof_date,
                 order_by="market, stock_code, available_at DESC, report_date DESC, ingest_time DESC",
             )
@@ -347,7 +348,7 @@ class LightGBMAnalysisMixin:
             latest = financial.drop_duplicates(subset=["market", "stock_code"], keep="last")
             raw_components = {}
             for _, row in latest.iterrows():
-                code = normalize_stock_code(row.get("stock_code"))
+                code = normalize_stock_code(row.get("stock_code"), market=market)
                 raw_components[code] = {
                     "roe": row.get("roe"),
                     "roa": row.get("roa"),
@@ -385,7 +386,7 @@ class LightGBMAnalysisMixin:
             return {}, {}
 
     @staticmethod
-    def _merge_alt_sentiment_features(panel_features, stock_codes, show_progress=False):
+    def _merge_alt_sentiment_features(panel_features, stock_codes, show_progress=False, market="HK"):
         """Merge alternative sentiment features into the LightGBM feature panel.
 
         Loads pre-computed alt_sentiment features from the feature layer.
@@ -396,7 +397,7 @@ class LightGBMAnalysisMixin:
 
             # 1. Try loading from warehouse first (fast path)
             panel_with_alt = LightGBMAnalysisMixin._load_alt_from_warehouse(
-                panel_features, stock_codes, show_progress
+                panel_features, stock_codes, show_progress, market=market
             )
             if panel_with_alt is not None:
                 return panel_with_alt
@@ -439,7 +440,7 @@ class LightGBMAnalysisMixin:
             return panel_features
 
     @staticmethod
-    def _load_alt_from_warehouse(panel_features, stock_codes, show_progress=False):
+    def _load_alt_from_warehouse(panel_features, stock_codes, show_progress=False, market="HK"):
         """Try to load pre-computed alt_sentiment features from the feature layer.
 
         Returns merged panel if features exist, None otherwise.
@@ -458,7 +459,7 @@ class LightGBMAnalysisMixin:
 
             feature_df = wh.read_features(
                 feature_set="alt_sentiment",
-                market="HK",
+                market=(market or "HK").upper(),
                 frequency="daily",
                 start_date=start_date,
                 end_date=end_date,
@@ -499,6 +500,7 @@ class LightGBMAnalysisMixin:
         show_progress=False,
         feature_set="theme_opportunity",
         feature_prefix="theme_",
+        market="HK",
     ):
         """Merge pre-computed theme opportunity features into LightGBM panel."""
         try:
@@ -515,7 +517,7 @@ class LightGBMAnalysisMixin:
             end_date = str(max(panel_end, pd.Timestamp(_dt.date.today())).date())
             feature_df = wh.read_features(
                 feature_set=feature_set,
-                market="HK",
+                market=(market or "HK").upper(),
                 frequency="daily",
                 start_date=start_date,
                 end_date=end_date,
@@ -525,8 +527,9 @@ class LightGBMAnalysisMixin:
                     print("[PROGRESS] analysis phase=lightgbm_theme_features theme_features=0")
                 return panel_features
             if stock_codes:
-                allowed_codes = {normalize_stock_code(code, market="HK") for code in stock_codes}
-                feature_df["stock_code"] = feature_df["stock_code"].astype(str).map(lambda code: normalize_stock_code(code, market="HK"))
+                normalized_market = (market or "HK").upper()
+                allowed_codes = {normalize_stock_code(code, market=normalized_market) for code in stock_codes}
+                feature_df["stock_code"] = feature_df["stock_code"].astype(str).map(lambda code: normalize_stock_code(code, market=normalized_market))
                 feature_df = feature_df.loc[feature_df["stock_code"].isin(allowed_codes)]
             if feature_df.empty:
                 return panel_features
@@ -544,7 +547,8 @@ class LightGBMAnalysisMixin:
             date_col = base_reset.columns[0]
             base_reset.rename(columns={date_col: "trade_date"}, inplace=True)
             base_reset["trade_date"] = pd.to_datetime(base_reset["trade_date"], errors="coerce")
-            base_reset["stock_code"] = base_reset["stock_code"].astype(str).map(lambda code: normalize_stock_code(code, market="HK"))
+            normalized_market = (market or "HK").upper()
+            base_reset["stock_code"] = base_reset["stock_code"].astype(str).map(lambda code: normalize_stock_code(code, market=normalized_market))
             theme_cols = [col for col in wide.columns if str(col).startswith(feature_prefix)]
             future_mask = wide["trade_date"] > panel_end
             if future_mask.any() and theme_cols:
@@ -620,6 +624,9 @@ class LightGBMAnalysisMixin:
         stock_codes = list(stock_codes or [])
         if not stock_codes:
             return []
+        market = getattr(self, "market", "HK")
+        frequency = getattr(self, "frequency", "daily")
+        adjust = getattr(self, "adjust", "qfq")
 
         ranker_cls = core_module.LightGBMRankerPipeline
         try:
@@ -661,7 +668,7 @@ class LightGBMAnalysisMixin:
         try:
             stock_info_frame = self.market_warehouse.read_stock_info(
                 stock_codes=stock_codes,
-                market="HK",
+                market=market,
             )
             stock_info_map = self._stock_info_frame_to_map(stock_info_frame)
         except Exception:
@@ -704,7 +711,7 @@ class LightGBMAnalysisMixin:
 
             ohlcv_frame = full_data.reset_index().rename(columns={"date": "trade_date"})
 
-            stock_info = self.market_warehouse.get_stock_info(stock_code)
+            stock_info = self.market_warehouse.get_stock_info(stock_code, market=market)
             _stock_market_cap = np.nan
             if stock_info and stock_info.get("market_cap"):
                 _stock_market_cap = float(stock_info["market_cap"])
@@ -714,7 +721,7 @@ class LightGBMAnalysisMixin:
                 ohlcv_frame["market_cap"] = _stock_market_cap
 
             factor = core_module.create_factor_set(factor_set)
-            context = FactorContext(stock_code=stock_code, market="HK", frequency="daily", adjust="qfq")
+            context = FactorContext(stock_code=stock_code, market=market, frequency=frequency, adjust=adjust)
             feature_frame = factor.transform(ohlcv_frame, context=context)
             if feature_frame is None or feature_frame.empty:
                 prepare_completed += 1
@@ -799,7 +806,7 @@ class LightGBMAnalysisMixin:
 
         # Merge alt sentiment features if available
         panel_features = self._merge_alt_sentiment_features(
-            panel_features, stock_codes, show_progress=show_progress
+            panel_features, stock_codes, show_progress=show_progress, market=market
         )
         if enable_theme_features:
             panel_features = self._merge_theme_opportunity_features(
@@ -807,6 +814,7 @@ class LightGBMAnalysisMixin:
                 stock_codes,
                 show_progress=show_progress,
                 feature_set=theme_feature_set,
+                market=market,
             )
 
         fit_started_at = time.time()

@@ -92,6 +92,10 @@ def _prepare_qlib_frame(frame):
     working.set_index("trade_date", inplace=True)
     working.index.name = "trade_date"
     keep_columns = ["open", "high", "low", "close", "volume", "vwap"]
+    for col in ["amount", "turnover"]:
+        if col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce")
+            keep_columns.append(col)
     for col in ["total_shares"]:
         if col in working.columns:
             keep_columns.append(col)

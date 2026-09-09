@@ -74,6 +74,196 @@ class ParquetDataStore:
             out = self._sort_frame(out, order_by)
         return out["value"].tolist()
 
+    def distinct_counts_by_group(
+        self,
+        dataset_name,
+        group_column,
+        value_column,
+        layer="clean",
+        filters=None,
+        range_filters=None,
+    ):
+        """Count distinct values per group without materializing the full dataset."""
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return {}
+
+        dataset_path = self.layout.dataset_path(dataset_name, layer=layer)
+        dataset = ds.dataset(dataset_path, format="parquet", partitioning="hive")
+        available_columns = set(dataset.schema.names)
+        if group_column not in available_columns or value_column not in available_columns:
+            return {}
+
+        import pyarrow.compute as pc
+
+        expression = None
+        for column, value in (filters or {}).items():
+            if value is None or column not in available_columns:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                values = [item for item in value if item is not None]
+                if not values:
+                    continue
+                condition = pc.field(column).isin(values)
+            else:
+                condition = pc.field(column) == value
+            expression = condition if expression is None else expression & condition
+
+        for column, bounds in (range_filters or {}).items():
+            if not bounds or column not in available_columns:
+                continue
+            lower = bounds.get("gte")
+            upper = bounds.get("lte")
+            if lower is not None:
+                condition = pc.field(column) >= pc.scalar(pd.to_datetime(lower))
+                expression = condition if expression is None else expression & condition
+            if upper is not None:
+                condition = pc.field(column) <= pc.scalar(pd.to_datetime(upper))
+                expression = condition if expression is None else expression & condition
+
+        group_ids_by_name = {}
+        value_ids_by_name = {}
+        values_by_group = {}
+        scanner = dataset.scanner(
+            columns=[group_column, value_column],
+            filter=expression,
+            batch_size=131_072,
+        )
+        for batch in scanner.to_batches():
+            # Dictionary encoding keeps the row loop numeric.  Converting every
+            # long-format factor name to a Python string here retained gigabytes
+            # of temporary objects on a multi-million-row factor dataset.
+            encoded_groups = pc.dictionary_encode(batch.column(0))
+            encoded_values = pc.dictionary_encode(batch.column(1))
+            local_groups = [
+                group_ids_by_name.setdefault(str(value), len(group_ids_by_name))
+                for value in encoded_groups.dictionary.to_pylist()
+            ]
+            local_values = [
+                value_ids_by_name.setdefault(str(value), len(value_ids_by_name))
+                for value in encoded_values.dictionary.to_pylist()
+            ]
+            group_indices = encoded_groups.indices.to_numpy(zero_copy_only=False)
+            value_indices = encoded_values.indices.to_numpy(zero_copy_only=False)
+            for group_index, value_index in zip(group_indices, value_indices):
+                values_by_group.setdefault(local_groups[int(group_index)], set()).add(local_values[int(value_index)])
+        group_names = {group_id: name for name, group_id in group_ids_by_name.items()}
+        return {group_names[group_id]: len(values) for group_id, values in values_by_group.items()}
+
+    def distinct_values_from_statistics(
+        self,
+        dataset_name,
+        column,
+        *,
+        layer="clean",
+        filters=None,
+    ):
+        """Return distinct values using Parquet row-group statistics first.
+
+        Feature files are normally written in single-stock row groups, so
+        ``min == max`` yields the exact instrument without reading factor
+        values. Mixed or unstatisted row groups fall back to scanning only the
+        requested column from that row group.
+        """
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return set()
+        dataset_path = self.layout.dataset_path(dataset_name, layer=layer)
+        dataset = ds.dataset(dataset_path, format="parquet", partitioning="hive")
+        if column not in dataset.schema.names:
+            return set()
+
+        import pyarrow.compute as pc
+
+        expression = None
+        for filter_column, value in (filters or {}).items():
+            if value is None or filter_column not in dataset.schema.names:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                values = [item for item in value if item is not None]
+                if not values:
+                    continue
+                condition = pc.field(filter_column).isin(values)
+            else:
+                condition = pc.field(filter_column) == value
+            expression = condition if expression is None else expression & condition
+
+        distinct = set()
+        for fragment in dataset.get_fragments(filter=expression):
+            # Partition-only fields (for example ``market``) are not physical
+            # parquet columns. They have already selected the fragment and
+            # must not be rebound against the row-group schema here.
+            for row_group_fragment in fragment.split_by_row_group():
+                metadata = row_group_fragment.metadata
+                names = metadata.schema.names if metadata is not None else []
+                column_index = names.index(column) if column in names else None
+                statistics = None
+                if column_index is not None and metadata.num_row_groups == 1:
+                    statistics = metadata.row_group(0).column(column_index).statistics
+                if statistics is not None and statistics.has_min_max and statistics.min == statistics.max:
+                    value = statistics.min
+                    distinct.add(value.decode() if isinstance(value, bytes) else value)
+                    continue
+                table = row_group_fragment.to_table(columns=[column])
+                distinct.update(value for value in pc.unique(table[column]).to_pylist() if value is not None)
+        return distinct
+
+    def group_count_and_max(
+        self,
+        dataset_name,
+        group_column,
+        count_column,
+        max_column,
+        layer="clean",
+        filters=None,
+        range_filters=None,
+    ):
+        """Return row counts and a max value per group using bounded batches."""
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return {}, {}
+
+        dataset_path = self.layout.dataset_path(dataset_name, layer=layer)
+        dataset = ds.dataset(dataset_path, format="parquet", partitioning="hive")
+        available_columns = set(dataset.schema.names)
+        if not {group_column, count_column, max_column}.issubset(available_columns):
+            return {}, {}
+        import pyarrow.compute as pc
+
+        expression = None
+        for column, value in (filters or {}).items():
+            if value is None or column not in available_columns:
+                continue
+            condition = pc.field(column).isin([item for item in value if item is not None]) if isinstance(value, (list, tuple, set)) else pc.field(column) == value
+            expression = condition if expression is None else expression & condition
+        for column, bounds in (range_filters or {}).items():
+            if not bounds or column not in available_columns:
+                continue
+            if bounds.get("gte") is not None:
+                condition = pc.field(column) >= pc.scalar(pd.to_datetime(bounds["gte"]))
+                expression = condition if expression is None else expression & condition
+            if bounds.get("lte") is not None:
+                condition = pc.field(column) <= pc.scalar(pd.to_datetime(bounds["lte"]))
+                expression = condition if expression is None else expression & condition
+
+        counts = {}
+        latest = {}
+        scan_columns = list(dict.fromkeys([group_column, count_column, max_column]))
+        scanner = dataset.scanner(columns=scan_columns, filter=expression, batch_size=131_072)
+        for batch in scanner.to_batches():
+            batch_table = pa.Table.from_batches([batch])
+            grouped = batch_table.group_by(group_column).aggregate(
+                [(count_column, "count"), (max_column, "max")]
+            )
+            group_values = grouped[group_column].to_pylist()
+            batch_counts = grouped[f"{count_column}_count"].to_pylist()
+            batch_latest = grouped[f"{max_column}_max"].to_pylist()
+            for group, count, value in zip(group_values, batch_counts, batch_latest):
+                if group is None:
+                    continue
+                key = str(group)
+                counts[key] = counts.get(key, 0) + int(count or 0)
+                if value is not None and (key not in latest or value > latest[key]):
+                    latest[key] = value
+        return counts, latest
+
     def write_frame(self, dataset_name, frame, layer="clean", date_column="trade_date", partition_columns=None):
         """覆盖写入 parquet 数据集。"""
         target = self.layout.dataset_path(dataset_name, layer=layer)

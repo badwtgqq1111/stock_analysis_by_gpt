@@ -230,6 +230,34 @@ def test_financial_cross_section_factor_uses_context_values():
     assert feature_frame.iloc[-1]["quality_value_score"] == 85.0
 
 
+def test_valuation_factor_preserves_sparse_observation_age_and_never_uses_future_value():
+    from factor_engine.context import FactorContext
+
+    raw = _make_ohlcv_frame(rows=5)
+    raw["date"] = pd.date_range("2026-01-02", periods=5, freq="B")
+    normalized = normalize_ohlcv_frame(raw, stock_code="00700", market="HK")
+    context = FactorContext(
+        stock_code="00700",
+        market="HK",
+        extra={
+            "valuation_history": [
+                {"trade_date": "2026-01-02", "market_cap": 100.0, "pe_ratio": 10.0, "pb_ratio": 1.0},
+                {"trade_date": "2026-01-07", "market_cap": 120.0, "pe_ratio": 20.0, "pb_ratio": 1.2},
+            ],
+        },
+    )
+
+    features = create_factor_set("valuation_hk", config={"stale_after_trading_days": 1}).transform(normalized, context=context)
+
+    assert features.iloc[2]["valuation_pe"] == 10.0
+    assert features.iloc[2]["valuation_pe_age_td"] == 2.0
+    assert features.iloc[2]["valuation_pe_is_stale"] == 1.0
+    assert features.iloc[3]["valuation_pe"] == 20.0
+    assert features.iloc[3]["valuation_pe_age_td"] == 0.0
+    assert features.iloc[3]["valuation_pe_is_stale"] == 0.0
+    assert features.iloc[0]["valuation_observation_coverage"] == 1.0
+
+
 def test_service_factor_context_extra_map_adds_financial_cross_section_scores():
     with tempfile.TemporaryDirectory() as tmp_dir:
         service = MarketDataService(base_dir=tmp_dir)
@@ -787,7 +815,7 @@ def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_fe
                 service.close()
 
         assert result["success_count"] == 2
-        assert read_feature_calls == [["00700", "00005"]]
+        assert read_feature_calls == []
         assert append_feature_calls
         assert result["rows_written"] == sum(append_feature_calls)
 

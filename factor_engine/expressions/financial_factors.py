@@ -23,6 +23,13 @@ VALUATION_HK_FEATURE_NAMES = [
     "valuation_dividend_yield",
     "valuation_fcf_yield",
     "valuation_market_cap_log",
+    "valuation_market_cap_age_td",
+    "valuation_pe_age_td",
+    "valuation_pb_age_td",
+    "valuation_market_cap_is_stale",
+    "valuation_pe_is_stale",
+    "valuation_pb_is_stale",
+    "valuation_observation_coverage",
     "liquidity_amount_ma20",
     "liquidity_amount_ma60",
     "liquidity_turnover_rate",
@@ -77,6 +84,64 @@ def _constant(index, value):
     return pd.Series(pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0], index=index)
 
 
+def _asof_context_series(index, context, key):
+    """Return the point-in-time value from sparse valuation observations."""
+    return _asof_valuation_alignment(index, context, key)[0]
+
+
+def _asof_valuation_alignment(index, context, key):
+    """Align a field and expose the observation's age in trading sessions.
+
+    The sparse Baidu charts are observations, not daily values.  Values are
+    carried only forward and their age is retained so models can distinguish
+    a current valuation from an old one.  A latest stock-info snapshot is not
+    used as a historical fallback because it would leak future information.
+    """
+    extra = getattr(context, "extra", None) or {} if context is not None else {}
+    history = extra.get("valuation_history")
+    if not history:
+        return _constant(index, np.nan), _constant(index, np.nan)
+    records = pd.DataFrame(history)
+    if "trade_date" not in records or key not in records:
+        return _constant(index, np.nan), _constant(index, np.nan)
+    records["trade_date"] = pd.to_datetime(records["trade_date"], errors="coerce")
+    records[key] = pd.to_numeric(records[key], errors="coerce")
+    records = records.dropna(subset=["trade_date", key]).sort_values("trade_date")
+    records = records.drop_duplicates("trade_date", keep="last")
+    if records.empty:
+        return _constant(index, np.nan), _constant(index, np.nan)
+    target = pd.DataFrame({"_sample_date": pd.to_datetime(index, errors="coerce")})
+    target["_row_order"] = range(len(target))
+    ordered = target.sort_values("_sample_date")
+    aligned = pd.merge_asof(
+        ordered,
+        records[["trade_date", key]].rename(columns={"trade_date": "_valuation_date"}),
+        left_on="_sample_date",
+        right_on="_valuation_date",
+        direction="backward",
+    )
+    sample_dates = aligned["_sample_date"].to_numpy(dtype="datetime64[ns]")
+    observation_dates = aligned["_valuation_date"].to_numpy(dtype="datetime64[ns]")
+    age = np.full(len(aligned), np.nan, dtype=float)
+    observed = ~pd.isna(observation_dates)
+    # searchsorted gives the first available sample at/after the source date.
+    # The difference is therefore the number of completed trading sessions.
+    positions = np.arange(len(aligned), dtype=float)
+    observed_positions = np.searchsorted(sample_dates, observation_dates[observed], side="left")
+    age[observed] = np.maximum(0.0, positions[observed] - observed_positions)
+    aligned["_valuation_age_td"] = age
+    aligned = aligned.sort_values("_row_order")
+    return (
+        pd.Series(aligned[key].to_numpy(), index=index),
+        pd.Series(aligned["_valuation_age_td"].to_numpy(), index=index),
+    )
+
+
+def _stale_flag(age, threshold):
+    age = pd.to_numeric(age, errors="coerce")
+    return pd.Series(np.where(age.notna(), (age > threshold).astype(float), np.nan), index=age.index)
+
+
 def _score_good(series):
     return series.clip(lower=-5, upper=5)
 
@@ -95,20 +160,37 @@ class ValuationHKFactorSet(BaseFactorSet):
             return pd.DataFrame(columns=VALUATION_HK_FEATURE_NAMES)
         close = qlib_frame["close"]
         volume = qlib_frame["volume"].replace(0, np.nan)
-        amount = volume * qlib_frame["vwap"]
+        amount = qlib_frame.get("amount", volume * qlib_frame["vwap"])
+        amount = pd.to_numeric(amount, errors="coerce")
         ret_abs = (safe_divide(close, close.shift(1)) - 1.0).abs()
-        market_cap = _constant(close.index, _latest_context_value(context, "market_cap"))
+        market_cap, market_cap_age = _asof_valuation_alignment(close.index, context, "market_cap")
+        pe_ratio, pe_age = _asof_valuation_alignment(close.index, context, "pe_ratio")
+        pb_ratio, pb_age = _asof_valuation_alignment(close.index, context, "pb_ratio")
+        stale_after_td = max(1, int(self.config.get("stale_after_trading_days", 20)))
         circulating_shares = _constant(close.index, _latest_context_value(context, "circulating_shares"))
-        turnover_rate = safe_divide(volume, circulating_shares) * 100.0
+        turnover_rate = qlib_frame.get("turnover")
+        if turnover_rate is None or pd.to_numeric(turnover_rate, errors="coerce").notna().sum() == 0:
+            turnover_rate = safe_divide(volume, circulating_shares) * 100.0
+        else:
+            turnover_rate = pd.to_numeric(turnover_rate, errors="coerce")
 
         columns = {
-            "valuation_pe": _constant(close.index, _latest_context_value(context, "pe_ratio")),
-            "valuation_pb": _constant(close.index, _latest_context_value(context, "pb_ratio")),
+            "valuation_pe": pe_ratio,
+            "valuation_pb": pb_ratio,
             "valuation_ps": _constant(close.index, _latest_context_value(context, "ps_ratio")),
             "valuation_ev_ebitda": _constant(close.index, _latest_context_value(context, "ev_ebitda")),
             "valuation_dividend_yield": _constant(close.index, _latest_context_value(context, "dividend_yield")),
             "valuation_fcf_yield": _constant(close.index, _latest_context_value(context, "fcf_yield")),
-            "valuation_market_cap_log": np.log(market_cap + 1.0),
+            "valuation_market_cap_log": np.log1p(market_cap.where(market_cap > 0)),
+            "valuation_market_cap_age_td": market_cap_age,
+            "valuation_pe_age_td": pe_age,
+            "valuation_pb_age_td": pb_age,
+            "valuation_market_cap_is_stale": _stale_flag(market_cap_age, stale_after_td),
+            "valuation_pe_is_stale": _stale_flag(pe_age, stale_after_td),
+            "valuation_pb_is_stale": _stale_flag(pb_age, stale_after_td),
+            "valuation_observation_coverage": (
+                market_cap.notna().astype(float) + pe_ratio.notna().astype(float) + pb_ratio.notna().astype(float)
+            ) / 3.0,
             "liquidity_amount_ma20": ts_mean(amount, 20),
             "liquidity_amount_ma60": ts_mean(amount, 60),
             "liquidity_turnover_rate": turnover_rate,
@@ -128,7 +210,7 @@ class ValuationHKFactorSet(BaseFactorSet):
                 exactness="snapshot_latest_until_pit_panel_available",
                 input_fields=("close", "volume", "vwap"),
                 requires_pit=name.startswith("valuation_"),
-                notes="Uses local context values supplied by feature generation; no live download.",
+                notes="Sparse valuation fields use backward as-of alignment; age and stale flags retain observation freshness.",
             ).to_dict()
             for name in VALUATION_HK_FEATURE_NAMES
         ]
@@ -136,7 +218,10 @@ class ValuationHKFactorSet(BaseFactorSet):
             name=self.name,
             description=self.description,
             version=self.version,
-            assumptions=("Snapshot context should come from local warehouse, not live fetch during selection.",),
+            assumptions=(
+                "Sparse valuation observations are aligned only backward in time.",
+                "A valuation older than 20 trading sessions is marked stale; missingness remains explicit.",
+            ),
             extra={
                 "feature_count": len(VALUATION_HK_FEATURE_NAMES),
                 "feature_names": VALUATION_HK_FEATURE_NAMES,

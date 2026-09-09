@@ -3,7 +3,10 @@
 
 """A 股历史数据抓取。"""
 
+import threading
+
 import pandas as pd
+import requests
 
 from data.ingest.providers.cn_common import (
     ak,
@@ -24,6 +27,19 @@ from data.ingest.providers.history_utils import (
 )
 from data.model import normalize_adjust
 from data.store.database_manager import DatabaseManager
+
+
+_TENCENT_SESSION_LOCAL = threading.local()
+
+
+def _tencent_direct_session():
+    """Return a per-thread Tencent session that bypasses local proxy settings."""
+    session = getattr(_TENCENT_SESSION_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.trust_env = False
+        _TENCENT_SESSION_LOCAL.session = session
+    return session
 
 
 class CNHistoryDataFetcher:
@@ -194,6 +210,42 @@ class CNHistoryDataFetcher:
             )
             return apply_date_filters(fallback_df, start_date, end_date, num_records)
 
+    def _fetch_tencent_intraday_hist(self, period, start_date=None, end_date=None, num_records=None, adjust=None):
+        """Fetch recent Tencent minute bars without the unstable web proxy path."""
+        normalized_period = normalize_period(period)
+        period_digits = to_akshare_intraday_period(normalized_period)
+        response = _tencent_direct_session().get(
+            "https://ifzq.gtimg.cn/appstock/app/kline/mkline",
+            params={"param": f"{self.prefixed_symbol},m{period_digits},,1000"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5,
+        )
+        response.raise_for_status()
+        payload = ((response.json().get("data") or {}).get(self.prefixed_symbol) or {})
+        rows = payload.get(f"m{period_digits}") or payload.get(f"qfqm{period_digits}") or []
+        if not rows:
+            return pd.DataFrame()
+
+        parsed_rows = []
+        for row in rows:
+            if len(row) < 6:
+                continue
+            timestamp = pd.to_datetime(str(row[0]), format="%Y%m%d%H%M", errors="coerce")
+            if pd.isna(timestamp):
+                continue
+            parsed_rows.append(
+                {
+                    "date": timestamp,
+                    "open": row[1],
+                    "close": row[2],
+                    "high": row[3],
+                    "low": row[4],
+                    "volume": row[5],
+                }
+            )
+        normalized_df = normalize_history_dataframe(pd.DataFrame(parsed_rows), {})
+        return apply_date_filters(normalized_df, start_date, end_date, num_records)
+
     def fetch(self, start_date=None, end_date=None, num_records=None, adjust=None, period="daily"):
         normalized_period = normalize_period(period)
         normalized_adjust = normalize_adjust(adjust or self.default_adjust)
@@ -202,6 +254,13 @@ class CNHistoryDataFetcher:
 
         if is_intraday_period(normalized_period):
             fetchers = {
+                "tencent": lambda: self._fetch_tencent_intraday_hist(
+                    normalized_period,
+                    start_date,
+                    end_date,
+                    num_records,
+                    normalized_adjust,
+                ),
                 "akshare_sina": lambda: self._fetch_akshare_sina_intraday_hist(
                     normalized_period,
                     start_date,
@@ -245,7 +304,10 @@ class CNHistoryDataFetcher:
                 ),
             }
 
-        for source_name in self.source_priority:
+        source_priority = self.source_priority
+        if is_intraday_period(normalized_period) and source_priority and source_priority[0] == "tencent":
+            source_priority = ["tencent"]
+        for source_name in source_priority:
             fetcher = fetchers.get(source_name)
             if fetcher is None:
                 continue

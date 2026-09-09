@@ -1,0 +1,245 @@
+[pipeline]
+market = "CN"
+start_date = "2014-01-01"
+end_date = ""
+adjust = "qfq"
+days = 365
+factor_set = "alpha_zoo_hk"
+top_n = 10
+max_workers_sync = 12
+max_workers_stock_info = 8
+max_workers_valuation = 12
+max_workers_financial = 4
+# BaoStock financial-statement requests are serialized by the provider and
+# are not needed for the historical market-cap/PE/PB panel. Enable only for a
+# separate statement-data refresh.
+financial_metrics_enabled = false
+financial_lookback_quarters = 1
+valuation_history_source = "baidu"
+valuation_history_period = "全部"
+max_workers_factors = 8
+export_csv = "output/results_cn"
+quality_report_dir = "output/data_quality"
+min_ohlcv_rows = 120
+min_training_stocks = 50
+# Fundamental and alternative fields are optional inputs. Their coverage is reported,
+# not used to discard otherwise valid price/volume samples.
+min_fundamental_coverage = 0.80
+
+[factor_config.valuation_hk]
+# Baidu valuations are sparse observations. Keep the as-of value, and give
+# models an explicit stale marker after this many completed trading sessions.
+stale_after_trading_days = 20
+
+[stages]
+daily_bars = true
+intraday_bars = false
+fundamental = true
+alternative = false
+features = true
+regime = true
+clean_panel = true
+lightgbm = true
+transformer = true
+cnn = false
+model_scores = true
+selection = true
+paper_outcomes = false
+paper_account = false
+graph_temporal = false
+model_comparison = false
+oos_predictions = false
+strategy_labels = false
+
+[daily_bars]
+frequencies = ["daily"]
+skip_existing = true
+complete_data = false
+
+[intraday_bars]
+# Enable only when minute-level features or execution research needs these bars.
+# The window is independent from daily bars to avoid requesting minute data since 2014.
+lookback_days = 1095
+# Tencent retains a rolling recent window. Use 5min as the base frequency.
+frequencies = ["5min", "15min", "30min", "60min"]
+data_source = "tencent"
+adjust = "raw"
+max_workers = 16
+derive_intraday_from_1min = false
+derive_intraday_from_base = true
+intraday_base_frequency = "5min"
+min_daily_rows_for_intraday = 120
+skip_existing = true
+complete_data = false
+
+[alternative]
+# Import a locally collected CN search/news/announcement export. Required
+# columns: stock_code plus published_at or available_at; optional sentiment_score.
+input_path = ""
+source = "manual_import"
+output_dir = "output/alternative_data"
+
+[strategy_labels]
+days = 756
+output_dir = "output/strategy_labels"
+
+[clean_panel]
+days = 365
+cleaning_version = "p0.2.v1"
+# Ten stocks keep the long-source read bounded while still vectorizing pivot
+# and compact snapshot writes across multiple instruments.
+feature_batch_size = 10
+
+[model_features]
+# Reject a source feature and its missing-value mask when the value is present
+# on fewer than this share of a training fold. Sparse but usable features retain
+# their masks; all-missing and constant inputs never enter model artifacts.
+min_feature_coverage = 0.05
+drop_constant_features = true
+
+[regime]
+days = 756
+min_stocks = 20
+trend_window = 60
+breadth_window = 20
+volatility_window = 20
+hysteresis_days = 3
+version = "regime.v1"
+output_dir = "output/regime"
+
+[lightgbm]
+days = 365
+label_horizon = 20
+validation_days = 60
+embargo_days = 20
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/lightgbm/alpha_zoo_hk"
+# Leave empty for a fresh scheduled retrain; set a compatible model.txt for warm-start.
+warm_start_path = ""
+
+[transformer]
+days = 365
+label_horizon = 20
+validation_days = 60
+embargo_days = 20
+lookback = 60
+epochs = 10
+batch_size = 256
+max_samples = 200000
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/transformer/alpha_zoo_hk"
+device = "auto" # CUDA -> Apple MPS -> CPU
+# Set both values to a prior compatible checkpoint for incremental fine-tuning.
+warm_start_path = ""
+warm_start_manifest_path = ""
+
+[cnn]
+days = 365
+label_horizon = 20
+validation_days = 60
+embargo_days = 20
+lookback = 60
+epochs = 10
+batch_size = 256
+max_samples = 200000
+channels = 64
+kernel_size = 3
+num_layers = 3
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/cnn/alpha_zoo_hk"
+device = "auto"
+
+[model_scores]
+days = 365
+cleaning_version = "p0.2.v1"
+# Do not select from a partially materialized latest date. The scorer falls
+# back to the newest date that covers at least this share of the universe.
+min_cross_section_coverage = 0.95
+output_dir = "output/model_scores"
+lightgbm_model_path = "output/models/cn/lightgbm/alpha_zoo_hk/model.txt"
+lightgbm_manifest_path = "output/models/cn/lightgbm/alpha_zoo_hk/model_manifest.json"
+transformer_model_path = "output/models/cn/transformer/alpha_zoo_hk/model.pt"
+transformer_manifest_path = "output/models/cn/transformer/alpha_zoo_hk/model_manifest.json"
+transformer_device = "auto"
+cnn_model_path = ""
+cnn_manifest_path = ""
+cnn_device = "auto"
+
+[selection]
+model_scores_dir = "output/model_scores"
+output_dir = "output/results_cn"
+model = "ensemble" # lightgbm, transformer, or ensemble
+top_n = 10
+portfolio_mode = "topn" # topn or mean_variance_cost_aware
+initial_capital = 1000000.0
+
+[selection.portfolio_constraints]
+gross_exposure = 0.95
+max_weight = 0.10
+max_industry_weight = 0.30
+max_turnover = 0.50
+max_participation = 0.05
+risk_aversion = 2.0
+turnover_penalty = 0.10
+cost_penalty = 0.10
+
+[paper_outcomes]
+selection_path = "output/results_cn/cn_ensemble_selected.csv"
+days = 756
+horizons = [1, 5, 20, 60]
+cost_bps = 10.0
+# Optional CSV with trade_date, close (or date, price). If empty, reports use
+# the explicitly named cross-sectional market proxy.
+benchmark_path = ""
+output_dir = "output/paper_trading"
+
+[paper_account]
+selection_path = "output/results_cn/cn_ensemble_selected.csv"
+days = 756
+account_id = "cn_default"
+strategy_version = "cn-ensemble.v1"
+initial_capital = 1000000.0
+commission_bps = 5.0
+slippage_bps = 5.0
+lot_size = 100
+output_dir = "output/paper_trading/account"
+
+[graph_temporal]
+days = 365
+lookback = 20
+epochs = 5
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/graph_temporal/alpha_zoo_hk"
+
+[model_comparison]
+prediction_paths = { lightgbm = "output/oos_predictions/cn_lightgbm_oos_predictions.csv", transformer = "output/oos_predictions/cn_transformer_oos_predictions.csv" }
+output_dir = "output/evaluations"
+prefix = "cn_model_comparison"
+target_col = "forward_return_20d"
+n_splits = 5
+min_train_days = 120
+purge_days = 20
+embargo_days = 0
+
+[oos_predictions]
+# This stage retrains strictly on each expanding fold. Enable after current
+# feature-panel coverage passes; Transformer is intentionally opt-in because it
+# performs one inference pass per OOS decision date.
+models = ["lightgbm"]
+days = 756
+label_horizon = 20
+cleaning_version = "p0.2.v1"
+output_dir = "output/oos_predictions"
+n_splits = 5
+min_train_days = 120
+purge_days = 20
+embargo_days = 0
+transformer_lookback = 60
+transformer_epochs = 5
+transformer_batch_size = 256
+transformer_max_samples = 200000
+transformer_device = "auto"
+# Required only when models contains graph_temporal. The CSV must have
+# stock_code, industry_l1 and available_at; current industry labels are invalid
+# for historical graph OOS evaluation.
+industry_mapping_path = ""

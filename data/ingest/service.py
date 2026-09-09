@@ -6,11 +6,14 @@
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from datetime import datetime
+import json
 import os
+import math
 from pathlib import Path
 import platform
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +27,7 @@ from data.ingest.hk_stock_loader import HKStockDataLoader
 from data.ingest.providers import (
     CNBaoStockFinancialFetcher,
     CNBaoStockIndustryFetcher,
+    CNBaiduValuationHistoryFetcher,
     CNEastmoneyValuationHistoryFetcher,
     CNMarketListFetcher,
     CNStockInfoFetcher,
@@ -35,6 +39,7 @@ from data.ingest.providers.hk_history import set_akshare_sina_history_concurrenc
 from tqdm import tqdm
 from data.ingest.providers.history_utils import normalize_period
 from data.model import (
+    get_market_calendar,
     get_adjustment_profile,
     normalize_adjust,
     normalize_corporate_actions_frame,
@@ -48,9 +53,13 @@ from data.model import (
     normalize_stock_info,
     normalize_trade_frame,
     normalize_valuation_snapshot,
+    aggregate_quality_reports,
+    validate_intraday_frame,
     validate_ohlcv_frame,
+    write_quality_report,
 )
 from data.store.layout import DataLayout
+from data.store.parquet_store import ParquetDataStore
 from data.store.raw_store import RawDataStore
 from data.store.warehouse import MarketDataWarehouse
 from factor_engine import (
@@ -59,6 +68,23 @@ from factor_engine import (
     create_factor_set,
     list_factor_sets as list_registered_factor_sets,
 )
+from factor_engine.ml.panel_dataset import (
+    PANEL_KEYS,
+    PRICE_FEATURE_COLUMNS,
+    build_feature_panel,
+    compact_training_panel,
+    training_wide_view,
+)
+from factor_engine.ml.model_training import train_cnn_panel, train_lightgbm_panel, train_transformer_panel
+from factor_engine.ml.regime import build_market_regime, write_market_regime_report
+from factor_engine.ml.paper_trading import evaluate_selection_outcomes, write_outcome_report
+from factor_engine.ml.graph_temporal import build_industry_adjacency, train_graph_temporal_panel
+from factor_engine.ml.walk_forward import compare_walk_forward_predictions, write_walk_forward_report
+from factor_engine.ml.oos_predictions import generate_cnn_oos_predictions, generate_graph_temporal_oos_predictions, generate_lightgbm_oos_predictions, generate_transformer_oos_predictions
+from factor_engine.portfolio.optimizer import PortfolioConstraints, optimize_long_only
+from factor_engine.portfolio.paper_account import persist_paper_account, run_paper_account
+from factor_engine.ml.alternative_data import normalize_cn_alternative_evidence, write_alternative_data_report
+from factor_engine.ml.strategy_labels import build_cn_strategy_labels
 from factor_validation import FactorValidator
 
 
@@ -205,6 +231,7 @@ CN_SOURCE_SHORT_LABELS = {
     "akshare_eastmoney": "em",
     "eastmoney": "em",
 }
+CN_MARKET_CALENDAR = get_market_calendar("CN")
 
 
 def _cn_source_key(source):
@@ -264,6 +291,58 @@ def _cn_progress_postfix(
         f"ok={success_count} skip={skipped_count} fail={failed_count} "
         f"rows={row_count} written={rows_written}{last} src={source_stats}"
     )
+
+
+def _print_cn_failure_summary(label, failed, *, limit=10):
+    """Print bounded, actionable failure details without flooding progress output."""
+    if not failed:
+        return
+    grouped = {}
+    for item in failed:
+        error = str(item.get("error") or "unknown error").strip() or "unknown error"
+        grouped[error] = grouped.get(error, 0) + 1
+    print(f"[FAILURES] {label}: total={len(failed)} unique_errors={len(grouped)}")
+    for error, count in sorted(grouped.items(), key=lambda pair: (-pair[1], pair[0]))[:limit]:
+        examples = [str(item.get("code")) for item in failed if str(item.get("error") or "unknown error").strip() == error][:3]
+        suffix = f" codes={','.join(examples)}" if examples else ""
+        print(f"  count={count} error={error[:240]}{suffix}")
+    if len(grouped) > limit:
+        print(f"  ... 其余 {len(grouped) - limit} 类错误详见 summary['failed']")
+
+
+def _latest_complete_cross_section(panel, *, min_coverage=0.95):
+    """Return the newest decision date with a sufficiently complete universe.
+
+    A partially materialized date must never shrink a Top-N selection to one
+    stock merely because it is newer than the last complete market snapshot.
+    """
+    if panel.empty or "trade_date" not in panel or "stock_code" not in panel:
+        raise ValueError("cannot resolve score date from an empty feature panel")
+    threshold = min(1.0, max(0.0, float(min_coverage)))
+    working = panel[["trade_date", "stock_code"]].copy()
+    working["trade_date"] = pd.to_datetime(working["trade_date"], errors="coerce").dt.normalize()
+    working = working.dropna(subset=["trade_date", "stock_code"])
+    universe_count = int(working["stock_code"].nunique())
+    min_stock_count = max(1, math.ceil(universe_count * threshold))
+    counts = working.groupby("trade_date")["stock_code"].nunique().sort_index()
+    eligible = counts[counts >= min_stock_count]
+    if eligible.empty:
+        latest_count = int(counts.iloc[-1]) if not counts.empty else 0
+        raise ValueError(
+            "no score-date cross section meets coverage threshold "
+            f"required={min_stock_count}/{universe_count} latest={latest_count}"
+        )
+    selected_date = pd.Timestamp(eligible.index[-1])
+    raw_latest_date = pd.Timestamp(counts.index[-1])
+    return selected_date, {
+        "min_cross_section_coverage": threshold,
+        "universe_stock_count": universe_count,
+        "minimum_stock_count": min_stock_count,
+        "selected_stock_count": int(eligible.iloc[-1]),
+        "raw_latest_trade_date": raw_latest_date.strftime("%Y-%m-%d"),
+        "raw_latest_stock_count": int(counts.iloc[-1]),
+        "skipped_partial_latest_date": raw_latest_date > selected_date,
+    }
 
 
 def _cn_history_fetch_worker(payload: dict) -> dict:
@@ -632,7 +711,11 @@ class MarketDataService:
         data_source=None,
         skip_existing=False,
         frequencies=("daily",),
+        derive_intraday_from_1min=False,
+        derive_intraday_from_base=False,
+        intraday_base_frequency=None,
         show_progress=True,
+        quality_report_dir="output/data_quality",
     ):
         """批量抓取 A 股多周期历史数据并落库。"""
         normalized_adjust = normalize_adjust(adjust)
@@ -644,6 +727,22 @@ class MarketDataService:
             normalized_frequency = normalize_period(frequency)
             if normalized_frequency not in frequency_list:
                 frequency_list.append(normalized_frequency)
+        intraday_order = {"1min": 0, "5min": 1, "15min": 2, "30min": 3, "60min": 4}
+        intraday_base_frequency = None
+        if derive_intraday_from_base:
+            intraday_base_frequency = normalize_period(intraday_base_frequency or "5min")
+        elif derive_intraday_from_1min:
+            intraday_base_frequency = "1min"
+        if intraday_base_frequency not in frequency_list:
+            intraday_base_frequency = None
+        if intraday_base_frequency:
+            # Fetch the base series before deriving coarser intraday bars.
+            frequency_list.sort(
+                key=lambda frequency: (
+                    0 if frequency == "daily" else 1,
+                    intraday_order.get(frequency, len(intraday_order)),
+                )
+            )
 
         if stock_codes:
             stocks = [
@@ -704,27 +803,61 @@ class MarketDataService:
             code = normalize_stock_code(stock["code"], market="CN")
             frames = []
             rows_by_frequency = {}
+            intraday_base_frame = None
+            intraday_base_source = None
             for frequency in frequency_list:
                 latest = latest_trade_dates.get((code, frequency))
                 if skip_existing and _is_fresh(code, frequency):
                     rows_by_frequency[frequency] = 0
                     continue
                 fetch_start_date = _cn_incremental_start_date(start_date, latest, frequency)
-                fetch_kwargs = {
-                    "stock_code": code,
-                    "start_date": fetch_start_date,
-                    "end_date": target_end_date,
-                    "adjust": normalized_adjust,
-                    "period": frequency,
-                }
-                if show_progress:
-                    fetch_kwargs["verbose"] = False
-                frame = self.cn_loader.fetch_history(
-                    **fetch_kwargs,
-                )
+                frame = None
+                source = None
+                if (
+                    intraday_base_frequency is not None
+                    and frequency != intraday_base_frequency
+                    and intraday_order.get(frequency, -1) > intraday_order[intraday_base_frequency]
+                    and intraday_base_frame is not None
+                ):
+                    try:
+                        resampled = CN_MARKET_CALENDAR.resample_intraday_frame(intraday_base_frame, frequency)
+                        if resampled is not None and not resampled.empty:
+                            source = f"{intraday_base_source or effective_data_source}_derived"
+                            frame = normalize_ohlcv_frame(
+                                resampled,
+                                stock_code=code,
+                                market="CN",
+                                exchange=infer_exchange(code, market="CN"),
+                                asset_type="equity",
+                                frequency=frequency,
+                                source=source,
+                                adjust=normalized_adjust,
+                                currency="CNY",
+                            )
+                    except Exception:
+                        # A malformed minute frame must not prevent the direct provider fallback.
+                        frame = None
+                if frame is None or frame.empty:
+                    fetch_kwargs = {
+                        "stock_code": code,
+                        "start_date": fetch_start_date,
+                        "end_date": target_end_date,
+                        "adjust": normalized_adjust,
+                        "period": frequency,
+                    }
+                    if show_progress:
+                        fetch_kwargs["verbose"] = False
+                    if effective_data_source != self.data_source:
+                        fetch_kwargs["data_source"] = effective_data_source
+                    frame = self.cn_loader.fetch_history(
+                        **fetch_kwargs,
+                    )
                 if frame is not None and not frame.empty:
                     frames.append(frame)
                     rows_by_frequency[frequency] = len(frame)
+                    if frequency == intraday_base_frequency:
+                        intraday_base_frame = frame
+                        intraday_base_source = str(frame["source"].iloc[-1]) if "source" in frame.columns else None
                 else:
                     rows_by_frequency[frequency] = 0
             info = None
@@ -746,6 +879,7 @@ class MarketDataService:
         rows_written = 0
         write_flush_count = 0
         source_counts = {source: 0 for source in CN_SOURCE_PROGRESS_ORDER}
+        quality_reports = []
         last_stock_code = None
         last_source = None
         rows_by_frequency = {frequency: 0 for frequency in frequency_list}
@@ -850,6 +984,20 @@ class MarketDataService:
                             source_counts[source_key] = source_counts.get(source_key, 0) + 1
                             for frequency, count in result["rows_by_frequency"].items():
                                 rows_by_frequency[frequency] = rows_by_frequency.get(frequency, 0) + int(count)
+                            for frequency, frequency_frame in frame.groupby("frequency", sort=True):
+                                validator = (
+                                    validate_ohlcv_frame
+                                    if str(frequency).lower() == "daily"
+                                    else validate_intraday_frame
+                                )
+                                quality_reports.append(
+                                    validator(
+                                        frequency_frame,
+                                        market="CN",
+                                        frequency=str(frequency),
+                                        stock_code=result.get("code"),
+                                    )
+                                )
                         if result.get("info"):
                             info_payloads.append(result["info"])
                     if pending_history_stocks >= flush_stock_count or pending_history_rows >= flush_row_count:
@@ -892,9 +1040,47 @@ class MarketDataService:
             "dataset_path": str(self.layout.dataset_path("ohlcv", layer="clean")),
             "failed": failed,
             "fetch_mode": "process_pool" if use_process_pool else "thread_pool",
+            "derive_intraday_from_1min": bool(derive_intraday_from_1min),
+            "derive_intraday_from_base": bool(derive_intraday_from_base),
+            "intraday_base_frequency": intraday_base_frequency,
             "write_flush_count": write_flush_count,
             "source_counts": dict(source_counts),
         }
+        quality_summary = aggregate_quality_reports(quality_reports)
+        quality_summary.update({
+            "market": "CN",
+            "details": [
+                {
+                    "stock_code": report.get("stock_code"),
+                    "frequency": report.get("frequency"),
+                    "rows": report.get("rows", 0),
+                    "passed": report.get("passed", False),
+                    "error_count": report.get("error_count", 0),
+                    "warning_count": report.get("warning_count", 0),
+                    "issue_counts": report.get("issue_counts", {}),
+                }
+                for report in quality_reports
+                if report.get("error_count", 0) or report.get("warning_count", 0)
+            ],
+        })
+        summary["quality_issue_stocks"] = int(quality_summary.get("issue_stock_count", 0))
+        summary["quality_issue_count"] = int(quality_summary.get("error_count", 0) + quality_summary.get("warning_count", 0))
+        summary["quality_by_frequency"] = {
+            frequency: {
+                "error_stocks": sum(1 for report in quality_reports if report.get("frequency") == frequency and report.get("error_count", 0)),
+                "warning_stocks": sum(1 for report in quality_reports if report.get("frequency") == frequency and report.get("warning_count", 0)),
+                "error_issues": sum(int(report.get("error_count", 0)) for report in quality_reports if report.get("frequency") == frequency),
+                "warning_issues": sum(int(report.get("warning_count", 0)) for report in quality_reports if report.get("frequency") == frequency),
+            }
+            for frequency in frequency_list
+        }
+        summary["quality_details"] = quality_summary["details"]
+        if quality_report_dir:
+            summary["quality_report_paths"] = write_quality_report(
+                quality_summary,
+                quality_report_dir,
+                prefix=f"cn_ohlcv_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            )
         if compact_result:
             summary["compacted_dataset_path"] = compact_result["dataset_path"]
         if complete_data:
@@ -953,14 +1139,43 @@ class MarketDataService:
             if complete_data:
                 failed_stages = summary.get("completion", {}).get("failed_stages") or []
                 print(f"  补全阶段失败数: {len(failed_stages)}")
+            _print_cn_failure_summary("sync_cn", failed)
         return summary
+
+    def _cn_metadata_codes(self, frequency="daily", adjust="qfq", limit=None):
+        """Get the CN metadata universe from the complete local OHLCV store.
+
+        ClickHouse may contain a partial mirror while Parquet has the full
+        ingest. Metadata refreshes must not let that partial mirror shrink the
+        requested universe.
+        """
+        filters = {
+            "market": "CN",
+            "asset_type": "equity",
+            "frequency": frequency,
+            "adjust": normalize_adjust(adjust),
+        }
+        codes = self.warehouse.parquet_store.values_query(
+            dataset_name=self.warehouse.OHLCV_DATASET,
+            column="stock_code",
+            layer="clean",
+            filters=filters,
+            distinct=True,
+            order_by="value",
+        )
+        if not codes:
+            codes = self.warehouse.get_all_stock_codes(
+                market="CN", frequency=frequency, adjust=normalize_adjust(adjust)
+            )
+        codes = list(dict.fromkeys(normalize_stock_code(code, market="CN") for code in codes))
+        return codes[: int(limit)] if limit else codes
 
     def refresh_cn_stock_info(self, stock_codes=None, limit=None, max_workers=8, data_source=None, show_progress=False):
         """刷新 A 股 stock_info_registry。"""
         if stock_codes:
             codes = [normalize_stock_code(code, market="CN") for code in stock_codes]
         else:
-            codes = self.get_all_stock_codes(market="CN")[:limit or None]
+            codes = self._cn_metadata_codes(limit=limit)
             if not codes:
                 codes = [item["code"] for item in CNMarketListFetcher(data_source=data_source or "baostock").fetch(limit=limit)]
         if limit and stock_codes:
@@ -1012,18 +1227,34 @@ class MarketDataService:
             self.warehouse.upsert_stock_info_batch(payloads)
         if show_progress:
             print(f"[SUMMARY] A 股 stock_info 刷新完成 success={len(payloads)} failed={len(failed)}")
+            _print_cn_failure_summary("stock_info", failed)
         return {"market": "CN", "success_count": len(payloads), "failed_count": len(failed), "failed": failed}
 
     def backfill_cn_industry(self, stock_codes=None, limit=None, show_progress=False):
         """使用 BaoStock 补全 A 股行业分类。"""
         codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
         if not codes:
-            codes = self.get_all_stock_codes(market="CN")[:limit or None]
+            codes = self._cn_metadata_codes(limit=limit)
         if limit and stock_codes:
             codes = codes[:limit]
         industry_frame = CNBaoStockIndustryFetcher(verbose=not show_progress).fetch(stock_codes=codes or None)
         if industry_frame is None or industry_frame.empty:
-            return {"market": "CN", "updated_count": 0, "rows": 0}
+            result = {
+                "market": "CN",
+                "source": "baostock",
+                "requested_count": len(codes),
+                "updated_count": 0,
+                "rows": 0,
+                "status": "empty",
+                "detail": "BaoStock returned no industry rows; retain existing registry and retry the fundamental stage",
+            }
+            if show_progress:
+                print(
+                    "[SUMMARY] A 股行业补全未返回数据 "
+                    f"source=baostock requested={len(codes)}; 请查看网络/数据源后重试",
+                    flush=True,
+                )
+            return result
         if codes:
             industry_frame = industry_frame[industry_frame["stock_code"].isin(set(codes))].copy()
         payloads = []
@@ -1047,8 +1278,15 @@ class MarketDataService:
         if payloads:
             self.warehouse.upsert_stock_info_batch(payloads)
         if show_progress:
-            print(f"[SUMMARY] A 股行业补全完成 updated={len(payloads)}")
-        return {"market": "CN", "updated_count": len(payloads), "rows": len(industry_frame)}
+            print(f"[SUMMARY] A 股行业补全完成 source=baostock requested={len(codes)} updated={len(payloads)}")
+        return {
+            "market": "CN",
+            "source": "baostock",
+            "requested_count": len(codes),
+            "updated_count": len(payloads),
+            "rows": len(industry_frame),
+            "status": "completed",
+        }
 
     def refresh_cn_valuation_history(
         self,
@@ -1063,7 +1301,7 @@ class MarketDataService:
         """刷新 A 股历史日频估值/流动性面板。"""
         codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
         if not codes:
-            codes = self.get_all_stock_codes(market="CN", frequency="daily", adjust=normalize_adjust(adjust))[:limit or None]
+            codes = self._cn_metadata_codes(frequency="daily", adjust=adjust, limit=limit)
         if limit and stock_codes:
             codes = codes[:limit]
         codes = [code for code in codes if not _is_unsupported_cn_ohlcv_code(code)]
@@ -1130,8 +1368,85 @@ class MarketDataService:
                 f"[SUMMARY] A 股历史估值补全完成 success={success_count} "
                 f"rows={rows_written} failed={len(failed)}"
             )
+            _print_cn_failure_summary("valuation_history", failed)
         return {
             "market": "CN",
+            "success_count": success_count,
+            "failed_count": len(failed),
+            "rows_written": rows_written,
+            "failed": failed,
+            "dataset_path": str(self.layout.dataset_path("valuation_snapshot", layer="meta")),
+        }
+
+    def refresh_cn_baidu_valuation_history(
+        self,
+        stock_codes=None,
+        limit=None,
+        start_date=None,
+        end_date=None,
+        max_workers=12,
+        period="全部",
+        show_progress=False,
+    ):
+        """Refresh sparse historical market-cap/PE(TTM)/PB observations."""
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self._cn_metadata_codes(limit=limit)
+        if limit and stock_codes:
+            codes = codes[: int(limit)]
+        codes = [code for code in codes if not _is_unsupported_cn_ohlcv_code(code)]
+        failed = []
+        frames = []
+        success_count = 0
+        rows_written = 0
+        flush_row_count = max(1, int(os.environ.get("CN_BAIDU_VALUATION_FLUSH_ROWS", "50000")))
+
+        def _fetch_one(code):
+            return CNBaiduValuationHistoryFetcher(
+                code,
+                period=period,
+                verbose=not show_progress,
+            ).fetch(start_date=start_date, end_date=end_date)
+
+        def _flush_frames():
+            nonlocal frames, rows_written
+            if not frames:
+                return
+            batch = pd.concat(frames, ignore_index=True)
+            rows_written += int(self.warehouse.upsert_valuation_snapshots(batch)["rows"])
+            frames = []
+
+        workers = max(1, min(int(max_workers or 1), len(codes) or 1))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(_fetch_one, code): code for code in codes}
+            iterator = as_completed(future_map)
+            pbar = tqdm(iterator, total=len(future_map), desc="refresh CN Baidu valuation", unit="stock", file=sys.stderr) if show_progress else None
+            try:
+                for future in pbar or iterator:
+                    code = future_map[future]
+                    try:
+                        frame = future.result()
+                        if frame is not None and not frame.empty:
+                            frames.append(frame)
+                            success_count += 1
+                            if sum(len(item) for item in frames) >= flush_row_count:
+                                _flush_frames()
+                    except Exception as exc:
+                        failed.append({"code": code, "error": str(exc)})
+            finally:
+                if pbar is not None:
+                    pbar.close()
+        _flush_frames()
+        if show_progress:
+            print(
+                f"[SUMMARY] A 股 Baidu 历史估值完成 success={success_count} "
+                f"rows={rows_written} failed={len(failed)}"
+            )
+            _print_cn_failure_summary("baidu_valuation_history", failed)
+        return {
+            "market": "CN",
+            "source": "baidu_valuation_history",
+            "period": period,
             "success_count": success_count,
             "failed_count": len(failed),
             "rows_written": rows_written,
@@ -1146,12 +1461,13 @@ class MarketDataService:
         max_workers=4,
         year=None,
         quarter=None,
+        lookback_quarters=1,
         show_progress=False,
     ):
         """刷新 A 股 valuation_snapshot 与 financial_statement_metrics。"""
         codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
         if not codes:
-            codes = self.get_all_stock_codes(market="CN")[:limit or None]
+            codes = self._cn_metadata_codes(limit=limit)
         if limit and stock_codes:
             codes = codes[:limit]
         info_frame = self.warehouse.read_stock_info(stock_codes=codes or None, market="CN")
@@ -1184,7 +1500,11 @@ class MarketDataService:
         )
 
         def _fetch_financial(code):
-            metrics = CNBaoStockFinancialFetcher(code, verbose=not show_progress).fetch_latest(year=year, quarter=quarter)
+            metrics = CNBaoStockFinancialFetcher(code, verbose=not show_progress).fetch_latest(
+                year=year,
+                quarter=quarter,
+                lookback_quarters=lookback_quarters,
+            )
             if not metrics:
                 return None
             return normalize_financial_statement_metrics(
@@ -1211,12 +1531,14 @@ class MarketDataService:
             financial_result["rows"] = total_financial_rows
             financial_rows = []
 
+        pbar = None
+        if show_progress:
+            # Construct this before workers can enter BaoStock.  BaoStock's
+            # library writes login messages to stderr during a request.
+            pbar = tqdm(total=len(codes), desc="refresh CN financial", unit="stock", file=sys.stderr)
         with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), len(codes) or 1))) as executor:
             future_map = {executor.submit(_fetch_financial, code): code for code in codes}
             iterator = as_completed(future_map)
-            pbar = None
-            if show_progress:
-                pbar = tqdm(total=len(future_map), desc="refresh CN financial", unit="stock", file=sys.stderr)
             try:
                 for future in iterator:
                     code = future_map[future]
@@ -1240,6 +1562,7 @@ class MarketDataService:
                 f"[SUMMARY] A 股财务刷新完成 valuation={valuation_result.get('rows', 0)} "
                 f"financial={financial_result.get('rows', 0)} failed={len(failed)}"
             )
+            _print_cn_failure_summary("financial_metrics", failed)
         return {
             "market": "CN",
             "valuation_snapshot": valuation_result,
@@ -1272,6 +1595,8 @@ class MarketDataService:
         min_ohlcv_rows=120,
         adjust="qfq",
         frequency="daily",
+        include_features=True,
+        feature_set=None,
     ):
         """检查 A 股数据是否足够支撑本地因子/回测链路。"""
         normalized_adjust = normalize_adjust(adjust)
@@ -1281,33 +1606,29 @@ class MarketDataService:
         if limit:
             codes = codes[:limit]
 
-        ohlcv = self.warehouse.read_ohlcv(
-            stock_code=codes or None,
+        row_counts, latest_dates = self.warehouse.ohlcv_coverage_by_stock(
+            stock_codes=codes or None,
             market="CN",
             asset_type="equity",
             frequency=frequency,
             adjust=normalized_adjust,
         )
-        if (not codes) and ohlcv is not None and not ohlcv.empty:
-            codes = sorted(ohlcv["stock_code"].astype(str).unique().tolist())
 
         info = self.warehouse.read_stock_info(stock_codes=codes or None, market="CN")
-        valuation = self.warehouse.read_valuation_snapshots(stock_codes=codes or None, market="CN")
-        financial = self.warehouse.read_financial_statement_metrics(stock_codes=codes or None, market="CN")
-        features = self.warehouse.read_features(
-            stock_code=codes or None,
-            market="CN",
-            asset_type="equity",
-            frequency=frequency,
-            adjust=normalized_adjust,
+        valuation = self.warehouse.read_valuation_snapshots(
+            stock_codes=codes or None, market="CN", columns=["stock_code"]
+        )
+        financial = self.warehouse.read_financial_statement_metrics(
+            stock_codes=codes or None, market="CN", columns=["stock_code"]
+        )
+        feature_stock_count = (
+            self.warehouse.feature_stock_count(
+                market="CN", asset_type="equity", frequency=frequency,
+                adjust=normalized_adjust, feature_set=feature_set,
+            )
+            if include_features else 0
         )
 
-        row_counts = {}
-        latest_dates = {}
-        if ohlcv is not None and not ohlcv.empty:
-            grouped = ohlcv.groupby("stock_code")
-            row_counts = {str(code): int(len(frame)) for code, frame in grouped}
-            latest_dates = {str(code): str(pd.to_datetime(frame["trade_date"]).max().date()) for code, frame in grouped}
         covered_codes = [code for code, count in row_counts.items() if count >= int(min_ohlcv_rows)]
 
         info_coverage = self._field_coverage(
@@ -1321,13 +1642,16 @@ class MarketDataService:
             industry_l2_count = int((info.get("industry_l2").notna() & (info.get("industry_l2").astype(str).str.strip() != "")).sum()) if "industry_l2" in info else 0
 
         blocking_reasons = []
+        coverage_warnings = []
         if not codes:
             blocking_reasons.append("cn_universe_empty")
-        if codes and len(covered_codes) < len(codes):
-            blocking_reasons.append("cn_ohlcv_rows_below_threshold")
+        excluded_codes = sorted(set(codes) - set(covered_codes))
+        if excluded_codes:
+            coverage_warnings.append("cn_ohlcv_rows_below_threshold")
 
         analyzer_sample = {"ok": False, "stock_code": None, "rows": 0, "error": None}
-        if codes:
+        sample_code = covered_codes[0] if covered_codes else (codes[0] if codes else None)
+        if sample_code:
             try:
                 from core import StockAnalyzer
 
@@ -1337,23 +1661,23 @@ class MarketDataService:
                     market="CN",
                 )
                 try:
-                    sample_end_date = latest_dates.get(codes[0])
+                    sample_end_date = latest_dates.get(sample_code)
                     sample = analyzer.load_stock_data(
-                        codes[0],
+                        sample_code,
                         days=max(365, int(min_ohlcv_rows)),
                         end_date=sample_end_date,
                     )
                     analyzer_sample = {
                         "ok": sample is not None and not sample.empty,
-                        "stock_code": codes[0],
+                        "stock_code": sample_code,
                         "rows": 0 if sample is None else int(len(sample)),
                         "error": None,
                     }
                 finally:
                     analyzer.close()
             except Exception as exc:
-                analyzer_sample = {"ok": False, "stock_code": codes[0], "rows": 0, "error": str(exc)}
-        if codes and not analyzer_sample["ok"]:
+                analyzer_sample = {"ok": False, "stock_code": sample_code, "rows": 0, "error": str(exc)}
+        if sample_code and not analyzer_sample["ok"]:
             blocking_reasons.append("stock_analyzer_cn_load_failed")
 
         return {
@@ -1362,9 +1686,13 @@ class MarketDataService:
             "ohlcv": {
                 "frequency": frequency,
                 "adjust": normalized_adjust,
-                "row_count": int(len(ohlcv)) if ohlcv is not None else 0,
+                "row_count": int(sum(row_counts.values())),
                 "covered_stock_count": len(covered_codes),
                 "min_required_rows": int(min_ohlcv_rows),
+                "coverage_ratio": float(len(covered_codes) / len(codes)) if codes else 0.0,
+                "excluded_stock_count": len(excluded_codes),
+                "excluded_stock_sample": excluded_codes[:20],
+                "excluded_stock_codes": excluded_codes,
                 "row_counts": row_counts,
                 "latest_trade_dates": latest_dates,
             },
@@ -1381,12 +1709,14 @@ class MarketDataService:
                 "financial_stock_count": int(financial["stock_code"].nunique()) if financial is not None and not financial.empty and "stock_code" in financial else 0,
             },
             "features": {
-                "row_count": int(len(features)) if features is not None else 0,
-                "stock_count": int(features["stock_code"].nunique()) if features is not None and not features.empty and "stock_code" in features else 0,
+                "row_count": None,
+                "stock_count": int(feature_stock_count),
             },
             "analyzer_sample": analyzer_sample,
             "backtest_ready": not blocking_reasons,
+            "full_universe_ready": not blocking_reasons and not coverage_warnings,
             "blocking_reasons": blocking_reasons,
+            "coverage_warnings": coverage_warnings,
         }
 
     def get_hk_ohlcv(self, stock_code, start_date=None, end_date=None, frequency="daily", adjust="qfq"):
@@ -4397,10 +4727,12 @@ class MarketDataService:
             stock_codes=[normalized_code],
             market=normalized_market,
             end_date=asof_date,
-            order_by="trade_date DESC, ingest_time DESC",
+            order_by="trade_date, ingest_time",
         )
         if valuation is not None and not valuation.empty:
-            row = valuation.iloc[0].to_dict()
+            valuation = valuation.sort_values(["trade_date", "ingest_time"])
+            payload["valuation_history"] = valuation.to_dict("records")
+            row = valuation.iloc[-1].to_dict()
             for key, value in row.items():
                 if value is not None and not pd.isna(value):
                     payload[key] = value
@@ -4418,7 +4750,7 @@ class MarketDataService:
                     payload[key] = value
         return payload
 
-    def _build_factor_context_extra_map(self, stock_codes, market="HK", asof_date=None):
+    def _build_factor_context_extra_map(self, stock_codes, market="HK", asof_date=None, start_date=None):
         """Build local persisted factor context for a stock universe in one pass."""
         normalized_market = (market or "HK").upper()
         codes = [
@@ -4444,13 +4776,17 @@ class MarketDataService:
         valuation = self.warehouse.read_valuation_snapshots(
             stock_codes=codes,
             market=normalized_market,
+            start_date=start_date,
             end_date=asof_date,
-            order_by="market, stock_code, trade_date DESC, ingest_time DESC",
+            order_by="market, stock_code, trade_date, ingest_time",
         )
         if valuation is not None and not valuation.empty:
             valuation = valuation.sort_values(["stock_code", "trade_date", "ingest_time"])
-            valuation = valuation.drop_duplicates(subset=["market", "stock_code"], keep="last")
-            for _, row in valuation.iterrows():
+            for code, history in valuation.groupby("stock_code", sort=False):
+                payload = payloads.setdefault(code, {})
+                payload["valuation_history"] = history.to_dict("records")
+            latest = valuation.drop_duplicates(subset=["market", "stock_code"], keep="last")
+            for _, row in latest.iterrows():
                 code = normalize_stock_code(row.get("stock_code"), market=normalized_market)
                 payload = payloads.setdefault(code, {})
                 for key, value in row.to_dict().items():
@@ -4621,6 +4957,12 @@ class MarketDataService:
             config=config,
         )
         expected_feature_count = int((factor_metadata.get("extra") or {}).get("feature_count") or 0)
+        # Some factor names are intentionally absent when their source series
+        # is unavailable (for example optional financial fields).  Requiring
+        # the theoretical metadata count would therefore recompute otherwise
+        # complete stocks on every run.  Keep a high threshold to catch
+        # genuinely partial writes while allowing source-dependent sparsity.
+        minimum_feature_count = max(1, int(np.ceil(expected_feature_count * 0.90))) if expected_feature_count else 0
 
         effective_days = max(int(days or 0), 1)
         effective_warmup_days = max(int(warmup_days or 0), 0)
@@ -4629,11 +4971,10 @@ class MarketDataService:
         start_ts = end_ts - pd.Timedelta(days=history_window_days)
         start_date = start_ts.strftime("%Y-%m-%d")
         end_date = end_ts.strftime("%Y-%m-%d")
-        factor_context_extra_map = self._build_factor_context_extra_map(
-            normalized_codes,
-            market=normalized_market,
-            asof_date=end_date,
-        )
+        # Build the valuation/financial context only for stocks that actually
+        # need computation.  A fully covered incremental run should not load
+        # millions of sparse valuation rows just to skip every stock.
+        factor_context_extra_map = {}
         requested_workers = int(max_workers or 0)
         resource_plan = self._resolve_factor_generation_resource_plan(
             requested_workers=requested_workers,
@@ -4684,7 +5025,7 @@ class MarketDataService:
             feature_dates = pd.to_datetime(existing_features.get("trade_date"), errors="coerce").dropna()
             if feature_dates.empty or feature_dates.max().normalize() < latest_trade_date.normalize():
                 return False
-            if expected_feature_count > 0 and existing_features["feature_name"].nunique() < expected_feature_count:
+            if minimum_feature_count > 0 and existing_features["feature_name"].nunique() < minimum_feature_count:
                 return False
             return True
 
@@ -4695,14 +5036,15 @@ class MarketDataService:
             print("[INFO] 正在批量检查已有特征覆盖...", flush=True)
         if expected_feature_count > 0:
             try:
-                latest_dates = self.warehouse.get_latest_trade_dates(
+                _, latest_dates_by_stock = self.warehouse.ohlcv_coverage_by_stock(
                     stock_codes=normalized_codes,
                     market=normalized_market,
                     exchange=exchange,
                     asset_type=asset_type,
-                    frequencies=[frequency],
+                    frequency=frequency,
                     adjust=normalized_adjust,
                 )
+                latest_dates = {(code, frequency): pd.Timestamp(value) for code, value in latest_dates_by_stock.items()}
                 # latest_dates is {(code, freq): timestamp}
                 coverage_start_ts = pd.to_datetime(start_date).normalize()
                 codes_with_data = [
@@ -4710,6 +5052,11 @@ class MarketDataService:
                     if (c, frequency) in latest_dates
                     and pd.Timestamp(latest_dates[(c, frequency)]).normalize() >= coverage_start_ts
                 ]
+                # The aggregate query is authoritative for this batch.  Do
+                # not fall back to one feature read per stock when a code has
+                # no qualifying OHLCV date; it will be handled by the normal
+                # OHLCV/compute path below.
+                coverage_prechecked_codes.update(normalized_codes)
                 if codes_with_data:
                     codes_by_latest_date = {}
                     for code in codes_with_data:
@@ -4728,8 +5075,8 @@ class MarketDataService:
                         )
                     try:
                         for latest_date, date_codes in sorted(codes_by_latest_date.items()):
-                            existing_features_map = self.warehouse.read_features(
-                                stock_code=date_codes,
+                            feature_counts = self.warehouse.feature_name_counts_by_stock(
+                                stock_codes=date_codes,
                                 market=normalized_market,
                                 exchange=exchange,
                                 asset_type=asset_type,
@@ -4738,24 +5085,13 @@ class MarketDataService:
                                 feature_set=factor_set,
                                 feature_version=materialization["feature_version"],
                                 feature_config_hash=materialization["feature_config_hash"],
-                                start_date=latest_date,
-                                end_date=latest_date,
-                                columns=["stock_code", "trade_date", "feature_name"],
+                                trade_date=latest_date,
                             )
-                            coverage_prechecked_codes.update(date_codes)
-                            if not existing_features_map.empty:
-                                existing_features_map["trade_date"] = pd.to_datetime(
-                                    existing_features_map["trade_date"], errors="coerce"
-                                )
-                                for code, group in existing_features_map.groupby("stock_code"):
-                                    if (code, frequency) not in latest_dates:
-                                        continue
-                                    last_date = group["trade_date"].max()
-                                    n_features = group["feature_name"].nunique()
-                                    ohlcv_latest = pd.Timestamp(latest_dates[(code, frequency)])
-                                    if (last_date.normalize() >= ohlcv_latest.normalize()
-                                            and n_features >= expected_feature_count):
-                                        skip_codes.add(code)
+                            for code, n_features in feature_counts.items():
+                                if (code, frequency) not in latest_dates:
+                                    continue
+                                if n_features >= minimum_feature_count:
+                                    skip_codes.add(code)
                             if coverage_pbar is not None:
                                 coverage_pbar.update(1)
                                 coverage_pbar.set_postfix_str(
@@ -4773,6 +5109,17 @@ class MarketDataService:
                 f"[INFO] 特征覆盖检查完成: 可跳过 {len(skip_codes)} 只, "
                 f"需计算 {max(0, len(normalized_codes) - len(skip_codes))} 只",
                 flush=True,
+            )
+
+        codes_to_compute = [code for code in normalized_codes if code not in skip_codes]
+        if codes_to_compute:
+            factor_context_extra_map = self._build_factor_context_extra_map(
+                codes_to_compute,
+                market=normalized_market,
+                asof_date=end_date,
+                # Keep one year of prior sparse observations so the first daily
+                # sample can be filled by an as-of valuation rather than NaN.
+                start_date=(pd.Timestamp(start_date) - pd.Timedelta(days=366)).strftime("%Y-%m-%d"),
             )
 
         def _generate_one(stock_code):
@@ -5136,6 +5483,934 @@ class MarketDataService:
             "warmup_days": effective_warmup_days,
             "results": results,
         }
+
+    def build_cn_market_regime(
+        self,
+        *,
+        days=756,
+        end_date=None,
+        min_stocks=20,
+        trend_window=60,
+        breadth_window=20,
+        volatility_window=20,
+        hysteresis_days=3,
+        version="regime.v1",
+        output_dir="output/regime",
+    ):
+        """Build a point-in-time CN market regime report from persisted daily bars."""
+        end_ts = pd.to_datetime(end_date or datetime.now().date()).normalize()
+        start_ts = end_ts - pd.Timedelta(days=max(1, int(days)))
+        bars = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "close"],
+        )
+        regime = build_market_regime(
+            bars,
+            min_stocks=min_stocks,
+            trend_window=trend_window,
+            breadth_window=breadth_window,
+            volatility_window=volatility_window,
+            hysteresis_days=hysteresis_days,
+            version=version,
+        )
+        report = write_market_regime_report(regime, output_dir=output_dir)
+        report.update({"start_date": start_ts.strftime("%Y-%m-%d"), "end_date": end_ts.strftime("%Y-%m-%d")})
+        return report
+
+    def evaluate_cn_paper_outcomes(self, *, selection_path, days=756, horizons=(1, 5, 20, 60), cost_bps=10.0, benchmark_path=None, output_dir="output/paper_trading"):
+        selections = pd.read_csv(selection_path)
+        end_ts = pd.to_datetime(datetime.now().date()).normalize()
+        start_ts = end_ts - pd.Timedelta(days=int(days))
+        bars = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "close"],
+        )
+        benchmark = pd.read_csv(benchmark_path) if benchmark_path and Path(benchmark_path).is_file() else None
+        outcomes = evaluate_selection_outcomes(selections, bars, horizons=horizons, cost_bps=cost_bps, benchmark=benchmark)
+        return write_outcome_report(outcomes, output_dir=output_dir)
+
+    def run_cn_paper_account(self, *, selection_path, days=756, account_id="cn_default", strategy_version="v1", initial_capital=1_000_000.0, commission_bps=5.0, slippage_bps=5.0, lot_size=100, output_dir="output/paper_trading"):
+        selections = pd.read_csv(selection_path)
+        end_ts = pd.to_datetime(datetime.now().date()).normalize()
+        start_ts = end_ts - pd.Timedelta(days=int(days))
+        bars = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "open", "close"],
+        )
+        result = run_paper_account(
+            selections, bars, account_id=account_id, strategy_version=strategy_version,
+            initial_capital=initial_capital, commission_bps=commission_bps,
+            slippage_bps=slippage_bps, lot_size=lot_size,
+        )
+        return {**persist_paper_account(result, output_dir=output_dir), "warehouse": self.warehouse.upsert_paper_account_frames(result)}
+
+    def import_cn_alternative_evidence(self, *, input_path, output_dir="output/alternative_data", source="manual_import"):
+        """Import a local CN news/search/event export with PIT availability timestamps."""
+        path = Path(input_path)
+        if not path.is_file():
+            raise ValueError(f"alternative evidence file not found: {path}")
+        source_frame = pd.read_csv(path)
+        evidence = normalize_cn_alternative_evidence(source_frame, default_source=source)
+        directory = Path(output_dir); directory.mkdir(parents=True, exist_ok=True)
+        data_path = directory / "cn_alternative_evidence.csv"
+        evidence.to_csv(data_path, index=False)
+        report = write_alternative_data_report(evidence, output_dir=directory)
+        return {"status": "completed", "data_path": str(data_path), **report}
+
+    def build_cn_strategy_labels(self, *, days=756, output_dir="output/strategy_labels"):
+        end_ts = pd.to_datetime(datetime.now().date()).normalize()
+        bars = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            start_date=(end_ts - pd.Timedelta(days=int(days))).strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "close"],
+        )
+        labels = build_cn_strategy_labels(bars)
+        directory = Path(output_dir); directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "cn_daily_strategy_labels.csv"; labels.to_csv(path, index=False)
+        return {"status": "completed", "rows": int(len(labels)), "path": str(path), "execution_ready": False}
+
+    def train_cn_graph_temporal(self, *, factor_set="alpha_zoo_hk", days=365, lookback=20, epochs=5, model_dir="output/models/cn/graph_temporal/alpha_zoo_hk", cleaning_version="p0.2.v1", end_date=None):
+        end_ts = pd.to_datetime(end_date or datetime.now().date()).normalize()
+        start_ts = end_ts - pd.Timedelta(days=int(days))
+        panel, features, label_column = self._clean_panel_training_data(
+            market="CN", factor_set=factor_set, days=days, label_horizon=20,
+            cleaning_version=cleaning_version, min_stock_count=2, end_date=end_date,
+        )
+        codes = sorted(panel["stock_code"].astype(str).unique())
+        info = self.warehouse.read_stock_info(stock_codes=codes, market="CN")
+        adjacency, graph_meta = build_industry_adjacency(codes, info)
+        graph_meta.update({"asof_date": end_ts.strftime("%Y-%m-%d"), "available_at_rule": "industry registry as-of run", "cleaning_version": cleaning_version})
+        return train_graph_temporal_panel(panel, features, model_dir=model_dir, lookback=lookback, epochs=epochs, adjacency=adjacency, graph_metadata=graph_meta)
+
+    def evaluate_cn_model_comparison(self, *, prediction_paths, output_dir="output/evaluations", prefix="cn_model_comparison", target_col="forward_return_20d", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0):
+        predictions = {name: pd.read_csv(path) for name, path in (prediction_paths or {}).items() if path and Path(path).is_file()}
+        if not predictions:
+            raise ValueError("no persisted prediction files available for model comparison")
+        report, summary = compare_walk_forward_predictions(
+            predictions, target_col=target_col, n_splits=n_splits, min_train_days=min_train_days,
+            test_days=test_days, purge_days=purge_days, embargo_days=embargo_days,
+        )
+        return write_walk_forward_report(report, summary, output_dir=output_dir, prefix=prefix)
+
+    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=200_000, transformer_device="auto", industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None):
+        """Generate historical predictions with one strictly prior model per OOS fold."""
+        panel, features, label_column = self._clean_panel_training_data(
+            market="CN", factor_set=factor_set, days=days, label_horizon=label_horizon,
+            cleaning_version=cleaning_version, min_stock_count=2, end_date=end_date,
+        )
+        requested = [str(item).lower() for item in models]
+        results = {}
+        common = {
+            "label_column": label_column, "output_dir": output_dir, "n_splits": n_splits,
+            "min_train_days": min_train_days, "test_days": test_days, "purge_days": purge_days,
+            "embargo_days": embargo_days, "cleaning_version": cleaning_version, "factor_set": factor_set,
+            "min_feature_coverage": min_feature_coverage, "drop_constant_features": drop_constant_features,
+        }
+        if "lightgbm" in requested:
+            results["lightgbm"] = generate_lightgbm_oos_predictions(panel, features, **common)
+        if "transformer" in requested:
+            results["transformer"] = generate_transformer_oos_predictions(
+                panel, features, **common, lookback=transformer_lookback, epochs=transformer_epochs,
+                batch_size=transformer_batch_size, max_samples=transformer_max_samples, device=transformer_device,
+            )
+        if "cnn" in requested:
+            results["cnn"] = generate_cnn_oos_predictions(
+                panel, features, **common, lookback=transformer_lookback, epochs=transformer_epochs,
+                batch_size=transformer_batch_size, max_samples=transformer_max_samples, device=transformer_device,
+            )
+        if "graph_temporal" in requested:
+            path = Path(industry_mapping_path or "")
+            if not path.is_file():
+                raise ValueError("graph_temporal OOS requires oos_predictions.industry_mapping_path with PIT available_at")
+            graph_common = {
+                key: value for key, value in common.items()
+                if key not in {"min_feature_coverage", "drop_constant_features"}
+            }
+            results["graph_temporal"] = generate_graph_temporal_oos_predictions(
+                panel, features, industry_mapping=pd.read_csv(path), **graph_common,
+                lookback=transformer_lookback, epochs=transformer_epochs,
+            )
+        unsupported = sorted(set(requested) - {"lightgbm", "transformer", "cnn", "graph_temporal"})
+        if unsupported:
+            raise ValueError(f"OOS prediction generator does not support: {','.join(unsupported)}")
+        return {"status": "completed", "label_column": label_column, "results": results}
+
+    def materialize_clean_feature_panel(
+        self,
+        *,
+        market="CN",
+        factor_set="alpha_zoo_hk",
+        frequency="daily",
+        adjust="qfq",
+        days=365,
+        end_date=None,
+        cleaning_version="p0.2.v1",
+        report_dir="output/data_quality",
+        show_progress=False,
+        feature_batch_size=10,
+    ):
+        """Materialize a versioned, auditable panel from persisted features.
+
+        This method reads factor values rather than re-running factor formulas.
+        Price/volume features are derived from the already persisted OHLCV layer.
+        """
+        normalized_market = str(market).upper()
+        normalized_adjust = normalize_adjust(adjust)
+        end_ts = pd.to_datetime(end_date or datetime.now().date()).normalize()
+        start_ts = end_ts - pd.Timedelta(days=max(1, int(days)))
+        progress_started_at = time.monotonic()
+
+        def _log(message: str) -> None:
+            if show_progress:
+                elapsed = time.monotonic() - progress_started_at
+                print(f"[CLEAN_PANEL] {message} elapsed={elapsed:.1f}s", flush=True)
+
+        _log(
+            "reading persisted inputs "
+            f"market={normalized_market} factor_set={factor_set} "
+            f"window={start_ts:%Y-%m-%d}..{end_ts:%Y-%m-%d}"
+        )
+        ohlcv_frame = self.warehouse.read_ohlcv(
+            market=normalized_market,
+            asset_type="equity",
+            frequency=frequency,
+            adjust=normalized_adjust,
+            start_date=start_ts.strftime("%Y-%m-%d"),
+            end_date=end_ts.strftime("%Y-%m-%d"),
+        )
+        _log(f"daily bars loaded rows={len(ohlcv_frame):,}")
+        if ohlcv_frame.empty:
+            raise ValueError("daily OHLCV is empty; run --stage daily_bars before --stage clean_panel")
+
+        # The source feature layer is long-format and can contain billions of
+        # rows. Materialize a compact (trade_date, stock_code) wide snapshot,
+        # matching Qlib's handler contract, without producing an audit-long
+        # copy of every value.
+        stock_codes = sorted(ohlcv_frame["stock_code"].dropna().astype(str).unique())
+        factor_metadata = create_factor_set(factor_set).metadata().to_dict()
+        expected_factor_names = list((factor_metadata.get("extra") or {}).get("feature_names") or [])
+        expected_factor_names.extend(f"RPS_{window}" for window in (5, 10, 20, 30, 60))
+        snapshot_features = list(dict.fromkeys(expected_factor_names + PRICE_FEATURE_COLUMNS))
+        target_path = self.layout.dataset_path("clean_feature_panel", layer="feature")
+        # Build into a private sibling dataset and atomically publish only
+        # after every stock has been processed. A terminated run must never
+        # expose a partial clean panel to model training.
+        import shutil
+        temp_path = target_path.parent / f".{target_path.name}.tmp-{os.getpid()}"
+        if temp_path.exists():
+            shutil.rmtree(temp_path)
+        temp_layout = DataLayout(base_dir=str(temp_path.parent.parent / (temp_path.name + "-layout")))
+        temp_store = ParquetDataStore(temp_layout)
+        temp_dataset_path = temp_store.layout.dataset_path("clean_feature_panel", layer="feature")
+        stock_bar = tqdm(total=len(stock_codes), desc="clean panel stocks", unit="stock", file=sys.stderr) if show_progress else None
+        total_rows = 0
+        total_invalid = 0
+        issue_stocks: set[str] = set()
+        feature_names: set[str] = set(snapshot_features)
+        missing_sum: dict[str, int] = {}
+        missing_count: dict[str, int] = {}
+        manifest = {
+            "cleaning_version": cleaning_version,
+            "storage_format": "qlib_wide_v1",
+            "mode": "vectorized_stock_batches",
+            "stocks": len(stock_codes),
+            "features": snapshot_features,
+        }
+        pending = []
+        pending_rows = 0
+
+        def flush_pending() -> None:
+            nonlocal pending, pending_rows
+            if not pending:
+                return
+            batch = pd.concat(pending, ignore_index=True)
+            temp_store.append_frame(
+                "clean_feature_panel", batch, layer="feature", date_column="trade_date",
+                partition_columns=("market", "exchange", "asset_type", "frequency", "adjust", "feature_set", "year"),
+            )
+            pending = []
+            pending_rows = 0
+
+        try:
+            normalized_batch_size = max(1, int(feature_batch_size))
+            for batch_start in range(0, len(stock_codes), normalized_batch_size):
+                batch_codes = stock_codes[batch_start:batch_start + normalized_batch_size]
+                _log(
+                    f"reading feature batch {batch_start + 1}-{batch_start + len(batch_codes)}"
+                    f"/{len(stock_codes)} stocks"
+                )
+                # Feature materialization is sourced from local Parquet.  It is
+                # the complete immutable feature source and avoids sending a
+                # multi-million-row exploratory query to an optional ClickHouse
+                # mirror during a long-running clean-panel rebuild.
+                factors_batch = self.warehouse.parquet_store.read_frame(
+                    "features",
+                    layer="feature",
+                    filters={
+                        "stock_code": batch_codes,
+                        "market": normalized_market,
+                        "asset_type": "equity",
+                        "frequency": frequency,
+                        "adjust": normalized_adjust,
+                        "feature_set": factor_set,
+                    },
+                    range_filters={
+                        "trade_date": {
+                            "gte": start_ts.strftime("%Y-%m-%d"),
+                            "lte": end_ts.strftime("%Y-%m-%d"),
+                        }
+                    },
+                    columns=["trade_date", "stock_code", "feature_name", "feature_value", "ingest_time"],
+                )
+                _log(f"feature batch loaded rows={len(factors_batch):,}")
+                bars_batch = ohlcv_frame.loc[ohlcv_frame["stock_code"].astype(str).isin(batch_codes)]
+                panel = build_feature_panel(
+                    factors_batch, bars_batch,
+                    market=normalized_market, frequency=frequency,
+                    adjust=normalized_adjust, factor_set=factor_set,
+                )
+                if not panel.empty:
+                    compact, _, batch_manifest = compact_training_panel(
+                        panel,
+                        feature_columns=snapshot_features,
+                        cleaning_version=cleaning_version,
+                    )
+                    compact["ingest_time"] = pd.Timestamp.now("UTC")
+                    pending.append(compact)
+                    pending_rows += len(compact)
+                    total_rows += len(compact)
+                    invalid = int(batch_manifest.get("pit_invalid_rows", 0))
+                    total_invalid += invalid
+                    if invalid:
+                        invalid_codes = compact.loc[~compact["pit_valid"], "stock_code"].astype(str).unique()
+                        issue_stocks.update(invalid_codes)
+                    for feature in snapshot_features:
+                        column = f"{feature}_is_missing"
+                        missing_sum[feature] = missing_sum.get(feature, 0) + int(compact[column].sum())
+                        missing_count[feature] = missing_count.get(feature, 0) + len(compact)
+                    # Wide batches are much denser than the old long rows;
+                    # flush around 25k samples to bound memory below ~1 GB.
+                    if pending_rows >= 25_000:
+                        flush_pending()
+                if stock_bar is not None:
+                    stock_bar.update(len(batch_codes))
+                    stock_bar.set_postfix_str(
+                        f"rows={total_rows:,} features={len(snapshot_features)} batch={len(batch_codes)}"
+                    )
+        finally:
+            flush_pending()
+            if stock_bar is not None:
+                stock_bar.close()
+
+        if not total_rows:
+            shutil.rmtree(temp_layout.base_path, ignore_errors=True)
+            return {
+                "market": normalized_market, "status": "empty", "rows": 0,
+                "dataset_path": str(target_path),
+            }
+        manifest["feature_count"] = len(feature_names)
+        report = {
+            "market": normalized_market, "rows": int(total_rows),
+            "stored_rows": int(total_rows), "feature_count": len(feature_names),
+            "error_count": total_invalid, "warning_count": 0,
+            "passed": total_invalid == 0, "issue_stock_count": len(issue_stocks),
+            "details": [
+                {"feature_name": feature, "missing_rate": round(missing_sum.get(feature, 0) / max(1, missing_count.get(feature, 0)), 6)}
+                for feature in sorted(feature_names)
+            ],
+        }
+        report_paths = write_quality_report(
+            report,
+            report_dir,
+            prefix=f"clean_feature_panel_{normalized_market.lower()}_{end_ts.strftime('%Y%m%d')}",
+        )
+        manifest_path = Path(report_dir) / f"clean_feature_panel_{normalized_market.lower()}_{end_ts.strftime('%Y%m%d')}_manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        # A dataset is readable only after this marker has been published.  It
+        # lives beside the parquet parts so a terminated build (or an old
+        # hand-copied partial directory) cannot be mistaken for a valid panel.
+        success_marker = {
+            "status": "completed",
+            "dataset": "clean_feature_panel",
+            "market": normalized_market,
+            "factor_set": factor_set,
+            "frequency": frequency,
+            "adjust": normalized_adjust,
+            "cleaning_version": cleaning_version,
+            "start_date": start_ts.strftime("%Y-%m-%d"),
+            "end_date": end_ts.strftime("%Y-%m-%d"),
+            "rows": int(total_rows),
+            "stored_rows": int(total_rows),
+            "feature_count": len(feature_names),
+            "storage_format": "qlib_wide_v1",
+            "quality_report": report_paths,
+            "manifest": str(manifest_path),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        marker_path = temp_dataset_path / "_SUCCESS.json"
+        marker_path.write_text(json.dumps(success_marker, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        # Publish the complete dataset only after its report and manifest are
+        # available. Keep the old dataset until the last possible moment.
+        backup_path = target_path.parent / f".{target_path.name}.previous-{os.getpid()}"
+        try:
+            if backup_path.exists():
+                shutil.rmtree(backup_path)
+            if target_path.exists():
+                target_path.rename(backup_path)
+            temp_dataset_path.rename(target_path)
+        except Exception:
+            # Restore the previous complete dataset if publication fails.
+            if not target_path.exists() and backup_path.exists():
+                backup_path.rename(target_path)
+            raise
+        finally:
+            shutil.rmtree(temp_layout.base_path, ignore_errors=True)
+        if backup_path.exists():
+            shutil.rmtree(backup_path, ignore_errors=True)
+        _log(f"quality report written manifest={manifest_path}")
+        return {
+            "market": normalized_market,
+            "status": "completed",
+            "rows": int(total_rows),
+            "stored_rows": int(total_rows),
+            "feature_count": len(feature_names),
+            "dataset_path": str(self.layout.dataset_path("clean_feature_panel", layer="feature")),
+            "report_paths": report_paths,
+            "manifest_path": str(manifest_path),
+            "start_date": start_ts.strftime("%Y-%m-%d"),
+            "end_date": end_ts.strftime("%Y-%m-%d"),
+        }
+
+    def read_clean_feature_panel(
+        self,
+        *,
+        market="CN",
+        factor_set="alpha_zoo_hk",
+        frequency="daily",
+        adjust="qfq",
+        start_date=None,
+        end_date=None,
+        cleaning_version="p0.2.v1",
+        feature_columns=None,
+        metadata_only=False,
+    ):
+        """Read a completed clean-panel snapshot as model-ready values and masks."""
+        dataset_path = self.layout.dataset_path("clean_feature_panel", layer="feature")
+        # A hard stop between moving the old directory aside and publishing
+        # the new one leaves a recoverable sibling. Restore it before applying
+        # the normal success-marker checks; never promote an unmarked dataset.
+        if not dataset_path.exists():
+            backups = sorted(
+                dataset_path.parent.glob(f".{dataset_path.name}.previous-*"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for backup in backups:
+                if (backup / "_SUCCESS.json").is_file():
+                    try:
+                        backup.rename(dataset_path)
+                    except OSError:
+                        pass
+                    break
+        marker_path = dataset_path / "_SUCCESS.json"
+        if not marker_path.is_file():
+            if self.warehouse.parquet_store.dataset_exists("clean_feature_panel", layer="feature"):
+                raise ValueError(
+                    "clean_feature_panel is incomplete: missing _SUCCESS.json "
+                    f"(path={dataset_path}); rerun --stage clean_panel to completion"
+                )
+            return pd.DataFrame(), []
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"clean_feature_panel has invalid _SUCCESS.json (path={marker_path})") from exc
+        if marker.get("status") != "completed":
+            raise ValueError(f"clean_feature_panel is not complete (path={dataset_path})")
+        marker_version = marker.get("cleaning_version")
+        if marker_version and str(marker_version) != str(cleaning_version):
+            raise ValueError(
+                f"clean_feature_panel cleaning_version={marker_version!r} does not match requested {cleaning_version!r}; "
+                "rerun --stage clean_panel with the requested version"
+            )
+        storage_format = marker.get("storage_format", "audit_long_v1")
+        requested_features = set(feature_columns or [])
+        read_columns = None
+        if metadata_only:
+            read_columns = [
+                "market", "exchange", "asset_type", "frequency", "adjust", "year",
+                "trade_date", "stock_code", "available_at", "quality_status", "pit_valid",
+            ]
+        elif requested_features:
+            read_columns = [
+                column for column in (
+                    "market", "exchange", "asset_type", "frequency", "adjust", "year",
+                    "trade_date", "stock_code", "feature_name", "value_clean", "is_missing",
+                    "available_at", "quality_status", "pit_valid", *requested_features,
+                )
+                if column
+            ]
+        read_filters = {
+            "market": str(market).upper(), "frequency": frequency,
+            "adjust": normalize_adjust(adjust), "feature_set": factor_set,
+            "cleaning_version": cleaning_version,
+        }
+        if requested_features and storage_format != "qlib_wide_v1":
+            read_filters["feature_name"] = [
+                column[:-6] if column.endswith("_clean") else column[:-11]
+                for column in requested_features
+                if column.endswith(("_clean", "_is_missing"))
+            ]
+        frame = self.warehouse.parquet_store.read_frame(
+            "clean_feature_panel",
+            layer="feature",
+            filters=read_filters,
+            columns=read_columns,
+            range_filters={"trade_date": {"gte": start_date, "lte": end_date}} if start_date or end_date else None,
+            order_by=(
+                "stock_code, trade_date"
+                if storage_format == "qlib_wide_v1"
+                else "stock_code, trade_date, feature_name"
+            ),
+        )
+        if frame.empty:
+            return pd.DataFrame(), []
+        if storage_format == "qlib_wide_v1":
+            feature_columns = sorted(
+                column for column in frame.columns
+                if column.endswith(("_clean", "_is_missing"))
+            )
+            return frame.sort_values(["stock_code", "trade_date"]).reset_index(drop=True), feature_columns
+        keys = [column for column in PANEL_KEYS if column in frame.columns]
+        values = frame.pivot_table(index=keys, columns="feature_name", values="value_clean", aggfunc="last")
+        missing = frame.pivot_table(index=keys, columns="feature_name", values="is_missing", aggfunc="last")
+        values.columns = [f"{column}_clean" for column in values.columns]
+        missing.columns = [f"{column}_is_missing" for column in missing.columns]
+        wide = pd.concat([values, missing], axis=1).reset_index()
+        # These fields are repeated on every long-form feature row. Preserve
+        # them so training can enforce PIT validity and retain audit status.
+        metadata_columns = [column for column in ("available_at", "quality_status", "pit_valid") if column in frame.columns]
+        if metadata_columns:
+            metadata = frame.groupby(keys, dropna=False, sort=False)[metadata_columns].first().reset_index()
+            wide = wide.merge(metadata, on=keys, how="left")
+        feature_columns = [column for column in wide.columns if column.endswith(("_clean", "_is_missing"))]
+        return wide.sort_values(["stock_code", "trade_date"]).reset_index(drop=True), feature_columns
+
+    def _clean_panel_training_data(
+        self,
+        *,
+        market="CN",
+        factor_set="alpha_zoo_hk",
+        frequency="daily",
+        adjust="qfq",
+        days=365,
+        label_horizon=20,
+        cleaning_version="p0.2.v1",
+        min_stock_count=50,
+        end_date=None,
+        show_progress=False,
+    ):
+        progress = tqdm(total=4, desc="training data", unit="step", file=sys.stderr) if show_progress else None
+        end_ts = pd.to_datetime(end_date or datetime.now().date()).normalize()
+        start_ts = end_ts - pd.Timedelta(days=max(1, int(days)))
+        try:
+            panel, feature_columns = self.read_clean_feature_panel(
+                market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
+                start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+                cleaning_version=cleaning_version,
+            )
+            if progress is not None:
+                progress.set_postfix_str(f"panel_rows={len(panel):,} features={len(feature_columns)}")
+                progress.update(1)
+            if panel.empty:
+                dataset_path = self.layout.dataset_path("clean_feature_panel", layer="feature")
+                raise ValueError(
+                    "clean_feature_panel is empty "
+                    f"(path={dataset_path}); run `uv run python scripts/run_cn_pipeline.py --stage clean_panel` "
+                    "after `--stage features`"
+                )
+            if "pit_valid" in panel.columns:
+                invalid_rows = int((~panel["pit_valid"].fillna(False).astype(bool)).sum())
+                if invalid_rows:
+                    raise ValueError(f"clean panel contains {invalid_rows} PIT-invalid rows; fix the quality report before training")
+            stock_count = int(panel["stock_code"].nunique())
+            if stock_count < int(min_stock_count):
+                raise ValueError(
+                    f"clean panel has only {stock_count} stocks; at least {int(min_stock_count)} are required for cross-sectional training"
+                )
+            if progress is not None:
+                progress.set_postfix_str(f"stocks={stock_count:,} PIT=ok")
+                progress.update(1)
+            prices = self.warehouse.read_ohlcv(
+                market=str(market).upper(), asset_type="equity", frequency=frequency,
+                adjust=normalize_adjust(adjust),
+                start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+            )
+            prices = prices[["stock_code", "trade_date", "close"]].copy()
+            prices["trade_date"] = pd.to_datetime(prices["trade_date"], errors="coerce")
+            prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
+            prices = prices.sort_values(["stock_code", "trade_date"]).drop_duplicates(
+                subset=["stock_code", "trade_date"], keep="last"
+            )
+            if progress is not None:
+                progress.set_postfix_str(f"price_rows={len(prices):,}")
+                progress.update(1)
+            prices[f"forward_return_{int(label_horizon)}d"] = prices.groupby("stock_code")["close"].shift(-int(label_horizon)) / prices["close"] - 1.0
+            panel = panel.merge(
+                prices[["stock_code", "trade_date", f"forward_return_{int(label_horizon)}d"]],
+                on=["stock_code", "trade_date"], how="left",
+            )
+            if progress is not None:
+                progress.set_postfix_str(f"labeled_rows={len(panel):,} horizon={label_horizon}d")
+                progress.update(1)
+            return panel, feature_columns, f"forward_return_{int(label_horizon)}d"
+        finally:
+            if progress is not None:
+                progress.close()
+
+    def score_clean_feature_panel_models(
+        self,
+        *,
+        market="CN",
+        factor_set="alpha_zoo_hk",
+        frequency="daily",
+        adjust="qfq",
+        days=365,
+        end_date=None,
+        cleaning_version="p0.2.v1",
+        lightgbm_model_path=None,
+        lightgbm_manifest_path=None,
+        transformer_model_path=None,
+        transformer_manifest_path=None,
+        transformer_device="auto",
+        cnn_model_path=None,
+        cnn_manifest_path=None,
+        cnn_device="auto",
+        output_dir="output/model_scores",
+        min_cross_section_coverage=0.95,
+        show_progress=False,
+    ):
+        """Score persisted models in isolated workers and persist their latest scores."""
+
+        end_ts = pd.to_datetime(end_date or datetime.now().date()).normalize()
+        start_ts = end_ts - pd.Timedelta(days=max(1, int(days)))
+        metadata_panel, _ = self.read_clean_feature_panel(
+            market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
+            start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+            cleaning_version=cleaning_version, metadata_only=True,
+        )
+        if metadata_panel.empty:
+            raise ValueError("clean_feature_panel is empty; run --stage clean_panel first")
+        if "pit_valid" in metadata_panel.columns:
+            metadata_panel = metadata_panel[metadata_panel["pit_valid"].fillna(False).astype(bool)].copy()
+        if metadata_panel.empty:
+            raise ValueError("clean_feature_panel has no PIT-valid rows available for scoring")
+        latest_date, score_date_quality = _latest_complete_cross_section(
+            metadata_panel, min_coverage=min_cross_section_coverage,
+        )
+        metadata_panel["trade_date"] = pd.to_datetime(metadata_panel["trade_date"], errors="coerce")
+        available_dates = sorted(metadata_panel.loc[metadata_panel["trade_date"] <= latest_date, "trade_date"].dropna().unique())
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        results = {}
+        if show_progress:
+            print(
+                "[MODEL_SCORES] selected date="
+                f"{latest_date.strftime('%Y-%m-%d')} stocks={score_date_quality['selected_stock_count']}/"
+                f"{score_date_quality['universe_stock_count']} "
+                f"raw_latest={score_date_quality['raw_latest_trade_date']} "
+                f"stocks={score_date_quality['raw_latest_stock_count']}",
+                flush=True,
+            )
+        progress = tqdm(total=sum(bool(path and manifest) for path, manifest in ((lightgbm_model_path, lightgbm_manifest_path), (transformer_model_path, transformer_manifest_path), (cnn_model_path, cnn_manifest_path))), desc="model scores", unit="model", file=sys.stderr) if show_progress else None
+        worker_path = Path(__file__).resolve().parents[2] / "scripts" / "score_cn_model.py"
+
+        def _score_in_worker(name, model_path, manifest_path, device):
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            lookback = int(manifest.get("preprocessing", {}).get("lookback", 1))
+            worker_start = available_dates[-max(1, lookback)] if available_dates else latest_date
+            path = output / f"cn_{name}_scores.csv"
+            command = [
+                sys.executable, str(worker_path), "--model", name,
+                "--model-path", str(model_path), "--manifest-path", str(manifest_path),
+                "--market", str(market), "--factor-set", str(factor_set),
+                "--frequency", str(frequency), "--adjust", str(adjust),
+                "--start-date", str(pd.Timestamp(worker_start).date()),
+                "--score-date", str(pd.Timestamp(latest_date).date()),
+                "--cleaning-version", str(cleaning_version), "--device", str(device),
+                "--output-path", str(path),
+            ]
+            if show_progress:
+                command.append("--show-progress")
+            completed = subprocess.run(command, check=False)
+            if completed.returncode:
+                raise RuntimeError(f"{name} scoring worker failed with exit status {completed.returncode}")
+            if not path.is_file():
+                raise RuntimeError(f"{name} scoring worker did not produce {path}")
+            rows = int(len(pd.read_csv(path, usecols=["stock_code"])))
+            results[name] = {"rows": rows, "path": str(path)}
+            if progress is not None:
+                progress.set_postfix_str(f"{name} rows={rows:,}")
+                progress.update(1)
+
+        # A worker exits after each model, bounding memory and keeping
+        # LightGBM/PyTorch OpenMP runtimes isolated on macOS.
+        if transformer_model_path and transformer_manifest_path:
+            _score_in_worker("transformer", transformer_model_path, transformer_manifest_path, transformer_device)
+        if lightgbm_model_path and lightgbm_manifest_path:
+            _score_in_worker("lightgbm", lightgbm_model_path, lightgbm_manifest_path, "cpu")
+        if cnn_model_path and cnn_manifest_path:
+            _score_in_worker("cnn", cnn_model_path, cnn_manifest_path, cnn_device)
+        if progress is not None:
+            progress.close()
+        if not results:
+            raise ValueError("at least one persisted model path and manifest path is required")
+        return {
+            "status": "completed",
+            "latest_trade_date": latest_date.strftime("%Y-%m-%d"),
+            "score_date_quality": score_date_quality,
+            "results": results,
+        }
+
+    def select_persisted_model_scores(
+        self,
+        *,
+        model_scores_dir="output/model_scores",
+        output_dir="output/results_cn",
+        model="ensemble",
+        top_n=10,
+        portfolio_mode="topn",
+        portfolio_constraints=None,
+        initial_capital=1_000_000.0,
+        show_progress=False,
+    ):
+        """Select from saved model predictions without rebuilding factors or retraining."""
+        from factor_engine.ml.model_training import select_top_model_scores
+
+        source = Path(model_scores_dir)
+        frames = {}
+        progress = tqdm(total=4, desc="selection", unit="step", file=sys.stderr) if show_progress else None
+        for name in ("lightgbm", "transformer", "cnn"):
+            path = source / f"cn_{name}_scores.csv"
+            if path.is_file():
+                frames[name] = pd.read_csv(path)
+        if progress is not None:
+            progress.set_postfix_str(f"score_files={len(frames)}")
+            progress.update(1)
+        regime = "unknown"
+        regime_version = None
+        regime_trade_date = None
+        model_weights = None
+        regime_path = Path("output/regime/cn_market_regime.csv")
+        if regime_path.is_file():
+            try:
+                regime_frame = pd.read_csv(regime_path)
+                if not regime_frame.empty:
+                    latest = regime_frame.sort_values("trade_date").iloc[-1]
+                    regime = str(latest.get("regime", "unknown"))
+                    regime_version = latest.get("regime_version")
+                    regime_trade_date = str(latest.get("trade_date"))
+                    model_weights = {
+                        name: float(latest.get(f"model_weight_{name}", 0.0))
+                        for name in ("lightgbm", "transformer", "cnn")
+                        if pd.notna(latest.get(f"model_weight_{name}"))
+                    }
+                    regime_budget = {
+                        key: float(latest[key]) for key in ("gross_exposure_budget", "max_weight_budget")
+                        if key in latest and pd.notna(latest[key])
+                    }
+                    regime_strategy_id = str(latest.get("strategy_id", "insufficient_data"))
+            except (ValueError, OSError):
+                pass
+        else:
+            regime_budget = {}
+            regime_strategy_id = "insufficient_data"
+        if "regime_budget" not in locals():
+            regime_budget = {}
+            regime_strategy_id = "insufficient_data"
+        selected = select_top_model_scores(
+            frames, model=model, top_n=top_n, model_weights=model_weights,
+            metadata={"regime": regime, "regime_version": regime_version, "regime_trade_date": regime_trade_date,
+                      "model_weights": json.dumps(model_weights or {}, ensure_ascii=False), "strategy_id": regime_strategy_id,
+                      "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
+        )
+        if progress is not None:
+            progress.set_postfix_str(f"candidates={len(selected):,} model={model}")
+            progress.update(1)
+        if str(portfolio_mode).lower() == "mean_variance_cost_aware":
+            info = self.warehouse.read_stock_info(stock_codes=selected["stock_code"].astype(str).tolist(), market="CN")
+            if not info.empty:
+                selected = selected.merge(
+                    info.reindex(columns=[column for column in ("stock_code", "industry_l1", "market_cap", "daily_turnover", "tradable_flag") if column in info.columns]),
+                    on="stock_code", how="left",
+                )
+            constraint_values = {**regime_budget, **(portfolio_constraints or {})}
+            cfg = PortfolioConstraints(**constraint_values)
+            selected, portfolio_manifest = optimize_long_only(
+                selected, constraints=cfg, initial_capital=float(initial_capital),
+            )
+            if progress is not None:
+                progress.set_postfix_str("portfolio optimized")
+                progress.update(1)
+        else:
+            selected["target_weight"] = 1.0 / max(1, len(selected))
+            selected["portfolio_mode"] = "topn"
+            portfolio_manifest = {"status": "completed", "portfolio_mode": "topn", "selected_count": int(len(selected))}
+            if progress is not None:
+                progress.set_postfix_str("equal-weight portfolio")
+                progress.update(1)
+        destination = Path(output_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / f"cn_{str(model).lower()}_selected.csv"
+        selected.to_csv(path, index=False)
+        portfolio_manifest_path = destination / f"cn_{str(model).lower()}_portfolio_manifest.json"
+        portfolio_manifest_path.write_text(json.dumps(portfolio_manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        if progress is not None:
+            progress.set_postfix_str(f"written={path}")
+            progress.update(1)
+            progress.close()
+        return {
+            "status": "completed", "model": str(model).lower(), "selected_count": int(len(selected)),
+            "latest_trade_date": pd.to_datetime(selected["trade_date"].iloc[0]).strftime("%Y-%m-%d"),
+            "path": str(path), "regime": regime, "regime_version": regime_version,
+            "regime_trade_date": regime_trade_date, "model_weights": model_weights or {},
+            "regime_budget": regime_budget, "strategy_id": regime_strategy_id, "portfolio": portfolio_manifest,
+            "portfolio_manifest_path": str(portfolio_manifest_path),
+        }
+
+    def train_lightgbm_clean_panel(
+        self,
+        *,
+        market="CN",
+        factor_set="alpha_zoo_hk",
+        frequency="daily",
+        adjust="qfq",
+        days=365,
+        label_horizon=20,
+        validation_days=60,
+        cleaning_version="p0.2.v1",
+        model_dir=None,
+        warm_start_path=None,
+        min_stock_count=50,
+        embargo_days=None,
+        min_feature_coverage=0.05,
+        drop_constant_features=True,
+        end_date=None,
+        show_progress=False,
+    ):
+        if show_progress:
+            print("[LIGHTGBM] loading clean panel and labels", flush=True)
+        panel, features, label_column = self._clean_panel_training_data(
+            market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
+            days=days, label_horizon=label_horizon, cleaning_version=cleaning_version,
+            min_stock_count=min_stock_count,
+            end_date=end_date,
+            show_progress=show_progress,
+        )
+        target_dir = model_dir or Path("output/models") / str(market).lower() / "lightgbm" / factor_set
+        return train_lightgbm_panel(
+            panel, features, model_dir=target_dir, label_column=label_column,
+            validation_days=validation_days, cleaning_version=cleaning_version,
+            factor_set=factor_set, warm_start_path=warm_start_path, embargo_days=embargo_days,
+            min_feature_coverage=min_feature_coverage, drop_constant_features=drop_constant_features,
+            show_progress=show_progress,
+        )
+
+    def train_transformer_clean_panel(
+        self,
+        *,
+        market="CN",
+        factor_set="alpha_zoo_hk",
+        frequency="daily",
+        adjust="qfq",
+        days=365,
+        label_horizon=20,
+        validation_days=60,
+        lookback=60,
+        epochs=10,
+        batch_size=256,
+        max_samples=200_000,
+        cleaning_version="p0.2.v1",
+        model_dir=None,
+        min_stock_count=50,
+        warm_start_path=None,
+        warm_start_manifest_path=None,
+        device="auto",
+        embargo_days=None,
+        min_feature_coverage=0.05,
+        drop_constant_features=True,
+        end_date=None,
+        show_progress=False,
+    ):
+        if show_progress:
+            print("[TRANSFORMER] loading clean panel and sequences", flush=True)
+        panel, features, label_column = self._clean_panel_training_data(
+            market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
+            days=days, label_horizon=label_horizon, cleaning_version=cleaning_version,
+            min_stock_count=min_stock_count,
+            end_date=end_date,
+            show_progress=show_progress,
+        )
+        target_dir = model_dir or Path("output/models") / str(market).lower() / "transformer" / factor_set
+        return train_transformer_panel(
+            panel, features, model_dir=target_dir, label_column=label_column,
+            validation_days=validation_days, lookback=lookback, epochs=epochs,
+            batch_size=batch_size, max_samples=max_samples,
+            cleaning_version=cleaning_version, factor_set=factor_set,
+            warm_start_path=warm_start_path, warm_start_manifest_path=warm_start_manifest_path,
+            device=device, embargo_days=embargo_days,
+            min_feature_coverage=min_feature_coverage, drop_constant_features=drop_constant_features,
+            show_progress=show_progress,
+        )
+
+    def train_cnn_clean_panel(
+        self,
+        *,
+        market="CN",
+        factor_set="alpha_zoo_hk",
+        frequency="daily",
+        adjust="qfq",
+        days=365,
+        label_horizon=20,
+        validation_days=60,
+        lookback=60,
+        epochs=10,
+        batch_size=256,
+        max_samples=200_000,
+        channels=64,
+        kernel_size=3,
+        num_layers=3,
+        cleaning_version="p0.2.v1",
+        model_dir=None,
+        min_stock_count=50,
+        device="auto",
+        embargo_days=None,
+        min_feature_coverage=0.05,
+        drop_constant_features=True,
+        end_date=None,
+        show_progress=False,
+    ):
+        if show_progress:
+            print("[CNN] loading clean panel and sequences", flush=True)
+        panel, features, label_column = self._clean_panel_training_data(
+            market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
+            days=days, label_horizon=label_horizon, cleaning_version=cleaning_version,
+            min_stock_count=min_stock_count, end_date=end_date,
+            show_progress=show_progress,
+        )
+        target_dir = model_dir or Path("output/models") / str(market).lower() / "cnn" / factor_set
+        return train_cnn_panel(
+            panel, features, model_dir=target_dir, label_column=label_column,
+            validation_days=validation_days, lookback=lookback, epochs=epochs,
+            batch_size=batch_size, max_samples=max_samples, channels=channels,
+            kernel_size=kernel_size, num_layers=num_layers, cleaning_version=cleaning_version,
+            factor_set=factor_set, device=device, embargo_days=embargo_days,
+            min_feature_coverage=min_feature_coverage, drop_constant_features=drop_constant_features,
+            show_progress=show_progress,
+        )
 
     def persist_backtest_result(
         self,

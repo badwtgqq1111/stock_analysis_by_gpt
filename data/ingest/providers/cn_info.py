@@ -153,7 +153,11 @@ class CNStockInfoFetcher:
         }
 
     def _fetch_tencent_info(self):
-        response = requests.get(f"http://qt.gtimg.cn/q={to_sina_symbol(self.stock_code)}", timeout=10)
+        response = requests.get(
+            f"http://qt.gtimg.cn/q={to_sina_symbol(self.stock_code)}",
+            timeout=10,
+            proxies={"http": "", "https": ""},
+        )
         response.raise_for_status()
         try:
             content = response.content.decode("gb2312")

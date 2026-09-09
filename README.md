@@ -2,215 +2,17 @@
 
 基于 `ClickHouse + Parquet` 的本地量化研究工具箱，支持港股生产选股、A 股数据补全、因子生成、LightGBM 排序选股、行业分层候选池、组合回测和 Web 看板。
 
-架构详见 [P0_01_quant_system_overall_design.md](./docs/todo/P0_01_quant_system_overall_design.md)，文档目录见 [docs/README.md](./docs/README.md)。
+使用手册、当前规划和历史归档见 [docs/README.md](./docs/README.md)。
 
 ## 环境部署
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv python install 3.12.3
-uv python pin 3.12.3
-uv sync --dev
-
-# macOS 上 LightGBM 需要 libomp
-brew install libomp
+uv run python scripts/setup_environment.py
 ```
 
-项目通过 `pyproject.toml` 的 `[tool.uv.sources]` 将 `akshare` 指向同级目录 `../akshare`。如果本地目录结构不同，需要调整该路径。
+环境安装、服务配置和检查结果说明见 [环境部署与检查](./docs/runbooks/environment-setup.md)。
 
-### 一键部署可选服务
-
-ClickHouse、SearXNG、LightRAG 本地依赖可以用统一脚本部署和校验。脚本会：
-
-- 自动创建 `assets/clickhouse`、`deploy/searxng/cache` 等本地持久化目录。
-- 自动执行 `cp deploy/lightrag/server.env.example deploy/lightrag/server.env`，但只在 `server.env` 不存在时创建，不覆盖已有本地配置。
-- 部署 ClickHouse、SearXNG、LightRAG PostgreSQL/Ollama，并逐项输出部署和健康检查结果。
-- 对 Docker Hub 拉取超时做重试，并在最终失败时提示是网络/镜像源问题还是服务健康检查问题。
-
-```bash
-# 默认部署 clickhouse,searxng,lightrag 并输出每部分结果
-bash scripts/deploy_local_services.sh
-
-# 只部署其中一部分
-bash scripts/deploy_local_services.sh up --components clickhouse,searxng
-bash scripts/deploy_local_services.sh up --components lightrag
-
-# 只做健康检查
-bash scripts/deploy_local_services.sh check
-
-# 镜像拉取网络不稳定时增加重试
-bash scripts/deploy_local_services.sh up --components lightrag --retries 5
-
-# 只拉镜像，适合先验证 Docker Hub/镜像代理连通性
-bash scripts/deploy_local_services.sh pull --components lightrag --retries 5
-
-# 如果暂时不想拉 bge-m3 embedding 模型
-bash scripts/deploy_local_services.sh up --components lightrag --skip-ollama-pull
-```
-
-脚本默认使用这些本地端口：ClickHouse HTTP `8123`、ClickHouse native `9000`、SearXNG `8888`、LightRAG PostgreSQL `15432`、Ollama `11434`、LightRAG API `9621`。端口被占用时可以在运行前覆盖环境变量，例如：
-
-```bash
-export CLICKHOUSE_HTTP_PORT=18123
-export CLICKHOUSE_NATIVE_PORT=19000
-export SEARXNG_PORT=18888
-export POSTGRES_PORT=25432
-export OLLAMA_PORT=21434
-bash scripts/deploy_local_services.sh up
-```
-
-如果看到类似 `Get "https://registry-1.docker.io/v2/": net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers)`，根因通常是 Docker Hub/网络代理/镜像源连通性超时，不是 LightRAG compose 配置本身坏了。先用 `bash scripts/deploy_local_services.sh pull --components lightrag --retries 5` 单独验证镜像拉取；仍失败时需要配置 Docker 代理或 registry mirror 后重跑。
-
-### ClickHouse 可选
-
-ClickHouse 可选。设置环境变量后，features 与 stock info registry 优先写入 ClickHouse；不可用时自动回退到 Parquet。
-
-```bash
-mkdir -p assets/clickhouse
-
-# 如果宿主机 9000 已被占用，把 CLICKHOUSE_NATIVE_PORT 改成 19000 等备用端口。
-export CLICKHOUSE_HTTP_PORT=${CLICKHOUSE_HTTP_PORT:-8123}
-export CLICKHOUSE_NATIVE_PORT=${CLICKHOUSE_NATIVE_PORT:-9000}
-
-docker run -d --name clickhouse \
-  --restart unless-stopped \
-  -p "${CLICKHOUSE_HTTP_PORT}:8123" -p "${CLICKHOUSE_NATIVE_PORT}:9000" \
-  -v "$(pwd)/assets/clickhouse:/var/lib/clickhouse" \
-  -e CLICKHOUSE_USER=default \
-  -e CLICKHOUSE_PASSWORD=quant2024 \
-  -e CLICKHOUSE_DB=quant \
-  clickhouse/clickhouse-server
-
-export CLICKHOUSE_HOST=localhost
-export CLICKHOUSE_PORT="${CLICKHOUSE_HTTP_PORT}"
-export CLICKHOUSE_USER=default
-export CLICKHOUSE_PASSWORD=quant2024
-export CLICKHOUSE_DATABASE=quant
-
-# 可选：应用侧 ClickHouse 批量写入分块行数，默认 50000
-export CLICKHOUSE_INSERT_CHUNK_ROWS=50000
-```
-
-`--restart unless-stopped` 会让 Docker 服务启动后自动拉起 ClickHouse 容器；`-v "$(pwd)/assets/clickhouse:/var/lib/clickhouse"` 将 ClickHouse 数据文件保存在项目的 `assets/clickhouse` 下，删除或重建容器时数据不会丢。`/var/lib/clickhouse` 是必须持久化的数据目录，应用侧数据库名使用 `CLICKHOUSE_DATABASE`，默认建议为 `quant`。本项目通过 HTTP 端口访问 ClickHouse，即容器内 `8123`；native 端口 `9000` 只给 clickhouse-client 或其他 native 协议工具使用。如果宿主机 `9000` 被占用，可以改用 `export CLICKHOUSE_NATIVE_PORT=19000` 后再执行 `docker run`，应用侧 `CLICKHOUSE_PORT` 仍然保持 HTTP 端口。
-
-ClickHouse 写入上限由应用侧分块控制，不需要先改 ClickHouse server 配置。`data/store/clickhouse_store.py` 的 `_insert_frame()` 会读取 `CLICKHOUSE_INSERT_CHUNK_ROWS`，把一次 DataFrame 写入拆成多次 `insert_df()`；未设置时默认每批 `50000` 行。建议本地单机先保持默认；如果导入 stock info、features 或 OHLCV 时出现内存压力、HTTP payload 过大、连接被代理中断等问题，把它降到 `10000` 或 `20000`；如果机器内存充足且 ClickHouse 在本机 Docker 中运行，可以试到 `100000`。这个值只影响每次发给 ClickHouse 的 insert 行数，不改变最终写入行数，也不改变 `ReplacingMergeTree` 的去重逻辑。
-
-`STOCK_INFO_LOOKUP_CHUNK_ROWS` 是股票元数据 upsert 前读取旧字段的查询分块，默认 `100`，和插入上限不是同一个配置。只有在回填行业/标的类型时查询条件过大或 ClickHouse 响应慢，才需要把它调小，例如：
-
-```bash
-export STOCK_INFO_LOOKUP_CHUNK_ROWS=50
-```
-
-### SearXNG 可选
-
-SearXNG 用于本地聚合搜索 evidence，是 `stock-intelligence-pipeline` 的推荐搜索入口。它不是离线搜索引擎，仍会请求 Bing、DuckDuckGo 等上游搜索源；优势是统一缓存、统一 JSON API，并避免全市场流程逐股打开浏览器。
-
-推荐优先使用一键脚本：
-
-```bash
-bash scripts/deploy_local_services.sh up --components searxng
-bash scripts/deploy_local_services.sh check --components searxng
-
-export SEARXNG_URL=http://127.0.0.1:8888
-```
-
-手动部署命令如下，适合排障时逐条执行：
-
-```bash
-mkdir -p deploy/searxng/searxng deploy/searxng/cache
-
-docker compose -f deploy/searxng/docker-compose.yml up -d
-
-curl 'http://127.0.0.1:8888/search?q=00700%20腾讯控股%20主营业务%20年报&format=json&language=zh-CN&categories=general'
-
-export SEARXNG_URL=http://127.0.0.1:8888
-```
-
-`deploy/searxng/docker-compose.yml` 默认只绑定 `127.0.0.1:8888`，不要直接暴露公网。`deploy/searxng/searxng/settings.yml` 已启用 `json` format，否则 `/search?format=json` 会返回 403；默认启用 Bing 和 DuckDuckGo，禁用 Google 以减少验证码和风控。若 `8888` 被占用，可以临时改 `deploy/searxng/docker-compose.yml` 的宿主机端口，例如 `127.0.0.1:18888:8080`，并同步设置 `SEARXNG_URL=http://127.0.0.1:18888`。完整说明和排障见 `docs/done/P0_03_searxng_search_integration.md`。
-
-### LightRAG 可选
-
-LightRAG 只用于 evidence 索引、主题/股票画像召回和重点股票深挖；全市场生产流程默认用 `--profile-stage skip`，不逐股做昂贵问答。部署分两层：Docker 跑 PostgreSQL/pgvector/AGE；若需要本地 embedding，再显式启用 Ollama profile；宿主机运行上游 LightRAG API server。
-
-推荐先用一键脚本部署并校验 Docker 层：
-
-```bash
-bash scripts/deploy_local_services.sh up --components lightrag
-bash scripts/deploy_local_services.sh check --components lightrag
-
-# 可选：本地 Ollama 镜像约 3GB+，只在确实需要本地 embedding 时启用
-bash scripts/deploy_local_services.sh up --components lightrag --with-ollama
-```
-
-脚本会在缺少配置时自动创建：
-
-```bash
-cp deploy/lightrag/server.env.example deploy/lightrag/server.env
-```
-
-它不会覆盖已经存在的 `deploy/lightrag/server.env`。首次部署后仍建议打开这个文件确认 `POSTGRES_PASSWORD`、`LLM_MODEL`、`LLM_BINDING_HOST` 等本地配置。LightRAG API server 依赖上游 `../LightRAG` 和 `DEEPSEEK_API_KEY`，脚本只会把 API 健康检查列为单独结果；如果 API 未启动，会提示用 `deploy/lightrag/start-server.sh` 启动。
-
-`deploy/lightrag/docker-compose.yml` 默认不再拉取 `gzdaniel/postgres-for-rag:pg18-age-pgvector`，因为该自定义镜像容易受 Docker Hub/mirror 白名单影响。PostgreSQL 会从同级 `../LightRAG/Dockerfile.postgres` 本地构建 `stock-lightrag-postgres:pg18-age-pgvector-local`，第一次构建会下载 pgvector 基础镜像、Debian 编译依赖并编译 Apache AGE，耗时会比直接 pull 更长；构建完成后镜像会留在本机。若你已经有内部镜像，可以运行前覆盖：
-
-```bash
-export LIGHTRAG_POSTGRES_IMAGE=registry.example.com/postgres-for-rag:pg18-age-pgvector
-export LIGHTRAG_POSTGRES_PULL_POLICY=missing
-export OLLAMA_IMAGE=registry.example.com/ollama/ollama:latest
-```
-
-Ollama 被放在 compose profile 中，默认命令不会拉取 3GB+ 的 `ollama/ollama` 镜像：
-
-```bash
-# 默认只启动 PostgreSQL，不拉 Ollama
-docker compose --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
-
-# 确认需要本地 embedding 时再启用 Ollama
-docker compose --profile ollama --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
-docker exec stock-lightrag-ollama ollama pull bge-m3
-```
-
-手动部署流程如下，适合排障时逐条执行：
-
-```bash
-# 1) 准备 LightRAG 运行环境变量
-cp deploy/lightrag/server.env.example deploy/lightrag/server.env
-# 编辑 deploy/lightrag/server.env，至少确认 POSTGRES_PASSWORD、LLM_MODEL 等配置
-
-# 2) 启动 PostgreSQL
-docker compose --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
-
-# 可选：启用本地 Ollama embedding 服务
-docker compose --profile ollama --env-file deploy/lightrag/server.env -f deploy/lightrag/docker-compose.yml up -d
-docker exec stock-lightrag-ollama ollama pull bge-m3
-
-# 3) 安装上游 LightRAG API server
-cd ../LightRAG
-uv sync --extra api --extra offline-storage --extra offline-llm
-
-# 4) 回到本项目启动 LightRAG API
-cd ../stock_analysis_by_gpt
-export LIGHTRAG_PATH="$(cd ../LightRAG && pwd)"
-export DEEPSEEK_API_KEY=...
-bash deploy/lightrag/start-server.sh
-```
-
-如果不想占用当前终端，可以用 `tmux` 后台启动：
-
-```bash
-cd /home/yuxun/quant/stock_analysis_by_gpt
-tmux new -d -s lightrag 'LIGHTRAG_PATH=/home/yuxun/quant/LightRAG DEEPSEEK_API_KEY=... bash deploy/lightrag/start-server.sh'
-
-# 查看会话
-tmux ls
-
-# 进入会话查看日志；退出但不停止服务：Ctrl+b，然后按 d
-tmux attach -t lightrag
-
-# 停止服务
-tmux kill-session -t lightrag
-```
-
-启动后检查 `http://127.0.0.1:9621/health`，API 文档在 `http://127.0.0.1:9621/docs`。`start-server.sh` 会读取 `deploy/lightrag/server.env` 和当前 shell 中的 `DEEPSEEK_API_KEY`，不会把 API key 写入仓库。更完整的后端取舍和排障见 `docs/done/P0_02_lightrag_deployment.md`，部署脚本说明见 `deploy/lightrag/README.md`。
+A 股日 K、分时、基本面、另类数据、覆盖率报告与训练门禁见 [A 股数据分层与训练门禁](./docs/runbooks/cn-data-pipeline.md)。
 
 ## 推荐 Runbook
 
@@ -268,6 +70,14 @@ A 股选股:
 | 生产选股 | `sync`、`refresh-stock-info`、`generate-factors`；强烈建议先 `backfill-industry`；可叠加特征层 | `select --analysis-mode lightgbm --export-csv output/results` | 每次要出组合 |
 | A 股研究选股 | `sync-cn`、`refresh-cn-stock-info`、`refresh-cn-financial-metrics`、`backfill-cn-industry`、`generate-factors --market CN` | `select --market CN --analysis-mode lightgbm --export-csv output/results_cn` | 每次要出 A 股研究组合 |
 | 选股后验收 | `select` 导出的 ranking/selected/feature artifacts | `lightgbm-model-diagnostics`、`theme-feature-diagnostics`、Purged CV、A/B、TCA/RL | 每次模型或特征变化后 |
+
+### A 股一键流水线
+
+```bash
+uv run python scripts/run_cn_pipeline.py
+```
+
+分层阶段、单独重跑、覆盖率报告、训练门禁和 A 股另类数据接入要求见 [A 股数据分层与训练门禁](./docs/runbooks/cn-data-pipeline.md)。
 
 ### 港股日常选股
 
@@ -869,14 +679,8 @@ uv run python run.py signal-report --days 365 --signal-recipes low_price_setup,r
 uv run python run.py factor-report --days 365 --factor-set alpha_zoo_hk --export-csv output/factor_report --show-progress
 uv run python run.py fetch-alt --stock-limit 100 --persist-signals --show-progress
 
-# A 股日常选股
-uv run python run.py sync-cn --start-date 2014-01-01 --frequencies daily --skip-existing --complete-data --max-workers 12 --show-progress
-uv run python run.py refresh-cn-stock-info --max-workers 8 --show-progress
-uv run python run.py refresh-cn-valuation-history --start-date 2014-01-01 --max-workers 12 --show-progress
-uv run python run.py refresh-cn-financial-metrics --max-workers 4 --show-progress
-uv run python run.py backfill-cn-industry --show-progress
-uv run python run.py generate-factors --market CN --days 365 --factor-set alpha_zoo_hk --max-workers 8 --show-progress
-uv run python run.py select --market CN --analysis-mode lightgbm --top-n 10 --days 365 --factor-set alpha_zoo_hk --max-workers 8 --export-csv output/results_cn --show-progress
+# A 股日常选股（推荐）
+uv run python scripts/run_cn_pipeline.py
 ```
 
 刚补完行业或 instrument 元数据后，不需要重跑 `sync`，但需要重跑 `select`。生产默认是 `alpha_zoo_hk`；若只是快速调试，可显式指定轻量回退包 `alpha158_hk`。

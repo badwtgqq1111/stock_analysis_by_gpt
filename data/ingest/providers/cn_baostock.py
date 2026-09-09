@@ -75,7 +75,10 @@ class BaoStockSession:
         if bs is None:
             raise ImportError("baostock 未安装")
         _SESSION_LOCK.acquire()
-        if not self.verbose:
+        # redirect_stdout/stderr changes process-global objects.  In worker
+        # threads that hides the caller's tqdm output, so only suppress the
+        # BaoStock login chatter for a single-threaded direct invocation.
+        if not self.verbose and threading.current_thread() is threading.main_thread():
             self._stdout_redirect = redirect_stdout(io.StringIO())
             self._stderr_redirect = redirect_stderr(io.StringIO())
             self._stdout_redirect.__enter__()
@@ -266,14 +269,14 @@ class CNBaoStockFinancialFetcher:
             merged.update({key: value for key, value in item.items() if value not in (None, "")})
         return merged
 
-    def fetch_latest(self, year=None, quarter=None):
+    def fetch_latest(self, year=None, quarter=None, lookback_quarters=8):
         target_year, target_quarter = self._latest_quarter()
         resolved_year = int(year or target_year)
         resolved_quarter = int(quarter or target_quarter)
         candidates = (
             [(resolved_year, resolved_quarter)]
             if year is not None or quarter is not None
-            else list(self._quarter_candidates(resolved_year, resolved_quarter))
+            else list(self._quarter_candidates(resolved_year, resolved_quarter, lookback=lookback_quarters))
         )
         merged = {}
         with BaoStockSession(verbose=self.verbose):

@@ -31,6 +31,7 @@ class CNStockDataLoader(BaseMarketDataLoader):
         adjust="qfq",
         period="daily",
         verbose=True,
+        data_source=None,
     ):
         """抓取并标准化 A 股历史数据。"""
         normalized_code = normalize_stock_code(stock_code, market="CN")
@@ -38,7 +39,7 @@ class CNStockDataLoader(BaseMarketDataLoader):
         fetcher = CNHistoryDataFetcher(
             normalized_code,
             db_dir=self.db_dir,
-            data_source=self.data_source,
+            data_source=data_source or self.data_source,
             adjust=adjust,
             verbose=verbose,
         )
@@ -51,7 +52,7 @@ class CNStockDataLoader(BaseMarketDataLoader):
         )
         if frame is None:
             return None
-        source = fetcher.last_successful_source or self.data_source
+        source = fetcher.last_successful_source or data_source or self.data_source
         return normalize_ohlcv_frame(
             frame,
             stock_code=normalized_code,

@@ -146,6 +146,53 @@ def test_cn_ohlcv_normalization_preserves_amount_turnover_and_vwap():
     assert normalized.iloc[0]["vwap"] == 10.8
 
 
+def test_ohlcv_reads_union_of_partial_clickhouse_and_parquet_backfill():
+    from data.store import DataLayout, MarketDataWarehouse
+
+    class PartialClickHouse:
+        def __init__(self, frame):
+            self.frame = frame
+
+        def read_frame(self, **kwargs):
+            return self.frame.copy()
+
+        def values_query(self, **kwargs):
+            return ["600000.SH"]
+
+    frame = normalize_ohlcv_frame(
+        pd.DataFrame(
+            {
+                "trade_date": ["2026-01-02", "2026-01-05", "2026-01-06"],
+                "open": [10.0, 10.1, 10.2], "high": [10.2, 10.3, 10.4],
+                "low": [9.9, 10.0, 10.1], "close": [10.1, 10.2, 10.3],
+                "volume": [1000, 1100, 1200],
+            }
+        ),
+        stock_code="600000.SH", market="CN", source="unit_test",
+    )
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        layout = DataLayout(base_dir=tmp_dir)
+        partial = frame.iloc[[2]].copy()
+        warehouse = MarketDataWarehouse(layout, clickhouse_store=PartialClickHouse(partial))
+        warehouse.parquet_store.upsert_frame(
+            "ohlcv", frame, layer="clean",
+            dedupe_keys=["market", "stock_code", "trade_date", "frequency", "adjust"],
+            sort_by=["market", "stock_code", "trade_date"],
+        )
+
+        loaded = warehouse.read_ohlcv(
+            market="CN", frequency="daily", adjust="qfq", columns=["stock_code", "trade_date"]
+        )
+        latest = warehouse.get_latest_trade_dates(
+            market="CN", frequencies=["daily"], adjust="qfq"
+        )
+
+    assert len(loaded) == 3
+    assert list(loaded.columns) == ["stock_code", "trade_date"]
+    assert warehouse.get_all_stock_codes(market="CN", frequency="daily", adjust="qfq") == ["600000.SH"]
+    assert latest[("600000.SH", "daily")] == pd.Timestamp("2026-01-06")
+
+
 def test_cn_eastmoney_valuation_history_fetcher_normalizes_daily_fields(monkeypatch):
     from data.ingest.providers import cn_valuation_history
 
@@ -184,6 +231,43 @@ def test_cn_eastmoney_valuation_history_fetcher_normalizes_daily_fields(monkeypa
     assert frame.iloc[0]["turnover_rate"] == 0.31
     assert frame.iloc[0]["pe_ratio"] == 6.1
     assert frame.iloc[0]["pb_ratio"] == 0.7
+
+
+def test_cn_baidu_valuation_history_fetcher_joins_sparse_indicators(monkeypatch):
+    from data.ingest.providers import cn_baidu_valuation
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "Result": [{
+                    "DisplayData": {
+                        "resultData": {
+                            "tplData": {
+                                "result": {
+                                    "chartInfo": [{"body": [["2024-01-02", "10"], ["2024-01-23", "12"]]}]
+                                }
+                            }
+                        }
+                    }
+                }]
+            }
+
+    class FakeSession:
+        trust_env = False
+
+        def get(self, url, params=None, timeout=None):
+            return FakeResponse()
+
+    monkeypatch.setattr(cn_baidu_valuation, "_session", lambda: FakeSession())
+    frame = cn_baidu_valuation.CNBaiduValuationHistoryFetcher("600000.SH", verbose=False).fetch()
+
+    assert list(frame["trade_date"].dt.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-23"]
+    assert set(frame["source"]) == {"baidu_valuation_history"}
+    assert frame.iloc[0]["market_cap"] == 10.0
+    assert frame.iloc[1]["pb_ratio"] == 12.0
 
 
 def test_refresh_cn_valuation_history_writes_daily_panel(monkeypatch):
@@ -412,6 +496,56 @@ def test_cn_history_source_priority_uses_baostock_only_as_default_fallback():
     assert build_source_priority("akshare") == ["tencent", "akshare_sina", "baostock", "akshare_eastmoney"]
     assert build_source_priority("baostock")[0] == "baostock"
     assert build_source_priority("eastmoney")[0] == "akshare_eastmoney"
+
+
+def test_cn_tencent_intraday_bypasses_proxy_and_does_not_fallback(monkeypatch):
+    from data.ingest.providers import cn_history
+
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": {
+                    "sh600000": {
+                        "m5": [
+                            ["202608071455", "9.20", "9.22", "9.23", "9.19", "1200"],
+                            ["202608071500", "9.22", "9.21", "9.23", "9.21", "1300"],
+                        ]
+                    }
+                }
+            }
+
+    class FakeSession:
+        trust_env = True
+
+        def get(self, url, params=None, headers=None, timeout=None):
+            calls.append({"url": url, "params": params, "timeout": timeout})
+            return FakeResponse()
+
+    session = FakeSession()
+    session.trust_env = False
+    monkeypatch.setattr(cn_history, "_tencent_direct_session", lambda: session)
+    monkeypatch.setattr(
+        cn_history.CNHistoryDataFetcher,
+        "_fetch_akshare_sina_intraday_hist",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fallback")),
+    )
+
+    fetcher = cn_history.CNHistoryDataFetcher("600000.SH", data_source="tencent", verbose=False)
+    frame = fetcher.fetch(start_date="2026-08-07", end_date="2026-08-08", period="5min", adjust="raw")
+
+    assert len(frame) == 2
+    assert fetcher.last_successful_source == "tencent"
+    assert session.trust_env is False
+    assert calls == [{
+        "url": "https://ifzq.gtimg.cn/appstock/app/kline/mkline",
+        "params": {"param": "sh600000,m5,,1000"},
+        "timeout": 5,
+    }]
 
 
 def test_cn_sync_progress_postfix_shows_last_stock_and_source_counts():
@@ -867,6 +1001,173 @@ def test_bulk_sync_cn_history_uses_incremental_overlap_when_existing_data(monkey
             service.close()
 
 
+def test_bulk_sync_cn_history_derives_coarser_intraday_bars_from_1min(monkeypatch):
+    from data.ingest.service import MarketDataService
+
+    for key in ("CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_HTTP_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+    class IntradayLoader:
+        def __init__(self):
+            self.periods = []
+
+        def fetch_history(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily"):
+            self.periods.append(period)
+            if period != "1min":
+                raise AssertionError(f"unexpected provider request for {period}")
+            return normalize_ohlcv_frame(
+                pd.DataFrame(
+                    {
+                        "trade_date": pd.date_range("2024-01-02 09:30:00", periods=4, freq="min"),
+                        "open": [10.0, 10.1, 10.2, 10.3],
+                        "high": [10.1, 10.2, 10.3, 10.4],
+                        "low": [9.9, 10.0, 10.1, 10.2],
+                        "close": [10.05, 10.15, 10.25, 10.35],
+                        "volume": [100, 200, 300, 400],
+                    }
+                ),
+                stock_code=stock_code,
+                market="CN",
+                frequency=period,
+                adjust=adjust,
+                source="unit_test",
+                currency="CNY",
+            )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        loader = IntradayLoader()
+        service.cn_loader = loader
+        try:
+            summary = service.bulk_sync_cn_history(
+                stock_codes=["600000.SH"],
+                start_date="2024-01-02",
+                end_date="2024-01-02",
+                frequencies=("1min", "5min", "15min", "30min", "60min"),
+                derive_intraday_from_1min=True,
+                max_workers=1,
+                show_progress=False,
+                compact_after=False,
+            )
+
+            assert loader.periods == ["1min"]
+            assert summary["derive_intraday_from_1min"] is True
+            assert all(summary["rows_by_frequency"][frequency] > 0 for frequency in summary["rows_by_frequency"])
+            stored = service.warehouse.read_ohlcv(market="CN", adjust="qfq")
+            assert set(stored["frequency"]) == {"1min", "5min", "15min", "30min", "60min"}
+            assert set(stored.loc[stored["frequency"] != "1min", "source"]) == {"unit_test_derived"}
+        finally:
+            service.close()
+
+
+def test_bulk_sync_cn_history_derives_coarser_intraday_bars_from_5min(monkeypatch):
+    from data.ingest.service import MarketDataService
+
+    for key in ("CLICKHOUSE_HOST", "CLICKHOUSE_PORT", "CLICKHOUSE_HTTP_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+    class IntradayLoader:
+        def __init__(self):
+            self.requests = []
+
+        def fetch_history(
+            self,
+            stock_code,
+            start_date=None,
+            end_date=None,
+            num_records=None,
+            adjust="qfq",
+            period="daily",
+            data_source=None,
+        ):
+            self.requests.append((period, data_source))
+            if period != "5min":
+                raise AssertionError(f"unexpected provider request for {period}")
+            return normalize_ohlcv_frame(
+                pd.DataFrame(
+                    {
+                        "trade_date": pd.date_range("2024-01-02 09:30:00", periods=4, freq="5min"),
+                        "open": [10.0, 10.1, 10.2, 10.3],
+                        "high": [10.1, 10.2, 10.3, 10.4],
+                        "low": [9.9, 10.0, 10.1, 10.2],
+                        "close": [10.05, 10.15, 10.25, 10.35],
+                        "volume": [100, 200, 300, 400],
+                    }
+                ),
+                stock_code=stock_code,
+                market="CN",
+                frequency=period,
+                adjust=adjust,
+                source="unit_test",
+                currency="CNY",
+            )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        service = MarketDataService(base_dir=tmp_dir)
+        loader = IntradayLoader()
+        service.cn_loader = loader
+        try:
+            summary = service.bulk_sync_cn_history(
+                stock_codes=["600000.SH"],
+                start_date="2024-01-02",
+                end_date="2024-01-02",
+                frequencies=("5min", "15min", "30min", "60min"),
+                data_source="eastmoney",
+                derive_intraday_from_base=True,
+                intraday_base_frequency="5min",
+                max_workers=1,
+                show_progress=False,
+                compact_after=False,
+            )
+
+            assert loader.requests == [("5min", "eastmoney")]
+            assert summary["derive_intraday_from_base"] is True
+            assert summary["intraday_base_frequency"] == "5min"
+            assert all(summary["rows_by_frequency"][frequency] > 0 for frequency in summary["rows_by_frequency"])
+            stored = service.warehouse.read_ohlcv(market="CN", adjust="qfq")
+            assert set(stored["frequency"]) == {"5min", "15min", "30min", "60min"}
+            assert set(stored.loc[stored["frequency"] != "5min", "source"]) == {"unit_test_derived"}
+        finally:
+            service.close()
+
+
+def test_cn_stock_loader_uses_per_request_history_data_source(monkeypatch):
+    from data.ingest import cn_stock_loader as loader_module
+
+    observed = {}
+
+    class FakeHistoryFetcher:
+        def __init__(self, stock_code, db_dir=None, data_source=None, adjust=None, verbose=True):
+            observed["data_source"] = data_source
+            self.last_successful_source = data_source
+
+        def fetch(self, **kwargs):
+            return pd.DataFrame(
+                {
+                    "date": ["2024-01-02 09:30:00"],
+                    "open": [10.0],
+                    "high": [10.1],
+                    "low": [9.9],
+                    "close": [10.05],
+                    "volume": [100],
+                }
+            )
+
+    monkeypatch.setattr(loader_module, "CNHistoryDataFetcher", FakeHistoryFetcher)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        loader = loader_module.CNStockDataLoader(base_dir=tmp_dir, data_source="akshare")
+        frame = loader.fetch_history(
+            "600000.SH",
+            start_date="2024-01-02",
+            end_date="2024-01-02",
+            period="5min",
+            data_source="eastmoney",
+        )
+
+    assert observed["data_source"] == "eastmoney"
+    assert set(frame["source"]) == {"eastmoney"}
+
+
 def test_refresh_cn_stock_info_show_progress_uses_quiet_fetcher(monkeypatch, capsys):
     from data.ingest import service as service_module
     from data.ingest.service import MarketDataService
@@ -1000,7 +1301,7 @@ def test_refresh_cn_financial_metrics_writes_valuation_before_financial_fetch(mo
             self.stock_code = stock_code
             self.verbose = verbose
 
-        def fetch_latest(self, year=None, quarter=None):
+        def fetch_latest(self, year=None, quarter=None, lookback_quarters=8):
             service = holder["service"]
             valuation = service.warehouse.read_valuation_snapshots(stock_codes=[self.stock_code], market="CN")
             assert len(valuation) == 1
@@ -1136,7 +1437,7 @@ def test_cn_service_sync_refresh_and_coverage(monkeypatch):
             self.stock_code = stock_code
             self.verbose = verbose
 
-        def fetch_latest(self, year=None, quarter=None):
+        def fetch_latest(self, year=None, quarter=None, lookback_quarters=8):
             return {
                 "report_date": "2024-03-31",
                 "announce_date": "2024-04-30",
@@ -1182,6 +1483,8 @@ def test_cn_service_sync_refresh_and_coverage(monkeypatch):
             assert report["industry"]["industry_l2_count"] == 1
             assert report["financial"]["valuation_stock_count"] == 1
             assert report["backtest_ready"] is True, report
+            assert report["full_universe_ready"] is True, report
+            assert report["coverage_warnings"] == []
         finally:
             service.close()
 

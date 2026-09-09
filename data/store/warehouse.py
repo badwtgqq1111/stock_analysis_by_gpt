@@ -15,6 +15,10 @@ from data.model import (
     ENTITY_ALIAS_FIELDS,
     FINANCIAL_STATEMENT_METRIC_FIELDS,
     FEATURE_COLUMNS,
+    PAPER_FILL_FIELDS,
+    PAPER_NAV_FIELDS,
+    PAPER_ORDER_FIELDS,
+    PAPER_POSITION_FIELDS,
     SIGNAL_COLUMNS,
     STOCK_DEEP_TAG_FIELDS,
     STOCK_GRAPH_EDGE_FIELDS,
@@ -54,6 +58,10 @@ class MarketDataWarehouse:
     STOCK_GRAPH_EDGE_DATASET = "stock_graph_edges"
     ATTENTION_SIGNAL_DATASET = "attention_signal"
     THEME_OPPORTUNITY_SCORE_DATASET = "theme_opportunity_score"
+    PAPER_ORDER_DATASET = "paper_orders"
+    PAPER_FILL_DATASET = "paper_fills"
+    PAPER_POSITION_DATASET = "paper_positions"
+    PAPER_NAV_DATASET = "paper_nav"
     CORPORATE_ACTIONS_PARTITION_COLUMNS = ("market", "exchange", "asset_type", "action_type", "year")
     FEATURES_PARTITION_COLUMNS = (
         "market",
@@ -580,6 +588,105 @@ class MarketDataWarehouse:
         frame.reset_index(drop=True, inplace=True)
         return frame
 
+    def feature_name_counts_by_stock(
+        self,
+        stock_codes=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust=None,
+        feature_set=None,
+        feature_version=None,
+        feature_config_hash=None,
+        trade_date=None,
+    ):
+        """Return compact per-stock feature counts for one feature date.
+
+        The local Parquet dataset is the complete feature source.  Aggregating
+        it in scanner batches avoids loading all long-format factor rows merely
+        to decide whether a stock needs an incremental recomputation.
+        """
+        filters = {
+            "stock_code": stock_codes,
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "frequency": frequency,
+            "adjust": adjust,
+            "feature_set": feature_set,
+            "feature_version": feature_version,
+            "feature_config_hash": feature_config_hash,
+        }
+        range_filters = None
+        if trade_date is not None:
+            range_filters = {"trade_date": {"gte": trade_date, "lte": trade_date}}
+        return self.parquet_store.distinct_counts_by_group(
+            dataset_name=self.FEATURES_DATASET,
+            group_column="stock_code",
+            value_column="feature_name",
+            layer="feature",
+            filters=filters,
+            range_filters=range_filters,
+        )
+
+    def feature_stock_count(
+        self,
+        *,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency=None,
+        adjust=None,
+        feature_set=None,
+        feature_version=None,
+        feature_config_hash=None,
+    ) -> int:
+        """Count stocks in the feature layer without materializing long rows."""
+        filters = {
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "frequency": frequency,
+            "adjust": adjust,
+            "feature_set": feature_set,
+            "feature_version": feature_version,
+            "feature_config_hash": feature_config_hash,
+        }
+        stocks = self.parquet_store.distinct_values_from_statistics(
+            dataset_name=self.FEATURES_DATASET,
+            column="stock_code",
+            layer="feature",
+            filters=filters,
+        )
+        return len(stocks)
+
+    def ohlcv_coverage_by_stock(
+        self,
+        stock_codes=None,
+        market=None,
+        exchange=None,
+        asset_type=None,
+        frequency="daily",
+        adjust="qfq",
+    ):
+        """Return OHLCV row counts and latest dates without loading all rows."""
+        return self.parquet_store.group_count_and_max(
+            dataset_name=self.OHLCV_DATASET,
+            group_column="stock_code",
+            count_column="trade_date",
+            max_column="trade_date",
+            layer="clean",
+            filters={
+                "stock_code": stock_codes,
+                "market": market,
+                "exchange": exchange,
+                "asset_type": asset_type,
+                "frequency": frequency,
+                "adjust": adjust,
+            },
+        )
+
     def read_valuation_snapshots(
         self,
         stock_codes=None,
@@ -729,6 +836,28 @@ class MarketDataWarehouse:
             frame = frame.loc[frame["trade_date"] <= pd.to_datetime(end_date)]
         frame.reset_index(drop=True, inplace=True)
         return frame
+
+    def upsert_paper_account_frames(self, result: dict):
+        """Persist immutable paper-account tables in the trade layer."""
+        datasets = {
+            "orders": (self.PAPER_ORDER_DATASET, PAPER_ORDER_FIELDS, "decision_time", ["order_id"]),
+            "fills": (self.PAPER_FILL_DATASET, PAPER_FILL_FIELDS, "fill_time", ["order_id", "fill_time"]),
+            "positions": (self.PAPER_POSITION_DATASET, PAPER_POSITION_FIELDS, "asof_date", ["run_id", "asof_date", "stock_code"]),
+            "nav": (self.PAPER_NAV_DATASET, PAPER_NAV_FIELDS, "asof_date", ["run_id", "asof_date"]),
+        }
+        summaries = {}
+        for name, (dataset, fields, date_column, keys) in datasets.items():
+            frame = result.get(name, pd.DataFrame())
+            if frame is None or frame.empty:
+                summaries[name] = {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset, layer="trade"))}
+                continue
+            payload = frame.reindex(columns=fields)
+            target = self.parquet_store.upsert_frame(
+                dataset, payload, dedupe_keys=keys, layer="trade", sort_by=[*keys], date_column=date_column,
+                partition_columns=("account_id",),
+            )
+            summaries[name] = {"rows": int(len(payload)), "dataset_path": str(target)}
+        return summaries
 
     def upsert_trades(self, frame, dataset_name=TRADES_DATASET):
         """将标准成交数据 upsert 到 trade 层 parquet 数据集。"""
@@ -1217,9 +1346,15 @@ class MarketDataWarehouse:
         adjust=None,
         start_date=None,
         end_date=None,
+        columns=None,
         dataset_name=OHLCV_DATASET,
     ):
-        """按条件读取 clean 层 OHLCV 数据，ClickHouse 优先。"""
+        """Read clean OHLCV from every available backend and reconcile keys.
+
+        ClickHouse can contain a partial or lagging mirror while local Parquet
+        already has the historical backfill.  Returning the first non-empty
+        backend makes coverage gates silently see only that partial mirror.
+        """
         year_filter = None
         range_filters = {}
         start_ts = pd.to_datetime(start_date) if start_date else None
@@ -1245,8 +1380,19 @@ class MarketDataWarehouse:
             "frequency": frequency,
             "adjust": adjust,
         }
-        frame = pd.DataFrame()
-        for store in self._clean_store_candidates():
+        requested_columns = list(dict.fromkeys(columns or []))
+        # Reconciliation needs the natural key even when callers only need a
+        # projected subset for coverage statistics.
+        read_columns = None
+        if requested_columns:
+            read_columns = list(
+                dict.fromkeys(
+                    requested_columns
+                    + ["market", "stock_code", "trade_date", "frequency", "adjust", "ingest_time"]
+                )
+            )
+        frames = []
+        for priority, store in enumerate(self._clean_store_candidates()):
             try:
                 filters = dict(base_filters)
                 if store is self.parquet_store:
@@ -1255,6 +1401,7 @@ class MarketDataWarehouse:
                     dataset_name=dataset_name,
                     layer="clean",
                     filters=filters,
+                    columns=read_columns,
                     order_by="market, stock_code, trade_date",
                     range_filters=range_filters,
                 )
@@ -1263,17 +1410,34 @@ class MarketDataWarehouse:
                     self._clickhouse_disabled_reason = str(exc)
                 frame = pd.DataFrame()
             if frame is not None and not frame.empty:
-                break
-        if frame.empty:
-            return frame
+                candidate = frame.copy()
+                candidate["_store_priority"] = priority
+                frames.append(candidate)
+        if not frames:
+            return pd.DataFrame()
+
+        frame = pd.concat(frames, ignore_index=True, sort=False)
 
         frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
         if start_ts is not None:
             frame = frame.loc[frame["trade_date"] >= start_ts]
         if end_ts is not None:
             frame = frame.loc[frame["trade_date"] <= end_ts]
-        frame.reset_index(drop=True, inplace=True)
-        return frame
+        key_columns = [
+            column for column in ["market", "stock_code", "trade_date", "frequency", "adjust"]
+            if column in frame.columns
+        ]
+        if key_columns:
+            sort_columns = key_columns + ["_store_priority"]
+            if "ingest_time" in frame.columns:
+                frame["ingest_time"] = pd.to_datetime(frame["ingest_time"], errors="coerce")
+                sort_columns.insert(-1, "ingest_time")
+            frame = frame.sort_values(sort_columns).drop_duplicates(subset=key_columns, keep="last")
+        frame = frame.drop(columns=["_store_priority"], errors="ignore")
+        frame = frame.sort_values(
+            [column for column in ["market", "stock_code", "trade_date"] if column in frame.columns]
+        ).reset_index(drop=True)
+        return frame[requested_columns] if requested_columns else frame
 
     def sync_ohlcv_to_parquet(self, dataset_name=OHLCV_DATASET, stock_code=None):
         """兼容旧接口，直接返回 parquet 数据集路径。"""
@@ -1371,7 +1535,7 @@ class MarketDataWarehouse:
             "adjust": adjust,
         }
         columns = ["stock_code", "market", "frequency", "adjust", "trade_date"]
-        frame = pd.DataFrame()
+        frames = []
         for store in self._clean_store_candidates():
             try:
                 frame = store.read_frame(
@@ -1385,9 +1549,10 @@ class MarketDataWarehouse:
                     self._clickhouse_disabled_reason = str(exc)
                 frame = pd.DataFrame(columns=columns)
             if frame is not None and not frame.empty:
-                break
-        if frame is None or frame.empty:
+                frames.append(frame)
+        if not frames:
             return {}
+        frame = pd.concat(frames, ignore_index=True, sort=False)
         frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
         frame.dropna(subset=["stock_code", "frequency", "trade_date"], inplace=True)
         if frame.empty:
@@ -1460,16 +1625,17 @@ class MarketDataWarehouse:
         }
 
     def get_all_stock_codes(self, market=None, asset_type=None, frequency=None, adjust=None, dataset_name=OHLCV_DATASET):
-        """获取 OHLCV 数据集中全部证券代码，ClickHouse 优先。"""
+        """Return the union of OHLCV codes across ClickHouse and Parquet."""
         filters = {
             "market": market,
             "asset_type": asset_type,
             "frequency": frequency,
             "adjust": adjust,
         }
+        values = []
         for store in self._clean_store_candidates():
             try:
-                values = store.values_query(
+                store_values = store.values_query(
                     dataset_name=dataset_name,
                     column="stock_code",
                     layer="clean",
@@ -1480,10 +1646,9 @@ class MarketDataWarehouse:
             except Exception as exc:
                 if store is self.clickhouse_store:
                     self._clickhouse_disabled_reason = str(exc)
-                values = []
-            if values:
-                return values
-        return []
+                store_values = []
+            values.extend(store_values or [])
+        return sorted(dict.fromkeys(str(value) for value in values if value is not None))
 
     def get_total_rows(self, market=None, asset_type=None, frequency=None, adjust=None, dataset_name=OHLCV_DATASET):
         """获取 OHLCV 数据集总行数，ClickHouse 优先。"""

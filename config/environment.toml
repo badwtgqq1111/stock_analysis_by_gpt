@@ -1,0 +1,27 @@
+[python]
+version = "3.12.3"
+sync_dev_dependencies = true
+
+[services]
+# The default deploys every local service managed by this repository.
+components = ["clickhouse", "searxng", "lightrag"]
+auto_deploy = true
+retries = 2
+
+# Ollama is a LightRAG profile. Enable it only when local embedding is needed.
+with_ollama = true
+skip_ollama_pull = false
+
+[clickhouse]
+host = "localhost"
+http_port = 8123
+native_port = 9000
+user = "default"
+password = "quant2024"
+database = "quant"
+insert_chunk_rows = 50000
+
+[preflight]
+online_sources = true
+min_free_gb = 20
+min_ohlcv_rows = 120

@@ -30,14 +30,14 @@ uv sync --extra api --extra offline-storage --extra offline-llm
 
 cd /home/yuxun/quant/stock_analysis_by_gpt
 export DEEPSEEK_API_KEY=...
-bash deploy/lightrag/start-server.sh
+uv run python deploy/lightrag/start_server.py
 ```
 
 Run it in the background with `tmux`:
 
 ```bash
 cd /home/yuxun/quant/stock_analysis_by_gpt
-tmux new -d -s lightrag 'LIGHTRAG_PATH=/home/yuxun/quant/LightRAG DEEPSEEK_API_KEY=... bash deploy/lightrag/start-server.sh'
+tmux new -d -s lightrag 'LIGHTRAG_PATH=/home/yuxun/quant/LightRAG DEEPSEEK_API_KEY=... uv run python deploy/lightrag/start_server.py'
 
 tmux ls
 tmux attach -t lightrag
@@ -47,7 +47,7 @@ tmux kill-session -t lightrag
 API health: `http://127.0.0.1:9621/health`
 API docs: `http://127.0.0.1:9621/docs`
 
-The server script reads `DEEPSEEK_API_KEY` from the shell and does not write secrets to disk. Override defaults by copying `deploy/lightrag/server.env.example` to `deploy/lightrag/server.env` and editing that local file.
+The server script reads `DEEPSEEK_API_KEY` from the environment and does not write secrets to disk. Override defaults by copying `deploy/lightrag/server.env.example` to `deploy/lightrag/server.env` and editing that local file.
 
 Notes:
 

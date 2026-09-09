@@ -4,6 +4,7 @@
 """ClickHouse 数据存储后端 —— 支持并发写入。"""
 
 import os
+from datetime import datetime
 
 import pandas as pd
 from clickhouse_connect import get_client
@@ -940,7 +941,16 @@ class ClickHouseStore:
             "updated_at", "fetched_at", "available_at",
         ]:
             if column in prepared.columns:
-                prepared[column] = pd.to_datetime(prepared[column], errors="coerce")
+                timestamps = pd.to_datetime(prepared[column], errors="coerce")
+                if column == "ingest_time":
+                    timestamps = timestamps.fillna(pd.Timestamp.utcnow().tz_localize(None))
+                # clickhouse-connect's native DateTime writer requires Python
+                # datetime values for mixed/large pandas batches on pandas 3.
+                prepared[column] = pd.Series(
+                    [None if pd.isna(value) else value.to_pydatetime() for value in timestamps],
+                    index=prepared.index,
+                    dtype=object,
+                )
         for column in ["trade_date", "report_date", "announce_date"]:
             if column in prepared.columns:
                 prepared[column] = pd.to_datetime(prepared[column], errors="coerce")

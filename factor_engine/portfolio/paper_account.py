@@ -51,10 +51,22 @@ def run_paper_account(
         if date in by_date:
             snapshot = by_date[date]
             next_date = _next_trade_date(dates, date)
-            if next_date is not None:
+            nav_before = cash + sum(qty * float(day.loc[code, "close"]) for code, qty in quantities.items() if code in day.index)
+            targets = {str(row.stock_code): float(row.target_weight) for row in snapshot.itertuples()}
+            if next_date is None:
+                # The newest decision does not yet have a later daily bar.
+                # Retain a pending intent for auditability; the next daily run
+                # rebuilds it against the first available T+1 session.
+                for code, target_weight in sorted(targets.items()):
+                    if target_weight > 0:
+                        orders.append(
+                            _order(
+                                run_id, account_id, strategy_version, code, date, None,
+                                "pending", nav_before * target_weight,
+                            )
+                        )
+            else:
                 executable = market[market["trade_date"] == next_date].set_index("stock_code")
-                nav_before = cash + sum(qty * float(day.loc[code, "close"]) for code, qty in quantities.items() if code in day.index)
-                targets = {str(row.stock_code): float(row.target_weight) for row in snapshot.itertuples()}
                 for code in sorted(set(quantities) | set(targets)):
                     target_value = nav_before * targets.get(code, 0.0)
                     if code not in executable.index:

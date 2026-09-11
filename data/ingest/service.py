@@ -5593,9 +5593,10 @@ class MarketDataService:
             predictions, target_col=target_col, n_splits=n_splits, min_train_days=min_train_days,
             test_days=test_days, purge_days=purge_days, embargo_days=embargo_days,
         )
-        return write_walk_forward_report(report, summary, output_dir=output_dir, prefix=prefix)
+        paths = write_walk_forward_report(report, summary, output_dir=output_dir, prefix=prefix)
+        return {**paths, "comparison": summary}
 
-    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=200_000, transformer_device="auto", industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None):
+    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=12_000, transformer_max_feature_pairs=128, transformer_device="auto", prediction_stride=1, industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None, show_progress=False):
         """Generate historical predictions with one strictly prior model per OOS fold."""
         panel, features, label_column = self._clean_panel_training_data(
             market="CN", factor_set=factor_set, days=days, label_horizon=label_horizon,
@@ -5608,18 +5609,22 @@ class MarketDataService:
             "min_train_days": min_train_days, "test_days": test_days, "purge_days": purge_days,
             "embargo_days": embargo_days, "cleaning_version": cleaning_version, "factor_set": factor_set,
             "min_feature_coverage": min_feature_coverage, "drop_constant_features": drop_constant_features,
+            "prediction_stride": prediction_stride,
+            "show_progress": show_progress,
         }
         if "lightgbm" in requested:
             results["lightgbm"] = generate_lightgbm_oos_predictions(panel, features, **common)
         if "transformer" in requested:
             results["transformer"] = generate_transformer_oos_predictions(
                 panel, features, **common, lookback=transformer_lookback, epochs=transformer_epochs,
-                batch_size=transformer_batch_size, max_samples=transformer_max_samples, device=transformer_device,
+                batch_size=transformer_batch_size, max_samples=transformer_max_samples,
+                max_feature_pairs=transformer_max_feature_pairs, device=transformer_device,
             )
         if "cnn" in requested:
             results["cnn"] = generate_cnn_oos_predictions(
                 panel, features, **common, lookback=transformer_lookback, epochs=transformer_epochs,
-                batch_size=transformer_batch_size, max_samples=transformer_max_samples, device=transformer_device,
+                batch_size=transformer_batch_size, max_samples=transformer_max_samples,
+                max_feature_pairs=transformer_max_feature_pairs, device=transformer_device,
             )
         if "graph_temporal" in requested:
             path = Path(industry_mapping_path or "")
@@ -5627,7 +5632,7 @@ class MarketDataService:
                 raise ValueError("graph_temporal OOS requires oos_predictions.industry_mapping_path with PIT available_at")
             graph_common = {
                 key: value for key, value in common.items()
-                if key not in {"min_feature_coverage", "drop_constant_features"}
+                if key not in {"min_feature_coverage", "drop_constant_features", "prediction_stride", "show_progress"}
             }
             results["graph_temporal"] = generate_graph_temporal_oos_predictions(
                 panel, features, industry_mapping=pd.read_csv(path), **graph_common,
@@ -6218,10 +6223,12 @@ class MarketDataService:
                         for name in ("lightgbm", "transformer", "cnn")
                         if pd.notna(latest.get(f"model_weight_{name}"))
                     }
-                    regime_budget = {
-                        key: float(latest[key]) for key in ("gross_exposure_budget", "max_weight_budget")
-                        if key in latest and pd.notna(latest[key])
-                    }
+                    regime_budget = {}
+                    if regime not in {"insufficient", "unknown"}:
+                        if "gross_exposure_budget" in latest and pd.notna(latest["gross_exposure_budget"]):
+                            regime_budget["gross_exposure"] = float(latest["gross_exposure_budget"])
+                        if "max_weight_budget" in latest and pd.notna(latest["max_weight_budget"]):
+                            regime_budget["max_weight"] = float(latest["max_weight_budget"])
                     regime_strategy_id = str(latest.get("strategy_id", "insufficient_data"))
             except (ValueError, OSError):
                 pass
@@ -6247,7 +6254,39 @@ class MarketDataService:
                     info.reindex(columns=[column for column in ("stock_code", "industry_l1", "market_cap", "daily_turnover", "tradable_flag") if column in info.columns]),
                     on="stock_code", how="left",
                 )
-            constraint_values = {**regime_budget, **(portfolio_constraints or {})}
+            # Attach point-in-time risk/liquidity estimates for sizing.  The
+            # selection date is the last fully materialized model date, so the
+            # window below never uses prices after the decision.
+            selection_date = pd.to_datetime(selected["trade_date"].iloc[0]).normalize()
+            risk_start = selection_date - pd.Timedelta(days=45)
+            risk_bars = self.warehouse.read_ohlcv(
+                market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+                stock_code=selected["stock_code"].astype(str).tolist(),
+                start_date=risk_start.strftime("%Y-%m-%d"), end_date=selection_date.strftime("%Y-%m-%d"),
+                columns=["stock_code", "trade_date", "close", "amount"],
+            )
+            if not risk_bars.empty:
+                risk_bars["trade_date"] = pd.to_datetime(risk_bars["trade_date"], errors="coerce")
+                risk_bars["close"] = pd.to_numeric(risk_bars["close"], errors="coerce")
+                risk_bars["amount"] = pd.to_numeric(risk_bars.get("amount"), errors="coerce")
+                risk_bars = risk_bars.sort_values(["stock_code", "trade_date"])
+                risk_bars["return_1d"] = risk_bars.groupby("stock_code")["close"].pct_change()
+                risk_snapshot = risk_bars.groupby("stock_code", as_index=False).agg(
+                    volatility_20d=("return_1d", lambda value: float(value.tail(20).std(ddof=1) * np.sqrt(252)) if value.tail(20).count() >= 5 else np.nan),
+                    median_turnover_amount_20d=("amount", lambda value: float(value.tail(20).median()) if value.notna().any() else np.nan),
+                )
+                selected = selected.merge(risk_snapshot, on="stock_code", how="left")
+            # Static TOML values are hard safety ceilings.  Regime policy may
+            # tighten those ceilings but must never be bypassed by a looser
+            # global value, otherwise the displayed regime has no effect on
+            # the actual portfolio.
+            constraint_values = dict(portfolio_constraints or {})
+            for key in ("gross_exposure", "max_weight"):
+                budget = regime_budget.get(key)
+                if budget is None:
+                    continue
+                configured = constraint_values.get(key)
+                constraint_values[key] = float(budget) if configured is None else min(float(configured), float(budget))
             cfg = PortfolioConstraints(**constraint_values)
             selected, portfolio_manifest = optimize_long_only(
                 selected, constraints=cfg, initial_capital=float(initial_capital),
@@ -6268,18 +6307,109 @@ class MarketDataService:
         selected.to_csv(path, index=False)
         portfolio_manifest_path = destination / f"cn_{str(model).lower()}_portfolio_manifest.json"
         portfolio_manifest_path.write_text(json.dumps(portfolio_manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        # Persist an auditable, human-readable explanation alongside the
+        # selection.  This deliberately explains observed scores and portfolio
+        # constraints; it does not claim that a model score is a causal factor
+        # attribution (SHAP/attention is a separate research output).
+        explanation_paths = self._write_cn_selection_explanation(
+            selected, destination=destination, portfolio_manifest=portfolio_manifest,
+            regime=regime, strategy_id=regime_strategy_id,
+        )
         if progress is not None:
             progress.set_postfix_str(f"written={path}")
             progress.update(1)
             progress.close()
+        actual_selected_count = int((selected.get("target_weight", pd.Series(dtype=float)).fillna(0) > 0).sum()) if "target_weight" in selected.columns else int(len(selected))
         return {
-            "status": "completed", "model": str(model).lower(), "selected_count": int(len(selected)),
+            "status": "completed", "model": str(model).lower(), "selected_count": actual_selected_count,
             "latest_trade_date": pd.to_datetime(selected["trade_date"].iloc[0]).strftime("%Y-%m-%d"),
             "path": str(path), "regime": regime, "regime_version": regime_version,
             "regime_trade_date": regime_trade_date, "model_weights": model_weights or {},
             "regime_budget": regime_budget, "strategy_id": regime_strategy_id, "portfolio": portfolio_manifest,
             "portfolio_manifest_path": str(portfolio_manifest_path),
+            "explanation_paths": explanation_paths,
         }
+
+    @staticmethod
+    def _write_cn_selection_explanation(selected: pd.DataFrame, *, destination: Path,
+                                         portfolio_manifest: dict, regime: str,
+                                         strategy_id: str) -> dict:
+        """Write per-stock selection rationale from persisted observable fields.
+
+        The report is intentionally transparent about its limits: model scores
+        rank candidates, while volatility/liquidity/cost/holding constraints
+        determine final weights.  No feature-level causal attribution is
+        inferred from the scores.
+        """
+        if selected is None or selected.empty:
+            return {}
+        # Portfolio optimization may preserve a pre-existing volatility field
+        # and append its refreshed risk snapshot.  Collapse duplicate labels
+        # before scalar formatting so explanation generation is deterministic.
+        frame = selected.loc[:, ~selected.columns.duplicated(keep="last")].copy()
+        numeric = [
+            "rank", "lightgbm_score", "transformer_score", "cnn_score",
+            "ensemble_score", "target_weight", "volatility_20d",
+            "median_turnover_amount_20d", "expected_transaction_cost_bps",
+            "liquidity_capacity_score", "order_size_to_adv",
+        ]
+        for column in numeric:
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        target_series = frame["target_weight"] if "target_weight" in frame.columns else pd.Series(0.0, index=frame.index)
+        frame["selected"] = target_series.fillna(0).gt(0)
+        frame["selection_reason"] = frame.apply(
+            lambda row: (
+                "入选：ensemble 排名靠前且通过可交易性、流动性和持仓数约束；"
+                "目标权重按近20日逆波动率分配。"
+                if bool(row["selected"]) else
+                "未配置：虽然进入模型候选 Top-N，但在最多持仓数/逆波动率组合优化后权重为 0。"
+            ), axis=1,
+        )
+        keep = [
+            "trade_date", "stock_code", "rank", "selected", "selection_reason",
+            "lightgbm_score", "transformer_score", "cnn_score", "ensemble_score",
+            "target_weight", "volatility_20d", "median_turnover_amount_20d",
+            "expected_transaction_cost_bps", "liquidity_capacity_score",
+            "order_size_to_adv", "tradable_flag", "constraint_status",
+            "regime", "strategy_id",
+        ]
+        keep = [column for column in keep if column in frame.columns]
+        report = frame[keep].copy()
+        csv_path = destination / f"cn_{str('ensemble').lower()}_explanations.csv"
+        report.to_csv(csv_path, index=False)
+        json_path = destination / f"cn_ensemble_explanations.json"
+        payload = {
+            "status": "completed", "trade_date": str(frame["trade_date"].iloc[0]) if "trade_date" in frame else None,
+            "regime": regime, "strategy_id": strategy_id,
+            "selection_rule": "按 ensemble_score 降序取候选，再执行可交易性、流动性、最大持仓数和组合权重约束；权重采用逆波动率。",
+            "model_score_meaning": "LightGBM/Transformer 的横截面百分位分数，仅表示相对排序，不是收益保证。",
+            "factor_attribution_status": "unavailable: 当前 selection 未生成 SHAP/Transformer 敏感度归因。",
+            "portfolio_manifest": portfolio_manifest, "rows": report.to_dict(orient="records"),
+        }
+        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        md_path = destination / "cn_ensemble_explanations.md"
+        lines = [
+            "# CN 选股解释报告", "", f"- 交易日：{payload['trade_date']}",
+            f"- 市场状态：`{regime}`；策略：`{strategy_id}`",
+            "- 选股规则：模型分数排序 → 可交易性/流动性过滤 → 最大持仓数与组合约束 → 逆波动率定权。",
+            "- 分数含义：LightGBM、Transformer 为横截面百分位排名，不代表确定收益。",
+            "- 归因边界：本报告没有把具体因子描述为因果贡献；SHAP/Transformer 敏感度需单独生成。", "",
+            "|代码|状态|排名|LGBM|Transformer|Ensemble|目标权重|20日年化波动率|预估成本(bps)|说明|",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        ]
+        for _, row in report.iterrows():
+            weight = f"{float(row['target_weight']):.2%}" if pd.notna(row.get("target_weight")) else ""
+            volatility = f"{float(row['volatility_20d']):.2%}" if pd.notna(row.get("volatility_20d")) else ""
+            lines.append(
+                f"|{row.get('stock_code','')}|{'入选' if row.get('selected') else '候选未配置'}|"
+                f"{int(row['rank']) if pd.notna(row.get('rank')) else ''}|"
+                f"{row.get('lightgbm_score','')}|{row.get('transformer_score','')}|{row.get('ensemble_score','')}|"
+                f"{weight}|{volatility}|"
+                f"{row.get('expected_transaction_cost_bps','')}|{row.get('selection_reason','')}|"
+            )
+        md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return {"csv": str(csv_path), "json": str(json_path), "markdown": str(md_path)}
 
     def train_lightgbm_clean_panel(
         self,
@@ -6332,7 +6462,8 @@ class MarketDataService:
         lookback=60,
         epochs=10,
         batch_size=256,
-        max_samples=200_000,
+        max_samples=12_000,
+        max_feature_pairs=128,
         cleaning_version="p0.2.v1",
         model_dir=None,
         min_stock_count=50,
@@ -6359,6 +6490,7 @@ class MarketDataService:
             panel, features, model_dir=target_dir, label_column=label_column,
             validation_days=validation_days, lookback=lookback, epochs=epochs,
             batch_size=batch_size, max_samples=max_samples,
+            max_feature_pairs=max_feature_pairs,
             cleaning_version=cleaning_version, factor_set=factor_set,
             warm_start_path=warm_start_path, warm_start_manifest_path=warm_start_manifest_path,
             device=device, embargo_days=embargo_days,
@@ -6379,7 +6511,7 @@ class MarketDataService:
         lookback=60,
         epochs=10,
         batch_size=256,
-        max_samples=200_000,
+        max_samples=12_000,
         channels=64,
         kernel_size=3,
         num_layers=3,
@@ -6390,6 +6522,7 @@ class MarketDataService:
         embargo_days=None,
         min_feature_coverage=0.05,
         drop_constant_features=True,
+        max_feature_pairs=128,
         end_date=None,
         show_progress=False,
     ):
@@ -6409,6 +6542,7 @@ class MarketDataService:
             kernel_size=kernel_size, num_layers=num_layers, cleaning_version=cleaning_version,
             factor_set=factor_set, device=device, embargo_days=embargo_days,
             min_feature_coverage=min_feature_coverage, drop_constant_features=drop_constant_features,
+            max_feature_pairs=max_feature_pairs,
             show_progress=show_progress,
         )
 

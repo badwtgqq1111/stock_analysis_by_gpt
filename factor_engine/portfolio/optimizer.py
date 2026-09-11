@@ -20,6 +20,8 @@ class PortfolioConstraints:
     risk_aversion: float = 2.0
     turnover_penalty: float = 0.10
     cost_penalty: float = 0.10
+    max_holdings: int | None = None
+    weighting: str = "score_risk"
 
 
 def build_risk_snapshot(candidates: pd.DataFrame, *, asof_date=None) -> pd.DataFrame:
@@ -69,13 +71,32 @@ def optimize_long_only(
     alpha = np.maximum(alpha, 0.0) + 1e-8
     risk = frame["specific_variance"].to_numpy(dtype=float)
     cost = pd.to_numeric(frame["expected_transaction_cost_bps"], errors="coerce").fillna(100.0).to_numpy(dtype=float) / 10_000.0
-    raw = alpha / (1.0 + float(cfg.risk_aversion) * risk + float(cfg.cost_penalty) * cost)
+    # Select the strongest candidates first, then size them by inverse
+    # volatility when requested.  This keeps the model score responsible for
+    # selection while making capital allocation risk-aware.
+    active = np.ones(len(frame), dtype=bool)
+    if cfg.max_holdings is not None and int(cfg.max_holdings) > 0 and len(frame) > int(cfg.max_holdings):
+        active[:] = False
+        ranked = np.argsort(-alpha, kind="stable")[: int(cfg.max_holdings)]
+        active[ranked] = True
+    if str(cfg.weighting).lower() in {"inverse_volatility", "inverse-volatility", "volatility"}:
+        raw = np.where(active, 1.0 / np.sqrt(np.maximum(risk, 1e-12)), 0.0)
+    else:
+        raw = np.where(
+            active,
+            alpha / (1.0 + float(cfg.risk_aversion) * risk + float(cfg.cost_penalty) * cost),
+            0.0,
+        )
     raw = raw / max(float(raw.sum()), 1e-12) * float(cfg.gross_exposure)
     target = np.minimum(raw, float(cfg.max_weight))
     tradable = frame.get("tradable_flag", pd.Series(True, index=frame.index)).fillna(True).astype(bool).to_numpy()
     target = np.where(tradable, target, 0.0)
     adv = pd.to_numeric(frame["adv_20d"], errors="coerce").to_numpy(dtype=float)
-    capacity_weight = np.where(np.isfinite(adv) & (adv > 0), adv * float(cfg.max_participation) / max(float(initial_capital), 1.0), 0.0)
+    capacity_weight = np.where(
+        np.isfinite(adv) & (adv > 0),
+        adv * float(cfg.max_participation) / max(float(initial_capital), 1.0),
+        np.inf,
+    )
     target = np.minimum(target, capacity_weight)
     target = _apply_industry_caps(frame, target, float(cfg.max_industry_weight))
     target = _limit_turnover(current, target, float(cfg.max_turnover))
@@ -89,6 +110,8 @@ def optimize_long_only(
         "status": "completed", "portfolio_mode": "mean_variance_cost_aware", "constraints": asdict(cfg),
         "gross_exposure": float(target.sum()), "turnover": float(np.abs(target - current).sum()),
         "candidate_count": int(len(frame)), "selected_count": int((target > 0).sum()),
+        "max_holdings": int(cfg.max_holdings) if cfg.max_holdings is not None else None,
+        "weighting": str(cfg.weighting),
         "covariance_version": "diagonal-volatility.v1", "cost_version": "costs.v1",
     }
     return frame.sort_values("target_weight", ascending=False).reset_index(drop=True), manifest
@@ -96,8 +119,24 @@ def optimize_long_only(
 
 def _apply_industry_caps(frame: pd.DataFrame, weights: np.ndarray, cap: float) -> np.ndarray:
     industry = frame.get("industry_l1", pd.Series("__unknown__", index=frame.index)).fillna("__unknown__").astype(str)
+    # Some providers store the taxonomy label (for example, "证监会行业分类")
+    # in industry_l1 and the actual sector code/name in industry_l2.  Grouping
+    # on that label would incorrectly put the whole universe in one bucket and
+    # cap gross exposure at max_industry_weight.  Fall back to l2 when l1 is
+    # non-informative or constant across candidates.
+    l2 = frame.get("industry_l2")
+    if l2 is not None:
+        l2 = l2.fillna("").astype(str)
+        informative_l1 = industry.replace({"", "__unknown__", "nan", "None"}).nunique() > 1
+        if not informative_l1 and int((l2.str.strip() != "").sum()) > 0:
+            industry = l2.where(l2.str.strip() != "", industry)
     result = weights.copy()
     for group in industry.unique():
+        # Missing industry reference data must not be treated as one giant
+        # industry.  Otherwise every otherwise eligible stock is capped by
+        # the same bucket and gross exposure collapses to the industry cap.
+        if group in {"", "__unknown__", "nan", "None"}:
+            continue
         indices = np.flatnonzero(industry.to_numpy() == group)
         total = result[indices].sum()
         if total > cap and total > 0:
@@ -106,6 +145,11 @@ def _apply_industry_caps(frame: pd.DataFrame, weights: np.ndarray, cap: float) -
 
 
 def _limit_turnover(current: np.ndarray, target: np.ndarray, max_turnover: float) -> np.ndarray:
+    # Initial deployment has no existing portfolio to turn over against.
+    # Applying a rebalance turnover cap here would silently invest only
+    # `max_turnover` of the requested gross exposure on the first run.
+    if not np.any(np.abs(current) > 1e-12):
+        return target
     turnover = np.abs(target - current).sum()
     if turnover <= max_turnover or turnover <= 0:
         return target

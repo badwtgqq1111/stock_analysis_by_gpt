@@ -17,6 +17,7 @@ from factor_engine.ml.model_training import (
     _preprocess_transformer_panel,
     _prepare_labeled_panel,
     _purged_time_split,
+    _select_temporal_feature_pairs,
     predict_lightgbm_panel,
     predict_transformer_panel,
     predict_cnn_panel,
@@ -36,7 +37,11 @@ from factor_engine.ml.walk_forward import compare_walk_forward_predictions, eval
 from factor_engine.ml.regime import build_market_regime, write_market_regime_report
 from factor_engine.ml.paper_trading import evaluate_selection_outcomes
 from factor_engine.ml.graph_temporal import build_industry_adjacency
-from factor_engine.ml.oos_predictions import generate_graph_temporal_oos_predictions, generate_lightgbm_oos_predictions
+from factor_engine.ml.oos_predictions import (
+    _asof_sequence_window,
+    generate_graph_temporal_oos_predictions,
+    generate_lightgbm_oos_predictions,
+)
 from factor_engine.portfolio.optimizer import PortfolioConstraints, optimize_long_only
 from factor_engine.portfolio.paper_account import run_paper_account
 from factor_engine.ml.alternative_data import materialize_alternative_features, normalize_cn_alternative_evidence
@@ -240,6 +245,15 @@ def test_transformer_artifact_can_be_loaded_for_prediction(tmp_path):
     result = train_transformer_panel(training, features, model_dir=tmp_path / "transformer", label_column="forward_return_3d", lookback=10, validation_days=8, epochs=1, batch_size=8, max_samples=1000, factor_set="demo")
     scored = predict_transformer_panel(wide, model_path=result["artifact"]["model_path"], manifest_path=result["artifact"]["manifest_path"])
     assert not scored.empty
+    target_dates = sorted(pd.to_datetime(wide["trade_date"]).unique())[-2:]
+    batch_scored = predict_transformer_panel(
+        wide,
+        model_path=result["artifact"]["model_path"],
+        manifest_path=result["artifact"]["manifest_path"],
+        target_dates=target_dates,
+    )
+    assert set(pd.to_datetime(batch_scored["trade_date"])) == set(target_dates)
+    assert batch_scored.groupby("trade_date")["stock_code"].nunique().eq(wide["stock_code"].nunique()).all()
     manifest = json.loads(Path(result["artifact"]["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["preprocessing"]["mask"] == "raw_feature_missing_mask"
     assert manifest["preprocessing"]["cross_section"]["mode"] == "qlib_robust"
@@ -257,6 +271,46 @@ def test_transformer_cross_section_preprocessing_preserves_raw_missing_mask():
     assert transformed[missing_columns[factor_index]].any()
     assert transformed["factor_b_clean"].notna().all()
     assert set(transformed["factor_b_is_missing"].unique()) <= {0.0, 1.0}
+
+
+def test_temporal_feature_selection_caps_clean_values_and_keeps_masks():
+    rows = []
+    for index in range(30):
+        rows.append({
+            "trade_date": pd.Timestamp("2025-01-01") + pd.Timedelta(days=index),
+            "stock_code": f"S{index % 3}",
+            "label": float(index),
+            "signal_clean": float(index),
+            "signal_is_missing": False,
+            "noise_clean": float((index * 7) % 5),
+            "noise_is_missing": False,
+        })
+    selected, quality = _select_temporal_feature_pairs(
+        pd.DataFrame(rows),
+        ["signal_clean", "signal_is_missing", "noise_clean", "noise_is_missing"],
+        max_feature_pairs=1,
+    )
+    assert selected == ["signal_clean", "signal_is_missing"]
+    assert quality["selected_clean_feature_count"] == 1
+
+
+def test_temporal_feature_selection_handles_extreme_values_without_warning():
+    frame = pd.DataFrame({
+        "label": [0.0, 0.1, -0.1, 0.2],
+        "extreme_clean": [1e200, -1e200, 1e200, -1e200],
+        "extreme_is_missing": [False, False, False, False],
+        "stable_clean": [1.0, 2.0, 3.0, 4.0],
+        "stable_is_missing": [False, False, False, False],
+    })
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        selected, quality = _select_temporal_feature_pairs(
+            frame,
+            ["extreme_clean", "extreme_is_missing", "stable_clean", "stable_is_missing"],
+            max_feature_pairs=1,
+        )
+    assert len(selected) == 2
+    assert quality["ranking_extreme_value_count"] == 4
 
 
 def test_transformer_preprocessing_builds_high_dimensional_masks_without_fragmentation_warning():
@@ -296,6 +350,16 @@ def test_model_score_ensemble_selects_common_latest_top_n():
     assert selected["rank"].tolist() == [1, 2]
 
 
+def test_model_score_ensemble_records_normalized_active_weights():
+    date = pd.Timestamp("2025-03-01")
+    scores = pd.DataFrame({"trade_date": [date] * 2, "stock_code": ["A", "B"], "model_score": [90.0, 60.0]})
+    selected = select_top_model_scores(
+        {"lightgbm": scores, "transformer": scores}, model="ensemble", top_n=1,
+        model_weights={"lightgbm": 0.55, "transformer": 0.25, "cnn": 0.20},
+    )
+    assert json.loads(selected.iloc[0]["effective_model_weights"]) == {"lightgbm": 0.6875, "transformer": 0.3125}
+
+
 def test_market_regime_builds_point_in_time_labels_and_weights(tmp_path):
     dates = pd.date_range("2024-01-01", periods=80, freq="D")
     rows = []
@@ -306,6 +370,7 @@ def test_market_regime_builds_point_in_time_labels_and_weights(tmp_path):
     assert not regime.empty
     assert set(regime["regime"]).issubset({"insufficient", "bull", "bear", "sideways"})
     assert {"model_weight_lightgbm", "model_weight_transformer", "model_weight_cnn"}.issubset(regime.columns)
+    assert (regime.loc[regime["regime"] == "sideways", "max_weight_budget"] == 0.35).all()
     report = write_market_regime_report(regime, tmp_path)
     assert Path(report["csv"]).exists() and Path(report["json"]).exists() and Path(report["markdown"]).exists()
 
@@ -317,6 +382,15 @@ def test_paper_outcomes_mature_and_pending_without_future_imputation():
     outcomes = evaluate_selection_outcomes(selections, bars, horizons=(1, 5), cost_bps=0)
     assert set(outcomes["status"]) == {"matured", "pending"}
     assert np.isclose(float(outcomes.loc[(outcomes.stock_code == "A") & (outcomes.horizon == 1), "net_return"].iloc[0]), 0.1)
+
+
+def test_paper_outcomes_ignore_optimizer_excluded_candidates():
+    bars = pd.DataFrame({"stock_code": ["A", "A", "B", "B"], "trade_date": list(pd.date_range("2025-01-01", periods=2)) * 2,
+                         "close": [10, 11, 20, 21]})
+    selections = pd.DataFrame({"stock_code": ["A", "B"], "trade_date": [pd.Timestamp("2025-01-01")] * 2,
+                               "target_weight": [0.5, 0.0]})
+    outcomes = evaluate_selection_outcomes(selections, bars, horizons=(1,), cost_bps=0)
+    assert outcomes["stock_code"].tolist() == ["A"]
 
 
 def test_paper_outcomes_prefer_explicit_benchmark_over_market_proxy():
@@ -349,6 +423,37 @@ def test_model_comparison_uses_identical_folds_and_writes_report(tmp_path):
     assert all(Path(path).exists() for path in paths.values())
 
 
+def test_model_comparison_uses_persisted_oos_folds_and_common_universe():
+    dates = pd.to_datetime(["2025-01-03", "2025-01-10", "2025-02-03", "2025-02-10"])
+    base = pd.DataFrame([
+        {"trade_date": date, "stock_code": code, "fold": 1 if index < 2 else 2,
+         "model_score": float(score), "forward_return_20d": float(score) / 100}
+        for index, date in enumerate(dates)
+        for score, code in enumerate(["A", "B", "C"], start=1)
+    ])
+    transformer = base[~((base["trade_date"] == dates[0]) & (base["stock_code"] == "C"))].copy()
+    report, summary = compare_walk_forward_predictions(
+        {"lightgbm": base, "transformer": transformer},
+        n_splits=5, min_train_days=120, purge_days=20,
+    )
+    assert set(report["fold"]) == {1, 2}
+    assert report.groupby("model")["test_rows"].sum().nunique() == 1
+    assert summary["common_universe_rows"] == len(transformer)
+
+
+def test_walk_forward_suppresses_compounded_proxy_for_overlapping_forward_labels():
+    dates = pd.to_datetime(["2025-01-03", "2025-01-10", "2025-01-17"])
+    predictions = pd.DataFrame([
+        {"trade_date": date, "stock_code": code, "fold": 1,
+         "model_score": float(score), "forward_return_20d": float(score) / 100}
+        for date in dates for score, code in enumerate(["A", "B", "C"], start=1)
+    ])
+    report, _ = evaluate_walk_forward_predictions(predictions)
+    assert bool(report.iloc[0]["overlapping_forward_windows"])
+    assert pd.isna(report.iloc[0]["cumulative_top_return"])
+    assert pd.isna(report.iloc[0]["max_drawdown"])
+
+
 def test_lightgbm_oos_predictions_are_folded_and_include_realized_labels(tmp_path):
     factors, ohlcv = _frames(days=80)
     panel = build_feature_panel(factors, ohlcv, market="CN", factor_set="demo")
@@ -365,6 +470,24 @@ def test_lightgbm_oos_predictions_are_folded_and_include_realized_labels(tmp_pat
     assert result["fold_count"] == 2
     assert not output.empty
     assert {"fold", "model_score", "forward_return_3d"}.issubset(output.columns)
+
+
+def test_oos_sequence_window_uses_only_prior_lookback_rows():
+    dates = pd.date_range("2025-01-01", periods=100, freq="D")
+    panel = pd.DataFrame({
+        "stock_code": [code for code in ("A", "B") for _ in dates],
+        "trade_date": list(dates) * 2,
+        "factor": np.arange(len(dates) * 2),
+        "forward_return_3d": 0.01,
+    })
+    cutoff = pd.Timestamp("2025-03-20")
+    window = _asof_sequence_window(
+        panel, test_date=cutoff, lookback=10, label_column="forward_return_3d",
+    )
+    assert "forward_return_3d" not in window.columns
+    assert window["trade_date"].max() == cutoff
+    assert window.groupby("stock_code").size().eq(10).all()
+    assert (window["trade_date"] <= cutoff).all()
 
 
 def test_cost_aware_optimizer_respects_weight_industry_and_turnover_limits():
@@ -388,6 +511,15 @@ def test_paper_account_enforces_next_session_fill_and_writes_nav():
     assert pd.Timestamp(account["fills"].iloc[0]["fill_time"]) == dates[1]
     assert len(account["nav"]) == 3
     assert float(account["nav"].iloc[-1]["nav"]) > 10_000
+
+
+def test_paper_account_records_pending_order_without_later_bar():
+    date = pd.Timestamp("2025-01-01")
+    bars = pd.DataFrame({"stock_code": ["A"], "trade_date": [date], "open": [10], "close": [10]})
+    selection = pd.DataFrame({"stock_code": ["A"], "trade_date": [date], "target_weight": [0.5]})
+    account = run_paper_account(selection, bars, initial_capital=10_000, commission_bps=0, slippage_bps=0)
+    assert account["orders"].iloc[0]["status"] == "pending"
+    assert pd.isna(account["orders"].iloc[0]["executable_from"])
 
 
 def test_alternative_evidence_uses_available_at_for_asof_features():

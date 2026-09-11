@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -138,9 +139,17 @@ def predict_lightgbm_panel(panel: pd.DataFrame, *, model_path, manifest_path) ->
     working["trade_date"] = pd.to_datetime(working["trade_date"])
     working, _ = preprocess_features_by_date(working, features)
     booster = lgb.Booster(model_file=str(model_path))
-    working["model_score_raw"] = booster.predict(working[features])
-    working["model_score"] = working.groupby("trade_date")["model_score_raw"].rank(pct=True) * 100.0
-    return working[["trade_date", "stock_code", "model_score_raw", "model_score"]]
+    raw_scores = np.asarray(booster.predict(working[features]), dtype=np.float64)
+    # Build score columns in one concat operation.  Assigning two columns to
+    # a wide, already fragmented feature frame triggers pandas' fragmentation
+    # warning and creates unnecessary block copies during every OOS fold.
+    score_frame = working.loc[:, ["trade_date", "stock_code"]].copy()
+    score_frame = pd.concat(
+        [score_frame.reset_index(drop=True), pd.DataFrame({"model_score_raw": raw_scores})],
+        axis=1,
+    )
+    score_frame["model_score"] = score_frame.groupby("trade_date")["model_score_raw"].rank(pct=True) * 100.0
+    return score_frame
 
 
 def train_transformer_panel(
@@ -157,7 +166,7 @@ def train_transformer_panel(
     nhead=4,
     num_layers=2,
     learning_rate=1e-3,
-    max_samples=200_000,
+    max_samples=12_000,
     cleaning_version="p0.2.v1",
     factor_set=None,
     warm_start_path=None,
@@ -166,13 +175,21 @@ def train_transformer_panel(
     embargo_days=None,
     min_feature_coverage=0.05,
     drop_constant_features=True,
+    max_feature_pairs=128,
     show_progress=False,
 ) -> dict:
     """Fit an encoder-only temporal Transformer using the same clean panel."""
     import torch
     from torch import nn
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader, Dataset
 
+    started_at = time.perf_counter()
+    if show_progress:
+        print(
+            f"[TRANSFORMER] preparing labels rows={len(panel):,} "
+            f"candidate_features={len(feature_columns):,}",
+            flush=True,
+        )
     prepared, features, feature_quality = _prepare_labeled_panel(
         panel,
         feature_columns,
@@ -181,9 +198,29 @@ def train_transformer_panel(
         drop_constant_features=drop_constant_features,
     )
     prepared["trade_date"] = pd.to_datetime(prepared["trade_date"])
+    features, temporal_feature_quality = _select_temporal_feature_pairs(
+        prepared, features, max_feature_pairs=max_feature_pairs,
+    )
+    feature_quality["temporal_feature_selection"] = temporal_feature_quality
+    # Drop the unselected wide feature columns before cross-sectional work and
+    # sequence construction.  Retaining them as passthrough data can otherwise
+    # dominate memory even though the temporal model never consumes them.
+    prepared = prepared.loc[:, list(dict.fromkeys(["trade_date", "stock_code", "label", *features]))].copy()
+    if show_progress:
+        print(
+            f"[TRANSFORMER] labels ready rows={len(prepared):,} features={len(features):,} "
+            f"elapsed={time.perf_counter() - started_at:.1f}s; cross-sectional preprocessing",
+            flush=True,
+        )
     prepared, missing_columns, cross_section_preprocessing = _preprocess_transformer_panel(
         prepared, features
     )
+    if show_progress:
+        print(
+            f"[TRANSFORMER] preprocessing ready elapsed={time.perf_counter() - started_at:.1f}s; "
+            "splitting and constructing sequences",
+            flush=True,
+        )
     embargo_days = _resolve_embargo_days(label_column, embargo_days)
     train_rows, validation_rows, split = _purged_time_split(
         prepared, validation_days=validation_days, embargo_days=embargo_days
@@ -193,8 +230,16 @@ def train_transformer_panel(
     scaler = _fit_sequence_scaler(
         train_rows, features, preserve_binary_features=_missing_indicator_features(features)
     )
+    if show_progress:
+        print(
+            f"[TRANSFORMER] sequence source train_rows={len(train_rows):,} "
+            f"valid_rows={len(validation_rows):,} lookback={int(lookback)}",
+            flush=True,
+        )
     sequences = _build_sequences(
-        prepared, features, lookback, scaler, missing_columns=missing_columns, max_samples=max_samples
+        prepared, features, lookback, scaler, missing_columns=missing_columns,
+        max_samples=max_samples, show_progress=show_progress,
+        progress_label="Transformer sequence windows",
     )
     train_dates = set(pd.to_datetime(train_rows["trade_date"]).to_numpy())
     validation_dates = set(pd.to_datetime(validation_rows["trade_date"]).to_numpy())
@@ -202,6 +247,12 @@ def train_transformer_panel(
     valid_items = [item for item in sequences if item[2] in validation_dates]
     if not train_items or not valid_items:
         raise ValueError("not enough complete sequences for Transformer train/validation split")
+    if show_progress:
+        print(
+            f"[TRANSFORMER] sequences ready train={len(train_items):,} valid={len(valid_items):,} "
+            f"elapsed={time.perf_counter() - started_at:.1f}s; training",
+            flush=True,
+        )
     input_dim = len(features) * 2
     model = TemporalTransformer(input_dim, d_model=d_model, nhead=nhead, num_layers=num_layers)
     warm_start = _load_transformer_warm_start(
@@ -220,8 +271,14 @@ def train_transformer_panel(
     model.to(torch_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=1e-4)
     loss_fn = nn.HuberLoss()
-    train_loader = _sequence_loader(train_items, batch_size, DataLoader, TensorDataset)
-    valid_loader = _sequence_loader(valid_items, batch_size, DataLoader, TensorDataset)
+    if show_progress:
+        print(
+            f"[TRANSFORMER] creating lazy batch loaders input_shape="
+            f"({int(lookback)}, {input_dim}) batch_size={int(batch_size)}",
+            flush=True,
+        )
+    train_loader = _sequence_loader(train_items, batch_size, DataLoader, Dataset)
+    valid_loader = _sequence_loader(valid_items, batch_size, DataLoader, Dataset, shuffle=False)
     best_state, best_loss = None, float("inf")
     epoch_iter = tqdm(range(max(1, int(epochs))), desc="Transformer epochs", unit="epoch") if show_progress else range(max(1, int(epochs)))
     for _epoch in epoch_iter:
@@ -282,9 +339,15 @@ def predict_transformer_panel(
     manifest_path,
     device="auto",
     show_progress=False,
-    inference_batch_size=32,
+    inference_batch_size=128,
+    target_dates=None,
 ) -> pd.DataFrame:
-    """Load a Transformer checkpoint and score complete windows in batches."""
+    """Load a Transformer checkpoint and score complete windows in batches.
+
+    ``target_dates`` permits a whole OOS test block to share one causal context
+    panel and one cross-sectional preprocessing pass.  With no target supplied,
+    the latest complete window per stock is scored for production inference.
+    """
     import torch
 
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
@@ -304,7 +367,13 @@ def predict_transformer_panel(
         working = working.sort_values(["stock_code", "trade_date"], kind="stable")
     stock_codes = working["stock_code"].to_numpy(copy=True)
     trade_dates = pd.to_datetime(working["trade_date"], errors="coerce").to_numpy(copy=True)
-    feature_values = working.loc[:, features].to_numpy(dtype=np.float32, copy=True)
+    # Some raw Alpha formulas can emit values outside float32 range before
+    # cross-sectional winsorization. Treat non-finite values as missing and
+    # bound finite extremes before the conversion so inference is stable.
+    feature_values = working.loc[:, features].to_numpy(dtype=np.float64, copy=True)
+    feature_values[~np.isfinite(feature_values)] = np.nan
+    np.clip(feature_values, -1e20, 1e20, out=feature_values)
+    feature_values = feature_values.astype(np.float32, copy=False)
     missing_values = ~np.isfinite(feature_values)
     feature_values[missing_values] = np.nan
     if preprocessing.get("cross_section"):
@@ -331,7 +400,8 @@ def predict_transformer_panel(
                 finite = np.isfinite(values)
                 valid_counts = finite.sum(axis=0)
                 if mode in {"qlib_robust", "robust"} and len(indexes) >= min_samples:
-                    with np.errstate(invalid="ignore"):
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
                         lo = np.nanquantile(values, winsorize_lo, axis=0)
                         hi = np.nanquantile(values, winsorize_hi, axis=0)
                     can_clip = (valid_counts > 2) & np.isfinite(lo) & np.isfinite(hi) & (hi > lo)
@@ -373,6 +443,20 @@ def predict_transformer_panel(
     np.clip(feature_values, -8.0, 8.0, out=feature_values)
     boundaries = np.r_[0, np.flatnonzero(stock_codes[1:] != stock_codes[:-1]) + 1, len(stock_codes)]
     stock_count = len(boundaries) - 1
+    target_values = None
+    target_mask = None
+    if target_dates is not None:
+        target_values = pd.to_datetime(pd.Series(list(target_dates)), errors="coerce").dropna().to_numpy()
+        if len(target_values) == 0:
+            return pd.DataFrame(columns=["trade_date", "stock_code", "model_score_raw", "model_score"])
+        target_mask = np.isin(trade_dates, target_values)
+        candidate_count = sum(
+            int(target_mask[start + int(lookback) - 1:end].sum())
+            for start, end in zip(boundaries[:-1], boundaries[1:])
+            if end - start >= lookback
+        )
+    else:
+        candidate_count = stock_count
     del working
     batch_size = max(1, int(inference_batch_size))
     rows = []
@@ -387,7 +471,7 @@ def predict_transformer_panel(
         if show_progress and batch_count == 0:
             print(
                 f"[TRANSFORMER] scoring device={torch_device} batch_shape={batch_inputs.shape} "
-                f"batches={int(np.ceil(stock_count / batch_size))}",
+                f"batches={int(np.ceil(candidate_count / batch_size))}",
                 flush=True,
             )
         with torch.no_grad():
@@ -404,20 +488,31 @@ def predict_transformer_panel(
         if progress is not None:
             progress.update(len(items))
 
-    progress = tqdm(total=stock_count, desc="Transformer scoring", unit="stock") if show_progress else None
+    progress_unit = "sequence" if target_mask is not None else "stock"
+    progress = tqdm(total=candidate_count, desc="Transformer scoring", unit=progress_unit) if show_progress else None
     try:
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             if end - start < lookback:
-                if progress is not None:
+                if progress is not None and target_mask is None:
                     progress.update(1)
                 continue
-            sequence = np.concatenate(
-                [feature_values[end - lookback:end], missing_values[end - lookback:end]], axis=1,
-            )
-            batch.append((stock_codes[end - 1], pd.Timestamp(trade_dates[end - 1]), sequence))
-            if len(batch) >= batch_size:
-                score_batch(batch)
-                batch.clear()
+            if target_mask is None:
+                endpoints = (end - 1,)
+            else:
+                endpoints = np.flatnonzero(target_mask[start:end]) + start
+                endpoints = endpoints[endpoints >= start + int(lookback) - 1]
+            for endpoint in endpoints:
+                sequence = np.concatenate(
+                    [
+                        feature_values[endpoint - lookback + 1:endpoint + 1],
+                        missing_values[endpoint - lookback + 1:endpoint + 1],
+                    ],
+                    axis=1,
+                )
+                batch.append((stock_codes[endpoint], pd.Timestamp(trade_dates[endpoint]), sequence))
+                if len(batch) >= batch_size:
+                    score_batch(batch)
+                    batch.clear()
         score_batch(batch)
     finally:
         if progress is not None:
@@ -444,18 +539,19 @@ def train_cnn_panel(
     kernel_size=3,
     num_layers=3,
     learning_rate=1e-3,
-    max_samples=200_000,
+    max_samples=12_000,
     cleaning_version="p0.2.v1",
     factor_set=None,
     device="auto",
     min_feature_coverage=0.05,
     drop_constant_features=True,
+    max_feature_pairs=128,
     show_progress=False,
 ) -> dict:
     """Fit a 1D temporal CNN from the same clean-panel sequence contract."""
     import torch
     from torch import nn
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader, Dataset
 
     prepared, features, feature_quality = _prepare_labeled_panel(
         panel,
@@ -465,6 +561,11 @@ def train_cnn_panel(
         drop_constant_features=drop_constant_features,
     )
     prepared["trade_date"] = pd.to_datetime(prepared["trade_date"])
+    features, temporal_feature_quality = _select_temporal_feature_pairs(
+        prepared, features, max_feature_pairs=max_feature_pairs,
+    )
+    feature_quality["temporal_feature_selection"] = temporal_feature_quality
+    prepared = prepared.loc[:, list(dict.fromkeys(["trade_date", "stock_code", "label", *features]))].copy()
     prepared, missing_columns, cross_section_preprocessing = _preprocess_transformer_panel(prepared, features)
     embargo_days = _resolve_embargo_days(label_column, embargo_days)
     train_rows, validation_rows, split = _purged_time_split(
@@ -476,7 +577,8 @@ def train_cnn_panel(
         train_rows, features, preserve_binary_features=_missing_indicator_features(features)
     )
     sequences = _build_sequences(
-        prepared, features, lookback, scaler, missing_columns=missing_columns, max_samples=max_samples
+        prepared, features, lookback, scaler, missing_columns=missing_columns,
+        max_samples=max_samples, show_progress=show_progress, progress_label="CNN sequence windows",
     )
     train_dates = set(pd.to_datetime(train_rows["trade_date"]).to_numpy())
     validation_dates = set(pd.to_datetime(validation_rows["trade_date"]).to_numpy())
@@ -490,8 +592,14 @@ def train_cnn_panel(
     model.to(torch_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=1e-4)
     loss_fn = nn.HuberLoss()
-    train_loader = _sequence_loader(train_items, batch_size, DataLoader, TensorDataset)
-    valid_loader = _sequence_loader(valid_items, batch_size, DataLoader, TensorDataset)
+    if show_progress:
+        print(
+            f"[CNN] creating lazy batch loaders input_shape="
+            f"({int(lookback)}, {input_dim}) batch_size={int(batch_size)}",
+            flush=True,
+        )
+    train_loader = _sequence_loader(train_items, batch_size, DataLoader, Dataset)
+    valid_loader = _sequence_loader(valid_items, batch_size, DataLoader, Dataset, shuffle=False)
     best_state, best_loss = None, float("inf")
     epoch_iter = tqdm(range(max(1, int(epochs))), desc="CNN epochs", unit="epoch") if show_progress else range(max(1, int(epochs)))
     for _epoch in epoch_iter:
@@ -621,9 +729,11 @@ def select_top_model_scores(
     if merged is None or merged.empty:
         raise ValueError("no common latest-date persisted model scores available for selection")
     score_columns = [f"{name}_score" for name in required]
+    effective_weights = None
     if requested == "ensemble" and model_weights:
         weights = {name: max(0.0, float(model_weights.get(name, 0.0))) for name in required}
         total = sum(weights.values()) or 1.0
+        effective_weights = {name: value / total for name, value in weights.items()}
         merged["ensemble_score"] = sum(merged[f"{name}_score"] * weights[name] for name in required) / total
     else:
         merged["ensemble_score"] = merged[score_columns].mean(axis=1)
@@ -633,6 +743,8 @@ def select_top_model_scores(
     selected = merged.head(max(1, int(top_n)))
     for key, value in (metadata or {}).items():
         selected[key] = value
+    if effective_weights is not None:
+        selected["effective_model_weights"] = json.dumps(effective_weights, ensure_ascii=False)
     return selected
 
 
@@ -725,6 +837,61 @@ def _empty_feature_quality(feature_columns, min_feature_coverage, drop_constant_
         "dropped_low_coverage": [],
         "dropped_constant": [],
         "filter_applied": False,
+    }
+
+
+def _select_temporal_feature_pairs(frame, feature_columns, *, max_feature_pairs=128):
+    """Select a bounded, auditable temporal feature set before sequence expansion.
+
+    A temporal input doubles each feature with its raw-missingness mask.  Passing
+    every Alpha feature therefore turns a 60-day sequence into a multi-megabyte
+    object and makes a moderate training sample consume tens of gigabytes.  Rank
+    clean values using only the supplied training panel's ranked label, coverage
+    and variance, then retain the corresponding missingness mask when available.
+    """
+    limit = max(0, int(max_feature_pairs or 0))
+    columns = [column for column in feature_columns if column in frame.columns]
+    clean_columns = [column for column in columns if str(column).endswith("_clean")]
+    if not limit or len(clean_columns) <= limit:
+        return columns, {
+            "max_feature_pairs": limit,
+            "input_clean_feature_count": len(clean_columns),
+            "selected_clean_feature_count": len(clean_columns),
+            "selection_applied": False,
+        }
+    numeric = frame.loc[:, clean_columns].apply(pd.to_numeric, errors="coerce")
+    # Feature ranking needs a stable scale estimate only. Raw Alpha formulas
+    # can yield finite values outside a dtype's safe variance range before the
+    # later cross-sectional winsorization. Normalize this ranking-only copy to
+    # float64 and cap extremes rather than allowing pandas nanops to overflow.
+    ranking_values = numeric.to_numpy(dtype=np.float64, copy=True)
+    ranking_values[~np.isfinite(ranking_values)] = np.nan
+    extreme_limit = 1e12
+    extreme_count = int(np.count_nonzero(np.abs(ranking_values) > extreme_limit))
+    np.clip(ranking_values, -extreme_limit, extreme_limit, out=ranking_values)
+    numeric = pd.DataFrame(ranking_values, columns=clean_columns, index=frame.index)
+    coverage = numeric.notna().mean()
+    variability = numeric.std(ddof=0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    label = pd.to_numeric(frame["label"], errors="coerce")
+    correlation = numeric.corrwith(label).abs().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # Coverage is capped at one and variance is log-compressed so one
+    # large-scale factor cannot crowd out all other predictive candidates.
+    score = correlation * coverage * np.log1p(variability.clip(lower=0.0))
+    ranked_clean = sorted(clean_columns, key=lambda column: (-float(score[column]), str(column)))[:limit]
+    selected = set(ranked_clean)
+    for clean_column in ranked_clean:
+        missing_column = f"{clean_column[:-len('_clean')]}_is_missing"
+        if missing_column in columns:
+            selected.add(missing_column)
+    return [column for column in columns if column in selected], {
+        "max_feature_pairs": limit,
+        "input_clean_feature_count": len(clean_columns),
+        "selected_clean_feature_count": len(ranked_clean),
+        "selected_feature_count": len(selected),
+        "selection_applied": True,
+        "method": "abs_rank_label_correlation_x_coverage_x_log_variance",
+        "ranking_extreme_clip_value": extreme_limit,
+        "ranking_extreme_value_count": extreme_count,
     }
 
 
@@ -871,7 +1038,7 @@ def _preprocess_transformer_panel(panel, features, *, config=None):
     # inference window has ~300K rows and >1K columns; copying every complete
     # group (including masks) can exceed unified memory before scoring starts.
     feature_values = panel.loc[:, features].apply(pd.to_numeric, errors="coerce")
-    feature_values = feature_values.replace([np.inf, -np.inf], np.nan).astype(np.float32)
+    feature_values = feature_values.replace([np.inf, -np.inf], np.nan).clip(-1e20, 1e20).astype(np.float32)
     missing_values = feature_values.isna().to_numpy(dtype=bool, copy=True)
     continuous_indices = [features.index(feature) for feature in continuous_features]
     missing_indicator_indices = [
@@ -892,7 +1059,8 @@ def _preprocess_transformer_panel(panel, features, *, config=None):
             finite = np.isfinite(values)
             valid_counts = finite.sum(axis=0)
             if mode in {"qlib_robust", "robust"} and len(indexes) >= min_samples:
-                with np.errstate(invalid="ignore"):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
                     lo = np.nanquantile(values, winsorize_lo, axis=0)
                     hi = np.nanquantile(values, winsorize_hi, axis=0)
                 can_clip = (valid_counts > 2) & np.isfinite(lo) & np.isfinite(hi) & (hi > lo)
@@ -961,31 +1129,77 @@ def _fit_sequence_scaler(frame, features, *, preserve_binary_features=()):
     return {"center": center.to_dict(), "scale": scale.to_dict()}
 
 
-def _build_sequences(panel, features, lookback, scaler, *, missing_columns=None, max_samples):
-    center = pd.Series(scaler["center"])
-    scale = pd.Series(scaler["scale"]).replace(0, 1.0)
+def _build_sequences(
+    panel,
+    features,
+    lookback,
+    scaler,
+    *,
+    missing_columns=None,
+    max_samples,
+    show_progress=False,
+    progress_label="sequence windows",
+):
+    """Build a balanced bounded sample of stock-level temporal windows.
+
+    The former implementation appended every window for the first instruments
+    until ``max_samples`` and copied each one through a Python loop.  It both
+    biased training toward early stock codes and could allocate >100 GB.  This
+    version allocates the finite budget evenly across stocks and selects evenly
+    spaced endpoints, preserving both historical and recent validation windows.
+    """
+    max_samples = max(1, int(max_samples))
+    center = np.asarray([scaler["center"].get(feature, 0.0) for feature in features], dtype=np.float32)
+    scale = np.asarray([scaler["scale"].get(feature, 1.0) for feature in features], dtype=np.float32)
+    scale[~np.isfinite(scale) | (scale == 0)] = 1.0
+    ordered = panel.sort_values(["stock_code", "trade_date"], kind="stable")
+    group_count = int(ordered["stock_code"].nunique())
+    base_per_stock, remainder = divmod(max_samples, max(1, group_count))
     items = []
-    for _code, group in panel.sort_values(["stock_code", "trade_date"]).groupby("stock_code", sort=False):
-        values = group[features].apply(pd.to_numeric, errors="coerce")
+    groups = ordered.groupby("stock_code", sort=False)
+    iterator = tqdm(groups, total=group_count, desc=progress_label, unit="stock") if show_progress else groups
+    for group_index, (_code, group) in enumerate(iterator):
+        sample_count = base_per_stock + int(group_index < remainder)
+        if sample_count <= 0 or len(group) < int(lookback):
+            continue
+        values = group.loc[:, features].to_numpy(dtype=np.float32, copy=True)
         if missing_columns:
             missing = group[missing_columns].to_numpy(dtype=np.float32)
         else:
-            missing = values.isna().to_numpy(dtype=np.float32)
-        normalized = ((values.fillna(center) - center) / scale).clip(-8, 8).to_numpy(dtype=np.float32)
+            missing = (~np.isfinite(values)).astype(np.float32, copy=False)
+        values[~np.isfinite(values)] = np.nan
+        normalized = (values - center) / scale
+        np.nan_to_num(normalized, copy=False, nan=0.0, posinf=8.0, neginf=-8.0)
+        np.clip(normalized, -8.0, 8.0, out=normalized)
         inputs = np.concatenate([normalized, missing], axis=1)
         labels = group["label"].to_numpy(dtype=np.float32)
         dates = group["trade_date"].to_numpy()
-        for index in range(int(lookback) - 1, len(group)):
+        endpoints = np.arange(int(lookback) - 1, len(group), dtype=int)
+        if len(endpoints) > sample_count:
+            endpoints = endpoints[np.linspace(0, len(endpoints) - 1, num=sample_count, dtype=int)]
+        for index in endpoints:
             items.append((inputs[index - int(lookback) + 1:index + 1], labels[index], dates[index]))
-            if len(items) >= int(max_samples):
-                return items
     return items
 
 
-def _sequence_loader(items, batch_size, DataLoader, TensorDataset):
-    values = np.stack([item[0] for item in items]).astype(np.float32)
-    labels = np.asarray([item[1] for item in items], dtype=np.float32)
-    return DataLoader(TensorDataset(__import__("torch").tensor(values), __import__("torch").tensor(labels)), batch_size=max(1, int(batch_size)), shuffle=True)
+def _sequence_loader(items, batch_size, DataLoader, Dataset, *, shuffle=True):
+    """Yield sequence tensors lazily instead of copying the full sample set twice."""
+    import torch
+
+    class _SequenceWindowDataset(Dataset):
+        def __init__(self, sequence_items):
+            self._items = sequence_items
+
+        def __len__(self):
+            return len(self._items)
+
+        def __getitem__(self, index):
+            values, label, _date = self._items[index]
+            return torch.from_numpy(values), torch.tensor(label, dtype=torch.float32)
+
+    return DataLoader(
+        _SequenceWindowDataset(items), batch_size=max(1, int(batch_size)), shuffle=bool(shuffle),
+    )
 
 
 class TemporalTransformer:

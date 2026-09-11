@@ -67,7 +67,10 @@ def build_market_regime(
     daily["model_weight_transformer"] = daily["regime"].map({"bull": 0.40, "sideways": 0.25, "bear": 0.15}).fillna(0.0)
     daily["model_weight_cnn"] = daily["regime"].map({"bull": 0.25, "sideways": 0.20, "bear": 0.15}).fillna(0.0)
     daily["gross_exposure_budget"] = daily["regime"].map({"bull": 0.95, "sideways": 0.75, "bear": 0.35}).fillna(0.0)
-    daily["max_weight_budget"] = daily["regime"].map({"bull": 0.10, "sideways": 0.08, "bear": 0.05}).fillna(0.0)
+    # These caps are for the configured concentrated three-holding account.
+    # A 5-10% single-name ceiling can never deploy a 75% gross budget with at
+    # most three holdings, so it would leave most capital unintentionally idle.
+    daily["max_weight_budget"] = daily["regime"].map({"bull": 0.45, "sideways": 0.35, "bear": 0.15}).fillna(0.0)
     daily["strategy_id"] = daily["regime"].map({"bull": "trend_following", "sideways": "quality_reversion", "bear": "defensive_quality"}).fillna("insufficient_data")
     return daily
 

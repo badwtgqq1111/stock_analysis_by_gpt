@@ -37,6 +37,7 @@ def test_cn_pipeline_has_no_subprocess_command_builder() -> None:
 def test_daily_and_intraday_commands_are_separate() -> None:
     config = MODULE.read_config(ROOT / "config" / "cn_pipeline.toml")
     assert config["daily_bars"]["frequencies"] == ["daily"]
+    assert config["daily_bars"]["data_source"] == "tencent"
     assert config["intraday_bars"]["frequencies"] == ["5min", "15min", "30min", "60min"]
     assert config["intraday_bars"]["derive_intraday_from_1min"] is False
     assert config["intraday_bars"]["data_source"] == "tencent"
@@ -76,6 +77,7 @@ def test_run_stage_calls_service_directly() -> None:
     assert service.calls[0][1]["show_progress"] is True
     assert service.calls[0][1]["quality_report_dir"] == "output/data_quality"
     assert service.calls[0][1]["complete_data"] is False
+    assert service.calls[0][1]["data_source"] == "tencent"
 
 
 def test_features_stage_passes_sparse_valuation_staleness_config() -> None:
@@ -275,9 +277,13 @@ def test_oos_prediction_stage_passes_fold_and_transformer_configuration() -> Non
     result = MODULE.run_stage("oos_predictions", config, service)
 
     assert result["status"] == "completed"
-    assert service.kwargs["models"] == ("lightgbm",)
+    assert service.kwargs["models"] == tuple(config["oos_predictions"]["models"])
     assert service.kwargs["purge_days"] == 20
     assert service.kwargs["transformer_lookback"] == 60
+    assert service.kwargs["transformer_max_samples"] == 12000
+    assert service.kwargs["transformer_max_feature_pairs"] == 128
+    assert service.kwargs["prediction_stride"] == 5
+    assert service.kwargs["show_progress"] is True
 
 
 def test_paper_account_and_strategy_label_stages_call_services() -> None:

@@ -52,6 +52,10 @@ oos_predictions = false
 strategy_labels = false
 
 [daily_bars]
+# Tencent is primary; fallbacks are BaoStock and Eastmoney.  The default chain
+# intentionally excludes Sina because its V8 decoder is unsafe under bulk
+# macOS concurrency.
+data_source = "tencent"
 frequencies = ["daily"]
 skip_existing = true
 complete_data = false
@@ -125,7 +129,10 @@ embargo_days = 20
 lookback = 60
 epochs = 10
 batch_size = 256
-max_samples = 200000
+# Sequence samples are balanced across stocks. This budget avoids multi-GB
+# copies of 60-day windows while retaining broad universe coverage.
+max_samples = 12000
+max_feature_pairs = 128
 cleaning_version = "p0.2.v1"
 model_dir = "output/models/cn/transformer/alpha_zoo_hk"
 device = "auto" # CUDA -> Apple MPS -> CPU
@@ -141,7 +148,8 @@ embargo_days = 20
 lookback = 60
 epochs = 10
 batch_size = 256
-max_samples = 200000
+max_samples = 12000
+max_feature_pairs = 128
 channels = 64
 kernel_size = 3
 num_layers = 3
@@ -170,12 +178,14 @@ model_scores_dir = "output/model_scores"
 output_dir = "output/results_cn"
 model = "ensemble" # lightgbm, transformer, or ensemble
 top_n = 10
-portfolio_mode = "topn" # topn or mean_variance_cost_aware
-initial_capital = 1000000.0
+portfolio_mode = "mean_variance_cost_aware" # topn or mean_variance_cost_aware
+initial_capital = 45000.0
 
 [selection.portfolio_constraints]
 gross_exposure = 0.95
-max_weight = 0.10
+max_weight = 0.60
+max_holdings = 3
+weighting = "inverse_volatility"
 max_industry_weight = 0.30
 max_turnover = 0.50
 max_participation = 0.05
@@ -198,7 +208,7 @@ selection_path = "output/results_cn/cn_ensemble_selected.csv"
 days = 756
 account_id = "cn_default"
 strategy_version = "cn-ensemble.v1"
-initial_capital = 1000000.0
+initial_capital = 45000.0
 commission_bps = 5.0
 slippage_bps = 5.0
 lot_size = 100
@@ -222,10 +232,10 @@ purge_days = 20
 embargo_days = 0
 
 [oos_predictions]
-# This stage retrains strictly on each expanding fold. Enable after current
-# feature-panel coverage passes; Transformer is intentionally opt-in because it
-# performs one inference pass per OOS decision date.
-models = ["lightgbm"]
+# This stage retrains strictly on each expanding fold. LightGBM and Transformer
+# are the default comparable baselines; add CNN only after its OOS value is needed.
+models = ["transformer"]
+# "lightgbm",
 days = 756
 label_horizon = 20
 cleaning_version = "p0.2.v1"
@@ -236,8 +246,12 @@ purge_days = 20
 embargo_days = 0
 transformer_lookback = 60
 transformer_epochs = 5
+# Use every fifth OOS decision date for a weekly-rebalanced deep-model study.
+# Set to 1 for daily OOS predictions when runtime permits.
+prediction_stride = 5
 transformer_batch_size = 256
-transformer_max_samples = 200000
+transformer_max_samples = 12000
+transformer_max_feature_pairs = 128
 transformer_device = "auto"
 # Required only when models contains graph_temporal. The CSV must have
 # stock_code, industry_l1 and available_at; current industry labels are invalid

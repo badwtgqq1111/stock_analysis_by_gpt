@@ -82,6 +82,9 @@ uv run python scripts/run_cn_pipeline.py --stage all
 ```
 
 `daily_bars` 只下载并写入日 K，不会自动刷新基本面；`intraday_bars` 也只处理分时。
+日 K 默认以腾讯为主、BaoStock 和东方财富为回退；默认链路不使用新浪日线，避免 macOS 上
+`py-mini-racer` / V8 在并发初始化时终止同步进程。只有排查特定新浪数据时才在独立配置中显式设置
+`daily_bars.data_source = "sina"`；该调用会串行执行。
 基本面阶段会在同一 Python 进程内依次调用 `MarketDataService` 的 stock info、估值历史、财务指标和行业补全方法，并作为一个报告层汇总展示。
 如果确实需要历史估值与日 K 同批执行，可在配置的 `[daily_bars]` 中显式设置
 `complete_data = true`，默认保持关闭以便分层重试。
@@ -89,7 +92,20 @@ uv run python scripts/run_cn_pipeline.py --stage all
 每个基本面刷新阶段的失败结果会输出失败数量、错误类型汇总和最多 3 个示例代码；
 完整失败明细保存在流水线 JSON 报告的 `failed` 字段中。
 
-## 推荐执行顺序
+## 运行编排
+
+不要把所有阶段作为每日任务。`--stage all` 是首次构建或完整重建的便利入口；默认配置中
+LightGBM 和 Transformer 均启用，因此它会重训模型。日常生产应按下面的命令矩阵显式运行阶段，
+避免把昂贵的训练和严格样本外评估混入每日选股。
+
+| 工作流 | 阶段 | 建议频率 | 触发条件 | 主要产物 |
+|---|---|---|---|---|
+| 首次构建/数据修复 | `daily_bars`、`fundamental`、`features`、`regime`、`clean_panel`、训练、打分、选股 | 首次；历史数据或清洗契约变更后 | 新机器、重建历史数据、特征 schema/清洗版本变化 | clean panel、模型工件、最新候选 |
+| 每日生产 | `daily_bars`、`features`、`regime`、`clean_panel`、`model_scores`、`selection`、`paper_account`、`paper_outcomes` | 每个交易日收盘数据完整后 | 有新的日 K 或新的选股日 | 最新分数、候选、纸面成交、净值和成熟信号收益 |
+| 基本面刷新 | `fundamental` | 按数据源披露节奏，建议每周；财报季可每日 | 新财报、估值或行业信息需要刷新 | 股票快照、PIT 财务和估值数据 |
+| 定期重训 | `lightgbm`、`transformer`，随后 `model_scores`、`selection` | 每 20 个交易日或每月 | 训练窗口滚动到期；模型/特征/标签参数变化 | 新模型和新选股结果 |
+| 严格研究评估 | `oos_predictions`、`model_comparison` | 每月/每季；模型提升和晋升前 | 模型、标签、特征或训练配置变化 | 按折 OOS 预测和模型对比报告 |
+| 可选研究 | `cnn`、`graph_temporal`、`intraday_bars`、`alternative`、`strategy_labels` | 按研究计划 | 对应数据和实验假设就绪 | 可选模型或研究数据集 |
 
 从仓库根目录执行。首次准备或需要完整刷新时，建议按阶段运行，便于失败重试和查看报告：
 
@@ -116,26 +132,69 @@ uv run python scripts/run_cn_pipeline.py
 
 默认配置不会执行分时、CNN、另类数据、策略标签、纸面账户、OOS 和模型比较。显式指定 `--stage` 时，即使该阶段在 `[stages]` 中为 `false` 也会执行（另类数据没有 `input_path` 时会报告 `skipped`）。
 
-日常增量只需按数据是否更新选择阶段，模型不会因为读取新数据而自动重训：
+### 每日生产
+
+日 K 收盘数据可用后运行以下命令。`fundamental` 不必每日执行，只有处于刷新日时才插入到
+`daily_bars` 与 `features` 之间。训练工件会被 `model_scores` 复用，因子只在 `features` 更新，
+不会在打分阶段重算。
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage daily_bars
-uv run python scripts/run_cn_pipeline.py --stage fundamental
 uv run python scripts/run_cn_pipeline.py --stage features
 uv run python scripts/run_cn_pipeline.py --stage regime
 uv run python scripts/run_cn_pipeline.py --stage clean_panel
 uv run python scripts/run_cn_pipeline.py --stage model_scores
 uv run python scripts/run_cn_pipeline.py --stage selection
+uv run python scripts/run_cn_pipeline.py --stage paper_account
+uv run python scripts/run_cn_pipeline.py --stage paper_outcomes
 ```
 
-只有在需要更新模型时才执行：
+`paper_account` 在 `selection` 之后每日运行：它会按 T+1 规则推进已有虚拟订单、更新持仓与净值。
+`paper_outcomes` 也建议每日运行：它不重新训练，只把历史信号与新到达的 1/5/20/60 日结果对齐；
+也可以按周补跑，但每日执行更容易及时发现成熟信号表现异常。
+
+### 定期重训
+
+模型不会因为读取新数据而自动重训。每 20 个交易日或每月执行一次；特征集合、清洗版本、标签
+定义或模型参数变化后，也应立即重训并重新打分选股：
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage lightgbm
 uv run python scripts/run_cn_pipeline.py --stage transformer
+uv run python scripts/run_cn_pipeline.py --stage model_scores
+uv run python scripts/run_cn_pipeline.py --stage selection
 ```
 
-训练阶段会复用已物化的 `clean_feature_panel`，不会每次打分时重新计算因子。
+### 严格样本外评估
+
+`oos_predictions` 不是每日推理任务。它会在每一个时间滚动折重新训练模型并生成严格隔离的历史
+预测，适合模型晋升前、模型/数据契约变更后和每月或每季的研究复核。`model_comparison` 读取这些
+已落盘预测进行比较，不重训模型，必须紧跟在 OOS 预测更新后执行；没有新的 OOS 输出时无需每日运行。
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage oos_predictions
+uv run python scripts/run_cn_pipeline.py --stage model_comparison
+```
+
+`model_comparison` 的 IC、RankIC、IR、分组收益和换手用于比较模型，不等同于纸面账户的可实现收益。
+观察期、交易成本、成交约束与持仓规则仍需在 `paper_account` 和 `paper_outcomes` 中验证。
+
+## 选股质量验证与虚拟持仓
+
+`selection` 只生成候选和目标权重，不代表已经验证盈利。建议每次选股后执行：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage paper_outcomes
+uv run python scripts/run_cn_pipeline.py --stage paper_account
+```
+
+- `paper_outcomes` 将信号与未来 1/5/20/60 个交易日收盘价对齐，输出毛收益、扣费收益、最大不利 excursion（MAE）、最大有利 excursion（MFE）及相对市场代理收益。文件位于 `output/paper_trading/cn_signal_outcomes.{csv,json,md}`。信号未满观察期会标记为 `pending`，不能当作亏损或盈利统计。
+- `paper_account` 按 T+1 下一交易日开盘、手续费和滑点回放虚拟账户，输出 `orders.csv`、`fills.csv`、`positions.csv`、`nav.csv` 和 `paper_account_summary.json`。它是持仓事件记录，不是实盘委托。
+- 质量判断至少观察滚动 20/60 日的命中率、平均净收益、超额收益、Sharpe、最大回撤、换手、成交率和 pending 比例；单次 Top-N 不能证明策略有效。正式评估应启用 `oos_predictions` 和 `model_comparison`，使用时间滚动、purge/embargo 的样本外预测。
+
+当前配置已按小额虚拟账户设置：初始资金 `45,000`、最多 `3` 只、总仓位 `95%`。候选仍由模型分数排序，入选后的权重使用近 20 日年化波动率的逆波动率分配：波动率越高，目标权重越低；同时受单票上限、行业上限、成交容量和换手约束。缺少行业数据时不会把所有股票错误地视为同一行业，但行业中性约束需要补齐行业映射后才完整生效。
+
+当前最近一次结果写入 `output/results_cn/cn_ensemble_selected.csv`：3 只持仓目标权重合计 95%，纸面账户记录在 `output/paper_trading/account/`。由于信号日期为最近交易日且后续行情尚未满观察期，`paper_outcomes` 可能全部为 `pending`；待未来交易日到达后重复执行即可自动成熟并更新统计。
 
 ## 可选研究阶段
 
@@ -143,13 +202,6 @@ uv run python scripts/run_cn_pipeline.py --stage transformer
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage strategy_labels
-```
-
-纸面收益评估和账户回放必须在 `selection` 之后运行：
-
-```bash
-uv run python scripts/run_cn_pipeline.py --stage paper_outcomes
-uv run python scripts/run_cn_pipeline.py --stage paper_account
 ```
 
 `paper_outcomes` 默认用横截面中位数作为市场代理；在 `[paper_outcomes]` 设置 `benchmark_path` 后才使用真实指数 CSV（列为 `trade_date,close` 或 `date,price`）。`paper_account` 输出订单、成交、持仓、净值和回撤 CSV，并写入独立的纸面交易数据集。
@@ -162,17 +214,23 @@ uv run python scripts/run_cn_pipeline.py --stage cnn
 
 执行前需在 `[model_scores]` 填写 CNN 的 model/manifest 路径；确认 OOS 增益后再把 CNN 纳入 ensemble。
 
-严格 OOS 预测和模型比较：先在 `[oos_predictions]` 设置模型列表，再运行：
+严格 OOS 预测和模型比较：先在 `[oos_predictions]` 设置模型列表，再在模型晋升前或定期研究复核时运行：
 
 ```toml
 [oos_predictions]
 models = ["lightgbm", "transformer", "cnn"]
+# 每 5 个交易日取一个决策日，模拟周度调仓；设为 1 才会逐日评估。
+prediction_stride = 5
 ```
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage oos_predictions
 uv run python scripts/run_cn_pipeline.py --stage model_comparison
 ```
+
+当前配置为 `models = ["transformer"]`，以便先快速复核 Transformer 的 OOS 基线。需要横向比较时，将 LightGBM 与 Transformer 同时加入 `models`，它们会使用同一批折叠、同一批决策日比较 IC、IR、超额收益和回撤。每个 Transformer 折只训练一次，并将该折所有目标日放入同一段因果上下文批量评分；CNN 默认不加入，确认前两者的基线后再配置 `models`。运行日志会先输出每折的训练区间、测试区间和实际评分日期数，再显示训练 epoch、批量评分上下文和 sequence 进度；`Transformer OOS folds: 0/5` 表示第一折正在做首次数据准备，并非任务停滞。
+
+时序模型不会直接将全部因子展开成序列。训练时从当前训练折中按标签相关性、覆盖率和方差筛选 `transformer_max_feature_pairs` 个 `*_clean` 因子，并保留对应的 `*_is_missing` 掩码；`transformer_max_samples` 在全股票池、全时间段均衡抽取序列窗口。默认值为 128 个因子对、12,000 条样本，避免 60 日、千维因子面板在序列复制时占用数十 GB 内存。模型工件记录最终特征列，因此推理仍严格使用与训练一致的特征集合。
 
 图时序 OOS 还必须提供带 `stock_code,industry_l1,available_at` 的历史行业映射 CSV，并把图模型预测文件加入 `[model_comparison].prediction_paths`：
 

@@ -489,13 +489,36 @@ def test_cn_sync_requests_default_timeout_injected(monkeypatch):
     assert calls[1]["timeout"] == 7
 
 
-def test_cn_history_source_priority_uses_baostock_only_as_default_fallback():
+def test_cn_history_source_priority_avoids_v8_sina_in_bulk_defaults():
     from data.ingest.providers.cn_common import build_source_priority
 
-    assert build_source_priority() == ["tencent", "akshare_sina", "baostock", "akshare_eastmoney"]
-    assert build_source_priority("akshare") == ["tencent", "akshare_sina", "baostock", "akshare_eastmoney"]
+    assert build_source_priority() == ["tencent", "baostock", "akshare_eastmoney"]
+    assert build_source_priority("akshare") == ["tencent", "baostock", "akshare_eastmoney"]
+    assert build_source_priority("tencent") == ["tencent", "baostock", "akshare_eastmoney"]
     assert build_source_priority("baostock")[0] == "baostock"
     assert build_source_priority("eastmoney")[0] == "akshare_eastmoney"
+    assert build_source_priority("sina")[0] == "akshare_sina"
+
+
+def test_cn_tencent_history_mode_uses_akshare_current_universe(monkeypatch):
+    from data.ingest.providers.cn_universe import CNMarketListFetcher
+
+    calls = []
+
+    def fake_akshare(self):
+        calls.append("akshare")
+        return [{"code": "600000.SH", "name": "浦发银行"}]
+
+    def fail_baostock(self):
+        raise AssertionError("Tencent history mode must not start from BaoStock's historical universe")
+
+    monkeypatch.setattr(CNMarketListFetcher, "_fetch_akshare", fake_akshare)
+    monkeypatch.setattr(CNMarketListFetcher, "_fetch_baostock", fail_baostock)
+
+    rows = CNMarketListFetcher(data_source="tencent", verbose=False).fetch()
+
+    assert rows == [{"code": "600000.SH", "name": "浦发银行"}]
+    assert calls == ["akshare"]
 
 
 def test_cn_tencent_intraday_bypasses_proxy_and_does_not_fallback(monkeypatch):
@@ -594,6 +617,35 @@ def test_cn_eastmoney_daily_uses_short_timeout(monkeypatch):
 
     assert len(frame) == 1
     assert calls[0]["timeout"] == 3
+
+
+def test_cn_tencent_daily_keeps_volume_and_amount_as_distinct_columns(monkeypatch):
+    from data.ingest.providers import cn_history
+
+    class FakeAk:
+        @staticmethod
+        def stock_zh_a_hist_tx(**kwargs):
+            return pd.DataFrame(
+                {
+                    "date": ["2024-01-02"],
+                    "open": [10.0],
+                    "close": [10.5],
+                    "high": [10.8],
+                    "low": [9.8],
+                    "volume": [1_200_000],
+                    "amount": [12_600_000],
+                    "turnover": [1.2],
+                }
+            )
+
+    monkeypatch.setattr(cn_history, "ak", FakeAk)
+    fetcher = cn_history.CNHistoryDataFetcher("600000.SH", data_source="tencent", verbose=False)
+    frame = fetcher._fetch_tencent_daily_hist(start_date="2024-01-02", end_date="2024-01-03", adjust="qfq")
+
+    assert frame.columns.is_unique
+    assert frame.iloc[0]["Volume"] == 1_200_000
+    assert frame.iloc[0]["amount"] == 12_600_000
+    assert frame.iloc[0]["turnover"] == 1.2
 
 
 def test_cn_stock_info_falls_back_to_sina_after_eastmoney_error(monkeypatch):

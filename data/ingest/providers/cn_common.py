@@ -11,7 +11,10 @@ except ImportError:  # pragma: no cover
     ak = None
 
 
-DEFAULT_SOURCE_PRIORITY = ["tencent", "akshare_sina", "baostock", "akshare_eastmoney"]
+# 新浪日线解码会创建 py-mini-racer/V8 context。macOS 上多个 context 同时
+# 初始化会让原生库直接终止解释器，异常处理无法恢复。因此默认批量链路只使用
+# 不依赖 V8 的源；新浪仍可通过 data_source="sina" 显式启用。
+DEFAULT_SOURCE_PRIORITY = ["tencent", "baostock", "akshare_eastmoney"]
 
 
 def normalize_cn_stock_code(stock_code):
@@ -61,12 +64,12 @@ def build_source_priority(data_source=None, source_priority=None):
     if normalized == "akshare":
         return list(DEFAULT_SOURCE_PRIORITY)
     if normalized == "baostock":
-        return ["baostock", "tencent", "akshare_sina", "akshare_eastmoney"]
+        return ["baostock", "tencent", "akshare_eastmoney"]
     if normalized in {"sina", "akshare_sina"}:
         return ["akshare_sina", "tencent", "baostock", "akshare_eastmoney"]
     if normalized in {"eastmoney", "akshare_eastmoney", "em"}:
-        return ["akshare_eastmoney", "tencent", "akshare_sina", "baostock"]
+        return ["akshare_eastmoney", "tencent", "baostock"]
     if normalized == "tencent":
-        return ["tencent", "akshare_sina", "baostock", "akshare_eastmoney"]
+        return ["tencent", "baostock", "akshare_eastmoney"]
 
     return list(DEFAULT_SOURCE_PRIORITY)

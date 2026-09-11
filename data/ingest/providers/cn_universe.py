@@ -53,7 +53,13 @@ class CNMarketListFetcher:
 
     def fetch(self, limit=None):
         errors = []
-        for source in ([self.data_source] if self.data_source != "akshare" else ["akshare"]) + ["baostock", "akshare"]:
+        # data_source controls the history provider, but Tencent and Eastmoney
+        # do not provide this instrument-list interface.  For those modes use
+        # AKShare's current A-share universe rather than accidentally calling
+        # BaoStock and admitting its broader historical universe.
+        preferred_sources = ["baostock"] if self.data_source == "baostock" else ["akshare"]
+        source_order = list(dict.fromkeys([*preferred_sources, "baostock", "akshare"]))
+        for source in source_order:
             try:
                 rows = self._fetch_akshare() if source == "akshare" else self._fetch_baostock()
                 if rows:

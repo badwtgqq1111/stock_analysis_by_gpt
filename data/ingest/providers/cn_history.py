@@ -30,6 +30,7 @@ from data.store.database_manager import DatabaseManager
 
 
 _TENCENT_SESSION_LOCAL = threading.local()
+_AKSHARE_SINA_DAILY_LOCK = threading.Lock()
 
 
 def _tencent_direct_session():
@@ -70,16 +71,21 @@ class CNHistoryDataFetcher:
 
         start_date_str = pd.to_datetime(start_date).strftime("%Y%m%d") if start_date else "19900101"
         end_date_str = pd.to_datetime(end_date).strftime("%Y%m%d") if end_date else "21000101"
-        df = call_with_retries(
-            lambda: ak.stock_zh_a_daily(
-                symbol=self.prefixed_symbol,
-                start_date=start_date_str,
-                end_date=end_date_str,
-                adjust=adjust or self.default_adjust,
-            ),
-            attempts=2,
-            sleep_seconds=0.5,
-        )
+        # AKShare's A-share Sina implementation creates a MiniRacer context per
+        # call.  The macOS V8 binding aborts the entire process when contexts
+        # initialize concurrently, so explicit Sina use is intentionally
+        # serialized.  Normal bulk sync does not include this source by default.
+        with _AKSHARE_SINA_DAILY_LOCK:
+            df = call_with_retries(
+                lambda: ak.stock_zh_a_daily(
+                    symbol=self.prefixed_symbol,
+                    start_date=start_date_str,
+                    end_date=end_date_str,
+                    adjust=adjust or self.default_adjust,
+                ),
+                attempts=2,
+                sleep_seconds=0.5,
+            )
         normalized_df = normalize_history_dataframe(
             df,
             {"date": "date", "open": "open", "close": "close", "high": "high", "low": "low", "volume": "volume"},
@@ -147,7 +153,19 @@ class CNHistoryDataFetcher:
         )
         normalized_df = normalize_history_dataframe(
             df,
-            {"date": "date", "open": "open", "close": "close", "high": "high", "low": "low", "amount": "volume"},
+            # AKShare's Tencent provider now returns both volume and amount.
+            # Mapping amount to volume creates duplicate volume columns, making
+            # pandas select a DataFrame instead of a Series during coercion.
+            {
+                "date": "date",
+                "open": "open",
+                "close": "close",
+                "high": "high",
+                "low": "low",
+                "volume": "volume",
+                "amount": "amount",
+                "turnover": "turnover",
+            },
         )
         return apply_date_filters(normalized_df, start_date, end_date, num_records)
 

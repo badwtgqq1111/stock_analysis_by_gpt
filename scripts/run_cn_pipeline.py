@@ -185,9 +185,12 @@ def run_stage(name: str, config: dict, service: MarketDataService) -> dict:
             transformer_lookback=int(layer.get("transformer_lookback", 60)), transformer_epochs=int(layer.get("transformer_epochs", 5)),
             transformer_batch_size=int(layer.get("transformer_batch_size", 256)), transformer_max_samples=int(layer.get("transformer_max_samples", 200000)),
             transformer_device=layer.get("transformer_device", "auto"), industry_mapping_path=layer.get("industry_mapping_path") or None,
+            transformer_max_feature_pairs=int(layer.get("transformer_max_feature_pairs", 128)),
+            prediction_stride=int(layer.get("prediction_stride", 1)),
             min_feature_coverage=float(feature_quality.get("min_feature_coverage", 0.05)),
             drop_constant_features=bool(feature_quality.get("drop_constant_features", True)),
             end_date=str(p["end_date"]) or None,
+            show_progress=True,
         )
     if name == "clean_panel":
         layer = config[name]
@@ -228,6 +231,7 @@ def run_stage(name: str, config: dict, service: MarketDataService) -> dict:
             validation_days=int(layer.get("validation_days", 60)),
             lookback=int(layer.get("lookback", 60)), epochs=int(layer.get("epochs", 10)),
             batch_size=int(layer.get("batch_size", 256)), max_samples=int(layer.get("max_samples", 200000)),
+            max_feature_pairs=int(layer.get("max_feature_pairs", 128)),
             cleaning_version=layer.get("cleaning_version", "p0.2.v1"), model_dir=layer.get("model_dir"),
             min_stock_count=int(p["min_training_stocks"]),
             warm_start_path=layer.get("warm_start_path"), warm_start_manifest_path=layer.get("warm_start_manifest_path"),
@@ -246,6 +250,7 @@ def run_stage(name: str, config: dict, service: MarketDataService) -> dict:
             label_horizon=int(layer.get("label_horizon", 20)), validation_days=int(layer.get("validation_days", 60)),
             lookback=int(layer.get("lookback", 60)), epochs=int(layer.get("epochs", 10)),
             batch_size=int(layer.get("batch_size", 256)), max_samples=int(layer.get("max_samples", 200000)),
+            max_feature_pairs=int(layer.get("max_feature_pairs", 128)),
             channels=int(layer.get("channels", 64)), kernel_size=int(layer.get("kernel_size", 3)),
             num_layers=int(layer.get("num_layers", 3)), cleaning_version=layer.get("cleaning_version", "p0.2.v1"),
             model_dir=layer.get("model_dir"), min_stock_count=int(p["min_training_stocks"]),
@@ -330,6 +335,15 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
                     failed_parts.append(f"{sub_name}={sub_result['failed_count']}")
             if failed_parts:
                 detail = f"{detail} failures: {', '.join(failed_parts)}"
+        if item.get("name") == "model_comparison":
+            comparison = summary.get("comparison", {})
+            rankings = comparison.get("ranking", [])
+            if rankings:
+                winner = rankings[0]
+                detail = (
+                    f"winner={winner.get('model')} RankIC={winner.get('rank_ic_mean')} "
+                    f"IR={winner.get('rank_ic_ir')} common_rows={comparison.get('common_universe_rows')}"
+                )
         lines.append(f"| {item['name']} | {item['status']} | {detail} |")
         if summary.get("failed"):
             for failure in summary["failed"][:10]:
@@ -409,6 +423,21 @@ def main() -> int:
             try:
                 summary = run_stage(stage, config, service)
                 item = {"name": stage, "status": "ok", "summary": summary}
+                if stage == "model_comparison":
+                    comparison = summary.get("comparison", {}) if isinstance(summary, dict) else {}
+                    common_rows = comparison.get("common_universe_rows")
+                    if common_rows is not None:
+                        print(f"[MODEL_COMPARISON] common_universe_rows={common_rows:,}", flush=True)
+                    for model in comparison.get("models", []):
+                        print(
+                            f"[MODEL_COMPARISON] model={model.get('model')} "
+                            f"RankIC={model.get('rank_ic_mean')} RankIC_IR={model.get('rank_ic_ir')} "
+                            f"IC={model.get('ic_mean')} IC_IR={model.get('ic_ir')} "
+                            f"TopQMean={model.get('top_quantile_return_mean')} "
+                            f"turnover={model.get('turnover_mean')}",
+                            flush=True,
+                        )
+                    print(f"[MODEL_COMPARISON] report={summary.get('markdown')}", flush=True)
             except Exception as exc:
                 blocked = True
                 print(f"[ERROR] stage={stage}: {exc}", flush=True)

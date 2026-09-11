@@ -28,6 +28,15 @@ def evaluate_selection_outcomes(
     required = {"stock_code", "trade_date"}
     if required - set(selections.columns):
         raise ValueError("selection input requires stock_code and trade_date")
+    # The selection artifact retains ranked but optimizer-excluded candidates
+    # for auditability.  Paper outcomes must track only capital that the
+    # portfolio actually targets; candidate-ranking research is evaluated by
+    # the OOS model-comparison stage instead.
+    if "target_weight" in selections.columns:
+        target_weight = pd.to_numeric(selections["target_weight"], errors="coerce").fillna(0.0)
+        selections = selections.loc[target_weight > 0].copy()
+        if selections.empty:
+            return pd.DataFrame()
     bars = ohlcv.copy() if ohlcv is not None else pd.DataFrame()
     if bars.empty or not {"stock_code", "trade_date", "close"}.issubset(bars.columns):
         raise ValueError("ohlcv input requires stock_code, trade_date and close")

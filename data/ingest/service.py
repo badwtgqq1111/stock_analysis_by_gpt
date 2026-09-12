@@ -6190,9 +6190,22 @@ class MarketDataService:
         portfolio_mode="topn",
         portfolio_constraints=None,
         initial_capital=1_000_000.0,
+        signal_config=None,
+        ensemble_weights=None,
+        affordability=None,
+        rebalance_stride_days=1,
+        force_rebalance=False,
         show_progress=False,
     ):
-        """Select from saved model predictions without rebuilding factors or retraining."""
+        """Select from saved model predictions without rebuilding factors or retraining.
+
+        ``signal_config`` enables the price-setup signal layer.  When enabled,
+        the Donchian channel recipe (``donchian_pullback``) and the range
+        breakout recipe are evaluated on the model shortlist for the selection
+        date, and the strongest volume-confirmed hits are forced into the
+        candidate pool with a minimum weight.  Disabled or empty configuration
+        reproduces the pure model Top-N behavior exactly.
+        """
         from factor_engine.ml.model_training import select_top_model_scores
 
         source = Path(model_scores_dir)
@@ -6205,6 +6218,75 @@ class MarketDataService:
         if progress is not None:
             progress.set_postfix_str(f"score_files={len(frames)}")
             progress.update(1)
+        score_dates = [pd.to_datetime(f["trade_date"]).max() for f in frames.values() if not f.empty]
+        selection_date = min(score_dates).normalize() if score_dates else None
+        destination = Path(output_dir)
+        selection_path = destination / f"cn_{str(model).lower()}_selected.csv"
+        state_path = destination / f"cn_{str(model).lower()}_rebalance_state.json"
+        stride = max(1, int(rebalance_stride_days or 1))
+        if stride > 1 and not force_rebalance and selection_date is not None and state_path.is_file() and selection_path.is_file():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                last_date = pd.Timestamp(state.get("trade_date")).normalize()
+                elapsed = int(np.busday_count(last_date.date(), selection_date.date()))
+            except (ValueError, OSError, TypeError):
+                elapsed = stride
+            if 0 <= elapsed < stride:
+                previous = pd.read_csv(selection_path)
+                if progress is not None:
+                    progress.set_postfix_str(f"carried forward (stride={stride}, elapsed={elapsed})")
+                    progress.update(1)
+                    progress.close()
+                return {
+                    "status": "carried_forward", "model": str(model).lower(),
+                    "latest_trade_date": last_date.strftime("%Y-%m-%d"),
+                    "score_date": selection_date.strftime("%Y-%m-%d"),
+                    "rebalance_stride_days": stride, "business_days_since_rebalance": elapsed,
+                    "selected_count": int((previous.get("target_weight", pd.Series(dtype=float)) > 0).sum()),
+                    "path": str(selection_path), "regime": regime if "regime" in dir() else "unknown",
+                    "detail": f"within rebalance stride ({elapsed}/{stride} business days); previous book kept",
+                }
+
+        affordability_summary = None
+        affordability_config = dict(affordability or {})
+        if affordability_config.get("enabled") and frames:
+            lot_size = int(affordability_config.get("lot_size", 100) or 100)
+            equity = float(affordability_config.get("equity") or initial_capital)
+            budget_ratio = float(affordability_config.get("budget_ratio", 0.15) or 0.15)
+            tolerance = float(affordability_config.get("tolerance", 1.0) or 1.0)
+            max_price = equity * budget_ratio * tolerance / max(lot_size, 1)
+            universe = sorted({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)})
+            end_ts = selection_date or pd.Timestamp.utcnow().tz_localize(None).normalize()
+            recent = self.warehouse.read_ohlcv(
+                market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+                stock_code=universe,
+                start_date=(end_ts - pd.Timedelta(days=30)).strftime("%Y-%m-%d"),
+                end_date=end_ts.strftime("%Y-%m-%d"),
+                columns=["stock_code", "trade_date", "close"],
+            )
+            affordable = set()
+            if recent is not None and not recent.empty:
+                recent = recent.copy()
+                recent["trade_date"] = pd.to_datetime(recent["trade_date"], errors="coerce")
+                recent["close"] = pd.to_numeric(recent["close"], errors="coerce")
+                recent = recent.dropna(subset=["trade_date", "close"]).sort_values(["stock_code", "trade_date"])
+                latest_close = recent.groupby("stock_code", sort=False)["close"].last()
+                affordable = set(latest_close[latest_close <= max_price].index.astype(str))
+            before = len(universe)
+            frames = {
+                name: frame[frame["stock_code"].astype(str).isin(affordable)].copy()
+                for name, frame in frames.items()
+            }
+            affordability_summary = {
+                "equity": equity, "lot_size": lot_size, "budget_ratio": budget_ratio,
+                "max_price": round(float(max_price), 2),
+                "universe": before, "affordable": int(len(affordable)),
+                "dropped": int(before - len(affordable) if affordable else before),
+            }
+            if progress is not None:
+                progress.set_postfix_str(
+                    f"affordability max_price={max_price:.1f} kept={len(affordable)}/{before}"
+                )
         regime = "unknown"
         regime_version = None
         regime_trade_date = None
@@ -6238,15 +6320,47 @@ class MarketDataService:
         if "regime_budget" not in locals():
             regime_budget = {}
             regime_strategy_id = "insufficient_data"
+        # The regime file publishes model weights, but an explicit configuration
+        # may override them; the regime weights stay in the report either way.
+        regime_model_weights = dict(model_weights or {})
+        applied_model_weights = regime_model_weights
+        requested_weights = {
+            str(name).strip().lower(): float(value)
+            for name, value in (ensemble_weights or {}).items()
+            if value is not None and float(value) > 0
+        }
+        if requested_weights:
+            applied_model_weights = requested_weights
         selected = select_top_model_scores(
-            frames, model=model, top_n=top_n, model_weights=model_weights,
+            frames, model=model, top_n=top_n, model_weights=applied_model_weights,
             metadata={"regime": regime, "regime_version": regime_version, "regime_trade_date": regime_trade_date,
-                      "model_weights": json.dumps(model_weights or {}, ensure_ascii=False), "strategy_id": regime_strategy_id,
+                      "model_weights": json.dumps(applied_model_weights or {}, ensure_ascii=False),
+                      "regime_model_weights": json.dumps(regime_model_weights, ensure_ascii=False),
+                      "strategy_id": regime_strategy_id,
                       "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
         )
         if progress is not None:
             progress.set_postfix_str(f"candidates={len(selected):,} model={model}")
             progress.update(1)
+        forced_codes: list[str] = []
+        forced_min_weight = 0.0
+        signal_summary = {"enabled": False}
+        if signal_config and bool(signal_config.get("enabled", False)):
+            ranked_all = select_top_model_scores(
+                frames, model=model, top_n=1_000_000_000, model_weights=applied_model_weights,
+            )
+            selected, signal_summary = self._apply_price_setup_signals(
+                selected, ranked_all, signal_config=dict(signal_config), model=model,
+            )
+            forced_codes = list(signal_summary.get("forced_codes") or [])
+            # Per-sleeve bounds: each forced name carries the floor/cap of the
+            # sleeve it was promoted from (setup vs momentum).
+            forced_min_weight = signal_summary.get("forced_floors") or (signal_summary.get("forced_min_weight") or 0.0)
+            forced_max_weight = signal_summary.get("forced_caps") or signal_summary.get("forced_max_weight")
+            if progress is not None:
+                progress.set_postfix_str(
+                    f"signals hits={signal_summary.get('hit_count', 0)} forced={len(forced_codes)}"
+                )
         if str(portfolio_mode).lower() == "mean_variance_cost_aware":
             info = self.warehouse.read_stock_info(stock_codes=selected["stock_code"].astype(str).tolist(), market="CN")
             if not info.empty:
@@ -6274,6 +6388,7 @@ class MarketDataService:
                 risk_snapshot = risk_bars.groupby("stock_code", as_index=False).agg(
                     volatility_20d=("return_1d", lambda value: float(value.tail(20).std(ddof=1) * np.sqrt(252)) if value.tail(20).count() >= 5 else np.nan),
                     median_turnover_amount_20d=("amount", lambda value: float(value.tail(20).median()) if value.notna().any() else np.nan),
+                    last_close=("close", "last"),
                 )
                 selected = selected.merge(risk_snapshot, on="stock_code", how="left")
             # Static TOML values are hard safety ceilings.  Regime policy may
@@ -6288,9 +6403,64 @@ class MarketDataService:
                 configured = constraint_values.get(key)
                 constraint_values[key] = float(budget) if configured is None else min(float(configured), float(budget))
             cfg = PortfolioConstraints(**constraint_values)
-            selected, portfolio_manifest = optimize_long_only(
-                selected, constraints=cfg, initial_capital=float(initial_capital),
+            lot_size = int((portfolio_constraints or {}).get("lot_size", 100) or 100)
+            pool_for_optimization = selected.copy()
+            dropped_for_lots: list[str] = []
+            lot_repair_rounds = 0
+            for _attempt in range(12):
+                optimized, portfolio_manifest = optimize_long_only(
+                    pool_for_optimization, constraints=cfg, initial_capital=float(initial_capital),
+                    forced_codes=forced_codes, forced_min_weight=forced_min_weight,
+                    forced_max_weight=forced_max_weight,
+                )
+                closes = pd.to_numeric(optimized.get("last_close"), errors="coerce")
+                one_lot = closes * lot_size
+                targets = pd.to_numeric(optimized["target_weight"], errors="coerce") * float(initial_capital)
+                lots = np.floor(targets.to_numpy(dtype=float) / np.where(one_lot.to_numpy(dtype=float) > 0, one_lot.to_numpy(dtype=float), np.nan))
+                unfillable = optimized[(optimized["target_weight"] > 0) & (~(lots >= 1))]
+                if unfillable.empty or not bool((portfolio_constraints or {}).get("require_fillable_lot", True)):
+                    break
+                # drop the weakest unfillable name (never a strategy-forced one) and re-optimize
+                droppable = unfillable[~unfillable["stock_code"].astype(str).isin(set(forced_codes))]
+                if droppable.empty:
+                    break
+                victim = str(droppable.sort_values("model_score").iloc[0]["stock_code"])
+                dropped_for_lots.append(victim)
+                pool_for_optimization = pool_for_optimization[
+                    pool_for_optimization["stock_code"].astype(str) != victim
+                ].copy()
+                lot_repair_rounds += 1
+            selected = optimized
+            if bool((portfolio_constraints or {}).get("require_fillable_lot", True)) and "lot_fillable" in selected.columns:
+                leftover = (~selected["lot_fillable"]) & (selected["target_weight"] > 0)
+                if bool(leftover.any()):
+                    selected.loc[leftover, "target_weight"] = 0.0
+                    selected.loc[leftover, "constraint_status"] = "excluded_unfillable_lot"
+                    remaining = float(selected["target_weight"].sum())
+                    gross_target = min(float(cfg.gross_exposure), remaining) if remaining > 0 else 0.0
+                    if remaining > 0 and gross_target > 0 and abs(remaining - gross_target) > 1e-9:
+                        selected["target_weight"] = selected["target_weight"] * (gross_target / remaining)
+            lot_summary = {
+                "lot_size": lot_size,
+                "repair_rounds": lot_repair_rounds,
+                "dropped_for_lots": dropped_for_lots,
+            }
+            # Report whether each remaining target weight can actually be filled.
+            last_close = pd.to_numeric(selected.get("last_close"), errors="coerce")
+            one_lot_value = last_close * lot_size
+            target_value = pd.to_numeric(selected["target_weight"], errors="coerce") * float(initial_capital)
+            selected["one_lot_value"] = one_lot_value.round(2)
+            selected["lots_at_target"] = np.floor(
+                target_value.to_numpy(dtype=float) / np.where(one_lot_value.to_numpy(dtype=float) > 0, one_lot_value.to_numpy(dtype=float), np.nan)
             )
+            selected["lot_fillable"] = (selected["lots_at_target"] >= 1).fillna(False)
+            lot_summary.update({
+                "fillable": int(selected["lot_fillable"].sum()),
+                "unfillable": int((~selected["lot_fillable"] & (selected["target_weight"] > 0)).sum()),
+                "unfillable_codes": selected.loc[
+                    (~selected["lot_fillable"]) & (selected["target_weight"] > 0), "stock_code"
+                ].astype(str).tolist(),
+            })
             if progress is not None:
                 progress.set_postfix_str("portfolio optimized")
                 progress.update(1)
@@ -6303,8 +6473,16 @@ class MarketDataService:
                 progress.update(1)
         destination = Path(output_dir)
         destination.mkdir(parents=True, exist_ok=True)
-        path = destination / f"cn_{str(model).lower()}_selected.csv"
+        path = selection_path
         selected.to_csv(path, index=False)
+        try:
+            state_path.write_text(json.dumps({
+                "trade_date": pd.to_datetime(selected["trade_date"].iloc[0]).strftime("%Y-%m-%d"),
+                "rebalance_stride_days": stride,
+                "selected_codes": selected.loc[selected["target_weight"] > 0, "stock_code"].astype(str).tolist(),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
         portfolio_manifest_path = destination / f"cn_{str(model).lower()}_portfolio_manifest.json"
         portfolio_manifest_path.write_text(json.dumps(portfolio_manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         # Persist an auditable, human-readable explanation alongside the
@@ -6326,9 +6504,486 @@ class MarketDataService:
             "path": str(path), "regime": regime, "regime_version": regime_version,
             "regime_trade_date": regime_trade_date, "model_weights": model_weights or {},
             "regime_budget": regime_budget, "strategy_id": regime_strategy_id, "portfolio": portfolio_manifest,
+            "signals": signal_summary,
+            "affordability": affordability_summary,
+            "rebalance_stride_days": stride,
+            "lot_execution": lot_summary if str(portfolio_mode).lower() == "mean_variance_cost_aware" else None,
             "portfolio_manifest_path": str(portfolio_manifest_path),
             "explanation_paths": explanation_paths,
         }
+
+    def plan_cn_exit_rules(
+        self,
+        *,
+        holdings_path="config/holdings_cn.csv",
+        market="CN",
+        adjust="qfq",
+        days=260,
+        model_scores_dir="output/model_scores",
+        model="ensemble",
+        ensemble_weights=None,
+        output_dir="output/results_cn",
+        rules_config=None,
+        cash=None,
+        show_progress=False,
+    ):
+        """Evaluate hold / reduce / exit rules for the current book.
+
+        Sell-side rules are deliberately narrow: the 2024-2026 sample shows that
+        fixed stop losses and "sell when price breaks the moving average" both
+        sell into the highest-expected-return states, so only risk rules
+        (ST / liquidity / suspension / model-rank decay), profit taking
+        (channel top, large 20-day gain) and the position cap are enabled.
+        """
+        from factor_engine.portfolio.exits import (
+            ExitRules,
+            evaluate_exit_plan,
+            plan_lot_orders,
+            render_exit_plan_markdown,
+            render_lot_order_markdown,
+        )
+
+        source = Path(holdings_path)
+        if not source.is_file():
+            raise ValueError(f"holdings file not found: {source}")
+        holdings = pd.read_csv(source)
+        if holdings.empty or "stock_code" not in holdings.columns:
+            raise ValueError(f"holdings file must contain a stock_code column: {source}")
+        holdings = holdings.copy()
+        holdings["stock_code"] = holdings["stock_code"].astype(str).str.strip()
+        codes = holdings["stock_code"].dropna().tolist()
+        if show_progress:
+            print(f"[EXITS] holdings={len(codes)} source={source}", flush=True)
+
+        end_ts = pd.Timestamp.utcnow().tz_localize(None).normalize()
+        start_ts = end_ts - pd.Timedelta(days=int(days))
+        bars = self.warehouse.read_ohlcv(
+            market=str(market).upper(), asset_type="equity", frequency="daily",
+            adjust=normalize_adjust(adjust),
+            stock_code=codes,
+            start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "high", "low", "close", "volume", "amount"],
+        )
+        if bars is None or bars.empty:
+            raise ValueError("no OHLCV available for the holdings")
+        bars = bars.copy()
+        bars["trade_date"] = pd.to_datetime(bars["trade_date"], errors="coerce")
+        for column in ("high", "low", "close", "volume", "amount"):
+            bars[column] = pd.to_numeric(bars[column], errors="coerce")
+        bars = bars.dropna(subset=["trade_date", "close"]).sort_values(["stock_code", "trade_date"])
+        universe_dates = np.sort(bars["trade_date"].unique())
+
+        states = []
+        for code, group in bars.groupby("stock_code", sort=False):
+            g = group.tail(260)
+            close = g["close"]
+            last_date = g["trade_date"].iloc[-1]
+            after = int((universe_dates > last_date).sum())
+            ma20 = float(close.tail(20).mean()) if len(close) >= 20 else np.nan
+            ma60 = float(close.tail(60).mean()) if len(close) >= 60 else np.nan
+            high60 = float(g["high"].tail(60).max()) if len(g) >= 60 else np.nan
+            prior_high = float(g["high"].shift(1).tail(20).max()) if len(g) >= 21 else np.nan
+            prior_low = float(g["low"].shift(1).tail(20).min()) if len(g) >= 21 else np.nan
+            pos = (
+                (close.iloc[-1] - prior_low) / (prior_high - prior_low)
+                if pd.notna(prior_high) and pd.notna(prior_low) and prior_high > prior_low else np.nan
+            )
+            states.append({
+                "stock_code": str(code),
+                "close": float(close.iloc[-1]),
+                "ma20": ma20, "ma60": ma60, "high60": high60,
+                "return_20d": float(close.iloc[-1] / close.iloc[-21] - 1.0) if len(close) >= 21 else np.nan,
+                "return_60d": float(close.iloc[-1] / close.iloc[-61] - 1.0) if len(close) >= 61 else np.nan,
+                "drawdown_60d": float(close.iloc[-1] / high60 - 1.0) if pd.notna(high60) and high60 else np.nan,
+                "donchian_pos": pos,
+                "donchian_upper": prior_high, "donchian_lower": prior_low,
+                "median_amount_20": float(g["amount"].tail(20).median()) if g["amount"].notna().any() else np.nan,
+                "volume_ratio_20": float(g["volume"].iloc[-1] / g["volume"].tail(20).mean()) if g["volume"].tail(20).mean() else np.nan,
+                "sessions_since_last_bar": after,
+                "last_bar_date": pd.Timestamp(last_date).strftime("%Y-%m-%d"),
+            })
+        state = pd.DataFrame(states)
+
+        info = self.warehouse.read_stock_info(stock_codes=codes, market=str(market).upper())
+        if info is not None and not info.empty:
+            info = info.drop_duplicates(subset=["stock_code"])
+            columns = [column for column in ("stock_code", "name", "market_cap", "tradable_flag") if column in info.columns]
+            state = state.merge(info[columns], on="stock_code", how="left")
+
+        score_path = Path(model_scores_dir)
+        frames = {}
+        for name in ("lightgbm", "transformer", "cnn"):
+            path = score_path / f"cn_{name}_scores.csv"
+            if path.is_file():
+                frames[name] = pd.read_csv(path)
+        percentile = pd.Series(dtype=float)
+        if frames:
+            from factor_engine.ml.model_training import select_top_model_scores
+
+            ranked = select_top_model_scores(
+                frames, model=model, top_n=1_000_000_000, model_weights=ensemble_weights or None,
+            )
+            percentile = ranked.drop_duplicates(subset=["stock_code"]).set_index("stock_code")["model_score"]
+        state["model_percentile"] = state["stock_code"].map(percentile)
+
+        rules = ExitRules(**{k: v for k, v in (rules_config or {}).items() if k in ExitRules.__dataclass_fields__})
+        # Position weights are measured against total equity (positions + cash),
+        # which is the denominator a risk limit should use.
+        cash_balance = float(cash) if cash is not None else 0.0
+        plan = evaluate_exit_plan(holdings, state, rules=rules, cash=cash_balance)
+        destination = Path(output_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        csv_path = destination / "cn_exit_plan.csv"
+        plan.to_csv(csv_path, index=False)
+        as_of = state["last_bar_date"].max() if not state.empty else None
+        markdown = render_exit_plan_markdown(plan, as_of=as_of)
+
+        redeploy = None
+        selection_path = Path(output_dir) / f"cn_{str(model).lower()}_selected.csv"
+        if bool((rules_config or {}).get("redeploy_cash", True)) and selection_path.is_file() and not plan.empty:
+            selected = pd.read_csv(selection_path)
+            selected = selected[selected.get("target_weight", 0) > 0]
+            proceeds = float((plan["suggested_shares_to_sell"] * plan["close"]).sum())
+            equity_after = float(plan.attrs.get("total_equity", 0.0))
+            cash_after = float(plan.attrs.get("cash", 0.0)) + proceeds
+            prices = dict(zip(state["stock_code"].astype(str), state["close"]))
+            target_codes = [code for code in selected["stock_code"].astype(str) if code not in prices]
+            if target_codes:
+                target_bars = self.warehouse.read_ohlcv(
+                    market=str(market).upper(), asset_type="equity", frequency="daily",
+                    adjust=normalize_adjust(adjust), stock_code=target_codes,
+                    start_date=(end_ts - pd.Timedelta(days=20)).strftime("%Y-%m-%d"),
+                    end_date=end_ts.strftime("%Y-%m-%d"),
+                    columns=["stock_code", "trade_date", "close"],
+                )
+                if target_bars is not None and not target_bars.empty:
+                    target_bars = target_bars.copy()
+                    target_bars["trade_date"] = pd.to_datetime(target_bars["trade_date"], errors="coerce")
+                    target_bars["close"] = pd.to_numeric(target_bars["close"], errors="coerce")
+                    target_bars = target_bars.dropna(subset=["trade_date", "close"]).sort_values(["stock_code", "trade_date"])
+                    latest = target_bars.groupby("stock_code", sort=False)["close"].last()
+                    prices.update({str(code): float(value) for code, value in latest.items()})
+            weights = dict(zip(selected["stock_code"].astype(str), selected["target_weight"]))
+            redeploy = plan_lot_orders(weights, prices, equity_after, lot_size=int(rules.lot_size))
+            if not redeploy.empty:
+                markdown += "\n" + render_lot_order_markdown(
+                    redeploy,
+                    title=f"按整手的再投入清单（卖出回笼 {proceeds:,.0f} 元 → 现金 {cash_after:,.0f} 元）",
+                )
+        md_path = destination / "cn_exit_plan.md"
+        md_path.write_text(markdown, encoding="utf-8")
+        actions = plan["action"].value_counts().to_dict() if not plan.empty else {}
+        return {
+            "status": "completed", "holdings": int(len(codes)), "as_of": as_of,
+            "actions": {str(k): int(v) for k, v in actions.items()},
+            "market_value": float(plan["market_value"].sum()) if not plan.empty else 0.0,
+            "cash": float(plan.attrs.get("cash", 0.0)),
+            "total_equity": float(plan.attrs.get("total_equity", 0.0)),
+            "suggested_sell_value": float(
+                (plan["suggested_shares_to_sell"] * plan["close"]).sum()
+            ) if not plan.empty else 0.0,
+            "plan_path": str(csv_path), "report_path": str(md_path),
+            "redeploy_plan": redeploy.to_dict("records") if redeploy is not None and not redeploy.empty else [],
+            "positions": plan.to_dict("records"),
+        }
+
+    def _momentum_candidates(self, ranked_all, selection_date, min_gain):
+        """Latest-bar limit-up / strong-momentum codes across the scored universe.
+
+        The momentum sleeve must not inherit the model shortlist: on 2026-09-11
+        none of the 24 liquid limit-up names ranked inside the model top-1200,
+        so a model-scoped scan could never trade the one event that carries a
+        measured short-horizon edge.
+        """
+        codes = ranked_all["stock_code"].dropna().astype(str).unique().tolist()
+        if not codes:
+            return set()
+        start = selection_date - pd.Timedelta(days=14)
+        recent = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            stock_code=codes, start_date=start.strftime("%Y-%m-%d"),
+            end_date=selection_date.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "close"],
+        )
+        if recent is None or recent.empty:
+            return set()
+        recent = recent.copy()
+        recent["trade_date"] = pd.to_datetime(recent["trade_date"], errors="coerce")
+        recent["close"] = pd.to_numeric(recent["close"], errors="coerce")
+        recent = recent.dropna(subset=["trade_date", "close"]).sort_values(["stock_code", "trade_date"])
+        tail = recent.groupby("stock_code", sort=False).tail(2)
+        if tail.empty:
+            return set()
+        previous = tail.groupby("stock_code", sort=False)["close"].shift(1)
+        gain = tail["close"] / previous - 1.0
+        mask = (gain >= float(min_gain)) & tail["trade_date"].eq(selection_date)
+        return set(tail.loc[mask, "stock_code"].astype(str))
+
+    def _apply_price_setup_signals(self, model_candidates, ranked_all, *, signal_config, model="ensemble"):
+        """Evaluate price-setup and momentum sleeves and force their strongest hits.
+
+        The scan runs on the model shortlist (``scan_top_k``) for the selection
+        date using only bars up to that date, so the signal layer cannot see the
+        future.  Two independent sleeves are built:
+
+        * setup sleeve  - Donchian channel breakout / pullback entries, gated by
+          model agreement, sized by ``forced_min_weight`` .. ``forced_max_weight``;
+        * momentum sleeve - limit-up / strong-momentum days, which the event study
+          shows are the only short-horizon edge in the sample (+1.3% next day),
+          kept small and separate via ``[selection.signals.momentum_sleeve]``.
+
+        Risk filters (ST, market cap, median turnover) are applied to both
+        sleeves before anything is promoted, and every rejection is recorded.
+        """
+        from factor_engine.signals.registry import create_signal_recipe
+
+        momentum_config = dict(signal_config.get("momentum_sleeve") or {})
+        risk_config = dict(signal_config.get("risk_filters") or {})
+        setup_min_weight = float(signal_config.get("forced_min_weight", 0.0) or 0.0)
+        setup_max_weight = signal_config.get("forced_max_weight")
+        summary = {
+            "enabled": True, "recipes": [], "hit_count": 0, "forced_codes": [],
+            "forced_min_weight": setup_min_weight, "forced_max_weight": setup_max_weight,
+            "forced_floors": {}, "forced_caps": {}, "sleeves": {},
+            "selection_date": None, "scan_size": 0, "pool_size": int(len(model_candidates)),
+            "override_rank": str(signal_config.get("override_rank", "volume_ratio_20")),
+            "min_score": float(signal_config.get("min_score", 60.0) or 0.0),
+            "min_model_score": float(signal_config.get("min_model_score", 0.0) or 0.0),
+            "risk_filters": {
+                "exclude_st": bool(risk_config.get("exclude_st", True)),
+                "min_market_cap": float(risk_config.get("min_market_cap", 0.0) or 0.0),
+                "min_median_amount_20d": float(risk_config.get("min_median_amount_20d", 0.0) or 0.0),
+            },
+            "risk_rejected": [],
+            "errors": [],
+        }
+        recipes = [str(name) for name in (signal_config.get("recipes") or []) if str(name).strip()]
+        if not recipes or model_candidates is None or model_candidates.empty:
+            summary["enabled"] = False
+            return model_candidates, summary
+        recipe_params = dict(signal_config.get("recipe_params") or {})
+        instances = []
+        for name in recipes:
+            try:
+                instances.append((name, create_signal_recipe(name, **dict(recipe_params.get(name) or {}))))
+            except KeyError as exc:
+                summary["errors"].append(f"{name}: {exc}")
+        if not instances:
+            summary["enabled"] = False
+            return model_candidates, summary
+        summary["recipes"] = [name for name, _ in instances]
+
+        selection_date = pd.to_datetime(model_candidates["trade_date"].iloc[0]).normalize()
+        summary["selection_date"] = selection_date.strftime("%Y-%m-%d")
+        scan_top_k = int(signal_config.get("scan_top_k", 0) or 0)
+        pool = ranked_all if scan_top_k <= 0 else ranked_all.head(scan_top_k)
+        pool = pool.dropna(subset=["stock_code"]).copy()
+        momentum_enabled = bool(momentum_config.get("enabled", False))
+        momentum_types = {str(value) for value in (momentum_config.get("setup_types") or ["limit_momentum"])}
+        momentum_min_gain = float((recipe_params.get("limit_momentum") or {}).get("min_gain", 0.095) or 0.095)
+        momentum_codes = set()
+        if momentum_enabled and momentum_types:
+            momentum_codes = self._momentum_candidates(ranked_all, selection_date, momentum_min_gain)
+        summary["momentum_scan_size"] = int(len(momentum_codes))
+        summary["momentum_scan_in_model_pool"] = int(
+            len(set(pool["stock_code"].astype(str)) & momentum_codes)
+        )
+        if momentum_codes:
+            extra_pool = ranked_all[ranked_all["stock_code"].astype(str).isin(momentum_codes)]
+            pool = pd.concat([pool, extra_pool], ignore_index=True, sort=False).drop_duplicates(subset=["stock_code"])
+        summary["scan_size"] = int(len(pool))
+        if pool.empty:
+            return model_candidates, summary
+
+        lookback = max(40, int(signal_config.get("lookback_sessions", 120) or 120))
+        start = selection_date - pd.Timedelta(days=int(lookback * 1.9) + 30)
+        bars = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            stock_code=pool["stock_code"].astype(str).tolist(),
+            start_date=start.strftime("%Y-%m-%d"), end_date=selection_date.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "high", "low", "close", "volume", "amount"],
+        )
+        if bars is None or bars.empty:
+            summary["errors"].append("no OHLCV available for the signal scan pool")
+            return model_candidates, summary
+        bars = bars.copy()
+        bars["trade_date"] = pd.to_datetime(bars["trade_date"], errors="coerce")
+        bars["amount"] = pd.to_numeric(bars["amount"], errors="coerce")
+        bars = bars.dropna(subset=["trade_date"])
+        bars = bars[bars["trade_date"] <= selection_date].sort_values(["stock_code", "trade_date"])
+        amount_stats = bars.groupby("stock_code", sort=False)["amount"].apply(
+            lambda series: float(series.tail(20).median()) if series.notna().any() else float("nan")
+        ).to_dict()
+
+        allowed = {str(value) for value in (signal_config.get("allowed_setup_types") or [])}
+        min_score = float(signal_config.get("min_score", 60.0) or 0.0)
+        min_model_score = float(signal_config.get("min_model_score", 0.0) or 0.0)
+        max_overrides = max(0, int(signal_config.get("max_overrides", 0) or 0))
+        model_scores = ranked_all.drop_duplicates(subset=["stock_code"]).set_index("stock_code")["model_score"]
+
+        hit_rows = []
+        for code, group in bars.groupby("stock_code", sort=False):
+            frame = group.set_index("trade_date")[["high", "low", "close", "volume", "amount"]]
+            if frame.empty:
+                continue
+            for name, recipe in instances:
+                try:
+                    result = recipe.evaluate(frame)
+                except Exception as exc:  # a single bad series must not abort selection
+                    summary["errors"].append(f"{code}:{name}: {exc}")
+                    continue
+                if result.signal_type not in allowed or float(result.score) < min_score:
+                    continue
+                features = dict(result.features)
+                ensemble = float(model_scores.get(code, np.nan)) if code in model_scores.index else np.nan
+                hit_rows.append({
+                    "stock_code": str(code), "signal_recipe": name, "signal_type": str(result.signal_type),
+                    "signal_score": float(result.score), "signal_ensemble_score": ensemble,
+                    "signal_median_amount_20": amount_stats.get(code),
+                    "signal_donchian_window": features.get("donchian_window"),
+                    "signal_donchian_upper": features.get("donchian_upper"),
+                    "signal_donchian_lower": features.get("donchian_lower"),
+                    "signal_donchian_pos": features.get("donchian_pos"),
+                    "signal_channel_width": features.get("channel_width"),
+                    "signal_breakout_count_20": features.get("breakout_count_20"),
+                    "signal_sessions_since_breakout": features.get("sessions_since_breakout"),
+                    "signal_volume_ratio_20": features.get("volume_ratio_20"),
+                    "signal_pullback_holding": features.get("pullback_holding"),
+                    "signal_volume_dryup": features.get("volume_dryup"),
+                    "signal_gain_1d": features.get("gain_1d"),
+                    "signal_stop_price": features.get("stop_price"),
+                    "signal_expected_holding_days": features.get("expected_holding_days"),
+                })
+        summary["hit_count"] = int(len(hit_rows))
+        if not hit_rows:
+            return model_candidates, summary
+
+        hits = pd.DataFrame(hit_rows)
+        hit_codes = sorted(set(hits["stock_code"].astype(str)))
+
+        # ---- risk filters: ST names, market cap and median turnover floors ----
+        risk_info = self.warehouse.read_stock_info(stock_codes=hit_codes, market="CN")
+        name_map = {}
+        cap_map = {}
+        if risk_info is not None and not risk_info.empty:
+            risk_info = risk_info.drop_duplicates(subset=["stock_code"])
+            if "name" in risk_info.columns:
+                name_map = dict(zip(risk_info["stock_code"].astype(str), risk_info["name"].astype(str)))
+            if "market_cap" in risk_info.columns:
+                cap_map = dict(zip(risk_info["stock_code"].astype(str), pd.to_numeric(risk_info["market_cap"], errors="coerce")))
+        keep_rows = []
+        rejected = []
+        for row in hits.to_dict("records"):
+            code = str(row["stock_code"])
+            reasons = []
+            name = name_map.get(code, "")
+            if summary["risk_filters"]["exclude_st"] and "ST" in name.upper():
+                reasons.append(f"st:{name}")
+            market_cap = cap_map.get(code, np.nan)
+            if summary["risk_filters"]["min_market_cap"] > 0 and (pd.isna(market_cap) or market_cap < summary["risk_filters"]["min_market_cap"]):
+                reasons.append(f"market_cap={market_cap}")
+            amount = row.get("signal_median_amount_20")
+            if summary["risk_filters"]["min_median_amount_20d"] > 0 and (pd.isna(amount) or amount < summary["risk_filters"]["min_median_amount_20d"]):
+                reasons.append(f"median_amount_20={amount}")
+            if reasons:
+                rejected.append({"stock_code": code, "signal_type": row["signal_type"], "reasons": reasons})
+                continue
+            keep_rows.append(row)
+        summary["risk_rejected"] = rejected
+        hits = pd.DataFrame(keep_rows)
+        summary["hit_count_after_risk"] = int(len(hits))
+        if hits.empty:
+            return model_candidates, summary
+
+        # ---- two independent sleeves ----
+        hits["_sleeve"] = np.where(hits["signal_type"].astype(str).isin(momentum_types), "momentum", "setup")
+
+        def _rank(frame, rank_key, slots, gate):
+            pool_frame = frame
+            if gate and gate > 0:
+                scores = pd.to_numeric(pool_frame["signal_ensemble_score"], errors="coerce")
+                pool_frame = pool_frame[scores.fillna(-np.inf) >= gate]
+            if pool_frame.empty or slots <= 0:
+                return pool_frame.iloc[0:0]
+            column = f"signal_{rank_key}" if f"signal_{rank_key}" in pool_frame.columns else rank_key
+            sort_columns = [c for c in (column, "signal_ensemble_score", "stock_code") if c in pool_frame.columns]
+            ordered = pool_frame.sort_values(sort_columns, ascending=[False] * (len(sort_columns) - 1) + [True]) if sort_columns else pool_frame
+            return ordered.head(int(slots))
+
+        setup_hits = hits[hits["_sleeve"] == "setup"]
+        momentum_hits = hits[hits["_sleeve"] == "momentum"]
+        setup_forces = _rank(setup_hits, str(signal_config.get("override_rank", "volume_ratio_20")), max_overrides, min_model_score)
+        momentum_forces = _rank(
+            momentum_hits, str(momentum_config.get("rank", "volume_ratio_20")),
+            int(momentum_config.get("slots", 0) or 0), float(momentum_config.get("min_model_score", 0.0) or 0.0),
+        ) if momentum_enabled else momentum_hits.iloc[0:0]
+
+        floors = {}
+        caps = {}
+        for code in setup_forces["stock_code"].astype(str):
+            floors[code] = setup_min_weight
+            caps[code] = setup_max_weight
+        for code in momentum_forces["stock_code"].astype(str):
+            floors[code] = float(momentum_config.get("min_weight", 0.0) or 0.0)
+            caps[code] = float(momentum_config.get("max_weight", 0.10) or 0.10)
+        forced = pd.concat([setup_forces, momentum_forces], ignore_index=True)
+        forced_codes = forced["stock_code"].astype(str).tolist()
+        summary["forced_codes"] = forced_codes
+        summary["forced_floors"] = floors
+        summary["forced_caps"] = caps
+        summary["forced_detail"] = forced.to_dict("records")
+        summary["sleeves"] = {
+            "setup": {"slots": max_overrides, "min_model_score": min_model_score,
+                      "min_weight": setup_min_weight, "max_weight": setup_max_weight,
+                      "hits": int(len(setup_hits)), "forced": setup_forces["stock_code"].astype(str).tolist()},
+            "momentum": {"enabled": momentum_enabled, "slots": int(momentum_config.get("slots", 0) or 0),
+                         "min_model_score": float(momentum_config.get("min_model_score", 0.0) or 0.0),
+                         "min_weight": float(momentum_config.get("min_weight", 0.0) or 0.0),
+                         "max_weight": float(momentum_config.get("max_weight", 0.10) or 0.10),
+                         "hits": int(len(momentum_hits)), "forced": momentum_forces["stock_code"].astype(str).tolist()},
+        }
+        if not forced_codes:
+            return model_candidates, summary
+
+        union = model_candidates.copy()
+        union["selection_channel"] = "model"
+        if "selection_sleeve" not in union.columns:
+            union["selection_sleeve"] = ""
+        existing = set(union["stock_code"].astype(str))
+        extra = ranked_all[ranked_all["stock_code"].astype(str).isin(set(forced_codes))]
+        extra = extra[~extra["stock_code"].astype(str).isin(existing)].copy()
+        if not extra.empty:
+            for column in union.columns:
+                if column not in extra.columns:
+                    extra[column] = union[column].iloc[0]
+            extra["selection_channel"] = "signal_override"
+            union = pd.concat([union, extra], ignore_index=True, sort=False)
+        union["stock_code"] = union["stock_code"].astype(str)
+        # A name can hit several recipes on the same day (for example a limit-up
+        # that is also a channel breakout).  Keep one row per code - the row that
+        # belongs to its forced sleeve - so the per-sleeve weight cap is applied
+        # exactly once.
+        sleeve_map = dict(zip(forced["stock_code"].astype(str), forced["_sleeve"].astype(str)))
+        hits["_forced_sleeve"] = [
+            sleeve_map.get(str(code)) == str(sleeve)
+            for code, sleeve in zip(hits["stock_code"].astype(str), hits["_sleeve"].astype(str))
+        ]
+        hits_display = (
+            hits.sort_values(["signal_score"], ascending=[False])
+            .sort_values(["_forced_sleeve"], ascending=[False], kind="stable")
+            .drop_duplicates(subset=["stock_code"], keep="first")
+        )
+        union = union.merge(
+            hits_display.drop(columns=["_sleeve", "_forced_sleeve"]), on="stock_code", how="left"
+        )
+        override_mask = union["stock_code"].isin(set(forced_codes))
+        union.loc[override_mask, "selection_channel"] = "signal_override"
+        union["selection_sleeve"] = union["stock_code"].map(sleeve_map).fillna("")
+        union = union.sort_values(
+            ["selection_channel", "model_score"], ascending=[True, False],
+        ).reset_index(drop=True)
+        summary["pool_size"] = int(len(union))
+        return union, summary
 
     @staticmethod
     def _write_cn_selection_explanation(selected: pd.DataFrame, *, destination: Path,
@@ -6358,16 +7013,50 @@ class MarketDataService:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
         target_series = frame["target_weight"] if "target_weight" in frame.columns else pd.Series(0.0, index=frame.index)
         frame["selected"] = target_series.fillna(0).gt(0)
-        frame["selection_reason"] = frame.apply(
-            lambda row: (
-                "入选：ensemble 排名靠前且通过可交易性、流动性和持仓数约束；"
-                "目标权重按近20日逆波动率分配。"
-                if bool(row["selected"]) else
-                "未配置：虽然进入模型候选 Top-N，但在最多持仓数/逆波动率组合优化后权重为 0。"
-            ), axis=1,
-        )
+
+        def _reason(row):
+            override = str(row.get("selection_channel") or "model") == "signal_override"
+            if override:
+                sleeve = str(row.get("selection_sleeve") or "setup")
+                if sleeve == "momentum":
+                    detail = (
+                        f"gain={float(row.get('signal_gain_1d') or 0.0):.2%}, "
+                        f"vol_ratio={float(row.get('signal_volume_ratio_20') or 0.0):.2f}, "
+                        f"stop={float(row.get('signal_stop_price') or 0.0):.2f}, "
+                        f"holding<= {int(float(row.get('signal_expected_holding_days') or 0))}d"
+                    )
+                    if bool(row["selected"]):
+                        return f"入选：短线动量 sleeve 命中（{detail}）；独立小额度 + 硬止损，不属于中期持仓。"
+                    return f"候选未配置：短线动量 sleeve 命中（{detail}），但组合约束后权重为 0。"
+                detail = (
+                    f"recipe={row.get('signal_recipe')}, type={row.get('signal_type')}, "
+                    f"score={float(row.get('signal_score') or 0.0):.0f}"
+                )
+                if pd.notna(row.get("signal_donchian_upper")):
+                    detail += (
+                        f", channel=[{float(row.get('signal_donchian_lower') or 0.0):.2f},"
+                        f"{float(row['signal_donchian_upper']):.2f}]"
+                        f", pos={float(row.get('signal_donchian_pos') or 0.0):.2f}"
+                        f", vol_ratio={float(row.get('signal_volume_ratio_20') or 0.0):.2f}"
+                    )
+                if bool(row["selected"]):
+                    return f"入选：Donchian 通道突破信号命中并保留组合权重（{detail}）；目标权重按近20日逆波动率分配。"
+                return f"候选未配置：Donchian 通道突破信号命中（{detail}），但组合约束后权重为 0。"
+            if bool(row["selected"]):
+                return (
+                    "入选：ensemble 排名靠前且通过可交易性、流动性和持仓数约束；"
+                    "目标权重按近20日逆波动率分配。"
+                )
+            return "未配置：虽然进入模型候选 Top-N，但在最多持仓数/逆波动率组合优化后权重为 0。"
+
+        frame["selection_reason"] = frame.apply(_reason, axis=1)
         keep = [
             "trade_date", "stock_code", "rank", "selected", "selection_reason",
+            "selection_channel", "selection_sleeve", "signal_recipe", "signal_type", "signal_score",
+            "signal_donchian_upper", "signal_donchian_lower", "signal_donchian_pos",
+            "signal_channel_width", "signal_breakout_count_20", "signal_sessions_since_breakout",
+            "signal_volume_ratio_20", "signal_pullback_holding", "signal_volume_dryup",
+            "signal_gain_1d", "signal_stop_price", "signal_expected_holding_days", "signal_median_amount_20",
             "lightgbm_score", "transformer_score", "cnn_score", "ensemble_score",
             "target_weight", "volatility_20d", "median_turnover_amount_20d",
             "expected_transaction_cost_bps", "liquidity_capacity_score",
@@ -6428,6 +7117,15 @@ class MarketDataService:
         embargo_days=None,
         min_feature_coverage=0.05,
         drop_constant_features=True,
+        n_estimators=500,
+        learning_rate=0.05,
+        num_leaves=64,
+        max_depth=8,
+        min_child_samples=30,
+        reg_lambda=10.0,
+        early_stopping_rounds=0,
+        min_trees=100,
+        eval_metric="daily_ic",
         end_date=None,
         show_progress=False,
     ):
@@ -6446,6 +7144,9 @@ class MarketDataService:
             validation_days=validation_days, cleaning_version=cleaning_version,
             factor_set=factor_set, warm_start_path=warm_start_path, embargo_days=embargo_days,
             min_feature_coverage=min_feature_coverage, drop_constant_features=drop_constant_features,
+            n_estimators=n_estimators, learning_rate=learning_rate, num_leaves=num_leaves,
+            max_depth=max_depth, min_child_samples=min_child_samples, reg_lambda=reg_lambda,
+            early_stopping_rounds=early_stopping_rounds, min_trees=min_trees, eval_metric=eval_metric,
             show_progress=show_progress,
         )
 

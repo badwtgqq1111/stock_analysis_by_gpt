@@ -14,6 +14,14 @@ PRICE_FEATURE_COLUMNS = [
     "pv_volatility_20d", "pv_intraday_range", "pv_log_volume",
     "pv_volume_ratio_20d", "pv_log_amount", "calendar_weekday_sin",
     "calendar_weekday_cos", "calendar_month_start", "calendar_month_end",
+    # Donchian channel state (20-day).  These are the model-visible form of the
+    # entry rule implemented by factor_engine.signals.donchian: a tree or
+    # sequence model can only learn the "breakout then pullback" pattern if the
+    # channel position, width, distance to the upper band and breakout flags are
+    # present as input columns.
+    "pv_donchian_pos_20", "pv_donchian_width_20", "pv_donchian_dist_upper_20",
+    "pv_donchian_break_20", "pv_donchian_break_count_20", "pv_donchian_since_break_20",
+    "pv_donchian_break_volume_20", "pv_donchian_pierce_20", "pv_donchian_pierce_volume_20",
 ]
 
 
@@ -208,6 +216,49 @@ def _derive_price_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
         working["pv_volume_ratio_20d"] = working["volume"] / mean_volume.replace(0, np.nan)
     if "amount" in working:
         working["pv_log_amount"] = np.log1p(working["amount"].clip(lower=0))
+    if "high" in working and "low" in working and "close" in working:
+        # Donchian channel state.  The breakout flag compares today's close with
+        # the channel top formed over the *previous* 20 sessions, so no value in
+        # a panel row depends on a future bar.
+        upper = grouped["high"].transform(lambda value: value.rolling(20, min_periods=20).max())
+        lower = grouped["low"].transform(lambda value: value.rolling(20, min_periods=20).min())
+        prior_upper = grouped["high"].transform(
+            lambda value: value.shift(1).rolling(20, min_periods=20).max()
+        )
+        channel = upper - lower
+        working["pv_donchian_pos_20"] = (close - lower) / channel.replace(0, np.nan)
+        working["pv_donchian_width_20"] = channel / close.replace(0, np.nan)
+        working["pv_donchian_dist_upper_20"] = close / upper.replace(0, np.nan) - 1.0
+        breakout = (close > prior_upper).astype(float).where(prior_upper.notna(), np.nan)
+        working["pv_donchian_break_20"] = breakout
+        working["pv_donchian_break_count_20"] = grouped["pv_donchian_break_20"].transform(
+            lambda value: value.rolling(20, min_periods=1).sum()
+        )
+        # A bar that pierces the channel top intraday but closes back inside is
+        # the "breakout then pullback" state the Donchian entry rule trades.
+        pierce = ((working["high"] > prior_upper) & (close <= prior_upper)).astype(float).where(prior_upper.notna(), np.nan)
+        working["pv_donchian_pierce_20"] = pierce
+        # Sessions elapsed since the most recent breakout, capped so the column
+        # stays bounded for long-dormant names.
+        def _sessions_since(values: pd.Series) -> pd.Series:
+            counter = []
+            elapsed = np.nan
+            for flag in values.to_numpy(dtype=float):
+                if flag == 1.0:
+                    elapsed = 0.0
+                elif not np.isnan(elapsed):
+                    elapsed += 1.0
+                counter.append(min(elapsed, 60.0) if not np.isnan(elapsed) else np.nan)
+            return pd.Series(counter, index=values.index, dtype=float)
+
+        working["pv_donchian_since_break_20"] = grouped["pv_donchian_break_20"].transform(_sessions_since)
+        if "pv_volume_ratio_20d" in working:
+            working["pv_donchian_break_volume_20"] = (
+                working["pv_donchian_break_20"] * working["pv_volume_ratio_20d"]
+            )
+            working["pv_donchian_pierce_volume_20"] = (
+                working["pv_donchian_pierce_20"] * working["pv_volume_ratio_20d"]
+            )
     trade_dates = pd.to_datetime(working["trade_date"], errors="coerce")
     # Calendar fields are known at the decision date and do not require a
     # market-data join. Cyclical encoding avoids an artificial Mon/Fri gap.

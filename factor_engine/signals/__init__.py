@@ -4,6 +4,8 @@
 """可复用信号 recipe 入口。"""
 
 from factor_engine.signals.base import SignalRecipe, SignalRecipeResult
+from factor_engine.signals.donchian import DonchianChannelRecipe
+from factor_engine.signals.momentum import LimitMomentumRecipe
 from factor_engine.signals.price_setup import (
     BoxPullbackRecipe,
     LowPriceSetupRecipe,
@@ -16,6 +18,8 @@ from factor_engine.signals.runner import DEFAULT_SIGNAL_RECIPES, SignalRecipeRun
 __all__ = [
     "DEFAULT_SIGNAL_RECIPES",
     "BoxPullbackRecipe",
+    "DonchianChannelRecipe",
+    "LimitMomentumRecipe",
     "LowPriceSetupRecipe",
     "RangeBreakoutRecipe",
     "SignalRecipe",

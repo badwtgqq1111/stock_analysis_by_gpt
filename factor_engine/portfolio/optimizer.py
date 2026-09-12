@@ -50,12 +50,23 @@ def optimize_long_only(
     current_weights: dict[str, float] | None = None,
     constraints: PortfolioConstraints | None = None,
     initial_capital=1_000_000.0,
+    forced_codes: list[str] | None = None,
+    forced_min_weight: float | dict | None = 0.0,
+    forced_max_weight: float | dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Return target weights under explicit long-only, industry and capacity limits.
 
     The implementation uses projected score weights rather than a hidden solver.
     This is deterministic, handles missing optional inputs, and records every
     active constraint in the returned manifest.
+
+    ``forced_codes`` admits explicitly triggered names (for example a Donchian
+    channel breakout confirmed by the signal layer) ahead of the pure model
+    ranking.  ``forced_min_weight`` guarantees each admitted name a floor so a
+    lower model percentile cannot reduce it to zero, and ``forced_max_weight``
+    caps it so a separate strategy sleeve (for example short-horizon momentum)
+    cannot grow beyond its own risk budget.  Both accept either a scalar or a
+    ``{stock_code: value}`` mapping.
     """
     cfg = constraints or PortfolioConstraints()
     frame = candidates.copy()
@@ -65,6 +76,8 @@ def optimize_long_only(
     frame = build_risk_snapshot(frame)
     frame = build_cost_snapshot(frame, initial_capital=initial_capital)
     codes = frame["stock_code"].astype(str)
+    forced_set = {str(code) for code in (forced_codes or [])}
+    forced_index = np.array([i for i, code in enumerate(codes) if code in forced_set], dtype=int)
     current = np.array([(current_weights or {}).get(code, 0.0) for code in codes], dtype=float)
     alpha = frame[score_col].to_numpy(dtype=float)
     alpha = alpha - np.nanmin(alpha)
@@ -77,8 +90,20 @@ def optimize_long_only(
     active = np.ones(len(frame), dtype=bool)
     if cfg.max_holdings is not None and int(cfg.max_holdings) > 0 and len(frame) > int(cfg.max_holdings):
         active[:] = False
-        ranked = np.argsort(-alpha, kind="stable")[: int(cfg.max_holdings)]
-        active[ranked] = True
+        slots = int(cfg.max_holdings)
+        ranked = np.argsort(-alpha, kind="stable")
+        # Signal-triggered names claim their slot before the model ranking fills
+        # the balance, so an explicit entry trigger is never displaced by the
+        # cross-sectional score it is meant to complement.
+        chosen = [int(index) for index in forced_index[:slots]]
+        chosen_set = set(chosen)
+        for index in ranked:
+            if len(chosen) >= slots:
+                break
+            if int(index) not in chosen_set:
+                chosen.append(int(index))
+                chosen_set.add(int(index))
+        active[np.asarray(chosen, dtype=int)] = True
     if str(cfg.weighting).lower() in {"inverse_volatility", "inverse-volatility", "volatility"}:
         raw = np.where(active, 1.0 / np.sqrt(np.maximum(risk, 1e-12)), 0.0)
     else:
@@ -101,6 +126,13 @@ def optimize_long_only(
     target = _apply_industry_caps(frame, target, float(cfg.max_industry_weight))
     target = _limit_turnover(current, target, float(cfg.max_turnover))
     target = _renormalize_capped(target, float(cfg.gross_exposure), float(cfg.max_weight))
+    forced_floors = {str(frame["stock_code"].iloc[index]): _forced_value(forced_min_weight, str(frame["stock_code"].iloc[index]), 0.0) for index in forced_index}
+    forced_caps = {str(frame["stock_code"].iloc[index]): _forced_value(forced_max_weight, str(frame["stock_code"].iloc[index]), None) for index in forced_index}
+    if forced_index.size and (any(value > 0 for value in forced_floors.values()) or any(value is not None for value in forced_caps.values())):
+        target = _apply_forced_bounds(
+            target, forced_index, active, codes, forced_floors, forced_caps,
+            float(cfg.gross_exposure), float(cfg.max_weight),
+        )
     frame["current_weight"] = current
     frame["target_weight"] = target
     frame["trade_weight"] = target - current
@@ -112,9 +144,63 @@ def optimize_long_only(
         "candidate_count": int(len(frame)), "selected_count": int((target > 0).sum()),
         "max_holdings": int(cfg.max_holdings) if cfg.max_holdings is not None else None,
         "weighting": str(cfg.weighting),
+        "forced_codes": sorted(str(frame["stock_code"].iloc[index]) for index in forced_index),
+        "forced_min_weight": forced_min_weight if isinstance(forced_min_weight, dict) else float(forced_min_weight or 0.0),
+        "forced_max_weight": forced_max_weight if isinstance(forced_max_weight, dict) else forced_max_weight,
+        "forced_weighted_count": int(((target > 0) & np.isin(np.arange(len(frame)), forced_index)).sum()),
         "covariance_version": "diagonal-volatility.v1", "cost_version": "costs.v1",
     }
     return frame.sort_values("target_weight", ascending=False).reset_index(drop=True), manifest
+
+
+def _forced_value(value, code, default):
+    """Resolve a scalar-or-mapping forced bound for one stock code."""
+    if value is None:
+        return default
+    if isinstance(value, dict):
+        raw = value.get(code, default)
+        return default if raw is None else float(raw)
+    return float(value)
+
+
+def _apply_forced_bounds(weights, forced_index, active, codes, floors, caps, gross, max_weight):
+    """Apply per-name floors and caps to forced codes without breaching gross exposure.
+
+    Forced sleeves (signal setups, short-horizon momentum) each carry their own
+    weight budget: the floor keeps a triggered name from being zeroed by a weak
+    model percentile, the cap keeps a small sleeve from dominating the book.
+    The budget left over after the forced names is reallocated to the rest.
+    """
+    result = weights.copy()
+    fixed = np.zeros(len(result), dtype=bool)
+    for index in np.asarray(forced_index, dtype=int):
+        if not bool(active[index]):
+            continue
+        fixed[index] = True
+        code = str(codes.iloc[index]) if hasattr(codes, "iloc") else str(codes[index])
+        floor = float(np.clip(float(floors.get(code, 0.0) or 0.0), 0.0, max_weight))
+        cap_value = caps.get(code)
+        cap = float(max_weight) if cap_value is None else float(np.clip(float(cap_value), 0.0, max_weight))
+        cap = max(cap, floor)
+        result[index] = min(max(float(result[index]), floor), cap)
+    flexible = ~fixed
+    remaining = max(0.0, float(gross) - float(result[fixed].sum()))
+    if flexible.any() and remaining > 0:
+        current = float(result[flexible].sum())
+        if current > 0:
+            result[flexible] = np.minimum(result[flexible] * (remaining / current), float(max_weight))
+        else:
+            result[flexible] = min(remaining / max(int(flexible.sum()), 1), float(max_weight))
+    total = float(result.sum())
+    if total > gross and total > 0:
+        overflow = total - float(gross)
+        flexible_total = float(result[flexible].sum())
+        if flexible_total > 0:
+            result[flexible] = result[flexible] * max(0.0, (flexible_total - overflow) / flexible_total)
+        total = float(result.sum())
+        if total > gross and total > 0:
+            result = result * (float(gross) / total)
+    return result
 
 
 def _apply_industry_caps(frame: pd.DataFrame, weights: np.ndarray, cap: float) -> np.ndarray:

@@ -54,7 +54,7 @@ def coverage_report(
     return report
 
 
-def run_stage(name: str, config: dict, service: MarketDataService) -> dict:
+def run_stage(name: str, config: dict, service: MarketDataService, *, force_rebalance: bool = False) -> dict:
     """Execute one configured stage in-process."""
     p = config["pipeline"]
     if name in {"daily_bars", "intraday_bars"}:
@@ -141,6 +141,20 @@ def run_stage(name: str, config: dict, service: MarketDataService) -> dict:
             hysteresis_days=int(layer.get("hysteresis_days", 3)), version=str(layer.get("version", "regime.v1")),
             output_dir=layer.get("output_dir", "output/regime"),
         )
+    if name == "exits":
+        layer = config.get(name, {})
+        return service.plan_cn_exit_rules(
+            holdings_path=layer.get("holdings_path", "config/holdings_cn.csv"),
+            market=p["market"], adjust=p.get("adjust", "qfq"),
+            days=int(layer.get("days", 260)),
+            model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
+            model=layer.get("model", config.get("selection", {}).get("model", "ensemble")),
+            ensemble_weights=layer.get("ensemble_weights") or config.get("selection", {}).get("ensemble_weights") or None,
+            output_dir=layer.get("output_dir", p.get("export_csv", "output/results_cn")),
+            rules_config=layer.get("rules") or None,
+            cash=layer.get("cash"),
+            show_progress=True,
+        )
     if name == "paper_outcomes":
         layer = config[name]
         return service.evaluate_cn_paper_outcomes(
@@ -218,6 +232,15 @@ def run_stage(name: str, config: dict, service: MarketDataService) -> dict:
             embargo_days=int(layer.get("embargo_days", layer.get("label_horizon", 20))),
             min_feature_coverage=float(feature_quality.get("min_feature_coverage", 0.05)),
             drop_constant_features=bool(feature_quality.get("drop_constant_features", True)),
+            n_estimators=int(layer.get("n_estimators", 500)),
+            learning_rate=float(layer.get("learning_rate", 0.05)),
+            num_leaves=int(layer.get("num_leaves", 64)),
+            max_depth=int(layer.get("max_depth", 8)),
+            min_child_samples=int(layer.get("min_child_samples", 30)),
+            reg_lambda=float(layer.get("reg_lambda", 10.0)),
+            early_stopping_rounds=int(layer.get("early_stopping_rounds", 0)),
+            min_trees=int(layer.get("min_trees", 100)),
+            eval_metric=str(layer.get("eval_metric", "daily_ic")),
             show_progress=True,
         )
     if name == "transformer":
@@ -282,6 +305,11 @@ def run_stage(name: str, config: dict, service: MarketDataService) -> dict:
             model=layer.get("model", "ensemble"), top_n=int(layer.get("top_n", p["top_n"])),
             portfolio_mode=layer.get("portfolio_mode", "topn"), portfolio_constraints=layer.get("portfolio_constraints") or None,
             initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
+            signal_config=layer.get("signals") or None,
+            ensemble_weights=layer.get("ensemble_weights") or None,
+            affordability=layer.get("affordability") or None,
+            rebalance_stride_days=int(layer.get("rebalance_stride_days", 1) or 1),
+            force_rebalance=force_rebalance,
             show_progress=True,
         )
     return {}
@@ -335,6 +363,15 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
                     failed_parts.append(f"{sub_name}={sub_result['failed_count']}")
             if failed_parts:
                 detail = f"{detail} failures: {', '.join(failed_parts)}"
+        if item.get("name") == "selection":
+            signals = summary.get("signals") or {}
+            if signals.get("enabled"):
+                forced = ", ".join(signals.get("forced_codes") or []) or "none"
+                detail = (
+                    f"signals recipes={','.join(signals.get('recipes') or [])} "
+                    f"hits={signals.get('hit_count')} forced={forced} "
+                    f"min_weight={signals.get('forced_min_weight')}"
+                )
         if item.get("name") == "model_comparison":
             comparison = summary.get("comparison", {})
             rankings = comparison.get("ranking", [])
@@ -356,14 +393,15 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run CN data, feature, model, OOS evaluation and selection stages.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="TOML pipeline configuration")
-    parser.add_argument("--stage", choices=["all", "daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "selection", "paper_outcomes", "paper_account", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
+    parser.add_argument("--stage", choices=["all", "daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "selection", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
+    parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue independent data stages after a stage failure")
     args = parser.parse_args()
     config = read_config(args.config if args.config.is_absolute() else ROOT / args.config)
     started = datetime.now().isoformat(timespec="seconds")
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
-    stages = ["daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "selection", "paper_outcomes", "paper_account", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
+    stages = ["daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "selection", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
     pipeline_config = config["pipeline"]
@@ -421,7 +459,7 @@ def main() -> int:
 
             print(f"\n[PIPELINE] stage={stage} (in-process)", flush=True)
             try:
-                summary = run_stage(stage, config, service)
+                summary = run_stage(stage, config, service, force_rebalance=bool(args.force_rebalance))
                 item = {"name": stage, "status": "ok", "summary": summary}
                 if stage == "model_comparison":
                     comparison = summary.get("comparison", {}) if isinstance(summary, dict) else {}

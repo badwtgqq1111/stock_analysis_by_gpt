@@ -43,9 +43,33 @@ def train_lightgbm_panel(
     embargo_days=None,
     min_feature_coverage=0.05,
     drop_constant_features=True,
+    n_estimators=500,
+    learning_rate=0.05,
+    num_leaves=64,
+    max_depth=8,
+    min_child_samples=30,
+    reg_lambda=10.0,
+    early_stopping_rounds=0,
+    min_trees=100,
+    eval_metric="daily_ic",
     show_progress=False,
 ) -> dict:
-    """Fit and save a cross-sectional LightGBM model from a clean panel."""
+    """Fit and save a cross-sectional LightGBM model from a clean panel.
+
+    The label is a within-date cross-sectional rank, so plain L2 is nearly flat
+    for any model (its floor is the label variance).  Early stopping on L2
+    therefore trims the booster to a handful of trees and collapses the score
+    range, which destroys the ranking the selection stage depends on.  The
+    default metric is therefore the mean per-date cross-sectional IC, with a
+    ``min_trees`` floor so a noisy validation fold can never shrink the model to
+    a near-constant predictor.
+
+    Early stopping is disabled by default: LightGBM trims the saved booster to
+    the best iteration, so on a flat metric it silently reduces the model to a
+    handful of trees (measured: 3 of 500) and the score range collapses.  Set
+    ``early_stopping_rounds`` above zero only when the metric curve is known to
+    peak late.
+    """
     import lightgbm as lgb
 
     progress = tqdm(total=4, desc="LightGBM preparation", unit="step") if show_progress else None
@@ -72,16 +96,28 @@ def train_lightgbm_panel(
     if train.empty:
         raise ValueError("not enough dates for LightGBM train/validation split")
     params = {
-        "objective": "regression", "learning_rate": 0.05, "n_estimators": 500,
-        "num_leaves": 64, "max_depth": 8, "min_child_samples": 30,
-        "subsample": 0.9, "colsample_bytree": 0.9, "reg_lambda": 10.0,
+        "objective": "regression", "learning_rate": float(learning_rate), "n_estimators": int(n_estimators),
+        "num_leaves": int(num_leaves), "max_depth": int(max_depth), "min_child_samples": int(min_child_samples),
+        "subsample": 0.9, "colsample_bytree": 0.9, "reg_lambda": float(reg_lambda),
         "random_state": 42, "n_jobs": -1, "verbosity": -1,
     }
     model = lgb.LGBMRegressor(**params)
     fit_kwargs = {}
+    validation_metric = None
+    metric_history = {}
     if not valid.empty:
         fit_kwargs["eval_set"] = [(valid[features], valid["label"])]
-        fit_kwargs["callbacks"] = [lgb.early_stopping(50, verbose=False)]
+        validation_metric = _build_validation_metric(eval_metric, valid["trade_date"].to_numpy())
+        if validation_metric is not None:
+            fit_kwargs["eval_metric"] = validation_metric["function"]
+        # The per-iteration metric curve is always recorded: it is the only
+        # signal that distinguishes "the model learned a ranking" from "the
+        # model is a constant predictor", and L2 cannot make that distinction.
+        callbacks = [lgb.record_evaluation(metric_history)]
+        stopping_rounds = int(early_stopping_rounds or 0)
+        if stopping_rounds > 0:
+            callbacks.append(_floor_early_stopping(stopping_rounds, int(min_trees or 0)))
+        fit_kwargs["callbacks"] = callbacks
     if warm_start_path and Path(warm_start_path).is_file():
         fit_kwargs["init_model"] = str(warm_start_path)
     fit_progress = tqdm(total=int(params["n_estimators"]), desc="LightGBM boosting", unit="tree") if show_progress else None
@@ -99,6 +135,32 @@ def train_lightgbm_panel(
     if progress is not None:
         progress.set_postfix_str("booster fitted")
         progress.update(1)
+    trees_kept = int(model.booster_.num_trees())
+    refit_without_early_stopping = False
+    if not valid.empty and trees_kept < int(min_trees or 0):
+        # LightGBM trims the saved booster to the best iteration, so a flat
+        # metric can silently reduce the published model to a near-constant
+        # predictor.  Refit deterministically at full length instead.
+        for key in ("eval_set", "eval_metric", "callbacks"):
+            fit_kwargs.pop(key, None)
+        model = lgb.LGBMRegressor(**params)
+        model.fit(train[features], train["label"], **fit_kwargs)
+        trees_kept = int(model.booster_.num_trees())
+        refit_without_early_stopping = True
+    validation_ic = None
+    if validation_metric is not None and not valid.empty:
+        name, value, _ = validation_metric["function"](valid["label"].to_numpy(), model.predict(valid[features]))
+        curve = list((metric_history.get("valid_0") or {}).get(name) or [])
+        best_iteration = int(np.argmax(curve)) + 1 if curve else None
+        validation_ic = {
+            "name": name, "value": float(value), "trees_kept": trees_kept,
+            "best": float(np.max(curve)) if curve else None,
+            "best_iteration": best_iteration,
+            "curve_first": [round(float(v), 6) for v in curve[:5]],
+            "curve_last": [round(float(v), 6) for v in curve[-5:]],
+            "rounds_ran": int(len(curve)),
+            "below_min_trees": bool(trees_kept < int(min_trees or 0)),
+        }
     directory = Path(model_dir)
     directory.mkdir(parents=True, exist_ok=True)
     model_path = directory / "model.txt"
@@ -113,6 +175,12 @@ def train_lightgbm_panel(
             "warm_start_path": warm_start_path,
             "split": split,
             "feature_quality": feature_quality,
+            "validation_ic": validation_ic,
+            "trees_kept": trees_kept,
+            "best_iteration": int(getattr(model, "best_iteration_", -1) or -1),
+            "early_stopping_rounds": int(early_stopping_rounds or 0),
+            "min_trees": int(min_trees or 0),
+            "refit_without_early_stopping": refit_without_early_stopping,
         },
     )
     manifest_path = directory / "model_manifest.json"
@@ -124,7 +192,71 @@ def train_lightgbm_panel(
     return {
         "artifact": TrainingArtifact(str(model_path), str(manifest_path), "lightgbm", len(train), len(valid), len(features)).to_dict(),
         "validation_mse": float(np.mean((model.predict(valid[features]) - valid["label"]) ** 2)) if not valid.empty else None,
+        "trees_kept": trees_kept,
+        "validation_ic": validation_ic,
+        "refit_without_early_stopping": refit_without_early_stopping,
     }
+
+
+def _build_validation_metric(eval_metric, dates):
+    """Return the LightGBM custom metric used for early stopping.
+
+    ``daily_ic`` is the mean per-date cross-sectional correlation between the
+    prediction and the (already cross-sectionally ranked) label.  It is the
+    quantity the selection stage actually consumes: plain L2 is dominated by
+    label variance and cannot tell a useful ranking from a constant one.
+    """
+    metric = str(eval_metric or "").strip().lower()
+    if metric in {"", "none"}:
+        return None
+    if metric in {"l2", "mse", "regression"}:
+        return {"name": "l2", "function": None}
+    date_codes, _ = pd.factorize(pd.to_datetime(pd.Series(dates)), sort=False)
+    frame_template = pd.DataFrame({"date_code": date_codes})
+    min_rows = 5
+
+    def _daily_ic(y_true, y_pred):
+        frame = frame_template.copy()
+        frame["y"] = np.asarray(y_true, dtype=float)
+        frame["p"] = np.asarray(y_pred, dtype=float)
+        grouped = frame.groupby("date_code", sort=False)
+        sizes = grouped["p"].transform("size")
+        usable = frame[sizes >= min_rows]
+        if usable.empty:
+            return "daily_ic", 0.0, True
+        values = usable.groupby("date_code", sort=False)[["y", "p"]].corr().unstack().iloc[:, 1]
+        values = values.replace([np.inf, -np.inf], np.nan).dropna()
+        if values.empty:
+            return "daily_ic", 0.0, True
+        return "daily_ic", float(values.mean()), True
+
+    return {"name": "daily_ic", "function": _daily_ic}
+
+
+def _floor_early_stopping(stopping_rounds, min_trees):
+    """Early stopping that delays its stop until ``min_trees`` boosting rounds.
+
+    Note: LightGBM trims the *saved* booster to the best iteration regardless of
+    when the stop fires, so this callback alone cannot guarantee a tree floor.
+    ``train_lightgbm_panel`` enforces the floor by refitting without early
+    stopping when the trimmed model comes back below ``min_trees``.
+    """
+    import lightgbm as lgb
+
+    callback = lgb.early_stopping(int(stopping_rounds), verbose=False)
+    floor = max(0, int(min_trees))
+
+    def _callback(environment):
+        # The stopping callback keeps internal per-metric state and must see
+        # every iteration; only the raised stop is suppressed before the floor.
+        try:
+            return callback(environment)
+        except lgb.callback.EarlyStopException:
+            if floor and int(environment.iteration) + 1 < floor:
+                return
+            raise
+
+    return _callback
 
 
 def predict_lightgbm_panel(panel: pd.DataFrame, *, model_path, manifest_path) -> pd.DataFrame:

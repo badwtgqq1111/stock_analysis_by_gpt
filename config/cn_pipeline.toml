@@ -44,6 +44,7 @@ transformer = true
 cnn = false
 model_scores = true
 selection = true
+exits = true
 paper_outcomes = false
 paper_account = false
 graph_temporal = false
@@ -120,6 +121,23 @@ cleaning_version = "p0.2.v1"
 model_dir = "output/models/cn/lightgbm/alpha_zoo_hk"
 # Leave empty for a fresh scheduled retrain; set a compatible model.txt for warm-start.
 warm_start_path = ""
+# The label is a within-date cross-sectional rank, so plain L2 has a floor equal
+# to the label variance (~1/12). On this weak-signal problem, early stopping on
+# L2 trims the booster to a handful of trees (measured: 3), which collapses the
+# score range and breaks the cross-sectional ranking the selection stage reads.
+# Default: stop on the mean per-date IC, with a hard floor on kept trees.
+n_estimators = 500
+learning_rate = 0.05
+num_leaves = 64
+max_depth = 8
+min_child_samples = 30
+reg_lambda = 10.0
+# Early stopping is disabled because LightGBM trims the saved booster to the best
+# iteration: with a flat metric it silently kept only 3 of 500 trees, which is
+# what collapsed the score range.  Raise this only if the IC curve peaks late.
+early_stopping_rounds = 0
+min_trees = 100
+eval_metric = "daily_ic" # daily_ic | l2 | none
 
 [transformer]
 days = 365
@@ -180,11 +198,90 @@ model = "ensemble" # lightgbm, transformer, or ensemble
 top_n = 10
 portfolio_mode = "mean_variance_cost_aware" # topn or mean_variance_cost_aware
 initial_capital = 45000.0
+# Optional override of the ensemble weights.  Leave empty to use the weights the
+# regime file publishes (`model_weight_*`); set explicit weights when the regime
+# split is known to bury a model that ranks a name well.
+ensemble_weights = { lightgbm = 0.50, transformer = 0.50 }
+# 再平衡节奏：>1 时，距上次再平衡不足 N 个交易日就沿用上一版组合（每日仍跑 exits）。
+rebalance_stride_days = 5
+
+# 可执行性约束：A 股按手交易，价格太高的小账户根本买不起一手。
+# 候选需满足 price * lot_size <= equity * budget_ratio（budget_ratio ≈ gross/持仓数）。
+[selection.affordability]
+enabled = true
+equity = 43137.82
+lot_size = 100
+budget_ratio = 0.15
+tolerance = 1.0
+
+# Price-setup signal layer.  When enabled, the Donchian channel recipe and the
+# range breakout recipe are evaluated on the model shortlist for the selection
+# date (bars up to that date only), and the strongest volume-confirmed hits are
+# merged into the candidate pool as `signal_override` names with a minimum
+# weight.  Set enabled = false to reproduce the pure model Top-N behavior.
+[selection.signals]
+enabled = true
+recipes = ["donchian_pullback", "range_breakout", "limit_momentum"]
+allowed_setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback", "limit_momentum"]
+min_score = 60.0
+# Require the cross-sectional model to agree before forcing a signal name.  85
+# was calibrated against the collapsed LightGBM (3 kept trees); with the fixed
+# model a 75th-percentile floor keeps the agreement filter meaningful without
+# discarding volume-confirmed breakouts.
+min_model_score = 75.0
+scan_top_k = 1200
+max_overrides = 2
+forced_min_weight = 0.08
+# The setup sleeve may not exceed this weight per name; momentum has its own,
+# smaller budget below.
+forced_max_weight = 0.20
+override_rank = "volume_ratio_20" # 放量强度：Donchian 突破的成交量确认
+lookback_sessions = 120
+
+# Event study (2024-01..2026-09, 3.42M stock-days, market-neutral): the 20-day
+# channel breakout is ~flat to negative (+0.00% / -0.56% at +1/+5 days) while a
+# limit-up day carries +1.30% / +0.68% and decays to zero by +10 days.  The
+# momentum sleeve therefore trades only that event, in a separate, small budget.
+[selection.signals.momentum_sleeve]
+enabled = true
+setup_types = ["limit_momentum"]
+slots = 1
+min_weight = 0.05
+max_weight = 0.10
+min_model_score = 0.0 # 模型在动量的事件上无证据优势，改用独立预算与止损控制风险
+rank = "volume_ratio_20"
+
+[selection.signals.risk_filters]
+exclude_st = true
+min_market_cap = 5000000000.0
+min_median_amount_20d = 50000000.0
+
+[selection.signals.recipe_params.donchian_pullback]
+window = 20
+breakout_min_pct = 0.005
+tol_break = 0.015
+tol_low = 0.03
+tol_high = 0.05
+max_sessions_since_breakout = 5
+volume_dryup_ratio = 0.70
+volume_expansion_min = 1.30
+channel_width_max = 0.35
+min_median_amount_20d = 10000000.0
+min_score = 60.0
+
+[selection.signals.recipe_params.limit_momentum]
+min_gain = 0.095
+channel_window = 20
+min_median_amount_20d = 50000000.0
+require_breakout = false
+stop_pct = 0.05
+expected_holding_days = 5
+min_score = 60.0
 
 [selection.portfolio_constraints]
 gross_exposure = 0.95
 max_weight = 0.60
-max_holdings = 3
+max_holdings = 6
 weighting = "inverse_volatility"
 max_industry_weight = 0.30
 max_turnover = 0.50
@@ -192,6 +289,27 @@ max_participation = 0.05
 risk_aversion = 2.0
 turnover_penalty = 0.10
 cost_penalty = 0.10
+
+[exits]
+# 持仓卖出规则：风险型（ST/流动性/停牌/模型排名下限）+ 兑现型（贴上沿/20日大涨减仓）
+# + 结构型（单只权重上限）。收益型止损默认关闭，见 factor_engine/portfolio/exits.py 的依据说明。
+holdings_path = "config/holdings_cn.csv"
+days = 260
+# 账户现金余额：持仓权重按「总资产 = 持仓 + 现金」计算（风险上限的正确分母）。
+cash = 5913.82
+output_dir = "output/results_cn"
+
+[exits.rules]
+exclude_st = true
+min_median_amount_20d = 50000000.0
+max_suspend_sessions = 5
+min_model_percentile = 30.0
+take_profit_pos = 0.80
+take_profit_ret20 = 0.15
+take_profit_reduce_ratio = 0.34
+max_weight = 0.35
+lot_size = 100 # A 股按手交易；减仓数量向下取整到整手
+stop_loss_pct = 0.0 # 样本期该规则无效，默认关闭
 
 [paper_outcomes]
 selection_path = "output/results_cn/cn_ensemble_selected.csv"

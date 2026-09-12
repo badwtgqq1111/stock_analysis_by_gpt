@@ -331,6 +331,169 @@ output/results_cn/cn_ensemble_selected.csv
 要求 LightGBM 和 Transformer 在相同最新交易日都有分数，避免用不同时点的预测静默混合；CNN 先单独
 进行 OOS 比较，确认增益后再进入 ensemble。
 
+### 价量形态信号层（Donchian 通道突破）
+
+`[selection.signals]` 在纯模型排序之外增加一层规则信号。启用后，选股阶段会：
+
+1. 取模型短名单（`scan_top_k`，默认 1200）作为扫描池；
+2. 读取截至选股日的 `lookback_sessions`（默认 120）个交易日行情，不含未来数据；
+3. 运行 `donchian_pullback`（上轨 `max(High[t-N..t-1])`、下轨 `min(Low[t-N..t-1])`）与 `range_breakout`；
+4. 命中 `allowed_setup_types`、`signal_score >= min_score` 且模型分位 `>= min_model_score` 的标的，
+   按 `override_rank`（默认 `volume_ratio_20`，即突破放量强度）排序，取前 `max_overrides` 个作为
+   `signal_override` 候选并入候选池；
+5. 组合优化时这些标的优先占位，并获得不低于 `forced_min_weight` 的目标权重。
+
+```toml
+[selection.signals]
+enabled = true
+recipes = ["donchian_pullback", "range_breakout"]
+min_score = 60.0
+min_model_score = 85.0
+scan_top_k = 1200
+max_overrides = 2
+forced_min_weight = 0.08
+override_rank = "volume_ratio_20"
+
+[selection.signals.recipe_params.donchian_pullback]
+window = 20
+tol_low = 0.03
+```
+
+`setup_type` 语义：`donchian_breakout` 为当日收盘或盘中上穿上轨（放量确认，对应"次日回调买入"的
+入场信号日）；`donchian_pullback` 为突破后 `1..max_sessions_since_breakout` 个交易日内收盘守在
+上轨附近且缩量。`enabled = false` 时完全回到纯模型 Top-N 行为，输出与未启用该层时逐行一致。
+由于信号标的会占用持仓名额，启用时应同步调整 `[selection.portfolio_constraints].max_holdings`
+（默认 6 = 2 个信号位 + 4 个模型位）。实现与验收记录见
+[P0_13 Donchian 通道突破接入选股计划](../todo/P0_13_donchian_breakout_selection_plan.md)。
+
+### 让模型学到 Donchian 通道状态
+
+`clean_panel` 会从日 K 派生价量特征，其中包含 9 个 Donchian 通道状态列：
+
+```text
+pv_donchian_pos_20            (close - min(low,20)) / (max(high,20) - min(low,20))
+pv_donchian_width_20          通道宽度 / close
+pv_donchian_dist_upper_20     close / max(high,20) - 1
+pv_donchian_break_20          close > max(high[t-20..t-1])   收盘突破（无前视）
+pv_donchian_break_count_20    近 20 日突破次数
+pv_donchian_since_break_20    距最近一次突破的交易日数（上限 60）
+pv_donchian_break_volume_20   突破 × volume_ratio_20d
+pv_donchian_pierce_20         盘中上穿上轨、收盘落回通道内
+pv_donchian_pierce_volume_20  回踩 × volume_ratio_20d
+```
+
+模型输入取自面板中所有 `*_clean` 与 `*_is_missing` 列，因此这 9 列会自动进入 LightGBM、
+Transformer 和 CNN 的训练与推理，无需额外的特征开关。要让它们真正影响结果，需重建面板并重训：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage clean_panel
+uv run python scripts/run_cn_pipeline.py --stage lightgbm
+uv run python scripts/run_cn_pipeline.py --stage transformer
+uv run python scripts/run_cn_pipeline.py --stage model_scores
+uv run python scripts/run_cn_pipeline.py --stage selection
+```
+
+相关约束：`[model_features] min_feature_coverage`（默认 0.05）会剔除低覆盖特征；Transformer / CNN
+的 `max_feature_pairs`（默认 128）决定有多少对时间序列表征进入网络。标签窗口由
+`label_horizon` 控制（默认 20 个交易日，标签为 `forward_return_{N}d`），突破类事件若要用更短的
+收益窗口，改小该值即可，`embargo_days` 会按标签名中的 `_Nd` 自动解析。
+
+在同一进程里先后训练 LightGBM 与 PyTorch 模型会在 macOS 上因共用 OpenMP 运行时互相阻塞，
+因此时间序列模型应放在独立进程中训练/打分（`scripts/score_cn_model.py` 每个模型一个 worker）。
+
+### LightGBM 早停与评估指标
+
+标签是日内横截面排名，其方差（≈1/12）就是 L2 的下界，因此 L2 无法区分「学到排序」与
+「常数预测」。默认配置按日内 IC 早停并关闭早停裁剪：
+
+```toml
+[lightgbm]
+eval_metric = "daily_ic"      # daily_ic | l2 | none
+early_stopping_rounds = 0     # LightGBM 会把保存的 booster 裁剪到 best_iteration
+min_trees = 100               # 裁剪后树数不足时自动去掉早停重训
+n_estimators = 500
+```
+
+历史故障：在平坦 L2 上早停于第 3 轮，保存的模型只剩 3 棵树（500 棵被裁剪），打分区间
+塌缩成 100 只并列最高分，选股排序实际由 Transformer 单独决定。修复后 500 棵树全部保留，
+5335 只股票的打分互不相同，日内 IC ≈ 0.072。排查时用 `validation_ic` 而不是
+`validation_mse` 判断模型质量。
+
+`[selection] ensemble_weights` 可覆盖 regime 发布的模型权重；regime 权重会保留在输出的
+`regime_model_weights` 列中，便于对比。信号扫描与候选排序都使用生效权重。
+
+#### 两个独立 sleeve 与风控过滤
+
+事件研究（2024-01..2026-09，全市场 3.42M 股票日，市场中性）显示：20 日通道突破在样本期是
+零到负期望（+1 日 +0.15% / +5 日 -0.29%；放量确认后 +5 日 -0.56%），而涨停型动量是唯一
+稳健为正的事件（+1 日 +1.30% / +5 日 +0.68%，10 日衰减到零）。因此信号层拆成两个独立 sleeve：
+
+```toml
+[selection.signals]
+max_overrides = 2        # setup sleeve 名额
+forced_min_weight = 0.08
+forced_max_weight = 0.20 # setup sleeve 单只上限
+
+[selection.signals.momentum_sleeve]
+enabled = true
+slots = 1                # 动量独立名额
+min_weight = 0.05
+max_weight = 0.10        # 动量独立上限
+min_model_score = 0.0    # 模型在该事件上无证据优势，用独立预算与止损控制风险
+
+[selection.signals.risk_filters]
+exclude_st = true
+min_market_cap = 5000000000.0
+min_median_amount_20d = 50000000.0
+```
+
+`limit_momentum` recipe 只识别强势动量日，输出 `stop_price`（min(当日最低价, 收盘×(1-5%))）与
+`expected_holding_days = 5`；被拒标的及原因写入 `signals.risk_rejected` 供审计。
+
+注意：动量 sleeve 的扫描域**不继承模型短名单**。实测 2026-09-11 全市场 24 只"涨停 + 流动性 +
+市值 + 非 ST"标的中 0 只位于模型 top-1200，因此实现里单独做了一次轻量涨停预筛
+（`_momentum_candidates`，只读最近 14 天收盘）。
+
+#### 持仓卖出规则（`--stage exits`）
+
+流水线的选股侧只排名买入；卖出侧由 `--stage exits` 独立评估，输入是持仓清单
+`config/holdings_cn.csv`（`stock_code, shares, cost_price`），输出
+`output/results_cn/cn_exit_plan.csv` 与 `.md`：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage exits
+```
+
+规则分三类（依据见 `factor_engine/portfolio/exits.py` 的模块说明与
+[P0_13 第 16 节](../todo/P0_13_donchian_breakout_selection_plan.md)）：
+
+- **风险型（硬退出）**：ST 名称、停牌 > 5 个交易日、20 日中位成交额 < 5000 万、模型排名跌出
+  `min_model_percentile`（默认 30 分位）；
+- **兑现型（减仓 1/3，不清仓）**：Donchian 位置 ≥ 0.80 或 20 日涨幅 ≥ +15%；
+- **结构型（减到上限）**：单只权重 > `max_weight`（默认 35%）。
+
+`[exits.rules].stop_loss_pct` 默认 0（关闭）：2024-2026 样本里 20 日跌幅 > 15% 的标的未来
+20 日超额 +1.6~2.2%，固定百分比止损会卖在期望最优的状态上。需要传统止损时显式设置该值。
+
+#### 执行层约束：整手可买 + 每周再平衡
+
+```toml
+[selection]
+rebalance_stride_days = 5   # 距上次再平衡不足 5 个交易日则沿用上一版组合；exits 仍每日运行
+
+[selection.affordability]
+enabled = true
+equity = 43137.82           # 账户总资产（持仓 + 现金）
+lot_size = 100
+budget_ratio = 0.15         # 单只预算占比 ≈ gross_exposure / 持仓数
+# => 可买价格上限 = equity * budget_ratio / lot_size = 64.71 元
+```
+
+候选池先按价格上限过滤，组合优化后再跑"整手修复"循环：最终权重买不到 1 手的标的会被剔除
+并重新优化（策略强制的 sleeve 名额不剔除），保证输出的目标权重都能以 100 股整数倍执行。
+输出新增 `one_lot_value / lots_at_target / lot_fillable` 三列与 `lot_affordability`、
+`lot_execution` 汇总。`--force-rebalance` 可跳过 stride 立即再选。
+
 日常推理应加载已批准模型，只处理新日期的 clean panel；模型 schema、清洗版本或标签定义变化时
 必须重新训练。LightGBM 支持通过 `warm_start_path` 使用旧 Booster 增量加树，但仍按固定周期从
 replay window 全量重训。

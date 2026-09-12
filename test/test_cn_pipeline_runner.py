@@ -122,7 +122,7 @@ def test_features_stage_precheck_skips_full_feature_read(monkeypatch, tmp_path) 
 
     monkeypatch.setattr(MODULE, "MarketDataService", FakeService)
     monkeypatch.setattr(MODULE, "coverage_report", fake_coverage_report)
-    monkeypatch.setattr(MODULE, "run_stage", lambda *args: {"success_count": 1, "skipped_count": 0, "rows_written": 2})
+    monkeypatch.setattr(MODULE, "run_stage", lambda *args, **kwargs: {"success_count": 1, "skipped_count": 0, "rows_written": 2})
     monkeypatch.setattr(MODULE, "write_report", lambda *args: (tmp_path / "report.json", tmp_path / "report.md"))
     monkeypatch.setattr(MODULE, "read_config", lambda path: config)
     monkeypatch.setattr(sys, "argv", ["run_cn_pipeline.py", "--stage", "features", "--report-dir", str(tmp_path)])

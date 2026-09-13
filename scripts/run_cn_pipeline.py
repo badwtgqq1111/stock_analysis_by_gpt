@@ -312,6 +312,37 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             force_rebalance=force_rebalance,
             show_progress=True,
         )
+    if name == "preselection":
+        layer = config.get("selection", {})
+        return service.select_persisted_model_scores(
+            model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
+            output_dir=layer.get("output_dir", p["export_csv"]),
+            model=layer.get("model", "ensemble"), top_n=int(layer.get("preselection_model_slots", 4)),
+            portfolio_mode="topn", initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
+            signal_config=layer.get("signals") or None,
+            ensemble_weights=layer.get("ensemble_weights") or None,
+            affordability=layer.get("affordability") or None,
+            rebalance_stride_days=int(layer.get("rebalance_stride_days", 1) or 1),
+            force_rebalance=force_rebalance, show_progress=True, preselection_only=True,
+        )
+    if name == "pk":
+        layer = config.get("selection", {})
+        preselected_path = layer.get("preselection_path", "output/results_cn/cn_ensemble_preselected.csv")
+        # Re-run the same optimizer on the preselection pool.  Signal floors
+        # and max-holdings constraints are applied only at this final PK step.
+        return service.select_persisted_model_scores(
+            model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
+            output_dir=layer.get("output_dir", p["export_csv"]),
+            model=layer.get("model", "ensemble"), top_n=int(layer.get("preselection_model_slots", 4)),
+            portfolio_mode=layer.get("portfolio_mode", "mean_variance_cost_aware"),
+            portfolio_constraints=layer.get("portfolio_constraints") or None,
+            initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
+            signal_config=layer.get("signals") or None,
+            ensemble_weights=layer.get("ensemble_weights") or None,
+            affordability=layer.get("affordability") or None,
+            rebalance_stride_days=1, force_rebalance=True, show_progress=True,
+            candidate_path=str(Path(preselected_path).resolve()),
+        )
     return {}
 
 
@@ -393,7 +424,7 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run CN data, feature, model, OOS evaluation and selection stages.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="TOML pipeline configuration")
-    parser.add_argument("--stage", choices=["all", "daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "selection", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
+    parser.add_argument("--stage", choices=["all", "daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
     parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue independent data stages after a stage failure")
@@ -401,7 +432,7 @@ def main() -> int:
     config = read_config(args.config if args.config.is_absolute() else ROOT / args.config)
     started = datetime.now().isoformat(timespec="seconds")
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
-    stages = ["daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "selection", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
+    stages = ["daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
     pipeline_config = config["pipeline"]
@@ -419,7 +450,7 @@ def main() -> int:
             if stage == "alternative" and not config.get("alternative", {}).get("input_path"):
                 result["stages"].append({"name": stage, "status": "skipped", "detail": "set alternative.input_path to a local PIT evidence CSV"})
                 continue
-            if stage in {"features", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "selection", "oos_predictions"}:
+            if stage in {"features", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "selection", "oos_predictions"}:
                 if last_coverage is None:
                     try:
                         print("[PIPELINE] checking CN coverage (aggregated, no full feature load)...", flush=True)
@@ -447,7 +478,7 @@ def main() -> int:
                         break
                     continue
                 availability = fundamental_availability(last_coverage, float(pipeline_config["min_fundamental_coverage"]))
-                if stage in {"clean_panel", "lightgbm", "transformer", "cnn", "selection", "oos_predictions"}:
+                if stage in {"clean_panel", "lightgbm", "transformer", "cnn", "preselection", "pk", "selection", "oos_predictions"}:
                     ready, detail = enough_feature_samples(last_coverage, minimum_stocks)
                     if not ready:
                         blocked = True

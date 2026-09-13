@@ -6,6 +6,7 @@ adjust = "qfq"
 days = 365
 factor_set = "alpha_zoo_hk"
 top_n = 10
+preselection_model_slots = 4
 max_workers_sync = 12
 max_workers_stock_info = 8
 max_workers_valuation = 12
@@ -19,6 +20,7 @@ valuation_history_source = "baidu"
 valuation_history_period = "全部"
 max_workers_factors = 8
 export_csv = "output/results_cn"
+preselection_path = "output/results_cn/cn_ensemble_preselected.csv"
 quality_report_dir = "output/data_quality"
 min_ohlcv_rows = 120
 min_training_stocks = 50
@@ -221,16 +223,17 @@ tolerance = 1.0
 # weight.  Set enabled = false to reproduce the pure model Top-N behavior.
 [selection.signals]
 enabled = true
-recipes = ["donchian_pullback", "range_breakout", "limit_momentum"]
-allowed_setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback", "limit_momentum"]
+recipes = ["donchian_pullback", "range_breakout", "limit_momentum", "value_reversal"]
+allowed_setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback", "limit_momentum", "value_reversal"]
 min_score = 60.0
 # Require the cross-sectional model to agree before forcing a signal name.  85
 # was calibrated against the collapsed LightGBM (3 kept trees); with the fixed
 # model a 75th-percentile floor keeps the agreement filter meaningful without
 # discarding volume-confirmed breakouts.
 min_model_score = 75.0
-scan_top_k = 1200
+scan_top_k = 5000
 max_overrides = 2
+recommendations_per_type = 2
 forced_min_weight = 0.08
 # The setup sleeve may not exceed this weight per name; momentum has its own,
 # smaller budget below.
@@ -250,6 +253,17 @@ min_weight = 0.05
 max_weight = 0.10
 min_model_score = 0.0 # 模型在动量的事件上无证据优势，改用独立预算与止损控制风险
 rank = "volume_ratio_20"
+
+# 长期回撤后的修复 sleeve：不要求模型横截面同意，使用独立小仓位与
+# 均线/量能确认，覆盖类似老板电器的价值修复候选。
+[selection.signals.reversal_sleeve]
+enabled = true
+setup_types = ["value_reversal"]
+slots = 1
+min_weight = 0.08
+max_weight = 0.15
+min_model_score = 0.0
+rank = "score"
 
 [selection.signals.risk_filters]
 exclude_st = true
@@ -277,6 +291,13 @@ require_breakout = false
 stop_pct = 0.05
 expected_holding_days = 5
 min_score = 60.0
+
+[selection.signals.recipe_params.value_reversal]
+min_return_120 = -0.10
+min_return_252 = -0.08
+min_reclaim_days = 1
+min_score = 60.0
+volume_ratio_min = 1.20
 
 [selection.portfolio_constraints]
 gross_exposure = 0.95

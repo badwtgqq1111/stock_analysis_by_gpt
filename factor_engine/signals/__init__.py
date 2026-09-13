@@ -10,6 +10,7 @@ from factor_engine.signals.price_setup import (
     BoxPullbackRecipe,
     LowPriceSetupRecipe,
     RangeBreakoutRecipe,
+    ValueReversalRecipe,
     summarize_low_price_setup,
 )
 from factor_engine.signals.registry import create_signal_recipe, list_signal_recipes, register_signal_recipe
@@ -22,6 +23,7 @@ __all__ = [
     "LimitMomentumRecipe",
     "LowPriceSetupRecipe",
     "RangeBreakoutRecipe",
+    "ValueReversalRecipe",
     "SignalRecipe",
     "SignalRecipeRunner",
     "SignalRecipeResult",

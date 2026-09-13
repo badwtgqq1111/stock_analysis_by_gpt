@@ -6196,6 +6196,8 @@ class MarketDataService:
         rebalance_stride_days=1,
         force_rebalance=False,
         show_progress=False,
+        preselection_only=False,
+        candidate_path=None,
     ):
         """Select from saved model predictions without rebuilding factors or retraining.
 
@@ -6221,7 +6223,7 @@ class MarketDataService:
         score_dates = [pd.to_datetime(f["trade_date"]).max() for f in frames.values() if not f.empty]
         selection_date = min(score_dates).normalize() if score_dates else None
         destination = Path(output_dir)
-        selection_path = destination / f"cn_{str(model).lower()}_selected.csv"
+        selection_path = destination / (f"cn_{str(model).lower()}_preselected.csv" if preselection_only else f"cn_{str(model).lower()}_selected.csv")
         state_path = destination / f"cn_{str(model).lower()}_rebalance_state.json"
         stride = max(1, int(rebalance_stride_days or 1))
         if stride > 1 and not force_rebalance and selection_date is not None and state_path.is_file() and selection_path.is_file():
@@ -6331,21 +6333,50 @@ class MarketDataService:
         }
         if requested_weights:
             applied_model_weights = requested_weights
-        selected = select_top_model_scores(
-            frames, model=model, top_n=top_n, model_weights=applied_model_weights,
-            metadata={"regime": regime, "regime_version": regime_version, "regime_trade_date": regime_trade_date,
-                      "model_weights": json.dumps(applied_model_weights or {}, ensure_ascii=False),
-                      "regime_model_weights": json.dumps(regime_model_weights, ensure_ascii=False),
-                      "strategy_id": regime_strategy_id,
-                      "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
-        )
+        if candidate_path and Path(candidate_path).is_file():
+            selected = pd.read_csv(candidate_path)
+            if selected.empty:
+                raise ValueError(f"candidate_path is empty: {candidate_path}")
+            selected["stock_code"] = selected["stock_code"].astype(str)
+            if "trade_date" in selected.columns:
+                selected["trade_date"] = pd.to_datetime(selected["trade_date"])
+            ranked_all = selected.copy()
+        else:
+            selected = select_top_model_scores(
+                frames, model=model, top_n=top_n, model_weights=applied_model_weights,
+                metadata={"regime": regime, "regime_version": regime_version, "regime_trade_date": regime_trade_date,
+                          "model_weights": json.dumps(applied_model_weights or {}, ensure_ascii=False),
+                          "regime_model_weights": json.dumps(regime_model_weights, ensure_ascii=False),
+                          "strategy_id": regime_strategy_id,
+                          "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
+            )
         if progress is not None:
             progress.set_postfix_str(f"candidates={len(selected):,} model={model}")
             progress.update(1)
         forced_codes: list[str] = []
         forced_min_weight = 0.0
+        forced_max_weight = None
         signal_summary = {"enabled": False}
-        if signal_config and bool(signal_config.get("enabled", False)):
+        if candidate_path and not selected.empty:
+            # PK consumes the frozen preselection pool.  Carry only explicit
+            # overrides (not ordinary signal candidates) as forced names so
+            # their sleeve budgets remain effective without rescanning the
+            # market.
+            override_mask = selected.get("selection_channel", pd.Series("", index=selected.index)).astype(str).eq("signal_override")
+            forced_codes = selected.loc[override_mask, "stock_code"].astype(str).tolist()
+            floors, caps = {}, {}
+            for _, row in selected.loc[override_mask].iterrows():
+                sleeve = str(row.get("selection_sleeve") or "")
+                if sleeve == "momentum":
+                    floors[str(row["stock_code"])] = float((signal_config or {}).get("momentum_sleeve", {}).get("min_weight", 0.05) or 0.05)
+                    caps[str(row["stock_code"])] = float((signal_config or {}).get("momentum_sleeve", {}).get("max_weight", 0.10) or 0.10)
+                else:
+                    floors[str(row["stock_code"])] = float((signal_config or {}).get("reversal_sleeve", {}).get("min_weight", 0.08) or 0.08)
+                    caps[str(row["stock_code"])] = float((signal_config or {}).get("reversal_sleeve", {}).get("max_weight", 0.15) or 0.15)
+            if forced_codes:
+                forced_min_weight, forced_max_weight = floors, caps
+                signal_summary = {"enabled": True, "source": "preselection", "forced_codes": forced_codes}
+        if signal_config and bool(signal_config.get("enabled", False)) and not candidate_path:
             ranked_all = select_top_model_scores(
                 frames, model=model, top_n=1_000_000_000, model_weights=applied_model_weights,
             )
@@ -6361,7 +6392,22 @@ class MarketDataService:
                 progress.set_postfix_str(
                     f"signals hits={signal_summary.get('hit_count', 0)} forced={len(forced_codes)}"
                 )
-        if str(portfolio_mode).lower() == "mean_variance_cost_aware":
+        if preselection_only:
+            selected["target_weight"] = 0.0
+            selected["trade_weight"] = 0.0
+            selected["portfolio_mode"] = "preselection"
+            selected["constraint_status"] = "preselected"
+            portfolio_manifest = {
+                "status": "preselected", "portfolio_mode": "preselection",
+                "candidate_count": int(len(selected)),
+                "model_slots": int(top_n),
+                "signal_recommendations_per_type": int(signal_summary.get("recommendations_per_type", 0) or 0),
+            }
+            lot_summary = None
+            if progress is not None:
+                progress.set_postfix_str("preselection written")
+                progress.update(1)
+        elif str(portfolio_mode).lower() == "mean_variance_cost_aware":
             info = self.warehouse.read_stock_info(stock_codes=selected["stock_code"].astype(str).tolist(), market="CN")
             if not info.empty:
                 selected = selected.merge(
@@ -6738,6 +6784,7 @@ class MarketDataService:
         from factor_engine.signals.registry import create_signal_recipe
 
         momentum_config = dict(signal_config.get("momentum_sleeve") or {})
+        reversal_config = dict(signal_config.get("reversal_sleeve") or {})
         risk_config = dict(signal_config.get("risk_filters") or {})
         setup_min_weight = float(signal_config.get("forced_min_weight", 0.0) or 0.0)
         setup_max_weight = signal_config.get("forced_max_weight")
@@ -6780,6 +6827,8 @@ class MarketDataService:
         pool = pool.dropna(subset=["stock_code"]).copy()
         momentum_enabled = bool(momentum_config.get("enabled", False))
         momentum_types = {str(value) for value in (momentum_config.get("setup_types") or ["limit_momentum"])}
+        reversal_enabled = bool(reversal_config.get("enabled", False))
+        reversal_types = {str(value) for value in (reversal_config.get("setup_types") or ["value_reversal"])}
         momentum_min_gain = float((recipe_params.get("limit_momentum") or {}).get("min_gain", 0.095) or 0.095)
         momentum_codes = set()
         if momentum_enabled and momentum_types:
@@ -6796,6 +6845,10 @@ class MarketDataService:
             return model_candidates, summary
 
         lookback = max(40, int(signal_config.get("lookback_sessions", 120) or 120))
+        # value_reversal needs a full 252-session context; extend the calendar
+        # read window independently of the shorter breakout lookback.
+        if reversal_enabled:
+            lookback = max(lookback, 380)
         start = selection_date - pd.Timedelta(days=int(lookback * 1.9) + 30)
         bars = self.warehouse.read_ohlcv(
             market="CN", asset_type="equity", frequency="daily", adjust="qfq",
@@ -6895,8 +6948,12 @@ class MarketDataService:
         if hits.empty:
             return model_candidates, summary
 
-        # ---- two independent sleeves ----
-        hits["_sleeve"] = np.where(hits["signal_type"].astype(str).isin(momentum_types), "momentum", "setup")
+        # ---- independent sleeves ----
+        hits["_sleeve"] = np.select(
+            [hits["signal_type"].astype(str).isin(momentum_types),
+             hits["signal_type"].astype(str).isin(reversal_types)],
+            ["momentum", "reversal"], default="setup",
+        )
 
         def _rank(frame, rank_key, slots, gate):
             pool_frame = frame
@@ -6912,11 +6969,42 @@ class MarketDataService:
 
         setup_hits = hits[hits["_sleeve"] == "setup"]
         momentum_hits = hits[hits["_sleeve"] == "momentum"]
+        # Candidate recommendations are kept separate from forced sleeve
+        # entries.  This lets the final portfolio optimizer perform the
+        # additional cross-signal PK while guaranteeing at least N names per
+        # signal type are visible to the operator.
+        recommendation_slots = max(2, int(signal_config.get("recommendations_per_type", 2) or 2))
+        recommendation_rows = []
+        for signal_type, group in hits.groupby(hits["signal_type"].astype(str), sort=True):
+            recommendation_rows.append(
+                group.sort_values(["signal_score", "signal_ensemble_score", "stock_code"],
+                                  ascending=[False, False, True]).head(recommendation_slots)
+            )
+        recommendations = pd.concat(recommendation_rows, ignore_index=True) if recommendation_rows else hits.iloc[0:0]
+        recommended_codes = recommendations["stock_code"].astype(str).drop_duplicates().tolist()
         setup_forces = _rank(setup_hits, str(signal_config.get("override_rank", "volume_ratio_20")), max_overrides, min_model_score)
         momentum_forces = _rank(
             momentum_hits, str(momentum_config.get("rank", "volume_ratio_20")),
             int(momentum_config.get("slots", 0) or 0), float(momentum_config.get("min_model_score", 0.0) or 0.0),
         ) if momentum_enabled else momentum_hits.iloc[0:0]
+        reversal_hits = hits[hits["_sleeve"] == "reversal"]
+        reversal_forces = _rank(
+            reversal_hits, str(reversal_config.get("rank", "signal_score")),
+            int(reversal_config.get("slots", 0) or 0),
+            float(reversal_config.get("min_model_score", 0.0) or 0.0),
+        ) if reversal_enabled else reversal_hits.iloc[0:0]
+        # Reversal is deliberately an orthogonal sleeve: among equal-quality
+        # setups prefer the lowest model score, avoiding duplication of the
+        # main cross-sectional book and surfacing names such as 002508.SZ.
+        if reversal_enabled and not reversal_hits.empty and int(reversal_config.get("slots", 0) or 0) > 0:
+            rev_pool = reversal_hits.copy()
+            gate = float(reversal_config.get("min_model_score", 0.0) or 0.0)
+            if gate > 0:
+                rev_pool = rev_pool[pd.to_numeric(rev_pool["signal_ensemble_score"], errors="coerce").fillna(-np.inf) >= gate]
+            reversal_forces = rev_pool.sort_values(
+                ["signal_score", "signal_ensemble_score", "stock_code"],
+                ascending=[False, True, True],
+            ).head(int(reversal_config.get("slots", 0) or 0))
 
         floors = {}
         caps = {}
@@ -6926,12 +7014,18 @@ class MarketDataService:
         for code in momentum_forces["stock_code"].astype(str):
             floors[code] = float(momentum_config.get("min_weight", 0.0) or 0.0)
             caps[code] = float(momentum_config.get("max_weight", 0.10) or 0.10)
-        forced = pd.concat([setup_forces, momentum_forces], ignore_index=True)
+        for code in reversal_forces["stock_code"].astype(str):
+            floors[code] = float(reversal_config.get("min_weight", 0.0) or 0.0)
+            caps[code] = float(reversal_config.get("max_weight", 0.15) or 0.15)
+        forced = pd.concat([setup_forces, momentum_forces, reversal_forces], ignore_index=True)
         forced_codes = forced["stock_code"].astype(str).tolist()
         summary["forced_codes"] = forced_codes
         summary["forced_floors"] = floors
         summary["forced_caps"] = caps
         summary["forced_detail"] = forced.to_dict("records")
+        summary["recommendations_per_type"] = recommendation_slots
+        summary["recommended_codes"] = recommended_codes
+        summary["recommendation_detail"] = recommendations.to_dict("records")
         summary["sleeves"] = {
             "setup": {"slots": max_overrides, "min_model_score": min_model_score,
                       "min_weight": setup_min_weight, "max_weight": setup_max_weight,
@@ -6941,8 +7035,13 @@ class MarketDataService:
                          "min_weight": float(momentum_config.get("min_weight", 0.0) or 0.0),
                          "max_weight": float(momentum_config.get("max_weight", 0.10) or 0.10),
                          "hits": int(len(momentum_hits)), "forced": momentum_forces["stock_code"].astype(str).tolist()},
+            "reversal": {"enabled": reversal_enabled, "slots": int(reversal_config.get("slots", 0) or 0),
+                         "min_model_score": float(reversal_config.get("min_model_score", 0.0) or 0.0),
+                         "min_weight": float(reversal_config.get("min_weight", 0.0) or 0.0),
+                         "max_weight": float(reversal_config.get("max_weight", 0.15) or 0.15),
+                         "hits": int(len(reversal_hits)), "forced": reversal_forces["stock_code"].astype(str).tolist()},
         }
-        if not forced_codes:
+        if not forced_codes and not recommended_codes:
             return model_candidates, summary
 
         union = model_candidates.copy()
@@ -6950,13 +7049,21 @@ class MarketDataService:
         if "selection_sleeve" not in union.columns:
             union["selection_sleeve"] = ""
         existing = set(union["stock_code"].astype(str))
-        extra = ranked_all[ranked_all["stock_code"].astype(str).isin(set(forced_codes))]
+        # Add all per-type recommendations to the optimizer pool.  Forced
+        # entries remain a subset with sleeve floors/caps; non-forced
+        # recommendations are ordinary candidates and can be rejected by the
+        # final max-holdings/cost-aware PK.
+        candidate_codes = set(recommended_codes) | set(forced_codes)
+        extra = ranked_all[ranked_all["stock_code"].astype(str).isin(candidate_codes)]
         extra = extra[~extra["stock_code"].astype(str).isin(existing)].copy()
         if not extra.empty:
             for column in union.columns:
                 if column not in extra.columns:
                     extra[column] = union[column].iloc[0]
-            extra["selection_channel"] = "signal_override"
+            extra["selection_channel"] = np.where(
+                extra["stock_code"].astype(str).isin(set(forced_codes)),
+                "signal_override", "signal_candidate",
+            )
             union = pd.concat([union, extra], ignore_index=True, sort=False)
         union["stock_code"] = union["stock_code"].astype(str)
         # A name can hit several recipes on the same day (for example a limit-up

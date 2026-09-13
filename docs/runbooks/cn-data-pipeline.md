@@ -42,7 +42,9 @@ uv run python scripts/run_cn_pipeline.py --config config/cn_pipeline.research.to
 | 清洗面板 | `clean_panel` | 已物化因子、日 K 派生量价、缺失/PIT/质量标记 | 是 |
 | 模型 | `lightgbm` / `transformer` / `cnn` | 保存模型工件并输出训练验证指标 | 是 |
 | 模型推理 | `model_scores` | 加载已保存模型，对最新 clean panel 截面打分 | 是 |
-| 选股 | `selection` | 读取已保存模型的最新分数，生成 LightGBM、Transformer 或 ensemble Top-N | 是 |
+| 预选 | `preselection` | 模型取 4 只，并按每种信号类型各取 2 只，形成候选池 | 是 |
+| PK 持仓 | `pk` | 对预选池执行风险、成本、流动性和持仓数优化，生成最终组合 | 是 |
+| 兼容选股 | `selection` | 旧版一步式 Top-N 选股入口；研究新流程应使用 `preselection`→`pk` | 是 |
 
 日 K 与分时是独立阶段。日 K 默认启用，因为因子和 LightGBM 依赖它；分时默认关闭，只有需要微结构特征、TCA 或执行模型时才打开：
 
@@ -72,7 +74,8 @@ uv run python scripts/run_cn_pipeline.py --stage lightgbm
 uv run python scripts/run_cn_pipeline.py --stage transformer
 uv run python scripts/run_cn_pipeline.py --stage cnn
 uv run python scripts/run_cn_pipeline.py --stage model_scores
-uv run python scripts/run_cn_pipeline.py --stage selection
+uv run python scripts/run_cn_pipeline.py --stage preselection
+uv run python scripts/run_cn_pipeline.py --stage pk
 ```
 
 上述阶段也可以合并为一次单进程运行：
@@ -192,7 +195,7 @@ uv run python scripts/run_cn_pipeline.py --stage paper_account
 - `paper_account` 按 T+1 下一交易日开盘、手续费和滑点回放虚拟账户，输出 `orders.csv`、`fills.csv`、`positions.csv`、`nav.csv` 和 `paper_account_summary.json`。它是持仓事件记录，不是实盘委托。
 - 质量判断至少观察滚动 20/60 日的命中率、平均净收益、超额收益、Sharpe、最大回撤、换手、成交率和 pending 比例；单次 Top-N 不能证明策略有效。正式评估应启用 `oos_predictions` 和 `model_comparison`，使用时间滚动、purge/embargo 的样本外预测。
 
-当前配置已按小额虚拟账户设置：初始资金 `45,000`、最多 `3` 只、总仓位 `95%`。候选仍由模型分数排序，入选后的权重使用近 20 日年化波动率的逆波动率分配：波动率越高，目标权重越低；同时受单票上限、行业上限、成交容量和换手约束。缺少行业数据时不会把所有股票错误地视为同一行业，但行业中性约束需要补齐行业映射后才完整生效。
+当前配置已按小额虚拟账户设置：初始资金 `45,000`、PK 最多 `6` 只、总仓位按 regime 预算执行。预选候选由模型与各信号类型共同构成；PK 后的权重使用近 20 日年化波动率的逆波动率分配，并受单票上限、行业上限、成交容量和换手约束。缺少行业数据时不会把所有股票错误地视为同一行业，但行业中性约束需要补齐行业映射后才完整生效。
 
 当前最近一次结果写入 `output/results_cn/cn_ensemble_selected.csv`：3 只持仓目标权重合计 95%，纸面账户记录在 `output/paper_trading/account/`。由于信号日期为最近交易日且后续行情尚未满观察期，`paper_outcomes` 可能全部为 `pending`；待未来交易日到达后重复执行即可自动成熟并更新统计。
 
@@ -319,8 +322,16 @@ output/model_scores/cn_cnn_scores.csv
 缺少模型文件、manifest、clean panel 或 schema 不一致时，阶段失败并写入流水线报告，不会静默
 回退到重新计算因子或重新训练。
 
-`selection` 读取 `output/model_scores` 中的模型分数，不会调用旧 `core/lightgbm_analysis.py`，也不会
-重新计算因子或重新训练模型。
+`preselection` 读取 `output/model_scores` 中的模型分数，不会调用旧 `core/lightgbm_analysis.py`，也不会
+重新计算因子或重新训练模型。它只负责构造候选集，不分配最终仓位：
+
+1. ensemble 模型按最新横截面分数取 `preselection_model_slots = 4`；
+2. 对每个命中的 `signal_type` 按 `signal_score` 排序，至少保留 2 只；
+3. 模型候选与信号候选去重后写入 `output/results_cn/cn_ensemble_preselected.csv`；
+4. 候选行保留 `selection_channel`（`model`/`signal_candidate`/`signal_override`）和信号证据，供下一阶段 PK。
+
+`pk` 是独立的最终持仓构建阶段。它读取 `preselection_path`，不再扩大股票池或重新扫描信号，
+从而避免最终持仓被全市场新信号悄悄改变。
 默认等权组合 LightGBM 与 Transformer 的百分位分数，并导出：
 
 ```text
@@ -362,9 +373,47 @@ tol_low = 0.03
 `setup_type` 语义：`donchian_breakout` 为当日收盘或盘中上穿上轨（放量确认，对应"次日回调买入"的
 入场信号日）；`donchian_pullback` 为突破后 `1..max_sessions_since_breakout` 个交易日内收盘守在
 上轨附近且缩量。`enabled = false` 时完全回到纯模型 Top-N 行为，输出与未启用该层时逐行一致。
-由于信号标的会占用持仓名额，启用时应同步调整 `[selection.portfolio_constraints].max_holdings`
-（默认 6 = 2 个信号位 + 4 个模型位）。实现与验收记录见
+预选池的规模可以大于最终持仓数；最终持仓由 PK 的 `max_holdings` 决定。当前默认最多 6 只，
+即模型 4 只与信号候选共同竞争 6 个持仓名额。实现与验收记录见
 [P0_13 Donchian 通道突破接入选股计划](../todo/P0_13_donchian_breakout_selection_plan.md)。
+
+### PK 持仓的量化逻辑
+
+PK 不是主观“看图挑股”，而是标准的 **candidate generation → portfolio construction** 两阶段架构：
+
+1. **候选生成（preselection）**：保证模型 alpha 与不同信号 sleeve 都有代表性，避免单一模型垄断候选池；
+2. **横截面排序**：保留模型分数、信号分数和信号类型，作为后续 alpha 输入；
+3. **风险模型**：使用近 20 日波动率构造特异风险（当前为对角协方差近似）；
+4. **交易成本与容量**：估算 ADV、冲击成本、参与率和换手，剔除不可执行权重；
+5. **约束优化**：在 `gross_exposure`、单票上限、行业上限、最大持仓数、换手上限和整手可买约束下，
+   先让强制 signal override 占位，再由模型/信号候选竞争剩余名额；
+6. **风险定权**：默认 inverse-volatility，波动率越高权重越低，并经过成本、行业和容量修复；
+7. **可执行修复**：目标权重买不到 100 股整手时移除弱候选并重新优化。
+
+这对应量化组合管理中的标准做法：Barra/因子风险模型的简化版、带交易成本的 long-only constrained
+portfolio construction，以及事件/信号 sleeve 的独立预算。它不是保证收益的打分器；应使用滚动 OOS、
+purge/embargo、换手和成本后的 Sharpe、最大回撤、IC/IR 与容量指标验收。
+
+两阶段运行：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
+uv run python scripts/run_cn_pipeline.py --stage pk --force-rebalance
+```
+
+`[selection]` 关键配置：
+
+```toml
+preselection_model_slots = 4
+preselection_path = "output/results_cn/cn_ensemble_preselected.csv"
+
+[selection.signals]
+recommendations_per_type = 2
+
+[selection.portfolio_constraints]
+max_holdings = 6
+weighting = "inverse_volatility"
+```
 
 ### 让模型学到 Donchian 通道状态
 

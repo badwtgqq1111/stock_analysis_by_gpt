@@ -10,6 +10,104 @@ from factor_engine.signals.base import SignalRecipe, SignalRecipeResult
 from factor_engine.signals.registry import register_signal_recipe
 
 
+def _empty_value_reversal_snapshot():
+    return {
+        "setup_type": "neutral", "setup_score": 0.0, "sideways_penalty": 0.0,
+        "value_reversal_score": 0.0, "return_120d": np.nan, "return_252d": np.nan,
+        "drawdown_120d": np.nan, "drawdown_252d": np.nan, "distance_from_252d_low": np.nan,
+        "ma20": np.nan, "ma60": np.nan, "ma20_reclaimed": False, "ma60_reclaimed": False,
+        "return_20d": np.nan, "volume_ratio_20": np.nan, "volume_confirmed": False,
+        "follow_through": False, "latest_close": np.nan,
+        "recipe_scores": {"value_reversal": 0.0},
+    }
+
+
+@register_signal_recipe("value_reversal")
+class ValueReversalRecipe(SignalRecipe):
+    """长期回撤后的均线收复/放量确认信号。
+
+    该信号与横截面未来收益模型解耦，专门覆盖“长期弱势、近期开始修复”
+    的股票。它要求 120/252 日回撤背景，并用 MA20/MA60 收复及量能确认
+    降低接飞刀概率；适合独立的小仓位 sleeve，而非替换主模型。
+    """
+
+    name = "value_reversal"
+
+    def __init__(self, min_return_120=-0.10, min_return_252=-0.08,
+                 min_reclaim_days=1, min_score=60.0, volume_ratio_min=1.20,
+                 **kwargs):
+        self.min_return_120 = float(min_return_120)
+        self.min_return_252 = float(min_return_252)
+        self.min_reclaim_days = max(1, int(min_reclaim_days))
+        self.min_score = float(min_score)
+        self.volume_ratio_min = float(volume_ratio_min)
+        self.extra_config = dict(kwargs)
+
+    def evaluate(self, data, context=None):
+        snapshot = _empty_value_reversal_snapshot()
+        if data is None or data.empty:
+            return self._to_result(snapshot)
+        working = data.copy().sort_index()
+        if "Close" not in working.columns and "close" in working.columns:
+            working = working.rename(columns={"close": "Close", "volume": "Volume"})
+        if "Close" not in working.columns:
+            return self._to_result(snapshot)
+        close = pd.to_numeric(working["Close"], errors="coerce")
+        volume = pd.to_numeric(working.get("Volume", pd.Series(index=working.index)), errors="coerce")
+        close = close.dropna()
+        if len(close) < 253:
+            return self._to_result(snapshot)
+        latest = float(close.iloc[-1])
+        returns = close.pct_change()
+        return_20d = latest / float(close.iloc[-21]) - 1.0
+        return_120d = latest / float(close.iloc[-121]) - 1.0
+        return_252d = latest / float(close.iloc[-253]) - 1.0
+        high120, high252 = float(close.tail(120).max()), float(close.tail(252).max())
+        low252 = float(close.tail(252).min())
+        drawdown120 = latest / high120 - 1.0 if high120 else np.nan
+        drawdown252 = latest / high252 - 1.0 if high252 else np.nan
+        distance_low252 = latest / low252 - 1.0 if low252 else np.nan
+        ma20, ma60 = float(close.tail(20).mean()), float(close.tail(60).mean())
+        # ``reclaimed`` means price has recovered and is holding above the
+        # moving average on the decision bar; the recent-return and volume
+        # gates below provide the actual confirmation against stale crossings.
+        reclaim20 = latest >= ma20
+        reclaim60 = latest >= ma60
+        vol_ma20 = float(volume.tail(20).mean()) if volume.notna().any() else np.nan
+        vol_ratio = float(volume.iloc[-1] / vol_ma20) if pd.notna(vol_ma20) and vol_ma20 else np.nan
+        volume_confirmed = pd.notna(vol_ratio) and vol_ratio >= self.volume_ratio_min
+        follow_through = int((returns.tail(3) > 0).sum()) >= 2
+        score = 0.0
+        if return_120d <= self.min_return_120: score += 20.0
+        if return_252d <= self.min_return_252: score += 15.0
+        if drawdown120 <= -0.12: score += 15.0
+        if drawdown252 <= -0.18: score += 10.0
+        if latest >= ma20: score += 15.0
+        if latest >= ma60: score += 15.0
+        if 0.02 <= return_20d <= 0.25: score += 10.0
+        if volume_confirmed: score += 10.0
+        if follow_through: score += 5.0
+        reclaimed = int(reclaim20) + int(reclaim60)
+        triggered = (return_120d <= self.min_return_120 and return_252d <= self.min_return_252
+                     and reclaimed >= self.min_reclaim_days and (volume_confirmed or follow_through)
+                     and score >= self.min_score)
+        snapshot.update({
+            "setup_type": "value_reversal" if triggered else "neutral", "setup_score": score,
+            "value_reversal_score": score, "return_120d": return_120d, "return_252d": return_252d,
+            "drawdown_120d": drawdown120, "drawdown_252d": drawdown252,
+            "distance_from_252d_low": distance_low252, "ma20": ma20, "ma60": ma60,
+            "ma20_reclaimed": bool(reclaim20), "ma60_reclaimed": bool(reclaim60),
+            "return_20d": return_20d, "volume_ratio_20": vol_ratio,
+            "volume_confirmed": bool(volume_confirmed), "follow_through": bool(follow_through),
+            "latest_close": latest, "recipe_scores": {"value_reversal": score},
+        })
+        return self._to_result(snapshot)
+
+    def _to_result(self, snapshot):
+        return SignalRecipeResult(name=self.name, signal_type=snapshot["setup_type"],
+                                  score=float(snapshot["setup_score"]), features=snapshot)
+
+
 def _empty_low_price_snapshot():
     return {
         "setup_type": "neutral",

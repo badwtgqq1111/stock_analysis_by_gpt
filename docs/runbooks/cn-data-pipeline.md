@@ -78,6 +78,19 @@ uv run python scripts/run_cn_pipeline.py --stage preselection
 uv run python scripts/run_cn_pipeline.py --stage pk
 ```
 
+重选与 `rebalance` 参数：
+
+- `preselection` 遵守 `[selection].rebalance_stride_days`（当前为 `5`）。不足 5 个交易日时，默认命令可能返回 `carried_forward` 并沿用上一版预选池；需要立即重新生成模型 4 只和各信号 2 只时，必须加 `--force-rebalance`。
+- `pk` 当前固定对传入的预选池重新做一次最终优化（内部使用 `rebalance_stride_days=1`），因此 `--force-rebalance` 不是必需的；保留它可以明确表达本次强制重算。
+- 两步都基于最新分数与信号重选时：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
+uv run python scripts/run_cn_pipeline.py --stage pk
+```
+
+只比较同一个预选池的最终权重时，只运行 `pk` 即可；它不会重新扫描全市场信号。
+
 上述阶段也可以合并为一次单进程运行：
 
 ```bash
@@ -124,7 +137,8 @@ uv run python scripts/run_cn_pipeline.py --stage clean_panel
 uv run python scripts/run_cn_pipeline.py --stage lightgbm
 uv run python scripts/run_cn_pipeline.py --stage transformer
 uv run python scripts/run_cn_pipeline.py --stage model_scores
-uv run python scripts/run_cn_pipeline.py --stage selection
+uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
+uv run python scripts/run_cn_pipeline.py --stage pk
 ```
 
 也可以直接执行默认配置中的启用阶段：
@@ -147,7 +161,8 @@ uv run python scripts/run_cn_pipeline.py --stage features
 uv run python scripts/run_cn_pipeline.py --stage regime
 uv run python scripts/run_cn_pipeline.py --stage clean_panel
 uv run python scripts/run_cn_pipeline.py --stage model_scores
-uv run python scripts/run_cn_pipeline.py --stage selection
+uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
+uv run python scripts/run_cn_pipeline.py --stage pk
 uv run python scripts/run_cn_pipeline.py --stage paper_account
 uv run python scripts/run_cn_pipeline.py --stage paper_outcomes
 ```
@@ -165,7 +180,8 @@ uv run python scripts/run_cn_pipeline.py --stage paper_outcomes
 uv run python scripts/run_cn_pipeline.py --stage lightgbm
 uv run python scripts/run_cn_pipeline.py --stage transformer
 uv run python scripts/run_cn_pipeline.py --stage model_scores
-uv run python scripts/run_cn_pipeline.py --stage selection
+uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
+uv run python scripts/run_cn_pipeline.py --stage pk
 ```
 
 ### 严格样本外评估
@@ -439,7 +455,8 @@ uv run python scripts/run_cn_pipeline.py --stage clean_panel
 uv run python scripts/run_cn_pipeline.py --stage lightgbm
 uv run python scripts/run_cn_pipeline.py --stage transformer
 uv run python scripts/run_cn_pipeline.py --stage model_scores
-uv run python scripts/run_cn_pipeline.py --stage selection
+uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
+uv run python scripts/run_cn_pipeline.py --stage pk
 ```
 
 相关约束：`[model_features] min_feature_coverage`（默认 0.05）会剔除低覆盖特征；Transformer / CNN

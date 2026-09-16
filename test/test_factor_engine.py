@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -762,6 +763,46 @@ def test_parquet_rps_uses_append_only_and_skips_existing_rows():
     assert rows_written == 2
     assert rows_written_again == 0
     assert len(rps) == 2
+
+
+def test_parquet_rps_is_directionally_correct_scoped_and_recomputes_on_roc_revision():
+    trade_date = pd.Timestamp("2026-01-01")
+
+    def row(code, market, exchange, value, ingest_time, frequency="daily"):
+        return {
+            "trade_date": trade_date, "stock_code": code, "market": market, "exchange": exchange,
+            "asset_type": "equity", "frequency": frequency, "adjust": "qfq", "feature_set": "unit_alpha",
+            "feature_version": "1.0.0", "feature_config_hash": "unit", "feature_name": "ROC5",
+            "feature_value": value, "source": "unit_test", "ingest_time": pd.Timestamp(ingest_time),
+        }
+
+    with patch.dict("os.environ", {"CLICKHOUSE_HOST": ""}):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            warehouse = MarketDataWarehouse(DataLayout(base_dir=tmp_dir))
+            warehouse.append_features(pd.DataFrame([
+                row("000001.SZ", "CN", "SZSE", 0.8, "2026-01-01 01:00"),
+                row("600000.SH", "CN", "SSE", 1.2, "2026-01-01 01:00"),
+                row("00700", "HK", "HKEX", 0.7, "2026-01-01 01:00"),
+            ], columns=FEATURE_COLUMNS))
+            assert warehouse.compute_rps_features(factor_set="unit_alpha", windows=(5,)) == 3
+            assert warehouse.compute_rps_features(factor_set="unit_alpha", windows=(5,)) == 0
+
+            # A corrected ROC changes the relative rank of the entire CN scope.
+            warehouse.append_features(pd.DataFrame([
+                row("600000.SH", "CN", "SSE", 0.6, "2026-01-02 01:00"),
+            ], columns=FEATURE_COLUMNS))
+            assert warehouse.compute_rps_features(factor_set="unit_alpha", windows=(5,)) == 2
+            rps = warehouse.read_features(market=None, feature_set="unit_alpha", feature_name="RPS_5")
+
+    rps["ingest_time"] = pd.to_datetime(rps["ingest_time"], errors="coerce")
+    rps = rps.sort_values("ingest_time").drop_duplicates(
+        subset=["market", "exchange", "stock_code", "trade_date", "feature_name"], keep="last",
+    )
+    values = {(row.market, row.stock_code): row.feature_value for row in rps.itertuples()}
+    assert values[("CN", "600000.SH")] == pytest.approx(100.0)
+    assert values[("CN", "000001.SZ")] == pytest.approx(50.0)
+    assert values[("HK", "00700")] == pytest.approx(100.0)
+    assert set(rps["source"]) == {"rps.v2"}
 
 
 def test_generate_factor_set_reuses_batch_coverage_check_instead_of_per_stock_feature_reads():

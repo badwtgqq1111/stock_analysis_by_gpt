@@ -94,6 +94,25 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
                 show_progress=True,
             ),
         }
+        relay_data = config.get("relay_data", {})
+        if bool(relay_data.get("enabled", False)):
+            summary["relay_daily_basic"] = service.refresh_cn_tushare_daily_basic(
+                start_date=relay_data.get("start_date") or p["start_date"],
+                end_date=relay_data.get("end_date") or p.get("end_date") or None,
+                max_workers=int(p["max_workers_valuation"]),
+                show_progress=True,
+            )
+        else:
+            summary["relay_daily_basic"] = {"skipped": True, "reason": "disabled by relay_data.enabled"}
+        if bool(relay_data.get("adjustment_factors_enabled", False)):
+            summary["relay_adjustment_factors"] = service.refresh_cn_tushare_adjustment_factors(
+                start_date=relay_data.get("start_date") or p["start_date"],
+                end_date=relay_data.get("end_date") or p.get("end_date") or None,
+                max_workers=int(p["max_workers_valuation"]),
+                show_progress=True,
+            )
+        else:
+            summary["relay_adjustment_factors"] = {"skipped": True, "reason": "disabled by relay_data.adjustment_factors_enabled"}
         if bool(p.get("financial_metrics_enabled", False)):
             summary["financial_metrics"] = service.refresh_cn_financial_metrics(
                 max_workers=int(p["max_workers_financial"]),
@@ -105,7 +124,17 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
                 "skipped": True,
                 "reason": "disabled by pipeline.financial_metrics_enabled",
             }
-        summary["industry"] = service.backfill_cn_industry(show_progress=True)
+        industry = config.get("industry", {})
+        summary["industry"] = service.backfill_cn_industry(
+            show_progress=True,
+            taxonomy=industry.get("taxonomy", "sw2021"),
+            min_coverage=float(industry.get("min_coverage", 0.95)),
+        )
+        if summary["industry"].get("status") != "completed":
+            raise RuntimeError(
+                f"CN industry coverage gate failed: {summary['industry'].get('coverage', 0):.1%} "
+                f"< {summary['industry'].get('min_coverage', 0):.1%}"
+            )
         return summary
     if name == "alternative":
         layer = config[name]
@@ -215,6 +244,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             cleaning_version=layer.get("cleaning_version", "p0.2.v1"),
             report_dir=p.get("quality_report_dir", "output/data_quality"),
             feature_batch_size=int(layer.get("feature_batch_size", 10)),
+            factor_config=config.get("factor_config") or None,
             show_progress=True,
         )
     if name == "lightgbm":

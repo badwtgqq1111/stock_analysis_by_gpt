@@ -45,7 +45,11 @@ lightgbm = true
 transformer = true
 cnn = false
 model_scores = true
-selection = true
+# 最终选股由 preselection → pk 两阶段完成；保留 selection 命令仅用于
+# 临时对照或人工显式调用，默认全流程不运行它。
+selection = false
+preselection = true
+pk = true
 exits = true
 paper_outcomes = false
 paper_account = false
@@ -86,6 +90,23 @@ input_path = ""
 source = "manual_import"
 output_dir = "output/alternative_data"
 
+[industry]
+# 当前生产主源使用 BaoStock 的证监会行业分类，接口已覆盖全市场且可稳定
+# 调用。验证过的申万 2021 中继源可设为 sw2021_relay（需要
+# CN_INDUSTRY_RELAY_BASE_KEY 或 TUSHARE_RELAY_KEY）；它写入独立 sw2021 快照，
+# 只有完整同步通过覆盖率门禁后才更新注册表，不能混用两种 taxonomy。
+taxonomy = "csrc_baostock"
+min_coverage = 0.95
+
+[relay_data]
+# 仅在已配置 CN_INDUSTRY_RELAY_BASE_KEY 或 TUSHARE_RELAY_KEY 时开启。daily_basic
+# 会覆盖同日估值快照的估值/股本字段；默认关闭，先用小股票池验证覆盖率与口径。
+enabled = false
+start_date = ""
+end_date = ""
+# Independent raw adj_factor audit snapshot; this does not overwrite OHLCV.
+adjustment_factors_enabled = false
+
 [strategy_labels]
 days = 756
 output_dir = "output/strategy_labels"
@@ -93,9 +114,9 @@ output_dir = "output/strategy_labels"
 [clean_panel]
 days = 365
 cleaning_version = "p0.2.v1"
-# Ten stocks keep the long-source read bounded while still vectorizing pivot
-# and compact snapshot writes across multiple instruments.
-feature_batch_size = 10
+# Stock-aware row-group indexing makes larger batches efficient while keeping
+# the wide pivot bounded. The source parquet is indexed once per clean-panel run.
+feature_batch_size = 50
 
 [model_features]
 # Reject a source feature and its missing-value mask when the value is present
@@ -223,8 +244,8 @@ tolerance = 1.0
 # weight.  Set enabled = false to reproduce the pure model Top-N behavior.
 [selection.signals]
 enabled = true
-recipes = ["donchian_pullback", "range_breakout", "limit_momentum", "value_reversal"]
-allowed_setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback", "limit_momentum", "value_reversal"]
+recipes = ["donchian_pullback", "range_breakout", "limit_momentum", "value_reversal", "bottom_momentum"]
+allowed_setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback", "limit_momentum", "value_reversal", "bottom_momentum"]
 min_score = 60.0
 # Require the cross-sectional model to agree before forcing a signal name.  85
 # was calibrated against the collapsed LightGBM (3 kept trees); with the fixed
@@ -265,6 +286,17 @@ max_weight = 0.15
 min_model_score = 0.0
 rank = "score"
 
+# 半年低点右侧确认 + 短期动量。行业超额收益在每日扫描中计算；其权重
+# 与涨停动量 sleeve 一样保持较小，先经纸面组合验证后再调整。
+[selection.signals.bottom_momentum_sleeve]
+enabled = true
+setup_types = ["bottom_momentum"]
+slots = 1
+min_weight = 0.05
+max_weight = 0.10
+min_model_score = 0.0
+rank = "signal_score"
+
 [selection.signals.risk_filters]
 exclude_st = true
 min_market_cap = 5000000000.0
@@ -298,6 +330,15 @@ min_return_252 = -0.08
 min_reclaim_days = 1
 min_score = 60.0
 volume_ratio_min = 1.20
+
+[selection.signals.recipe_params.bottom_momentum]
+lookback = 126
+min_rebound_atr = 1.0
+min_relative20 = 0.0
+min_volume_ratio = 1.10
+min_score = 55.0
+expected_holding_days = 10
+stop_atr = 1.5
 
 [selection.portfolio_constraints]
 gross_exposure = 0.95

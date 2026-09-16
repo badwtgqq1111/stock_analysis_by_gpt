@@ -10,6 +10,13 @@ import pandas as pd
 from clickhouse_connect import get_client
 
 
+RPS_ALGORITHM_SOURCE = "rps.v2"
+RPS_SCOPE_COLUMNS = (
+    "market", "asset_type", "frequency", "adjust",
+    "feature_set", "feature_version", "feature_config_hash", "trade_date",
+)
+
+
 _FEATURES_COLUMNS = [
     "trade_date", "stock_code", "market", "exchange", "asset_type",
     "frequency", "adjust", "feature_set", "feature_version",
@@ -48,7 +55,7 @@ _VALUATION_SNAPSHOT_COLUMNS = [
     "market_cap", "circulating_market_cap", "free_float_market_cap",
     "pe_ratio", "pb_ratio", "ps_ratio", "ev", "ev_ebitda",
     "dividend_yield", "fcf_yield", "volume", "amount", "daily_turnover",
-    "turnover_rate", "total_shares", "circulating_shares", "free_float_shares",
+    "turnover_rate", "free_turnover_rate", "volume_ratio", "total_shares", "circulating_shares", "free_float_shares",
     "source", "ingest_time",
 ]
 
@@ -76,6 +83,8 @@ CREATE TABLE IF NOT EXISTS {table} (
     amount Nullable(Float64),
     daily_turnover Nullable(Float64),
     turnover_rate Nullable(Float64),
+    free_turnover_rate Nullable(Float64),
+    volume_ratio Nullable(Float64),
     total_shares Nullable(Float64),
     circulating_shares Nullable(Float64),
     free_float_shares Nullable(Float64),
@@ -635,6 +644,9 @@ class ClickHouseStore:
                 "turnover_rate": "Nullable(Float64)",
             }.items():
                 client.command(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
+        if dataset_name == "valuation_snapshot":
+            for column in ("free_turnover_rate", "volume_ratio"):
+                client.command(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} Nullable(Float64)")
         return table
 
     # ---- public interface (matches ParquetDataStore) ----
@@ -847,11 +859,7 @@ class ClickHouseStore:
                              windows=(5, 10, 20, 30, 60),
                              layer="feature",
                              progress_callback=None):
-        """基于已有 ROC 因子计算横截面 RPS 排名并写入同一张表。
-
-        对每个窗口的 ROC 因子做跨股票百分位排名，生成 RPS_{w} 特征。
-        ROC{w} = close_past / close_today，值越低收益越高，所以升序排名。
-        """
+        """计算按完整数据口径隔离、可增量修订的横截面 RPS。"""
         def _progress(message):
             if progress_callback is not None:
                 progress_callback(message)
@@ -866,52 +874,68 @@ class ClickHouseStore:
                 rps_name = f"RPS_{w}"
                 _progress(f"rps window={w} querying ClickHouse")
 
-                # Get existing metadata from one ROC row
-                meta = client.query(
-                    f"SELECT market, exchange, asset_type, frequency, adjust, "
-                    f"feature_version, feature_config_hash "
-                    f"FROM {table} "
-                    f"WHERE feature_name = {{src:String}} "
-                    f"AND feature_set = {{fs:String}} "
-                    f"LIMIT 1",
-                    parameters={"src": roc_name, "fs": factor_set},
-                )
-                if not meta.result_rows:
-                    continue
-                meta_row = meta.result_rows[0]
-                mkt, exch, atype, freq, adj, ver, fhash = meta_row
-
                 rps_df = client.query_df(
-                    f"SELECT "
-                    f"trade_date, stock_code, "
-                    f"(1 - rank() OVER ("
-                    f"    PARTITION BY trade_date ORDER BY feature_value ASC"
-                    f") / CAST(count() OVER ("
-                    f"    PARTITION BY trade_date"
-                    f") AS Float64)) * 100 AS rps_val "
-                    f"FROM {table} "
-                    f"WHERE feature_name = {{src:String}} "
-                    f"AND feature_set = {{fs:String}} "
-                    f"AND feature_value IS NOT NULL",
-                    parameters={"src": roc_name, "fs": factor_set},
+                    f"WITH "
+                    f"source_rows AS ("
+                    f" SELECT f.market, f.exchange, f.asset_type, f.frequency, f.adjust, f.feature_set, "
+                    f" f.feature_version, f.feature_config_hash, f.trade_date, f.stock_code, "
+                    f" argMax(f.feature_value, f.ingest_time) AS feature_value, max(f.ingest_time) AS source_ingest_time "
+                    f" FROM {table} AS f WHERE f.feature_name = {{src:String}} AND f.feature_set = {{fs:String}} "
+                    f" AND f.feature_value IS NOT NULL "
+                    f" GROUP BY f.market, f.exchange, f.asset_type, f.frequency, f.adjust, f.feature_set, "
+                    f" f.feature_version, f.feature_config_hash, f.trade_date, f.stock_code"
+                    f"), "
+                    f"rps_state AS ("
+                    f" SELECT market, exchange, asset_type, frequency, adjust, feature_set, "
+                    f" feature_version, feature_config_hash, trade_date, stock_code, "
+                    f" argMax(feature_value, ingest_time) AS rps_value "
+                    f" FROM {table} WHERE feature_name = {{rps:String}} AND feature_set = {{fs:String}} "
+                    f" AND source = {{rps_source:String}} "
+                    f" GROUP BY market, exchange, asset_type, frequency, adjust, feature_set, "
+                    f" feature_version, feature_config_hash, trade_date, stock_code"
+                    f"), "
+                    f"ranked_rows AS ("
+                    f" SELECT s.market, s.exchange, s.asset_type, s.frequency, s.adjust, s.feature_set, "
+                    f" s.feature_version, s.feature_config_hash, s.trade_date, s.stock_code, "
+                    f" (count() OVER (PARTITION BY s.market, s.asset_type, s.frequency, s.adjust, "
+                    f" s.feature_set, s.feature_version, s.feature_config_hash, s.trade_date) "
+                    f" - rank() OVER (PARTITION BY s.market, s.asset_type, s.frequency, s.adjust, "
+                    f" s.feature_set, s.feature_version, s.feature_config_hash, s.trade_date ORDER BY s.feature_value ASC) + 1) "
+                    f" / CAST(count() OVER (PARTITION BY s.market, s.asset_type, s.frequency, s.adjust, "
+                    f" s.feature_set, s.feature_version, s.feature_config_hash, s.trade_date) AS Float64) * 100 AS rps_val "
+                    f" FROM source_rows s"
+                    f"), "
+                    f"dirty_scope AS ("
+                    f" SELECT s.market, s.asset_type, s.frequency, s.adjust, s.feature_set, "
+                    f" s.feature_version, s.feature_config_hash, s.trade_date "
+                    f" FROM ranked_rows s LEFT JOIN rps_state r ON "
+                    f" s.market=r.market AND s.asset_type=r.asset_type AND s.frequency=r.frequency "
+                    f" AND s.adjust=r.adjust AND s.feature_set=r.feature_set "
+                    f" AND s.feature_version=r.feature_version AND s.feature_config_hash=r.feature_config_hash "
+                    f" AND s.trade_date=r.trade_date AND s.exchange=r.exchange "
+                    f" AND s.stock_code=r.stock_code "
+                    f" GROUP BY s.market, s.asset_type, s.frequency, s.adjust, s.feature_set, "
+                    f" s.feature_version, s.feature_config_hash, s.trade_date "
+                    f" HAVING countIf(isNull(r.rps_value) OR abs(s.rps_val - r.rps_value) > 1e-12) > 0"
+                    f") "
+                    f"SELECT s.market, s.exchange, s.asset_type, s.frequency, s.adjust, s.feature_set, "
+                    f" s.feature_version, s.feature_config_hash, s.trade_date, s.stock_code, s.rps_val "
+                    f"FROM ranked_rows s INNER JOIN dirty_scope d ON "
+                    f" s.market=d.market AND s.asset_type=d.asset_type AND s.frequency=d.frequency "
+                    f" AND s.adjust=d.adjust AND s.feature_set=d.feature_set "
+                    f" AND s.feature_version=d.feature_version AND s.feature_config_hash=d.feature_config_hash "
+                    f" AND s.trade_date=d.trade_date",
+                    parameters={"src": roc_name, "rps": rps_name, "fs": factor_set, "rps_source": RPS_ALGORITHM_SOURCE},
                 )
                 if rps_df.empty:
                     continue
 
                 import pandas as pd
 
-                rps_df["market"] = mkt
-                rps_df["exchange"] = exch
-                rps_df["asset_type"] = atype
-                rps_df["frequency"] = freq
-                rps_df["adjust"] = adj
-                rps_df["feature_set"] = factor_set
-                rps_df["feature_version"] = ver
-                rps_df["feature_config_hash"] = fhash
                 rps_df["feature_name"] = rps_name
                 rps_df["feature_value"] = rps_df["rps_val"]
-                rps_df["source"] = "rps"
-                rps_df["ingest_time"] = pd.Timestamp.utcnow()
+                rps_df["source"] = RPS_ALGORITHM_SOURCE
+                rps_df["ingest_time"] = pd.Timestamp.now("UTC").tz_localize(None)
                 rps_df.drop(columns=["rps_val"], inplace=True)
                 rps_df["trade_date"] = pd.to_datetime(rps_df["trade_date"])
 

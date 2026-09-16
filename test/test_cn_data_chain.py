@@ -1521,7 +1521,9 @@ def test_cn_service_sync_refresh_and_coverage(monkeypatch):
             info_summary = service.refresh_cn_stock_info(stock_codes=["600000.SH"], max_workers=1)
             assert info_summary["success_count"] == 1
 
-            industry_summary = service.backfill_cn_industry(stock_codes=["600000.SH"])
+            industry_summary = service.backfill_cn_industry(
+                stock_codes=["600000.SH"], taxonomy="csrc_baostock"
+            )
             assert industry_summary["updated_count"] == 1
 
             financial_summary = service.refresh_cn_financial_metrics(stock_codes=["600000.SH"], max_workers=1)

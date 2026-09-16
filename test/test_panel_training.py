@@ -163,6 +163,36 @@ def test_parquet_distinct_values_uses_statistics_with_mixed_row_group_fallback(t
     assert values == {"000001.SZ", "000002.SZ"}
 
 
+def test_parquet_group_batch_reader_normalizes_mixed_ingest_time_schema(tmp_path):
+    layout = DataLayout(str(tmp_path / "data"))
+    store = ParquetDataStore(layout)
+    base = {
+        "trade_date": pd.Timestamp("2026-01-02"),
+        "market": "CN",
+        "feature_name": "RPS_5",
+        "feature_value": 50.0,
+    }
+    # Write two parts with the timestamp representations used by historical
+    # and current feature materializations.
+    naive = pd.DataFrame([{**base, "stock_code": "000001.SZ", "ingest_time": pd.Timestamp("2026-01-02")}])
+    aware = pd.DataFrame([{**base, "stock_code": "600000.SH", "ingest_time": pd.Timestamp("2026-01-02", tz="UTC")}])
+    store.append_frame("features", naive, layer="feature", partition_columns=("market",))
+    store.append_frame("features", aware, layer="feature", partition_columns=("market",))
+
+    batches = list(store.iter_frames_by_group_batches(
+        "features",
+        layer="feature",
+        group_column="stock_code",
+        group_values=["000001.SZ", "600000.SH"],
+        batch_size=2,
+        filters={"market": "CN"},
+        columns=["stock_code", "ingest_time"],
+    ))
+    result = batches[0][1]
+    assert set(result["stock_code"]) == {"000001.SZ", "600000.SH"}
+    assert result["ingest_time"].dt.tz is None
+
+
 def test_clean_panel_progress_reports_cleaning_and_long_expansion():
     factors, ohlcv = _frames(days=10)
     panel = build_feature_panel(factors, ohlcv, market="CN", factor_set="demo")

@@ -434,12 +434,19 @@ class MarketDataWarehouse:
             raise last_error
         return {"rows": len(payload), "dataset_path": str(target)}
 
-    def upsert_valuation_snapshots(self, frame, dataset_name=VALUATION_SNAPSHOT_DATASET):
+    def upsert_valuation_snapshots(
+        self,
+        frame,
+        dataset_name=VALUATION_SNAPSHOT_DATASET,
+        preserve_existing_values=False,
+    ):
         """Upsert valuation/liquidity daily snapshots."""
         self._ensure_writable()
         if frame is None or frame.empty:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="meta"))}
         payload = frame[VALUATION_SNAPSHOT_FIELDS].copy()
+        if preserve_existing_values:
+            payload = self._merge_valuation_snapshot_values(payload, dataset_name=dataset_name)
         target = self._upsert_meta_frame(
             dataset_name=dataset_name,
             frame=payload,
@@ -449,6 +456,45 @@ class MarketDataWarehouse:
             partition_columns=self.VALUATION_SNAPSHOT_PARTITION_COLUMNS,
         )
         return {"rows": len(payload), "dataset_path": str(target)}
+
+    def _merge_valuation_snapshot_values(self, payload, dataset_name=VALUATION_SNAPSHOT_DATASET):
+        """Keep already-observed non-null snapshot fields during sparse source updates."""
+        if payload is None or payload.empty:
+            return payload
+        required = {"market", "stock_code", "trade_date"}
+        if not required.issubset(payload.columns):
+            return payload
+        dates = pd.to_datetime(payload["trade_date"], errors="coerce").dropna()
+        if dates.empty:
+            return payload
+        codes = payload["stock_code"].dropna().astype(str).drop_duplicates().tolist()
+        markets = payload["market"].dropna().astype(str).drop_duplicates().tolist()
+        if not codes or len(markets) != 1:
+            return payload
+        existing = self.read_valuation_snapshots(
+            stock_codes=codes,
+            market=markets[0],
+            start_date=dates.min(),
+            end_date=dates.max(),
+            dataset_name=dataset_name,
+        )
+        if existing is None or existing.empty:
+            return payload
+        keys = ["market", "stock_code", "trade_date"]
+        existing = existing.drop_duplicates(subset=keys, keep="last")
+        merged = payload.merge(existing, on=keys, how="left", suffixes=("", "_existing"))
+        immutable = set(keys + ["source", "ingest_time"])
+        for field in VALUATION_SNAPSHOT_FIELDS:
+            existing_field = f"{field}_existing"
+            if field in immutable or existing_field not in merged.columns:
+                continue
+            merged[field] = merged[field].where(merged[field].notna(), merged[existing_field])
+            merged.drop(columns=[existing_field], inplace=True)
+        for field in ("source", "ingest_time"):
+            existing_field = f"{field}_existing"
+            if existing_field in merged.columns:
+                merged.drop(columns=[existing_field], inplace=True)
+        return merged[VALUATION_SNAPSHOT_FIELDS].copy()
 
     def upsert_financial_statement_metrics(self, frame, dataset_name=FINANCIAL_STATEMENT_METRICS_DATASET):
         """Upsert PIT financial statement metrics."""
@@ -1464,15 +1510,29 @@ class MarketDataWarehouse:
     def read_stock_info(self, stock_codes=None, market=None, columns=None, order_by=None):
         """批量读取 stock info registry。"""
         filters = {}
-        if stock_codes:
-            filters["stock_code"] = list(dict.fromkeys(stock_codes))
+        requested_codes = list(dict.fromkeys(stock_codes or []))
+        # A-share universe reads contain >5,000 symbols.  A giant ClickHouse
+        # IN clause can exceed query/proxy limits and silently force the
+        # caller onto the stale Parquet mirror.  Read the market partition and
+        # filter locally for those bulk metadata requests instead.
+        if requested_codes and len(requested_codes) <= 500:
+            filters["stock_code"] = requested_codes
         if market:
             filters["market"] = market
-        return self._read_stock_info_registry(
+        frame = self._read_stock_info_registry(
             filters=filters,
             columns=columns or STOCK_INFO_FIELDS,
             order_by=order_by or "market, stock_code",
         )
+        if requested_codes and len(requested_codes) > 500 and not frame.empty:
+            frame = frame[frame["stock_code"].astype(str).isin(set(map(str, requested_codes)))].copy()
+        if frame.empty:
+            return frame
+        # ReplacingMergeTree compaction is asynchronous.  Consumers of
+        # reference data always need one current row per market/security.
+        if "ingest_time" in frame.columns:
+            frame = frame.sort_values("ingest_time", kind="stable")
+        return frame.drop_duplicates(subset=["market", "stock_code"], keep="last").reset_index(drop=True)
 
     def get_latest_trade_date(
         self,

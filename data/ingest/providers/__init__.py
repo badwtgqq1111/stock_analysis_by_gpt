@@ -13,6 +13,9 @@ from .cn_baostock import (
 from .cn_baidu_valuation import CNBaiduValuationHistoryFetcher
 from .cn_history import CNHistoryDataFetcher
 from .cn_info import CNStockInfoFetcher
+from .cn_sw2021 import SW2021IndustryFetcher
+from .cn_sw2021_relay import SW2021RelayIndustryFetcher
+from .cn_tushare_relay import CNAdjustmentFactorRelayFetcher, CNDailyBasicRelayFetcher, CNTushareRelayClient
 from .cn_universe import CNMarketListFetcher
 from .cn_valuation_history import CNEastmoneyValuationHistoryFetcher
 from .hk_corporate_actions import HKCorporateActionsFetcher
@@ -31,6 +34,11 @@ __all__ = [
     "CNHistoryDataFetcher",
     "CNMarketListFetcher",
     "CNStockInfoFetcher",
+    "SW2021IndustryFetcher",
+    "SW2021RelayIndustryFetcher",
+    "CNDailyBasicRelayFetcher",
+    "CNAdjustmentFactorRelayFetcher",
+    "CNTushareRelayClient",
     "CNEastmoneyValuationHistoryFetcher",
     "HKCorporateActionsFetcher",
     "HKIndustryFetcher",

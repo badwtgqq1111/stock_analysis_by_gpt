@@ -23,7 +23,9 @@ def test_cn_pipeline_config_has_layered_stages() -> None:
     assert config["stages"]["transformer"] is True
     assert config["stages"]["cnn"] is False
     assert config["stages"]["model_scores"] is True
-    assert config["stages"]["selection"] is True
+    assert config["stages"]["selection"] is False
+    assert config["stages"]["preselection"] is True
+    assert config["stages"]["pk"] is True
     assert config["pipeline"]["max_workers_stock_info"] == 8
     assert config["pipeline"]["max_workers_valuation"] == 12
     assert config["pipeline"]["quality_report_dir"] == "output/data_quality"
@@ -213,7 +215,7 @@ def test_clean_panel_stage_calls_materializer() -> None:
     assert result["status"] == "completed"
     assert service.kwargs["cleaning_version"] == "p0.2.v1"
     assert service.kwargs["days"] == 365
-    assert service.kwargs["feature_batch_size"] == 10
+    assert service.kwargs["feature_batch_size"] == 50
     assert service.kwargs["show_progress"] is True
 
 

@@ -31,6 +31,10 @@ from data.ingest.providers import (
     CNEastmoneyValuationHistoryFetcher,
     CNMarketListFetcher,
     CNStockInfoFetcher,
+    SW2021IndustryFetcher,
+    SW2021RelayIndustryFetcher,
+    CNDailyBasicRelayFetcher,
+    CNAdjustmentFactorRelayFetcher,
     HKCorporateActionsFetcher,
     HKMarketListFetcher,
     HistoryDataFetcher,
@@ -1230,33 +1234,58 @@ class MarketDataService:
             _print_cn_failure_summary("stock_info", failed)
         return {"market": "CN", "success_count": len(payloads), "failed_count": len(failed), "failed": failed}
 
-    def backfill_cn_industry(self, stock_codes=None, limit=None, show_progress=False):
-        """使用 BaoStock 补全 A 股行业分类。"""
+    def backfill_cn_industry(
+        self, stock_codes=None, limit=None, show_progress=False,
+        taxonomy="sw2021", min_coverage=0.95,
+    ):
+        """补全 A 股主行业分类，并保存可审计的当前截面快照。"""
         codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
         if not codes:
             codes = self._cn_metadata_codes(limit=limit)
         if limit and stock_codes:
             codes = codes[:limit]
-        industry_frame = CNBaoStockIndustryFetcher(verbose=not show_progress).fetch(stock_codes=codes or None)
+        normalized_taxonomy = str(taxonomy or "sw2021").strip().lower()
+        if normalized_taxonomy == "sw2021":
+            industry_frame = SW2021IndustryFetcher().fetch(stock_codes=codes or None)
+            source = "sw2021_legulegu"
+        elif normalized_taxonomy == "sw2021_relay":
+            industry_frame = SW2021RelayIndustryFetcher().fetch(stock_codes=codes or None)
+            source = "tushare_relay_sw2021"
+        elif normalized_taxonomy == "csrc_baostock":
+            industry_frame = CNBaoStockIndustryFetcher(verbose=not show_progress).fetch(stock_codes=codes or None)
+            source = "baostock"
+        else:
+            raise ValueError(f"unsupported CN industry taxonomy: {taxonomy}")
         if industry_frame is None or industry_frame.empty:
             result = {
                 "market": "CN",
-                "source": "baostock",
+                "source": source,
                 "requested_count": len(codes),
                 "updated_count": 0,
                 "rows": 0,
                 "status": "empty",
-                "detail": "BaoStock returned no industry rows; retain existing registry and retry the fundamental stage",
+                "detail": "industry source returned no rows; retain existing registry and retry the fundamental stage",
             }
             if show_progress:
                 print(
                     "[SUMMARY] A 股行业补全未返回数据 "
-                    f"source=baostock requested={len(codes)}; 请查看网络/数据源后重试",
+                    f"source={source} requested={len(codes)}; 请查看网络/数据源后重试",
                     flush=True,
                 )
             return result
         if codes:
             industry_frame = industry_frame[industry_frame["stock_code"].isin(set(codes))].copy()
+        covered_codes = set(industry_frame["stock_code"].astype(str))
+        coverage = float(len(set(codes) & covered_codes) / len(codes)) if codes else 0.0
+        if coverage < float(min_coverage):
+            return {
+                "market": "CN", "source": source, "taxonomy": normalized_taxonomy,
+                "requested_count": len(codes), "updated_count": 0, "rows": len(industry_frame),
+                "coverage": coverage, "min_coverage": float(min_coverage),
+                "status": "coverage_failed",
+                "detail": "coverage gate failed; registry was not modified",
+            }
+
         payloads = []
         updated_at = datetime.utcnow().isoformat()
         for _, row in industry_frame.iterrows():
@@ -1267,24 +1296,33 @@ class MarketDataService:
                         "name": row.get("name"),
                         "industry_l1": row.get("industry_l1"),
                         "industry_l2": row.get("industry_l2"),
-                        "industry_source": row.get("industry_source") or "baostock",
+                        "industry_l3": row.get("industry_l3"),
+                        "industry_source": row.get("industry_source") or source,
                         "industry_updated_at": updated_at,
                     },
                     stock_code=code,
                     market="CN",
-                    source=row.get("industry_source") or "baostock_industry",
+                    source=row.get("industry_source") or source,
                 )
             )
         if payloads:
             self.warehouse.upsert_stock_info_batch(payloads)
         if show_progress:
-            print(f"[SUMMARY] A 股行业补全完成 source=baostock requested={len(codes)} updated={len(payloads)}")
+            print(f"[SUMMARY] A 股行业补全完成 source={source} requested={len(codes)} updated={len(payloads)}")
+        snapshot_dir = self.layout.dataset_path("industry_snapshots", layer="raw") / "market=CN" / f"taxonomy={normalized_taxonomy}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_path = snapshot_dir / f"snapshot_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.parquet"
+        industry_frame.assign(retrieved_at=updated_at).to_parquet(snapshot_path, index=False)
         return {
             "market": "CN",
-            "source": "baostock",
+            "source": source,
+            "taxonomy": normalized_taxonomy,
             "requested_count": len(codes),
             "updated_count": len(payloads),
             "rows": len(industry_frame),
+            "coverage": coverage,
+            "min_coverage": float(min_coverage),
+            "snapshot_path": str(snapshot_path),
             "status": "completed",
         }
 
@@ -1377,6 +1415,131 @@ class MarketDataService:
             "failed": failed,
             "dataset_path": str(self.layout.dataset_path("valuation_snapshot", layer="meta")),
         }
+
+    def refresh_cn_tushare_daily_basic(
+        self,
+        stock_codes=None,
+        limit=None,
+        start_date=None,
+        end_date=None,
+        max_workers=8,
+        show_progress=False,
+    ):
+        """补齐 Tushare daily_basic 日频估值与换手率快照。"""
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self._cn_metadata_codes(frequency="daily", adjust="qfq", limit=limit)
+        if limit and stock_codes:
+            codes = codes[:limit]
+        if not codes:
+            return {"market": "CN", "success_count": 0, "failed_count": 0, "rows_written": 0, "failed": []}
+
+        frames = []
+        failed = []
+        rows_written = 0
+        success_count = 0
+        flush_row_count = max(1, int(os.environ.get("CN_RELAY_DAILY_BASIC_FLUSH_ROWS", "250000")))
+
+        def _fetch_one(code):
+            return CNDailyBasicRelayFetcher(code).fetch(start_date=start_date, end_date=end_date)
+
+        def _flush():
+            nonlocal frames, rows_written
+            if frames:
+                rows_written += int(self.warehouse.upsert_valuation_snapshots(
+                    pd.concat(frames, ignore_index=True), preserve_existing_values=True,
+                )["rows"])
+                frames = []
+
+        workers = max(1, min(int(max_workers or 1), len(codes)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_fetch_one, code): code for code in codes}
+            progress = tqdm(total=len(futures), desc="refresh CN relay daily_basic", unit="stock", file=sys.stderr) if show_progress else None
+            try:
+                for future in as_completed(futures):
+                    code = futures[future]
+                    try:
+                        frame = future.result()
+                        if frame is not None and not frame.empty:
+                            frames.append(frame)
+                            success_count += 1
+                            if sum(len(item) for item in frames) >= flush_row_count:
+                                _flush()
+                    except Exception as exc:
+                        failed.append({"code": code, "error": str(exc)})
+                    finally:
+                        if progress is not None:
+                            progress.update(1)
+            finally:
+                if progress is not None:
+                    progress.close()
+        _flush()
+        if show_progress:
+            print(f"[SUMMARY] A 股中继 daily_basic 完成 success={success_count} rows={rows_written} failed={len(failed)}")
+            _print_cn_failure_summary("relay_daily_basic", failed)
+        return {
+            "market": "CN", "source": "tushare_relay_daily_basic", "success_count": success_count,
+            "failed_count": len(failed), "rows_written": rows_written, "failed": failed,
+            "dataset_path": str(self.layout.dataset_path("valuation_snapshot", layer="meta")),
+        }
+
+    def refresh_cn_tushare_adjustment_factors(
+        self,
+        stock_codes=None,
+        limit=None,
+        start_date=None,
+        end_date=None,
+        max_workers=8,
+        show_progress=False,
+    ):
+        """保存中继 adj_factor 原始快照，供复权数据审计和未来重算使用。"""
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self._cn_metadata_codes(frequency="daily", adjust="qfq", limit=limit)
+        if limit and stock_codes:
+            codes = codes[:limit]
+        if not codes:
+            return {"market": "CN", "success_count": 0, "failed_count": 0, "rows_written": 0, "failed": []}
+        output_dir = self.layout.dataset_path("adjustment_factor_snapshots", layer="raw") / "market=CN" / "source=tushare_relay"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        frames, failed, success_count = [], [], 0
+
+        def _fetch_one(code):
+            frame = CNAdjustmentFactorRelayFetcher(code).fetch(start_date=start_date, end_date=end_date)
+            return code, frame
+
+        with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), len(codes)))) as executor:
+            futures = {executor.submit(_fetch_one, code): code for code in codes}
+            progress = tqdm(total=len(futures), desc="refresh CN relay adj_factor", unit="stock", file=sys.stderr) if show_progress else None
+            try:
+                for future in as_completed(futures):
+                    code = futures[future]
+                    try:
+                        _, frame = future.result()
+                        if frame is not None and not frame.empty:
+                            frames.append(frame)
+                            success_count += 1
+                    except Exception as exc:
+                        failed.append({"code": code, "error": str(exc)})
+                    finally:
+                        if progress is not None:
+                            progress.update(1)
+            finally:
+                if progress is not None:
+                    progress.close()
+        if not frames:
+            return {"market": "CN", "source": "tushare_relay_adj_factor", "success_count": success_count, "failed_count": len(failed), "rows_written": 0, "failed": failed, "dataset_path": str(output_dir)}
+        payload = pd.concat(frames, ignore_index=True)
+        payload["market"] = "CN"
+        payload["source"] = "tushare_relay_adj_factor"
+        payload["retrieved_at"] = datetime.utcnow().isoformat()
+        payload = payload.sort_values(["stock_code", "trade_date"]).drop_duplicates(["stock_code", "trade_date"], keep="last")
+        path = output_dir / f"snapshot_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.parquet"
+        payload.to_parquet(path, index=False)
+        if show_progress:
+            print(f"[SUMMARY] A 股中继 adj_factor 完成 success={success_count} rows={len(payload)} failed={len(failed)}")
+            _print_cn_failure_summary("relay_adj_factor", failed)
+        return {"market": "CN", "source": "tushare_relay_adj_factor", "success_count": success_count, "failed_count": len(failed), "rows_written": len(payload), "failed": failed, "snapshot_path": str(path), "dataset_path": str(output_dir)}
 
     def refresh_cn_baidu_valuation_history(
         self,
@@ -5656,6 +5819,7 @@ class MarketDataService:
         report_dir="output/data_quality",
         show_progress=False,
         feature_batch_size=10,
+        factor_config=None,
     ):
         """Materialize a versioned, auditable panel from persisted features.
 
@@ -5695,7 +5859,12 @@ class MarketDataService:
         # matching Qlib's handler contract, without producing an audit-long
         # copy of every value.
         stock_codes = sorted(ohlcv_frame["stock_code"].dropna().astype(str).unique())
-        factor_metadata = create_factor_set(factor_set).metadata().to_dict()
+        factor_metadata = create_factor_set(factor_set, config=factor_config).metadata().to_dict()
+        materialization = build_feature_materialization_metadata(
+            factor_set=factor_set,
+            metadata=factor_metadata,
+            config=factor_config,
+        )
         expected_factor_names = list((factor_metadata.get("extra") or {}).get("feature_names") or [])
         expected_factor_names.extend(f"RPS_{window}" for window in (5, 10, 20, 30, 60))
         snapshot_features = list(dict.fromkeys(expected_factor_names + PRICE_FEATURE_COLUMNS))
@@ -5723,6 +5892,7 @@ class MarketDataService:
             "mode": "vectorized_stock_batches",
             "stocks": len(stock_codes),
             "features": snapshot_features,
+            "materialization": materialization,
         }
         pending = []
         pending_rows = 0
@@ -5741,34 +5911,34 @@ class MarketDataService:
 
         try:
             normalized_batch_size = max(1, int(feature_batch_size))
-            for batch_start in range(0, len(stock_codes), normalized_batch_size):
-                batch_codes = stock_codes[batch_start:batch_start + normalized_batch_size]
+            feature_batches = self.warehouse.parquet_store.iter_frames_by_group_batches(
+                "features",
+                layer="feature",
+                group_column="stock_code",
+                group_values=stock_codes,
+                batch_size=normalized_batch_size,
+                filters={
+                    "market": normalized_market,
+                    "asset_type": "equity",
+                    "frequency": frequency,
+                    "adjust": normalized_adjust,
+                    "feature_set": factor_set,
+                    "feature_version": materialization["feature_version"],
+                    "feature_config_hash": materialization["feature_config_hash"],
+                },
+                range_filters={
+                    "trade_date": {
+                        "gte": start_ts.strftime("%Y-%m-%d"),
+                        "lte": end_ts.strftime("%Y-%m-%d"),
+                    }
+                },
+                columns=["trade_date", "stock_code", "feature_name", "feature_value", "ingest_time"],
+            )
+            for batch_start, (batch_codes, factors_batch) in enumerate(feature_batches):
+                first_stock = batch_start * normalized_batch_size + 1
                 _log(
-                    f"reading feature batch {batch_start + 1}-{batch_start + len(batch_codes)}"
+                    f"reading feature batch {first_stock}-{first_stock + len(batch_codes) - 1}"
                     f"/{len(stock_codes)} stocks"
-                )
-                # Feature materialization is sourced from local Parquet.  It is
-                # the complete immutable feature source and avoids sending a
-                # multi-million-row exploratory query to an optional ClickHouse
-                # mirror during a long-running clean-panel rebuild.
-                factors_batch = self.warehouse.parquet_store.read_frame(
-                    "features",
-                    layer="feature",
-                    filters={
-                        "stock_code": batch_codes,
-                        "market": normalized_market,
-                        "asset_type": "equity",
-                        "frequency": frequency,
-                        "adjust": normalized_adjust,
-                        "feature_set": factor_set,
-                    },
-                    range_filters={
-                        "trade_date": {
-                            "gte": start_ts.strftime("%Y-%m-%d"),
-                            "lte": end_ts.strftime("%Y-%m-%d"),
-                        }
-                    },
-                    columns=["trade_date", "stock_code", "feature_name", "feature_value", "ingest_time"],
                 )
                 _log(f"feature batch loaded rows={len(factors_batch):,}")
                 bars_batch = ohlcv_frame.loc[ohlcv_frame["stock_code"].astype(str).isin(batch_codes)]
@@ -6785,6 +6955,7 @@ class MarketDataService:
 
         momentum_config = dict(signal_config.get("momentum_sleeve") or {})
         reversal_config = dict(signal_config.get("reversal_sleeve") or {})
+        bottom_momentum_config = dict(signal_config.get("bottom_momentum_sleeve") or {})
         risk_config = dict(signal_config.get("risk_filters") or {})
         setup_min_weight = float(signal_config.get("forced_min_weight", 0.0) or 0.0)
         setup_max_weight = signal_config.get("forced_max_weight")
@@ -6829,6 +7000,12 @@ class MarketDataService:
         momentum_types = {str(value) for value in (momentum_config.get("setup_types") or ["limit_momentum"])}
         reversal_enabled = bool(reversal_config.get("enabled", False))
         reversal_types = {str(value) for value in (reversal_config.get("setup_types") or ["value_reversal"])}
+        bottom_momentum_enabled = bool(bottom_momentum_config.get("enabled", False))
+        bottom_momentum_types = {
+            str(value) for value in (
+                bottom_momentum_config.get("setup_types") or ["bottom_momentum"]
+            )
+        }
         momentum_min_gain = float((recipe_params.get("limit_momentum") or {}).get("min_gain", 0.095) or 0.095)
         momentum_codes = set()
         if momentum_enabled and momentum_types:
@@ -6849,6 +7026,8 @@ class MarketDataService:
         # read window independently of the shorter breakout lookback.
         if reversal_enabled:
             lookback = max(lookback, 380)
+        if bottom_momentum_enabled:
+            lookback = max(lookback, 180)
         start = selection_date - pd.Timedelta(days=int(lookback * 1.9) + 30)
         bars = self.warehouse.read_ohlcv(
             market="CN", asset_type="equity", frequency="daily", adjust="qfq",
@@ -6868,6 +7047,39 @@ class MarketDataService:
             lambda series: float(series.tail(20).median()) if series.notna().any() else float("nan")
         ).to_dict()
 
+        # Build a point-in-time price-only industry benchmark over the scan
+        # universe.  The industry mapping comes from the registry; the return
+        # itself uses only bars available on the selection date.
+        industry_info = self.warehouse.read_stock_info(
+            stock_codes=pool["stock_code"].astype(str).tolist(), market="CN"
+        )
+        industry_map = {}
+        if (
+            industry_info is not None and not industry_info.empty
+            and "stock_code" in industry_info.columns
+            and ("industry_l2" in industry_info.columns or "industry_l1" in industry_info.columns)
+        ):
+            industry_info = industry_info.drop_duplicates(subset=["stock_code"])
+            industry_col = "industry_l2" if "industry_l2" in industry_info.columns else "industry_l1"
+            industry_map = dict(zip(
+                industry_info["stock_code"].astype(str),
+                industry_info[industry_col].fillna("").astype(str),
+            ))
+        return20_by_code = {}
+        for code, group in bars.groupby("stock_code", sort=False):
+            closes = pd.to_numeric(group["close"], errors="coerce").dropna()
+            if len(closes) >= 21 and closes.iloc[-21] != 0:
+                return20_by_code[str(code)] = float(closes.iloc[-1] / closes.iloc[-21] - 1.0)
+        industry_returns = {}
+        for code, value in return20_by_code.items():
+            industry = industry_map.get(code)
+            if industry:
+                industry_returns.setdefault(industry, []).append(value)
+        industry_return20 = {
+            industry: float(np.mean(values))
+            for industry, values in industry_returns.items() if values
+        }
+
         allowed = {str(value) for value in (signal_config.get("allowed_setup_types") or [])}
         min_score = float(signal_config.get("min_score", 60.0) or 0.0)
         min_model_score = float(signal_config.get("min_model_score", 0.0) or 0.0)
@@ -6881,7 +7093,12 @@ class MarketDataService:
                 continue
             for name, recipe in instances:
                 try:
-                    result = recipe.evaluate(frame)
+                    industry = industry_map.get(str(code))
+                    result = recipe.evaluate(frame, context={
+                        "stock_code": str(code),
+                        "industry": industry,
+                        "industry_return_20d": industry_return20.get(industry),
+                    })
                 except Exception as exc:  # a single bad series must not abort selection
                     summary["errors"].append(f"{code}:{name}: {exc}")
                     continue
@@ -6904,6 +7121,8 @@ class MarketDataService:
                     "signal_pullback_holding": features.get("pullback_holding"),
                     "signal_volume_dryup": features.get("volume_dryup"),
                     "signal_gain_1d": features.get("gain_1d"),
+                    "signal_relative20": features.get("relative20"),
+                    "signal_rebound_atr": features.get("rebound_atr"),
                     "signal_stop_price": features.get("stop_price"),
                     "signal_expected_holding_days": features.get("expected_holding_days"),
                 })
@@ -6951,8 +7170,9 @@ class MarketDataService:
         # ---- independent sleeves ----
         hits["_sleeve"] = np.select(
             [hits["signal_type"].astype(str).isin(momentum_types),
-             hits["signal_type"].astype(str).isin(reversal_types)],
-            ["momentum", "reversal"], default="setup",
+             hits["signal_type"].astype(str).isin(reversal_types),
+             hits["signal_type"].astype(str).isin(bottom_momentum_types)],
+            ["momentum", "reversal", "bottom_momentum"], default="setup",
         )
 
         def _rank(frame, rank_key, slots, gate):
@@ -6988,6 +7208,7 @@ class MarketDataService:
             int(momentum_config.get("slots", 0) or 0), float(momentum_config.get("min_model_score", 0.0) or 0.0),
         ) if momentum_enabled else momentum_hits.iloc[0:0]
         reversal_hits = hits[hits["_sleeve"] == "reversal"]
+        bottom_momentum_hits = hits[hits["_sleeve"] == "bottom_momentum"]
         reversal_forces = _rank(
             reversal_hits, str(reversal_config.get("rank", "signal_score")),
             int(reversal_config.get("slots", 0) or 0),
@@ -7005,6 +7226,12 @@ class MarketDataService:
                 ["signal_score", "signal_ensemble_score", "stock_code"],
                 ascending=[False, True, True],
             ).head(int(reversal_config.get("slots", 0) or 0))
+        bottom_momentum_forces = _rank(
+            bottom_momentum_hits,
+            str(bottom_momentum_config.get("rank", "signal_score")),
+            int(bottom_momentum_config.get("slots", 0) or 0),
+            float(bottom_momentum_config.get("min_model_score", 0.0) or 0.0),
+        ) if bottom_momentum_enabled else bottom_momentum_hits.iloc[0:0]
 
         floors = {}
         caps = {}
@@ -7017,7 +7244,13 @@ class MarketDataService:
         for code in reversal_forces["stock_code"].astype(str):
             floors[code] = float(reversal_config.get("min_weight", 0.0) or 0.0)
             caps[code] = float(reversal_config.get("max_weight", 0.15) or 0.15)
-        forced = pd.concat([setup_forces, momentum_forces, reversal_forces], ignore_index=True)
+        for code in bottom_momentum_forces["stock_code"].astype(str):
+            floors[code] = float(bottom_momentum_config.get("min_weight", 0.0) or 0.0)
+            caps[code] = float(bottom_momentum_config.get("max_weight", 0.10) or 0.10)
+        forced = pd.concat(
+            [setup_forces, momentum_forces, reversal_forces, bottom_momentum_forces],
+            ignore_index=True,
+        )
         forced_codes = forced["stock_code"].astype(str).tolist()
         summary["forced_codes"] = forced_codes
         summary["forced_floors"] = floors
@@ -7040,6 +7273,15 @@ class MarketDataService:
                          "min_weight": float(reversal_config.get("min_weight", 0.0) or 0.0),
                          "max_weight": float(reversal_config.get("max_weight", 0.15) or 0.15),
                          "hits": int(len(reversal_hits)), "forced": reversal_forces["stock_code"].astype(str).tolist()},
+            "bottom_momentum": {
+                "enabled": bottom_momentum_enabled,
+                "slots": int(bottom_momentum_config.get("slots", 0) or 0),
+                "min_model_score": float(bottom_momentum_config.get("min_model_score", 0.0) or 0.0),
+                "min_weight": float(bottom_momentum_config.get("min_weight", 0.0) or 0.0),
+                "max_weight": float(bottom_momentum_config.get("max_weight", 0.10) or 0.10),
+                "hits": int(len(bottom_momentum_hits)),
+                "forced": bottom_momentum_forces["stock_code"].astype(str).tolist(),
+            },
         }
         if not forced_codes and not recommended_codes:
             return model_candidates, summary
@@ -7135,6 +7377,17 @@ class MarketDataService:
                     if bool(row["selected"]):
                         return f"入选：短线动量 sleeve 命中（{detail}）；独立小额度 + 硬止损，不属于中期持仓。"
                     return f"候选未配置：短线动量 sleeve 命中（{detail}），但组合约束后权重为 0。"
+                if sleeve == "bottom_momentum":
+                    detail = (
+                        f"score={float(row.get('signal_score') or 0.0):.0f}, "
+                        f"相对行业20日={float(row.get('signal_relative20') or 0.0):.2%}, "
+                        f"反弹={float(row.get('signal_rebound_atr') or 0.0):.2f} ATR, "
+                        f"stop={float(row.get('signal_stop_price') or 0.0):.2f}, "
+                        f"holding<= {int(float(row.get('signal_expected_holding_days') or 0))}d"
+                    )
+                    if bool(row["selected"]):
+                        return f"入选：半年低点右侧确认后的短期动量 sleeve 命中（{detail}）；独立小额度 + ATR 止损。"
+                    return f"候选未配置：半年低点短期动量 sleeve 命中（{detail}），但组合约束后权重为 0。"
                 detail = (
                     f"recipe={row.get('signal_recipe')}, type={row.get('signal_type')}, "
                     f"score={float(row.get('signal_score') or 0.0):.0f}"
@@ -7163,7 +7416,8 @@ class MarketDataService:
             "signal_donchian_upper", "signal_donchian_lower", "signal_donchian_pos",
             "signal_channel_width", "signal_breakout_count_20", "signal_sessions_since_breakout",
             "signal_volume_ratio_20", "signal_pullback_holding", "signal_volume_dryup",
-            "signal_gain_1d", "signal_stop_price", "signal_expected_holding_days", "signal_median_amount_20",
+            "signal_gain_1d", "signal_relative20", "signal_rebound_atr", "signal_stop_price",
+            "signal_expected_holding_days", "signal_median_amount_20",
             "lightgbm_score", "transformer_score", "cnn_score", "ensemble_score",
             "target_weight", "volatility_20d", "median_turnover_amount_20d",
             "expected_transaction_cost_bps", "liquidity_capacity_score",

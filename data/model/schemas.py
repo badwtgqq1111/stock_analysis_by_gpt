@@ -70,6 +70,8 @@ VALUATION_SNAPSHOT_FIELDS = [
     "amount",
     "daily_turnover",
     "turnover_rate",
+    "free_turnover_rate",
+    "volume_ratio",
     "total_shares",
     "circulating_shares",
     "free_float_shares",

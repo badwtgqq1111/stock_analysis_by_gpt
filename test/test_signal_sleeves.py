@@ -151,6 +151,57 @@ def _sleeve_config():
     }
 
 
+def _bottom_momentum_bars(amount=8e8):
+    dates = pd.bdate_range(end="2026-09-11", periods=150)
+    close = pd.Series(
+        np.r_[np.linspace(10.0, 5.0, 100), np.linspace(5.1, 7.0, 50)], index=dates
+    )
+    return pd.DataFrame(
+        {
+            "stock_code": "600333.SH", "trade_date": dates,
+            "high": close * 1.01, "low": close * 0.99, "close": close,
+            "volume": amount / close, "amount": amount,
+        }
+    )
+
+
+def test_bottom_momentum_sleeve_has_its_own_weight_cap() -> None:
+    service = MarketDataService.__new__(MarketDataService)
+    bars = _bottom_momentum_bars()
+    service.warehouse = _StubWarehouse(
+        bars,
+        pd.DataFrame({
+            "stock_code": ["600333.SH"], "name": ["正常股份"],
+            "market_cap": [9e9], "industry_l2": ["测试行业"],
+        }),
+    )
+    ranked = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2026-09-11"]),
+        "stock_code": ["600333.SH"], "model_score": [60.0],
+    })
+    config = _sleeve_config()
+    config.update({
+        "recipes": ["bottom_momentum"],
+        "allowed_setup_types": ["bottom_momentum"],
+        "min_score": 40.0,
+        "risk_filters": {"exclude_st": True, "min_market_cap": 0.0, "min_median_amount_20d": 5e7},
+        "recipe_params": {
+            "bottom_momentum": {"min_score": 40.0, "min_relative20": -1.0}
+        },
+        "momentum_sleeve": {"enabled": False},
+        "bottom_momentum_sleeve": {
+            "enabled": True, "setup_types": ["bottom_momentum"], "slots": 1,
+            "min_weight": 0.05, "max_weight": 0.10, "min_model_score": 0.0,
+        },
+    })
+    _, summary = service._apply_price_setup_signals(ranked, ranked, signal_config=config)
+
+    assert summary["forced_codes"] == ["600333.SH"]
+    assert summary["forced_floors"]["600333.SH"] == 0.05
+    assert summary["forced_caps"]["600333.SH"] == 0.10
+    assert summary["sleeves"]["bottom_momentum"]["forced"] == ["600333.SH"]
+
+
 def test_risk_filters_drop_st_and_illiquid_names_and_cap_the_sleeve() -> None:
     service = _service_with_stub()
     ranked = pd.DataFrame(

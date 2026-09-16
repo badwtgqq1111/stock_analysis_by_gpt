@@ -489,6 +489,139 @@ def _cn_history_fetch_chunk_worker_inner(payload: dict) -> list[dict]:
     return results
 
 
+def _sleeve_weight_bounds(signal_config: dict | None) -> dict:
+    """Resolve the floor/cap pair every signal sleeve declares for its names.
+
+    Each sleeve owns a separate weight budget: the setup sleeve uses the
+    top-level ``forced_min_weight``/``forced_max_weight`` pair, while momentum,
+    reversal and bottom-momentum read their own ``*_sleeve`` tables.  Reading
+    the wrong table silently re-prices a sleeve (a bottom-momentum name was
+    charged the reversal floor), so the mapping lives in one place.
+    """
+    config = dict(signal_config or {})
+    bounds = {
+        "setup": (
+            float(config.get("forced_min_weight", 0.08) or 0.08),
+            float(config.get("forced_max_weight", 0.20) or 0.20),
+        ),
+    }
+    for sleeve, fallback in (("momentum", (0.05, 0.10)), ("reversal", (0.08, 0.15)),
+                             ("bottom_momentum", (0.05, 0.10))):
+        sleeve_config = dict(config.get(f"{sleeve}_sleeve") or {})
+        bounds[sleeve] = (
+            float(sleeve_config.get("min_weight", fallback[0]) or 0.0),
+            float(sleeve_config.get("max_weight", fallback[1]) or fallback[1]),
+        )
+    return bounds
+
+
+def _attach_lot_columns(frame: pd.DataFrame, *, capital: float, lot_size: int) -> pd.DataFrame:
+    """Record whether each target weight can actually be filled in whole lots."""
+    closes = pd.to_numeric(frame.get("last_close"), errors="coerce")
+    one_lot_value = closes * int(lot_size)
+    target_value = pd.to_numeric(frame["target_weight"], errors="coerce") * float(capital)
+    frame["one_lot_value"] = one_lot_value.round(2)
+    frame["lots_at_target"] = np.floor(
+        target_value.to_numpy(dtype=float)
+        / np.where(one_lot_value.to_numpy(dtype=float) > 0, one_lot_value.to_numpy(dtype=float), np.nan)
+    )
+    frame["lot_fillable"] = (frame["lots_at_target"] >= 1).fillna(False)
+    return frame
+
+
+def _repair_unfillable_targets(
+    optimize,
+    pool: pd.DataFrame,
+    *,
+    constraints,
+    initial_capital: float,
+    lot_size: int,
+    forced_codes=None,
+    forced_min_weight=None,
+    forced_max_weight=None,
+    require_fillable_lot: bool = True,
+    drop_unfillable_forced: bool = True,
+    max_rounds: int | None = None,
+):
+    """Optimize, then drop names whose one lot does not fit their own target.
+
+    A target weight below one lot value is not a position: it cannot be ordered,
+    so it must not be published as one.  Unfillable names are removed from the
+    pool and the book is re-optimized, which hands the freed budget to the
+    remaining names.  Strategy-forced names are dropped only when
+    ``drop_unfillable_forced`` allows it; either way the removal is recorded in
+    the returned lot summary.  Returns ``(frame, manifest, lot_summary)``.
+    """
+    forced_set = {str(code) for code in (forced_codes or [])}
+    dropped_for_lots: list[str] = []
+    dropped_forced_for_lots: list[str] = []
+    repair_rounds = 0
+    optimized = pool
+    manifest: dict = {}
+    # Each round removes exactly one name, so the pool size is the natural bound.
+    # Stopping earlier would leave the last removal without a re-optimization,
+    # which is what left part of the gross budget idle.
+    rounds = max(len(pool), 12) if max_rounds is None else max(int(max_rounds), 1)
+    for _attempt in range(rounds):
+        optimized, manifest = optimize(
+            pool, constraints=constraints, initial_capital=float(initial_capital),
+            forced_codes=forced_codes, forced_min_weight=forced_min_weight,
+            forced_max_weight=forced_max_weight,
+        )
+        optimized = _attach_lot_columns(optimized, capital=initial_capital, lot_size=lot_size)
+        unfillable = optimized[(optimized["target_weight"] > 0) & (~optimized["lot_fillable"])]
+        if unfillable.empty or not bool(require_fillable_lot):
+            break
+        droppable = unfillable[~unfillable["stock_code"].astype(str).isin(forced_set)]
+        candidates = droppable if not droppable.empty else (
+            unfillable if drop_unfillable_forced else unfillable.iloc[0:0]
+        )
+        if candidates.empty:
+            break
+        victim = str(candidates.sort_values("model_score").iloc[0]["stock_code"])
+        dropped_for_lots.append(victim)
+        if victim in forced_set:
+            dropped_forced_for_lots.append(victim)
+        pool = pool[pool["stock_code"].astype(str) != victim].copy()
+        repair_rounds += 1
+    optimized = _attach_lot_columns(optimized, capital=initial_capital, lot_size=lot_size)
+    gross = float(getattr(constraints, "gross_exposure", 0.0) or 0.0)
+    if bool(require_fillable_lot):
+        # Safety net: a name that is still unfillable after the repair rounds is
+        # cleared explicitly (and labelled) instead of staying in the book.
+        leftover = (~optimized["lot_fillable"]) & (optimized["target_weight"] > 0)
+        if not drop_unfillable_forced:
+            # Explicit opt-out: keep the strategy-forced name but report it as a
+            # theoretical position that cannot be ordered at this capital.
+            leftover &= ~optimized["stock_code"].astype(str).isin(forced_set)
+        if bool(leftover.any()):
+            optimized.loc[leftover, "target_weight"] = 0.0
+            optimized.loc[leftover, "trade_weight"] = -optimized.loc[leftover, "current_weight"]
+            optimized.loc[leftover, "constraint_status"] = "excluded_unfillable_lot"
+            remaining = float(optimized["target_weight"].sum())
+            gross_target = min(gross, remaining) if remaining > 0 else 0.0
+            if remaining > 0 and gross_target > 0 and abs(remaining - gross_target) > 1e-9:
+                optimized["target_weight"] = optimized["target_weight"] * (gross_target / remaining)
+                optimized["trade_weight"] = optimized["target_weight"] - optimized["current_weight"]
+            optimized = _attach_lot_columns(optimized, capital=initial_capital, lot_size=lot_size)
+    target_gross = float(optimized["target_weight"].sum())
+    lot_summary = {
+        "lot_size": int(lot_size),
+        "capital": float(initial_capital),
+        "repair_rounds": int(repair_rounds),
+        "dropped_for_lots": dropped_for_lots,
+        "dropped_forced_for_lots": dropped_forced_for_lots,
+        "target_gross": round(target_gross, 6),
+        "idle_gross": round(max(0.0, gross - target_gross), 6),
+        "fillable": int(optimized["lot_fillable"].sum()),
+        "unfillable": int((~optimized["lot_fillable"] & (optimized["target_weight"] > 0)).sum()),
+        "unfillable_codes": optimized.loc[
+            (~optimized["lot_fillable"]) & (optimized["target_weight"] > 0), "stock_code"
+        ].astype(str).tolist(),
+    }
+    return optimized, manifest, lot_summary
+
+
 class MarketDataService:
     """统一协调数据接入与查询。"""
 
@@ -6534,15 +6667,18 @@ class MarketDataService:
             # market.
             override_mask = selected.get("selection_channel", pd.Series("", index=selected.index)).astype(str).eq("signal_override")
             forced_codes = selected.loc[override_mask, "stock_code"].astype(str).tolist()
+            # Read each name's floor/cap from the sleeve it was promoted from.
+            # The previous momentum-or-else branch charged every non-momentum
+            # name the reversal floor, so a bottom-momentum name (own sleeve:
+            # 0.05/0.10) claimed 8% and pushed the total claim from 0.34 to 0.37.
+            sleeve_bounds = _sleeve_weight_bounds(signal_config)
             floors, caps = {}, {}
             for _, row in selected.loc[override_mask].iterrows():
-                sleeve = str(row.get("selection_sleeve") or "")
-                if sleeve == "momentum":
-                    floors[str(row["stock_code"])] = float((signal_config or {}).get("momentum_sleeve", {}).get("min_weight", 0.05) or 0.05)
-                    caps[str(row["stock_code"])] = float((signal_config or {}).get("momentum_sleeve", {}).get("max_weight", 0.10) or 0.10)
-                else:
-                    floors[str(row["stock_code"])] = float((signal_config or {}).get("reversal_sleeve", {}).get("min_weight", 0.08) or 0.08)
-                    caps[str(row["stock_code"])] = float((signal_config or {}).get("reversal_sleeve", {}).get("max_weight", 0.15) or 0.15)
+                sleeve = str(row.get("selection_sleeve") or "setup").strip() or "setup"
+                floor, cap = sleeve_bounds.get(sleeve, sleeve_bounds["setup"])
+                code = str(row["stock_code"])
+                floors[code] = floor
+                caps[code] = cap
             if forced_codes:
                 forced_min_weight, forced_max_weight = floors, caps
                 signal_summary = {"enabled": True, "source": "preselection", "forced_codes": forced_codes}
@@ -6618,65 +6754,26 @@ class MarketDataService:
                     continue
                 configured = constraint_values.get(key)
                 constraint_values[key] = float(budget) if configured is None else min(float(configured), float(budget))
-            cfg = PortfolioConstraints(**constraint_values)
-            lot_size = int((portfolio_constraints or {}).get("lot_size", 100) or 100)
-            pool_for_optimization = selected.copy()
-            dropped_for_lots: list[str] = []
-            lot_repair_rounds = 0
-            for _attempt in range(12):
-                optimized, portfolio_manifest = optimize_long_only(
-                    pool_for_optimization, constraints=cfg, initial_capital=float(initial_capital),
-                    forced_codes=forced_codes, forced_min_weight=forced_min_weight,
-                    forced_max_weight=forced_max_weight,
-                )
-                closes = pd.to_numeric(optimized.get("last_close"), errors="coerce")
-                one_lot = closes * lot_size
-                targets = pd.to_numeric(optimized["target_weight"], errors="coerce") * float(initial_capital)
-                lots = np.floor(targets.to_numpy(dtype=float) / np.where(one_lot.to_numpy(dtype=float) > 0, one_lot.to_numpy(dtype=float), np.nan))
-                unfillable = optimized[(optimized["target_weight"] > 0) & (~(lots >= 1))]
-                if unfillable.empty or not bool((portfolio_constraints or {}).get("require_fillable_lot", True)):
-                    break
-                # drop the weakest unfillable name (never a strategy-forced one) and re-optimize
-                droppable = unfillable[~unfillable["stock_code"].astype(str).isin(set(forced_codes))]
-                if droppable.empty:
-                    break
-                victim = str(droppable.sort_values("model_score").iloc[0]["stock_code"])
-                dropped_for_lots.append(victim)
-                pool_for_optimization = pool_for_optimization[
-                    pool_for_optimization["stock_code"].astype(str) != victim
-                ].copy()
-                lot_repair_rounds += 1
-            selected = optimized
-            if bool((portfolio_constraints or {}).get("require_fillable_lot", True)) and "lot_fillable" in selected.columns:
-                leftover = (~selected["lot_fillable"]) & (selected["target_weight"] > 0)
-                if bool(leftover.any()):
-                    selected.loc[leftover, "target_weight"] = 0.0
-                    selected.loc[leftover, "constraint_status"] = "excluded_unfillable_lot"
-                    remaining = float(selected["target_weight"].sum())
-                    gross_target = min(float(cfg.gross_exposure), remaining) if remaining > 0 else 0.0
-                    if remaining > 0 and gross_target > 0 and abs(remaining - gross_target) > 1e-9:
-                        selected["target_weight"] = selected["target_weight"] * (gross_target / remaining)
-            lot_summary = {
-                "lot_size": lot_size,
-                "repair_rounds": lot_repair_rounds,
-                "dropped_for_lots": dropped_for_lots,
+            # Lot and fillability settings travel in the same TOML table as the
+            # risk limits, but they are execution settings rather than fields of
+            # the constraint dataclass.  Filtering them out keeps the table a
+            # single operator-facing surface instead of forcing a second one.
+            lot_size = int(constraint_values.pop("lot_size", 100) or 100)
+            require_fillable_lot = bool(constraint_values.pop("require_fillable_lot", True))
+            drop_unfillable_forced = bool(constraint_values.pop("drop_unfillable_forced", True))
+            constraint_fields = set(getattr(PortfolioConstraints, "__dataclass_fields__", {}) or {})
+            constraint_values = {
+                key: value for key, value in constraint_values.items() if key in constraint_fields
             }
-            # Report whether each remaining target weight can actually be filled.
-            last_close = pd.to_numeric(selected.get("last_close"), errors="coerce")
-            one_lot_value = last_close * lot_size
-            target_value = pd.to_numeric(selected["target_weight"], errors="coerce") * float(initial_capital)
-            selected["one_lot_value"] = one_lot_value.round(2)
-            selected["lots_at_target"] = np.floor(
-                target_value.to_numpy(dtype=float) / np.where(one_lot_value.to_numpy(dtype=float) > 0, one_lot_value.to_numpy(dtype=float), np.nan)
+            cfg = PortfolioConstraints(**constraint_values)
+            selected, portfolio_manifest, lot_summary = _repair_unfillable_targets(
+                optimize_long_only, selected.copy(), constraints=cfg,
+                initial_capital=float(initial_capital), lot_size=lot_size,
+                forced_codes=forced_codes, forced_min_weight=forced_min_weight,
+                forced_max_weight=forced_max_weight,
+                require_fillable_lot=require_fillable_lot,
+                drop_unfillable_forced=drop_unfillable_forced,
             )
-            selected["lot_fillable"] = (selected["lots_at_target"] >= 1).fillna(False)
-            lot_summary.update({
-                "fillable": int(selected["lot_fillable"].sum()),
-                "unfillable": int((~selected["lot_fillable"] & (selected["target_weight"] > 0)).sum()),
-                "unfillable_codes": selected.loc[
-                    (~selected["lot_fillable"]) & (selected["target_weight"] > 0), "stock_code"
-                ].astype(str).tolist(),
-            })
             if progress is not None:
                 progress.set_postfix_str("portfolio optimized")
                 progress.update(1)

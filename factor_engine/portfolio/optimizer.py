@@ -128,8 +128,12 @@ def optimize_long_only(
     target = _renormalize_capped(target, float(cfg.gross_exposure), float(cfg.max_weight))
     forced_floors = {str(frame["stock_code"].iloc[index]): _forced_value(forced_min_weight, str(frame["stock_code"].iloc[index]), 0.0) for index in forced_index}
     forced_caps = {str(frame["stock_code"].iloc[index]): _forced_value(forced_max_weight, str(frame["stock_code"].iloc[index]), None) for index in forced_index}
+    forced_diagnostics = {
+        "forced_min_weight_effective": {}, "forced_floor_scale": 1.0,
+        "forced_floor_feasible": True, "forced_floor_honoured": True, "forced_floor_gross": 0.0,
+    }
     if forced_index.size and (any(value > 0 for value in forced_floors.values()) or any(value is not None for value in forced_caps.values())):
-        target = _apply_forced_bounds(
+        target, forced_diagnostics = _apply_forced_bounds(
             target, forced_index, active, codes, forced_floors, forced_caps,
             float(cfg.gross_exposure), float(cfg.max_weight),
         )
@@ -147,6 +151,14 @@ def optimize_long_only(
         "forced_codes": sorted(str(frame["stock_code"].iloc[index]) for index in forced_index),
         "forced_min_weight": forced_min_weight if isinstance(forced_min_weight, dict) else float(forced_min_weight or 0.0),
         "forced_max_weight": forced_max_weight if isinstance(forced_max_weight, dict) else forced_max_weight,
+        # Requested floors and realized floors differ whenever the claims do not
+        # fit inside the gross budget; both are published so a report can never
+        # present the requested value as if it had been applied.
+        "forced_min_weight_effective": forced_diagnostics["forced_min_weight_effective"],
+        "forced_floor_scale": forced_diagnostics["forced_floor_scale"],
+        "forced_floor_feasible": forced_diagnostics["forced_floor_feasible"],
+        "forced_floor_honoured": forced_diagnostics["forced_floor_honoured"],
+        "forced_floor_gross": forced_diagnostics["forced_floor_gross"],
         "forced_weighted_count": int(((target > 0) & np.isin(np.arange(len(frame)), forced_index)).sum()),
         "covariance_version": "diagonal-volatility.v1", "cost_version": "costs.v1",
     }
@@ -170,37 +182,92 @@ def _apply_forced_bounds(weights, forced_index, active, codes, floors, caps, gro
     weight budget: the floor keeps a triggered name from being zeroed by a weak
     model percentile, the cap keeps a small sleeve from dominating the book.
     The budget left over after the forced names is reallocated to the rest.
+
+    Declared floors are honoured literally whenever they fit inside the gross
+    budget.  When they do not - five signal names whose floors sum to 0.37
+    against a bear-regime budget of 0.35, for example - every floor is scaled by
+    one common ``gross / sum(floors)`` factor and that factor is returned in the
+    diagnostics, so a book can never silently end up below the floor it claims
+    to guarantee.  Returns ``(weights, diagnostics)``.
     """
     result = weights.copy()
     fixed = np.zeros(len(result), dtype=bool)
+    resolved: list[tuple[int, float, float]] = []
+    requested: dict[str, float] = {}
     for index in np.asarray(forced_index, dtype=int):
         if not bool(active[index]):
             continue
-        fixed[index] = True
         code = str(codes.iloc[index]) if hasattr(codes, "iloc") else str(codes[index])
         floor = float(np.clip(float(floors.get(code, 0.0) or 0.0), 0.0, max_weight))
         cap_value = caps.get(code)
         cap = float(max_weight) if cap_value is None else float(np.clip(float(cap_value), 0.0, max_weight))
         cap = max(cap, floor)
-        result[index] = min(max(float(result[index]), floor), cap)
-    flexible = ~fixed
+        fixed[index] = True
+        resolved.append((int(index), floor, cap))
+        requested[code] = floor
+    requested_gross = float(sum(floor for _, floor, _ in resolved))
+    floor_scale = 1.0
+    if requested_gross > float(gross) > 0:
+        floor_scale = float(gross) / requested_gross
+    floors_at: dict[int, float] = {}
+    for index, floor, cap in resolved:
+        effective_floor = floor * floor_scale
+        floors_at[index] = effective_floor
+        result[index] = min(max(float(result[index]), effective_floor), cap)
+    # Only active, non-forced names may absorb the residual budget: an inactive
+    # name must not be funded merely because a forced name left room.
+    flexible = (~fixed) & np.asarray(active, dtype=bool)
     remaining = max(0.0, float(gross) - float(result[fixed].sum()))
-    if flexible.any() and remaining > 0:
-        current = float(result[flexible].sum())
-        if current > 0:
-            result[flexible] = np.minimum(result[flexible] * (remaining / current), float(max_weight))
+    if remaining > 0:
+        if flexible.any():
+            current = float(result[flexible].sum())
+            if current > 0:
+                result[flexible] = np.minimum(result[flexible] * (remaining / current), float(max_weight))
+            else:
+                result[flexible] = min(remaining / max(int(flexible.sum()), 1), float(max_weight))
         else:
-            result[flexible] = min(remaining / max(int(flexible.sum()), 1), float(max_weight))
+            # Every active name is strategy-forced, so leftover budget would
+            # otherwise stay idle.  Fill it up to each name's own cap.
+            indices = np.array([index for index, _, _ in resolved], dtype=int)
+            headroom = np.clip(
+                np.array([cap - float(result[index]) for index, _, cap in resolved], dtype=float), 0.0, None,
+            )
+            if indices.size and float(headroom.sum()) > 0:
+                result[indices] += headroom * (min(remaining, float(headroom.sum())) / float(headroom.sum()))
     total = float(result.sum())
     if total > gross and total > 0:
+        # Shed the flexible names first, then only the excess a fixed name holds
+        # above its own floor.  Uniformly rescaling the whole book is what used
+        # to break the floors silently.
         overflow = total - float(gross)
-        flexible_total = float(result[flexible].sum())
+        flexible_total = float(result[flexible].sum()) if flexible.any() else 0.0
         if flexible_total > 0:
             result[flexible] = result[flexible] * max(0.0, (flexible_total - overflow) / flexible_total)
         total = float(result.sum())
+        if total > float(gross) and resolved:
+            indices = np.array([index for index, _, _ in resolved], dtype=int)
+            floor_vector = np.array([floors_at[int(index)] for index in indices], dtype=float)
+            excess = np.clip(result[indices] - floor_vector, 0.0, None)
+            excess_total = float(excess.sum())
+            if excess_total > 0:
+                keep = max(0.0, excess_total - (total - float(gross)))
+                result[indices] = floor_vector + excess * (keep / excess_total)
+            total = float(result.sum())
         if total > gross and total > 0:
+            # Unreachable while the floor scaling above fits the budget; kept as
+            # a last-resort feasibility guard and reported via the diagnostics.
             result = result * (float(gross) / total)
-    return result
+    honoured = all(float(result[index]) >= floors_at[index] - 1e-9 for index in floors_at)
+    diagnostics = {
+        "forced_min_weight_effective": {
+            code: round(float(floor) * float(floor_scale), 10) for code, floor in requested.items()
+        },
+        "forced_floor_scale": round(float(floor_scale), 10),
+        "forced_floor_feasible": bool(floor_scale >= 1.0 - 1e-12),
+        "forced_floor_honoured": bool(honoured),
+        "forced_floor_gross": round(float(sum(floors_at.values())), 10),
+    }
+    return result, diagnostics
 
 
 def _apply_industry_caps(frame: pd.DataFrame, weights: np.ndarray, cap: float) -> np.ndarray:

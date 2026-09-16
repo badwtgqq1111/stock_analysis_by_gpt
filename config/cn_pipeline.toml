@@ -351,6 +351,13 @@ max_participation = 0.05
 risk_aversion = 2.0
 turnover_penalty = 0.10
 cost_penalty = 0.10
+# 可执行性约束：目标权重必须买得起整手（last_close * lot_size <= weight * capital）。
+# require_fillable_lot = false 时允许保留理论仓位（不推荐，账户下不了单）；
+# drop_unfillable_forced 控制策略强制信号买不起一手时是否一并剔除，
+# 剔除结果记录在 lot_summary.dropped_forced_for_lots。
+require_fillable_lot = true
+lot_size = 100
+drop_unfillable_forced = true
 
 [exits]
 # 持仓卖出规则：风险型（ST/流动性/停牌/模型排名下限）+ 兑现型（贴上沿/20日大涨减仓）

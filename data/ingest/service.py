@@ -7,6 +7,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolE
 from contextlib import contextmanager
 from datetime import datetime
 import json
+from dataclasses import replace
 import os
 import math
 from pathlib import Path
@@ -85,6 +86,8 @@ from factor_engine.ml.paper_trading import evaluate_selection_outcomes, write_ou
 from factor_engine.ml.graph_temporal import build_industry_adjacency, train_graph_temporal_panel
 from factor_engine.ml.walk_forward import compare_walk_forward_predictions, write_walk_forward_report
 from factor_engine.ml.oos_predictions import generate_cnn_oos_predictions, generate_graph_temporal_oos_predictions, generate_lightgbm_oos_predictions, generate_transformer_oos_predictions
+from factor_engine.expressions.volume_volatility import compute_turnover_features, compute_volatility_features
+from factor_engine.expressions.volume_volatility import compute_volatility_features
 from factor_engine.portfolio.optimizer import PortfolioConstraints, optimize_long_only
 from factor_engine.portfolio.paper_account import persist_paper_account, run_paper_account
 from factor_engine.ml.alternative_data import normalize_cn_alternative_evidence, write_alternative_data_report
@@ -551,6 +554,13 @@ def _repair_unfillable_targets(
     remaining names.  Strategy-forced names are dropped only when
     ``drop_unfillable_forced`` allows it; either way the removal is recorded in
     the returned lot summary.  Returns ``(frame, manifest, lot_summary)``.
+
+    Before anything is dropped, an unfillable name whose own cap can host one lot
+    is *lifted* to its minimum executable weight and funded by shrinking the
+    other positions.  Without that step the highest-scoring names - usually the
+    expensive ones - were removed purely because inverse-volatility weighting
+    gave them a small weight (2026-09-16: the model's rank-1 name was dropped
+    this way in the rich profile).
     """
     forced_set = {str(code) for code in (forced_codes or [])}
     dropped_for_lots: list[str] = []
@@ -561,7 +571,55 @@ def _repair_unfillable_targets(
     # Each round removes exactly one name, so the pool size is the natural bound.
     # Stopping earlier would leave the last removal without a re-optimization,
     # which is what left part of the gross budget idle.
+    default_cap = float(getattr(constraints, "max_weight", 1.0) or 1.0)
+
+    def _cap_for(code: str) -> float:
+        if isinstance(forced_max_weight, dict):
+            value = forced_max_weight.get(str(code))
+            return default_cap if value is None else min(float(value), default_cap)
+        if forced_max_weight is None:
+            return default_cap
+        return min(float(forced_max_weight), default_cap)
+
     rounds = max(len(pool), 12) if max_rounds is None else max(int(max_rounds), 1)
+    lifted_for_lots: list[str] = []
+
+    def _lift(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+        """Raise unfillable positions to one-lot size, funded by the rest."""
+        if not require_fillable_lot or frame.empty or float(initial_capital) <= 0:
+            return frame, []
+        weights = pd.to_numeric(frame["target_weight"], errors="coerce").fillna(0.0).to_numpy(dtype=float, copy=True)
+        one_lot = pd.to_numeric(frame["one_lot_value"], errors="coerce").to_numpy(dtype=float, copy=True)
+        codes = frame["stock_code"].astype(str).to_numpy(copy=True)
+        scores = pd.to_numeric(frame.get("model_score"), errors="coerce").fillna(-np.inf).to_numpy(dtype=float)
+        gross = float(getattr(constraints, "gross_exposure", 0.0) or 0.0)
+        raised: list[str] = []
+        for index in np.argsort(-scores):
+            if not (weights[index] > 0 and np.isfinite(one_lot[index]) and one_lot[index] > 0):
+                continue
+            if weights[index] * float(initial_capital) >= one_lot[index]:
+                continue                                  # already fillable
+            minimum = float(one_lot[index]) / float(initial_capital)
+            if minimum > _cap_for(codes[index]) + 1e-12:
+                continue                                  # one lot never fits this name
+            deficit = minimum - weights[index]
+            others = np.flatnonzero((weights > 0) & (np.arange(len(weights)) != index))
+            available = float(weights[others].sum()) if others.size else 0.0
+            # Lifting redistributes inside the book, so the gross budget is
+            # unchanged; what matters is whether the other positions can fund it.
+            if available <= 0 or available < deficit - 1e-12:
+                continue
+            weights[others] -= deficit * (weights[others] / available)
+            weights[index] = minimum
+            raised.append(str(codes[index]))
+        if not raised:
+            return frame, []
+        frame = frame.copy()
+        frame["target_weight"] = weights
+        frame["trade_weight"] = frame["target_weight"] - frame["current_weight"]
+        frame = _attach_lot_columns(frame, capital=initial_capital, lot_size=lot_size)
+        return frame, raised
+
     for _attempt in range(rounds):
         optimized, manifest = optimize(
             pool, constraints=constraints, initial_capital=float(initial_capital),
@@ -572,6 +630,15 @@ def _repair_unfillable_targets(
         unfillable = optimized[(optimized["target_weight"] > 0) & (~optimized["lot_fillable"])]
         if unfillable.empty or not bool(require_fillable_lot):
             break
+        # Try to keep the name by sizing it up to one lot before dropping it.
+        optimized, raised = _lift(optimized)
+        if raised:
+            for code in raised:
+                if code not in lifted_for_lots:
+                    lifted_for_lots.append(code)
+            unfillable = optimized[(optimized["target_weight"] > 0) & (~optimized["lot_fillable"])]
+            if unfillable.empty:
+                continue
         droppable = unfillable[~unfillable["stock_code"].astype(str).isin(forced_set)]
         candidates = droppable if not droppable.empty else (
             unfillable if drop_unfillable_forced else unfillable.iloc[0:0]
@@ -604,6 +671,22 @@ def _repair_unfillable_targets(
                 optimized["target_weight"] = optimized["target_weight"] * (gross_target / remaining)
                 optimized["trade_weight"] = optimized["target_weight"] - optimized["current_weight"]
             optimized = _attach_lot_columns(optimized, capital=initial_capital, lot_size=lot_size)
+        # Removing unfillable names frees budget that must go back to work:
+        # without this the book silently ran under-invested (2 names, 0.23 gross
+        # on the 2026-09-15 replay).  Scale the survivors up to the gross budget,
+        # bounded by each name's own cap; scaling up can never make a name
+        # unfillable, so lot status stays valid.
+        live = optimized["target_weight"] > 0
+        if bool(live.any()) and gross > 0:
+            invested = float(optimized.loc[live, "target_weight"].sum())
+            if invested > 0 and invested < gross - 1e-9:
+                caps = optimized.loc[live, "stock_code"].astype(str).map(_cap_for)
+                headroom_scale = float((caps / optimized.loc[live, "target_weight"]).min())
+                scale = min(gross / invested, max(headroom_scale, 1.0))
+                if scale > 1.0 + 1e-12:
+                    optimized.loc[live, "target_weight"] = optimized.loc[live, "target_weight"] * scale
+                    optimized["trade_weight"] = optimized["target_weight"] - optimized["current_weight"]
+                    optimized = _attach_lot_columns(optimized, capital=initial_capital, lot_size=lot_size)
     target_gross = float(optimized["target_weight"].sum())
     lot_summary = {
         "lot_size": int(lot_size),
@@ -611,6 +694,7 @@ def _repair_unfillable_targets(
         "repair_rounds": int(repair_rounds),
         "dropped_for_lots": dropped_for_lots,
         "dropped_forced_for_lots": dropped_forced_for_lots,
+        "lifted_for_lots": lifted_for_lots,
         "target_gross": round(target_gross, 6),
         "idle_gross": round(max(0.0, gross - target_gross), 6),
         "fillable": int(optimized["lot_fillable"].sum()),
@@ -5799,7 +5883,7 @@ class MarketDataService:
         bars = self.warehouse.read_ohlcv(
             market="CN", asset_type="equity", frequency="daily", adjust="qfq",
             start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
-            columns=["stock_code", "trade_date", "close"],
+            columns=["stock_code", "trade_date", "close", "turnover"],
         )
         regime = build_market_regime(
             bars,
@@ -6483,6 +6567,50 @@ class MarketDataService:
             "results": results,
         }
 
+
+    def _market_reference_stats(self, selection_date, *, lookback_days: int = 110):
+        """Market-wide speculation state and volatility percentiles.
+
+        Used by both the preselect regime gate (market turnover Z) and the PK
+        sizing maths (cross-sectional volatility percentile).  Reads only bars up
+        to the decision date.
+        """
+        result = {"market_tr_z": None, "vol_cs_percentile": None}
+        try:
+            start = pd.to_datetime(selection_date).normalize() - pd.Timedelta(days=int(lookback_days))
+            bars = self.warehouse.read_ohlcv(
+                market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+                start_date=start.strftime("%Y-%m-%d"), end_date=pd.to_datetime(selection_date).strftime("%Y-%m-%d"),
+                columns=["stock_code", "trade_date", "close", "turnover"],
+            )
+            if bars is None or bars.empty:
+                return result
+            bars = bars.copy()
+            bars["trade_date"] = pd.to_datetime(bars["trade_date"], errors="coerce")
+            bars = bars.sort_values(["stock_code", "trade_date"])
+            rows = []
+            for code, group in bars.groupby("stock_code", sort=False):
+                closes = pd.to_numeric(group["close"], errors="coerce")
+                turnover = pd.to_numeric(group["turnover"], errors="coerce")
+                volatility = closes.pct_change().rolling(20, min_periods=10).std() * np.sqrt(252.0)
+                mean20 = turnover.rolling(20, min_periods=10).mean()
+                std20 = turnover.rolling(20, min_periods=10).std()
+                turnover_z = (turnover - mean20) / std20.replace(0.0, np.nan)
+                rows.append({"stock_code": str(code),
+                             "market_vol": float(volatility.iloc[-1]) if len(volatility) else np.nan,
+                             "market_tr_z": float(turnover_z.iloc[-1]) if len(turnover_z) else np.nan})
+            reference = pd.DataFrame(rows)
+            if reference.empty:
+                return result
+            volatile = reference.dropna(subset=["market_vol"])
+            if not volatile.empty:
+                result["vol_cs_percentile"] = volatile.set_index("stock_code")["market_vol"].rank(pct=True)
+            if reference["market_tr_z"].notna().any():
+                result["market_tr_z"] = float(reference["market_tr_z"].median())
+        except Exception:
+            return result
+        return result
+
     def select_persisted_model_scores(
         self,
         *,
@@ -6501,6 +6629,7 @@ class MarketDataService:
         show_progress=False,
         preselection_only=False,
         candidate_path=None,
+        as_of_date=None,
     ):
         """Select from saved model predictions without rebuilding factors or retraining.
 
@@ -6510,8 +6639,16 @@ class MarketDataService:
         date, and the strongest volume-confirmed hits are forced into the
         candidate pool with a minimum weight.  Disabled or empty configuration
         reproduces the pure model Top-N behavior exactly.
+
+        ``as_of_date`` replays a historical decision date: the model cross
+        section, the regime row, the affordability window and the risk window are
+        all taken as of that date (nothing after it is read), the rebalance
+        stride carry-forward is bypassed, and the caller decides where the
+        resulting files are written.
         """
         from factor_engine.ml.model_training import select_top_model_scores
+
+        as_of = pd.to_datetime(as_of_date).normalize() if as_of_date is not None else None
 
         source = Path(model_scores_dir)
         frames = {}
@@ -6523,13 +6660,17 @@ class MarketDataService:
         if progress is not None:
             progress.set_postfix_str(f"score_files={len(frames)}")
             progress.update(1)
-        score_dates = [pd.to_datetime(f["trade_date"]).max() for f in frames.values() if not f.empty]
-        selection_date = min(score_dates).normalize() if score_dates else None
+        if as_of is not None:
+            selection_date = as_of
+        else:
+            score_dates = [pd.to_datetime(f["trade_date"]).max() for f in frames.values() if not f.empty]
+            selection_date = min(score_dates).normalize() if score_dates else None
         destination = Path(output_dir)
         selection_path = destination / (f"cn_{str(model).lower()}_preselected.csv" if preselection_only else f"cn_{str(model).lower()}_selected.csv")
         state_path = destination / f"cn_{str(model).lower()}_rebalance_state.json"
         stride = max(1, int(rebalance_stride_days or 1))
-        if stride > 1 and not force_rebalance and selection_date is not None and state_path.is_file() and selection_path.is_file():
+        if (as_of is None and stride > 1 and not force_rebalance
+                and selection_date is not None and state_path.is_file() and selection_path.is_file()):
             try:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
                 last_date = pd.Timestamp(state.get("trade_date")).normalize()
@@ -6553,13 +6694,45 @@ class MarketDataService:
                 }
 
         affordability_summary = None
+        affordable_max_price = None
         affordability_config = dict(affordability or {})
         if affordability_config.get("enabled") and frames:
             lot_size = int(affordability_config.get("lot_size", 100) or 100)
             equity = float(affordability_config.get("equity") or initial_capital)
             budget_ratio = float(affordability_config.get("budget_ratio", 0.15) or 0.15)
             tolerance = float(affordability_config.get("tolerance", 1.0) or 1.0)
-            max_price = equity * budget_ratio * tolerance / max(lot_size, 1)
+            requested_price = affordability_config.get("max_price")
+            if isinstance(requested_price, str) and requested_price.strip().lower() == "auto":
+                # One position slot must be able to buy a whole lot: the binding
+                # budget is the regime gross exposure split across the slots.
+                gross = float((portfolio_constraints or {}).get("gross_exposure") or 0.0) or 1.0
+                holdings = (
+                    int((portfolio_constraints or {}).get("max_holdings") or 0)
+                    or int(affordability_config.get("slots", 0) or 0)
+                    or 6
+                )
+                regime_path = Path("output/regime/cn_market_regime.csv")
+                if regime_path.is_file():
+                    try:
+                        regime_frame = pd.read_csv(regime_path)
+                        if as_of is not None:
+                            regime_frame = regime_frame[
+                                pd.to_datetime(regime_frame["trade_date"]).dt.normalize() <= as_of
+                            ]
+                        if not regime_frame.empty and "gross_exposure_budget" in regime_frame.columns:
+                            budget = regime_frame.sort_values("trade_date").iloc[-1]["gross_exposure_budget"]
+                            if pd.notna(budget):
+                                gross = min(gross, float(budget))
+                    except (ValueError, OSError, KeyError):
+                        pass
+                max_price = equity * gross * tolerance / holdings / max(lot_size, 1)
+                affordability_summary_note = f"auto(gross={gross:.3f}, slots={holdings})"
+            elif requested_price is not None and float(requested_price) > 0:
+                max_price = float(requested_price) * tolerance
+                affordability_summary_note = "explicit"
+            else:
+                max_price = equity * budget_ratio * tolerance / max(lot_size, 1)
+                affordability_summary_note = "budget_ratio"
             universe = sorted({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)})
             end_ts = selection_date or pd.Timestamp.utcnow().tz_localize(None).normalize()
             recent = self.warehouse.read_ohlcv(
@@ -6585,9 +6758,11 @@ class MarketDataService:
             affordability_summary = {
                 "equity": equity, "lot_size": lot_size, "budget_ratio": budget_ratio,
                 "max_price": round(float(max_price), 2),
+                "max_price_source": affordability_summary_note,
                 "universe": before, "affordable": int(len(affordable)),
                 "dropped": int(before - len(affordable) if affordable else before),
             }
+            affordable_max_price = float(max_price)
             if progress is not None:
                 progress.set_postfix_str(
                     f"affordability max_price={max_price:.1f} kept={len(affordable)}/{before}"
@@ -6596,11 +6771,20 @@ class MarketDataService:
         regime_version = None
         regime_trade_date = None
         model_weights = None
+        latest: dict = {}
         regime_path = Path("output/regime/cn_market_regime.csv")
         if regime_path.is_file():
             try:
                 regime_frame = pd.read_csv(regime_path)
                 if not regime_frame.empty:
+                    if as_of is not None:
+                        # Replay must not read a regime row published after the
+                        # decision date; otherwise the backtest sees the future.
+                        regime_frame = regime_frame[
+                            pd.to_datetime(regime_frame["trade_date"]).dt.normalize() <= as_of
+                        ]
+                    if regime_frame.empty:
+                        raise ValueError(f"no regime row on or before {selection_date}")
                     latest = regime_frame.sort_values("trade_date").iloc[-1]
                     regime = str(latest.get("regime", "unknown"))
                     regime_version = latest.get("regime_version")
@@ -6652,6 +6836,7 @@ class MarketDataService:
                           "regime_model_weights": json.dumps(regime_model_weights, ensure_ascii=False),
                           "strategy_id": regime_strategy_id,
                           "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
+                as_of_date=as_of,
             )
         if progress is not None:
             progress.set_postfix_str(f"candidates={len(selected):,} model={model}")
@@ -6680,14 +6865,87 @@ class MarketDataService:
                 floors[code] = floor
                 caps[code] = cap
             if forced_codes:
+                # Sleeve floors may not consume the whole gross budget: on
+                # 2026-09-15 five floors claimed 0.37 against a 0.35 budget and
+                # the model block was priced out of the book entirely.  Keep a
+                # model reserve and drop the weakest floor (by signal score)
+                # until the claim fits; dropped names stay in the pool as plain
+                # candidates.
+                budget_gross = float((portfolio_constraints or {}).get("gross_exposure") or 0.0)
+                regime_gross = regime_budget.get("gross_exposure")
+                if regime_gross is not None:
+                    regime_gross = float(regime_gross)
+                    budget_gross = min(budget_gross, regime_gross) if budget_gross > 0 else regime_gross
+                model_min_share = float((portfolio_constraints or {}).get("model_min_share", 0.0) or 0.0)
+                sleeve_slots_max = (portfolio_constraints or {}).get("sleeve_slots_max")
+                floor_budget = max(0.0, budget_gross * (1.0 - model_min_share)) if budget_gross > 0 else None
+                dropped_for_budget: list[str] = []
+                if sleeve_slots_max is not None and floors and int(sleeve_slots_max) > 0:
+                    # A small account cannot fund a satellite per sleeve: keep the
+                    # highest-scoring forced names only (2026-09-15 profile=small
+                    # collapsed to 1.4 names when every sleeve claimed a slot).
+                    override_rows = selected.loc[override_mask]
+                    signal_scores = dict(zip(
+                        override_rows["stock_code"].astype(str),
+                        pd.to_numeric(override_rows.get("signal_score"), errors="coerce"),
+                    ))
+                    keep = sorted(
+                        floors,
+                        key=lambda code: float(signal_scores.get(code)) if pd.notna(signal_scores.get(code)) else -np.inf,
+                        reverse=True,
+                    )[: int(sleeve_slots_max)]
+                    for code in [code for code in floors if code not in set(keep)]:
+                        floors.pop(code, None)
+                        caps.pop(code, None)
+                        dropped_for_budget.append(code)
+                if floor_budget is not None and floors:
+                    override_rows = selected.loc[override_mask]
+                    signal_scores = dict(zip(
+                        override_rows["stock_code"].astype(str),
+                        pd.to_numeric(override_rows.get("signal_score"), errors="coerce"),
+                    ))
+                    weakest_first = sorted(
+                        floors,
+                        key=lambda code: float(signal_scores.get(code)) if pd.notna(signal_scores.get(code)) else -np.inf,
+                    )
+                    for code in weakest_first:
+                        if float(sum(floors.values())) <= floor_budget + 1e-12:
+                            break
+                        floors.pop(code, None)
+                        caps.pop(code, None)
+                        dropped_for_budget.append(code)
+                    if not floors and floor_budget > 1e-9 and weakest_first:
+                        # A single satellite floor (0.08) can exceed a tight model
+                        # reserve (0.35*0.2 = 0.07).  Rather than silently deleting
+                        # the whole sleeve layer, keep the best name at the budget
+                        # size it can actually be funded with.
+                        best = weakest_first[-1]
+                        floors[best] = round(min(0.08, floor_budget), 6)
+                        caps[best] = float(caps.get(best) or 0.20)
+                    forced_codes = [code for code in forced_codes if code in floors]
                 forced_min_weight, forced_max_weight = floors, caps
-                signal_summary = {"enabled": True, "source": "preselection", "forced_codes": forced_codes}
+                signal_summary = {
+                    "enabled": True, "source": "preselection", "forced_codes": forced_codes,
+                    "forced_floor_budget": None if floor_budget is None else round(float(floor_budget), 6),
+                    "model_min_share": model_min_share,
+                    "forced_floor_gross": round(float(sum(floors.values())), 6),
+                    "dropped_for_budget": dropped_for_budget,
+                }
         if signal_config and bool(signal_config.get("enabled", False)) and not candidate_path:
             ranked_all = select_top_model_scores(
                 frames, model=model, top_n=1_000_000_000, model_weights=applied_model_weights,
+                as_of_date=as_of,
             )
             selected, signal_summary = self._apply_price_setup_signals(
                 selected, ranked_all, signal_config=dict(signal_config), model=model,
+                max_price=affordable_max_price,
+                market_context={
+                    "regime": regime,
+                    "median_return_20d": latest.get("median_return_20d"),
+                    "breadth_above_ma20": latest.get("breadth_above_ma20"),
+                    "market_trend_20d": latest.get("median_return_20d"),
+                    "market_turnover_z": self._market_reference_stats(selection_date).get("market_tr_z"),
+                },
             )
             forced_codes = list(signal_summary.get("forced_codes") or [])
             # Per-sleeve bounds: each forced name carries the floor/cap of the
@@ -6717,19 +6975,19 @@ class MarketDataService:
             info = self.warehouse.read_stock_info(stock_codes=selected["stock_code"].astype(str).tolist(), market="CN")
             if not info.empty:
                 selected = selected.merge(
-                    info.reindex(columns=[column for column in ("stock_code", "industry_l1", "market_cap", "daily_turnover", "tradable_flag") if column in info.columns]),
+                    info.reindex(columns=[column for column in ("stock_code", "industry_l1", "industry_l2", "market_cap", "daily_turnover", "tradable_flag") if column in info.columns]),
                     on="stock_code", how="left",
                 )
             # Attach point-in-time risk/liquidity estimates for sizing.  The
             # selection date is the last fully materialized model date, so the
             # window below never uses prices after the decision.
             selection_date = pd.to_datetime(selected["trade_date"].iloc[0]).normalize()
-            risk_start = selection_date - pd.Timedelta(days=45)
+            risk_start = selection_date - pd.Timedelta(days=140)
             risk_bars = self.warehouse.read_ohlcv(
                 market="CN", asset_type="equity", frequency="daily", adjust="qfq",
                 stock_code=selected["stock_code"].astype(str).tolist(),
                 start_date=risk_start.strftime("%Y-%m-%d"), end_date=selection_date.strftime("%Y-%m-%d"),
-                columns=["stock_code", "trade_date", "close", "amount"],
+                columns=["stock_code", "trade_date", "open", "high", "low", "close", "amount", "turnover"],
             )
             if not risk_bars.empty:
                 risk_bars["trade_date"] = pd.to_datetime(risk_bars["trade_date"], errors="coerce")
@@ -6743,11 +7001,203 @@ class MarketDataService:
                     last_close=("close", "last"),
                 )
                 selected = selected.merge(risk_snapshot, on="stock_code", how="left")
+                # Risk-control inputs: multi-method volatility, downside vol,
+                # drawdown and reward/risk, computed on the same point-in-time
+                # window as the sizing snapshot.
+                risk_extra = []
+                for code, group in risk_bars.groupby("stock_code", sort=False):
+                    indexed = group.set_index("trade_date")
+                    features = compute_volatility_features(indexed)
+                    if features.empty:
+                        continue
+                    turnover_features = compute_turnover_features(indexed)
+                    last = features.iloc[-1]
+                    last_turnover = turnover_features.iloc[-1] if not turnover_features.empty else None
+                    risk_extra.append({
+                        "stock_code": str(code),
+                        "vol_downside_20": last.get("vol_downside_20"),
+                        "vol_cc_60": last.get("vol_cc_60"),
+                        "vol_gap_20": last.get("vol_gap_20"),
+                        "vol_max_drawdown_60": last.get("vol_max_drawdown_60"),
+                        "payoff_reward_risk_20": last.get("payoff_reward_risk_20"),
+                        "payoff_updown_mean_ratio_20": last.get("payoff_updown_mean_ratio_20"),
+                        "tr_true": None if last_turnover is None else last_turnover.get("tr_true"),
+                        "tr_zscore_20": None if last_turnover is None else last_turnover.get("tr_zscore_20"),
+                        "tr_volatility_20": None if last_turnover is None else last_turnover.get("tr_volatility_20"),
+                        "tr_percentile_252": None if last_turnover is None else last_turnover.get("tr_percentile_252"),
+                    })
+                if risk_extra:
+                    selected = selected.merge(pd.DataFrame(risk_extra), on="stock_code", how="left")
+                # Market reference statistics for the risk scalers: the cross-sectional
+                # volatility percentile (our bucket study is market-relative) and the
+                # market turnover-Z median (speculation state).
+                market_stats = self._market_reference_stats(selection_date)
+                if market_stats.get("vol_cs_percentile") is not None:
+                    percentile = market_stats["vol_cs_percentile"]
+                    selected = selected.merge(
+                        percentile.rename("vol_cs_percentile").reset_index().rename(columns={"index": "stock_code"}),
+                        on="stock_code", how="left")
+                if market_stats.get("market_tr_z") is not None:
+                    selected["market_tr_z"] = float(market_stats["market_tr_z"])
+                try:
+                    market_start = selection_date - pd.Timedelta(days=110)
+                    market_bars = None if True else self.warehouse.read_ohlcv(
+                        market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+                        start_date=market_start.strftime("%Y-%m-%d"),
+                        end_date=selection_date.strftime("%Y-%m-%d"),
+                        columns=["stock_code", "trade_date", "close", "turnover"],
+                    )
+                    if market_bars is not None and not market_bars.empty:
+                        market_bars = market_bars.copy()
+                        market_bars["trade_date"] = pd.to_datetime(market_bars["trade_date"], errors="coerce")
+                        market_bars = market_bars.sort_values(["stock_code", "trade_date"])
+                        reference = []
+                        for code, group in market_bars.groupby("stock_code", sort=False):
+                            closes = pd.to_numeric(group["close"], errors="coerce")
+                            turnover = pd.to_numeric(group["turnover"], errors="coerce")
+                            volatility = closes.pct_change().rolling(20, min_periods=10).std() * np.sqrt(252.0)
+                            mean20 = turnover.rolling(20, min_periods=10).mean()
+                            std20 = turnover.rolling(20, min_periods=10).std()
+                            turnover_z = (turnover - mean20) / std20.replace(0.0, np.nan)
+                            reference.append({"stock_code": str(code),
+                                              "market_vol": float(volatility.iloc[-1]) if len(volatility) else np.nan,
+                                              "market_tr_z": float(turnover_z.iloc[-1]) if len(turnover_z) else np.nan})
+                        reference = pd.DataFrame(reference)
+                        if not reference.empty:
+                            pooled = reference.dropna(subset=["market_vol"])
+                            if not pooled.empty:
+                                percentile_map = pooled["market_vol"].rank(pct=True)
+                                reference["vol_cs_percentile"] = percentile_map
+                            market_state = float(reference["market_tr_z"].median()) if reference["market_tr_z"].notna().any() else np.nan
+                            selected = selected.merge(
+                                reference[["stock_code", "vol_cs_percentile"]], on="stock_code", how="left")
+                            selected["market_tr_z"] = market_state
+                except Exception:
+                    pass
+                # Shrinkage covariance for the sizing maths: correlation matters when
+                # the book holds a handful of names, and the diagonal model cannot
+                # see it.  Ledoit-Wolf style intensity on the daily-return matrix.
+                shrinkage_covariance = None
+                try:
+                    price_wide = risk_bars.pivot_table(index="trade_date", columns="stock_code",
+                                                       values="close", aggfunc="last").sort_index()
+                    price_wide = price_wide.reindex(columns=[c for c in price_wide.columns
+                                                             if str(c) in set(selected["stock_code"].astype(str))])
+                    returns = np.log(price_wide).diff().dropna(how="all")
+                    returns = returns.loc[:, returns.notna().sum() >= max(20, int(0.6 * len(returns)))]
+                    codes_order = [str(code) for code in returns.columns]
+                    if returns.shape[1] >= 2 and len(returns) >= 20:
+                        sample = returns.cov().to_numpy(dtype=float) * 252.0
+                        diagonal = np.diag(np.diag(sample))
+                        # read from the raw constraints dict: this block runs before
+                        # `constraint_values` is built later in the function
+                        covariance_model = str((portfolio_constraints or {}).get("covariance_model", "shrinkage")).lower()
+                        factor_count = int((portfolio_constraints or {}).get("factor_count", 3) or 3)
+                        explained = None
+                        industry_block_applied = None
+                        industry_column_used = None
+                        if covariance_model == "factor" and sample.shape[0] >= 3:
+                            # Statistical factor model: PCA on standardised returns, so the
+                            # systematic part is captured by K factors and the remainder is
+                            # idiosyncratic.  This is what keeps the matrix usable when the
+                            # book holds many names relative to the observation window.
+                            std = np.sqrt(np.clip(np.diag(sample), 1e-12, None))
+                            correlation = sample / np.outer(std, std)
+                            eigenvalues, eigenvectors = np.linalg.eigh(correlation)
+                            order = np.argsort(eigenvalues)[::-1]
+                            eigenvalues, eigenvectors = eigenvalues[order], eigenvectors[:, order]
+                            k = int(np.clip(factor_count, 1, max(1, sample.shape[0] - 1)))
+                            loadings = eigenvectors[:, :k] * np.sqrt(np.clip(eigenvalues[:k], 0.0, None))
+                            specific = np.clip(1.0 - np.sum(loadings ** 2, axis=1), 0.05, None)
+                            factor_correlation = loadings @ loadings.T + np.diag(specific)
+                            # Industry-block shrinkage: pure statistical factors can leave
+                            # same-industry names looking independent.  Pull the correlation
+                            # matrix towards a block structure where names in the same
+                            # industry share the average intra-industry correlation and
+                            # cross-industry pairs keep their estimated value.
+                            # Same l1/l2 handling as the industry cap: some providers put the
+                            # taxonomy label in l1 and the sector name in l2, so prefer the
+                            # informative column and skip when it is constant.
+                            industry_map = {}
+                            industry_column_used = None
+                            industry_note = {
+                                "columns": [c for c in selected.columns if "industry" in c],
+                                "non_empty": {c: int(selected[c].fillna("").astype(str)
+                                                     .replace({"": "", "nan": "", "None": "", "证监会行业分类": ""})
+                                                     .ne("").sum())
+                                              for c in selected.columns if "industry" in c},
+                            }
+                            for candidate in ("industry_l2", "industry_l2_y", "industry_l1", "industry_l1_y"):
+                                if candidate not in selected.columns:
+                                    continue
+                                values = selected[candidate].fillna("").astype(str).replace(
+                                    {"": "", "nan": "", "None": "", "证监会行业分类": ""})
+                                if values[values != ""].nunique() > 1:
+                                    industry_map = dict(zip(selected["stock_code"].astype(str), values))
+                                    industry_column_used = candidate
+                                    break
+                            if industry_map:
+                                labels = [industry_map.get(str(code), "") for code in codes_order]
+                                intra_pairs = [(i, j) for i in range(len(labels)) for j in range(i + 1, len(labels))
+                                               if labels[i] and labels[i] == labels[j]]
+                                if intra_pairs:
+                                    intra_mean = float(np.mean([factor_correlation[i, j] for i, j in intra_pairs]))
+                                    block = factor_correlation.copy()
+                                    for i in range(len(labels)):
+                                        for j in range(len(labels)):
+                                            if i == j:
+                                                continue
+                                            if labels[i] and labels[i] == labels[j]:
+                                                block[i, j] = intra_mean
+                                            else:
+                                                block[i, j] = min(block[i, j], 0.0)
+                                    blend_block = float((portfolio_constraints or {}).get("industry_block_blend", 0.35) or 0.0)
+                                    industry_block_applied = {"pairs": len(intra_pairs), "intra_mean": round(intra_mean, 4),
+                                                              "blend": blend_block, "column": industry_column_used}
+                                    factor_correlation = (1.0 - blend_block) * factor_correlation + blend_block * block
+                            shrunk = factor_correlation * np.outer(std, std)
+                            explained = float(np.sum(eigenvalues[:k]) / max(np.sum(eigenvalues), 1e-12))
+                            intensity = 0.0
+                        else:
+                            off_diagonal = sample - diagonal
+                            denom = float(np.nansum(off_diagonal ** 2))
+                            intensity = 0.5 if denom <= 0 else float(np.clip(0.35, 0.0, 1.0))
+                            shrunk = (1.0 - intensity) * sample + intensity * diagonal
+                        base = float(np.nanmean(np.diag(shrunk)))
+                        shrink_to_average = 0.1      # pull towards a common variance level
+                        shrunk = (1.0 - shrink_to_average) * shrunk + shrink_to_average * np.eye(shrunk.shape[0]) * base
+                        shrinkage_covariance = {"codes": codes_order, "matrix": shrunk.tolist(),
+                                                "intensity": round(float(intensity), 4),
+                                                "model": covariance_model,
+                                                "industry_block": industry_block_applied,
+                                                "industry_columns": [c for c in selected.columns if "industry" in c],
+                                                "industry_note": industry_note,
+                                                "explained_variance": None if explained is None else round(explained, 4),
+                                                "assets": int(shrunk.shape[0]),
+                                                "obs": int(len(returns))}
+                except Exception as exc:      # never block sizing on a covariance failure
+                    shrinkage_covariance = None
+                    import traceback as _traceback
+                    _covariance_error = f"{type(exc).__name__}: {exc}\n{_traceback.format_exc()}"
+                    if progress is not None:
+                        progress.set_postfix_str(f"covariance fallback: {type(exc).__name__}")
+                    print(f"[COVARIANCE] fallback: {_covariance_error}", flush=True)
             # Static TOML values are hard safety ceilings.  Regime policy may
             # tighten those ceilings but must never be bypassed by a looser
             # global value, otherwise the displayed regime has no effect on
             # the actual portfolio.
             constraint_values = dict(portfolio_constraints or {})
+            # Regime-linked exposure ceiling for the volatility budget: a calm book
+            # may deploy more in bull/sideways, less in bear.  The static value stays
+            # the hard cap, so this can only tighten or relax inside it.
+            exposure_by_regime = dict(constraint_values.get("max_gross_exposure_by_regime") or {})
+            if exposure_by_regime and regime in exposure_by_regime:
+                try:
+                    budget_value = float(exposure_by_regime[regime])
+                    configured = float(constraint_values.get("max_gross_exposure") or budget_value)
+                    constraint_values["max_gross_exposure"] = min(configured, budget_value)
+                except (TypeError, ValueError):
+                    pass
             for key in ("gross_exposure", "max_weight"):
                 budget = regime_budget.get(key)
                 if budget is None:
@@ -6761,11 +7211,118 @@ class MarketDataService:
             lot_size = int(constraint_values.pop("lot_size", 100) or 100)
             require_fillable_lot = bool(constraint_values.pop("require_fillable_lot", True))
             drop_unfillable_forced = bool(constraint_values.pop("drop_unfillable_forced", True))
+            # Risk-control gates are execution policy, not PortfolioConstraints
+            # fields: read them before the dataclass filter drops unknown keys.
+            max_downside_vol = constraint_values.pop("max_downside_vol", None)
+            min_reward_risk = constraint_values.pop("min_reward_risk", None)
+            min_drawdown_60 = constraint_values.pop("min_drawdown_60", None)
+            risk_scalers = constraint_values.get("risk_scalers")
+            market_deleverage = constraint_values.get("market_deleverage")
             constraint_fields = set(getattr(PortfolioConstraints, "__dataclass_fields__", {}) or {})
             constraint_values = {
                 key: value for key, value in constraint_values.items() if key in constraint_fields
             }
-            cfg = PortfolioConstraints(**constraint_values)
+            if risk_scalers:
+                constraint_values["risk_scalers"] = risk_scalers
+            if market_deleverage:
+                constraint_values["market_deleverage"] = market_deleverage
+            if risk_scalers or market_deleverage:
+                # dict-valued policy blocks are not dataclass fields; merge explicitly
+                cfg = PortfolioConstraints(
+                    **{k: v for k, v in constraint_values.items()
+                       if k not in {"risk_scalers", "market_deleverage"}},
+                    risk_scalers=risk_scalers, market_deleverage=market_deleverage,
+                )
+            else:
+                cfg = PortfolioConstraints(**constraint_values)
+            # Affordability before sizing: a 45k account splits ~15.75k of gross
+            # budget across max_holdings slots, so a name whose one lot costs more
+            # than its own slot budget cannot be held at any weight the optimizer
+            # would pick.  Left in the pool it forces the book to collapse onto one
+            # or two names (the 2026-09-15 replay ended at 2 names / 0.23 gross).
+            dropped_unaffordable: list[str] = []
+            # ---- eligibility gates (risk-control layer, enforced before sizing) ----
+            risk_gate_rejected: list[dict] = []
+            if any(value is not None for value in (max_downside_vol, min_reward_risk, min_drawdown_60)):
+                downside = pd.to_numeric(selected.get("vol_downside_20"), errors="coerce")
+                payoff = pd.to_numeric(selected.get("payoff_reward_risk_20"), errors="coerce")
+                drawdown = pd.to_numeric(selected.get("vol_max_drawdown_60"), errors="coerce")
+                failing = []
+                for position, code in enumerate(selected["stock_code"].astype(str)):
+                    reasons = []
+                    if max_downside_vol is not None and pd.notna(downside.iloc[position]) and float(downside.iloc[position]) > float(max_downside_vol):
+                        reasons.append(f"downside_vol={float(downside.iloc[position]):.3f}")
+                    if min_reward_risk is not None and pd.notna(payoff.iloc[position]) and float(payoff.iloc[position]) < float(min_reward_risk):
+                        reasons.append(f"reward_risk={float(payoff.iloc[position]):.3f}")
+                    if min_drawdown_60 is not None and pd.notna(drawdown.iloc[position]) and float(drawdown.iloc[position]) < float(min_drawdown_60):
+                        reasons.append(f"drawdown_60={float(drawdown.iloc[position]):.3f}")
+                    if reasons:
+                        failing.append((position, code, reasons))
+                if failing:
+                    survivors = len(selected) - len(failing)
+                    keep_minimum = max(3, int(cfg.max_holdings or 0))
+                    if survivors >= keep_minimum:
+                        risk_gate_rejected = [{"stock_code": code, "reasons": reasons} for _, code, reasons in failing]
+                        failing_codes = {code for _, code, _ in failing}
+                        selected = selected[~selected["stock_code"].astype(str).isin(failing_codes)].copy()
+            # (affordability filter below)
+                per_name_budget = float(initial_capital) * float(cfg.gross_exposure) / int(cfg.max_holdings)
+                one_lot = pd.to_numeric(selected.get("last_close"), errors="coerce") * lot_size
+                too_expensive = one_lot > per_name_budget
+                if bool(too_expensive.any()):
+                    dropped_unaffordable = selected.loc[too_expensive, "stock_code"].astype(str).tolist()
+                    keep = selected[~too_expensive].copy()
+                    if len(keep) >= min(3, int(cfg.max_holdings)):
+                        selected = keep
+                    else:
+                        # Never empty the book: keep the cheapest slots available.
+                        cheapest = selected.assign(_one_lot=one_lot).nsmallest(
+                            max(1, min(int(cfg.max_holdings), len(selected))), "_one_lot"
+                        ).drop(columns=["_one_lot"])
+                        dropped_unaffordable = [
+                            code for code in selected["stock_code"].astype(str)
+                            if code not in set(cheapest["stock_code"].astype(str))
+                        ]
+                        selected = cheapest
+            if shrinkage_covariance:
+                try:
+                    order = [str(code) for code in selected["stock_code"].astype(str)]
+                    index_of = {code: position for position, code in enumerate(shrinkage_covariance["codes"])}
+                    matrix = shrinkage_covariance["matrix"]
+                    aligned = np.full((len(order), len(order)), np.nan)
+                    for row, code_row in enumerate(order):
+                        for column, code_column in enumerate(order):
+                            if code_row in index_of and code_column in index_of:
+                                aligned[row, column] = matrix[index_of[code_row]][index_of[code_column]]
+                    # fall back to the diagonal snapshot where a name has no history
+                    vols = pd.to_numeric(selected.get("volatility_20d"), errors="coerce").to_numpy(dtype=float)
+                    diagonal = np.where(np.isfinite(vols) & (vols > 0), vols ** 2, np.nan)
+                    for position in range(len(order)):
+                        if not np.isfinite(aligned[position, position]):
+                            aligned[position, position] = diagonal[position]
+                            for other in range(len(order)):
+                                if other != position:
+                                    aligned[position, other] = 0.0
+                    if np.isfinite(np.diag(aligned)).all():
+                        aligned = (aligned + aligned.T) / 2.0
+                        min_eig = float(np.min(np.linalg.eigvalsh(aligned)))
+                        if min_eig < 1e-10:
+                            aligned = aligned + np.eye(len(order)) * (1e-8 - min_eig)
+                        cfg = replace(cfg, covariance=aligned)
+                        covariance_used = {"assets": int(aligned.shape[0]),
+                                           "model": shrinkage_covariance.get("model"),
+                                           "intensity": shrinkage_covariance.get("intensity"),
+                                           "explained_variance": shrinkage_covariance.get("explained_variance"),
+                                           "industry_block": shrinkage_covariance.get("industry_block"),
+                                           "industry_columns": shrinkage_covariance.get("industry_columns"),
+                                           "industry_note": shrinkage_covariance.get("industry_note"),
+                                           "obs": shrinkage_covariance.get("obs")}
+                    else:
+                        covariance_used = None
+                except Exception:
+                    covariance_used = None
+            else:
+                covariance_used = None
             selected, portfolio_manifest, lot_summary = _repair_unfillable_targets(
                 optimize_long_only, selected.copy(), constraints=cfg,
                 initial_capital=float(initial_capital), lot_size=lot_size,
@@ -6773,6 +7330,14 @@ class MarketDataService:
                 forced_max_weight=forced_max_weight,
                 require_fillable_lot=require_fillable_lot,
                 drop_unfillable_forced=drop_unfillable_forced,
+            )
+            lot_summary["dropped_unaffordable"] = dropped_unaffordable
+            portfolio_manifest["covariance_input"] = covariance_used
+            lot_summary["risk_gate_rejected"] = risk_gate_rejected
+            lot_summary["risk_gates"] = {"max_downside_vol": max_downside_vol, "min_reward_risk": min_reward_risk,
+                                         "min_drawdown_60": min_drawdown_60}
+            lot_summary["per_name_budget"] = round(
+                float(initial_capital) * float(cfg.gross_exposure) / max(1, int(cfg.max_holdings or 1)), 2
             )
             if progress is not None:
                 progress.set_postfix_str("portfolio optimized")
@@ -7032,7 +7597,8 @@ class MarketDataService:
         mask = (gain >= float(min_gain)) & tail["trade_date"].eq(selection_date)
         return set(tail.loc[mask, "stock_code"].astype(str))
 
-    def _apply_price_setup_signals(self, model_candidates, ranked_all, *, signal_config, model="ensemble"):
+    def _apply_price_setup_signals(self, model_candidates, ranked_all, *, signal_config, model="ensemble",
+                                   market_context=None, max_price=None):
         """Evaluate price-setup and momentum sleeves and force their strongest hits.
 
         The scan runs on the model shortlist (``scan_top_k``) for the selection
@@ -7184,14 +7750,34 @@ class MarketDataService:
         model_scores = ranked_all.drop_duplicates(subset=["stock_code"]).set_index("stock_code")["model_score"]
 
         hit_rows = []
+        # Entry-delay sleeves are evaluated on bars up to the *previous* session:
+        # decision at close d buys at open d+1, so a one-session delay turns the
+        # fill into "event day + 2 open".  The 2024-2026 shock study found this is
+        # where the limit-up sleeve's expectancy lives (+0.01% -> +0.35%).
+        recipe_delay = {}
+        for name, recipe in instances:
+            delay = 0
+            if name in momentum_types:
+                delay = int(momentum_config.get("entry_delay_days", 0) or 0)
+            elif name in reversal_types:
+                delay = int(reversal_config.get("entry_delay_days", 0) or 0)
+            elif name in bottom_momentum_types:
+                delay = int(bottom_momentum_config.get("entry_delay_days", 0) or 0)
+            else:
+                delay = int(signal_config.get("entry_delay_days", 0) or 0)
+            recipe_delay[name] = max(0, delay)
         for code, group in bars.groupby("stock_code", sort=False):
             frame = group.set_index("trade_date")[["high", "low", "close", "volume", "amount"]]
             if frame.empty:
                 continue
             for name, recipe in instances:
+                delay = recipe_delay.get(name, 0)
+                eval_frame = frame.iloc[:-delay] if (delay > 0 and len(frame) > delay + 30) else frame
+                if len(eval_frame) < 30:
+                    continue
                 try:
                     industry = industry_map.get(str(code))
-                    result = recipe.evaluate(frame, context={
+                    result = recipe.evaluate(eval_frame, context={
                         "stock_code": str(code),
                         "industry": industry,
                         "industry_return_20d": industry_return20.get(industry),
@@ -7203,6 +7789,11 @@ class MarketDataService:
                     continue
                 features = dict(result.features)
                 ensemble = float(model_scores.get(code, np.nan)) if code in model_scores.index else np.nan
+                closes = pd.to_numeric(eval_frame["close"], errors="coerce").dropna()
+                latest_close = float(closes.iloc[-1]) if len(closes) else np.nan
+                upper = features.get("donchian_upper")
+                extension = (latest_close / float(upper) - 1.0) if (upper and np.isfinite(upper) and latest_close > 0) else np.nan
+                runup_5d = float(latest_close / closes.iloc[-6] - 1.0) if len(closes) >= 6 and closes.iloc[-6] else np.nan
                 hit_rows.append({
                     "stock_code": str(code), "signal_recipe": name, "signal_type": str(result.signal_type),
                     "signal_score": float(result.score), "signal_ensemble_score": ensemble,
@@ -7222,6 +7813,11 @@ class MarketDataService:
                     "signal_rebound_atr": features.get("rebound_atr"),
                     "signal_stop_price": features.get("stop_price"),
                     "signal_expected_holding_days": features.get("expected_holding_days"),
+                    "signal_extension": extension,
+                    "signal_runup_5d": runup_5d,
+                    "signal_last_close": latest_close,
+                    "signal_entry_delay_days": delay,
+                    "signal_event_date": eval_frame.index[-1].strftime("%Y-%m-%d"),
                 })
         summary["hit_count"] = int(len(hit_rows))
         if not hit_rows:
@@ -7254,6 +7850,11 @@ class MarketDataService:
             amount = row.get("signal_median_amount_20")
             if summary["risk_filters"]["min_median_amount_20d"] > 0 and (pd.isna(amount) or amount < summary["risk_filters"]["min_median_amount_20d"]):
                 reasons.append(f"median_amount_20={amount}")
+            close_price = row.get("signal_last_close")
+            if max_price is not None and pd.notna(close_price) and float(close_price) > float(max_price):
+                # The model shortlist is filtered by the same budget; a signal name
+                # that one lot cannot fit must not be promoted either.
+                reasons.append(f"price={float(close_price):.2f}>{float(max_price):.2f}")
             if reasons:
                 rejected.append({"stock_code": code, "signal_type": row["signal_type"], "reasons": reasons})
                 continue
@@ -7271,6 +7872,73 @@ class MarketDataService:
              hits["signal_type"].astype(str).isin(bottom_momentum_types)],
             ["momentum", "reversal", "bottom_momentum"], default="setup",
         )
+
+        # ---- sleeve gates: market state, over-extension, run-up ----
+        # Each gate below is derived from the 2024-2026 event study
+        # (output/verification/event_study_20260916): momentum sleeves only pay
+        # in an up-trending market, and breakout entries lose their edge once the
+        # close is stretched far beyond the channel or after a large run-up.
+        sleeve_configs = {
+            "setup": dict(signal_config),
+            "momentum": momentum_config,
+            "reversal": reversal_config,
+            "bottom_momentum": bottom_momentum_config,
+        }
+        trend = np.nan
+        breadth = np.nan
+        if market_context:
+            trend = float(market_context.get("median_return_20d", np.nan) or np.nan)
+            breadth = float(market_context.get("breadth_above_ma20", np.nan) or np.nan)
+        market_turnover_z = None
+        if market_context:
+            market_turnover_z = market_context.get("market_turnover_z")
+        gate_records = []
+        gated_rows = []
+        for row in hits.to_dict("records"):
+            sleeve = str(row["_sleeve"])
+            config = sleeve_configs.get(sleeve, {})
+            reasons = []
+            if bool(config.get("require_market_trend_up", False)):
+                floor = float(config.get("min_market_trend_20d", 0.0) or 0.0)
+                if not np.isfinite(trend) or trend <= floor:
+                    reasons.append(f"market_trend_20d={trend}")
+            hot_cap = config.get("max_market_turnover_z")
+            if hot_cap is not None and market_turnover_z is not None and np.isfinite(float(market_turnover_z)):
+                if float(market_turnover_z) > float(hot_cap):
+                    # Market-wide speculation is stretched: the same event that the PK
+                    # de-leverage reacts to also disqualifies fresh sleeve entries.
+                    reasons.append(f"market_turnover_z={float(market_turnover_z):.3f}")
+            extension_cap = config.get("max_breakout_extension")
+            extension = row.get("signal_extension")
+            if extension_cap is not None and np.isfinite(extension if extension is not None else np.nan):
+                if float(extension) > float(extension_cap):
+                    reasons.append(f"extension={float(extension):.4f}")
+            runup_cap = config.get("max_runup_5d")
+            runup = row.get("signal_runup_5d")
+            if runup_cap is not None and np.isfinite(runup if runup is not None else np.nan):
+                if float(runup) > float(runup_cap):
+                    reasons.append(f"runup_5d={float(runup):.4f}")
+            if reasons:
+                gate_records.append({"stock_code": str(row["stock_code"]), "signal_type": row["signal_type"],
+                                     "sleeve": sleeve, "reasons": reasons})
+            else:
+                gated_rows.append(row)
+        if gate_records:
+            hits = pd.DataFrame(gated_rows)
+        summary["sleeve_gates"] = {
+            "market_trend_20d": None if not np.isfinite(trend) else round(float(trend), 6),
+            "market_turnover_z": None if market_turnover_z is None else round(float(market_turnover_z), 4),
+            "breadth_above_ma20": None if not np.isfinite(breadth) else round(float(breadth), 6),
+            "rejected": gate_records,
+            "rejected_count": len(gate_records),
+            "config": {sleeve: {key: config.get(key) for key in
+                                ("require_market_trend_up", "min_market_trend_20d",
+                                 "max_market_turnover_z",
+                                 "max_breakout_extension", "max_runup_5d")}
+                       for sleeve, config in sleeve_configs.items()},
+        }
+        if hits.empty:
+            return model_candidates, summary
 
         def _rank(frame, rank_key, slots, gate):
             pool_frame = frame
@@ -7623,6 +8291,13 @@ class MarketDataService:
         batch_size=256,
         max_samples=12_000,
         max_feature_pairs=128,
+        learning_rate=1e-3,
+        d_model=64,
+        nhead=4,
+        num_layers=2,
+        seeds=None,
+        checkpoint_metric="ic",
+        seed_ensemble="average",
         cleaning_version="p0.2.v1",
         model_dir=None,
         min_stock_count=50,
@@ -7650,6 +8325,8 @@ class MarketDataService:
             validation_days=validation_days, lookback=lookback, epochs=epochs,
             batch_size=batch_size, max_samples=max_samples,
             max_feature_pairs=max_feature_pairs,
+            learning_rate=learning_rate, d_model=d_model, nhead=nhead, num_layers=num_layers,
+            seeds=seeds, checkpoint_metric=checkpoint_metric, seed_ensemble=seed_ensemble,
             cleaning_version=cleaning_version, factor_set=factor_set,
             warm_start_path=warm_start_path, warm_start_manifest_path=warm_start_manifest_path,
             device=device, embargo_days=embargo_days,

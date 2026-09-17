@@ -54,8 +54,42 @@ def coverage_report(
     return report
 
 
-def run_stage(name: str, config: dict, service: MarketDataService, *, force_rebalance: bool = False) -> dict:
+def with_profile(layer: dict, profile: dict | None) -> dict:
+    """Apply an account profile (capital, slots, model slots, price cap) to a selection layer."""
+    if not profile:
+        return layer
+    layer = dict(layer)
+    if profile.get("initial_capital"):
+        layer["initial_capital"] = float(profile["initial_capital"])
+    constraints = dict(layer.get("portfolio_constraints") or {})
+    if profile.get("max_holdings"):
+        constraints["max_holdings"] = int(profile["max_holdings"])
+    if profile.get("sleeve_slots_max") is not None:
+        constraints["sleeve_slots_max"] = int(profile["sleeve_slots_max"])
+    layer["portfolio_constraints"] = constraints
+    if profile.get("model_slots"):
+        layer["preselection_model_slots"] = int(profile["model_slots"])
+    affordability = dict(layer.get("affordability") or {})
+    affordability["enabled"] = True
+    affordability["equity"] = float(layer.get("initial_capital", 1_000_000.0))
+    if profile.get("max_price"):
+        affordability["max_price"] = profile["max_price"]
+    layer["affordability"] = affordability
+    return layer
+
+
+def replay_dir(layer: dict, export_default: str, as_of_date, profile: str | None) -> str:
+    """Route replay outputs away from the production files."""
+    output_dir = layer.get("output_dir", export_default)
+    suffix = str(as_of_date).replace("-", "")
+    if profile:
+        suffix = f"{suffix}_{profile}"
+    return f"{output_dir}/replay_{suffix}"
+
+def run_stage(name: str, config: dict, service: MarketDataService, *, force_rebalance: bool = False,
+              as_of_date: str | None = None, profile: str | None = None) -> dict:
     """Execute one configured stage in-process."""
+    profiles = dict(((config.get("selection") or {}).get("profiles") or {}))
     p = config["pipeline"]
     if name in {"daily_bars", "intraday_bars"}:
         layer = config[name]
@@ -185,18 +219,32 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             show_progress=True,
         )
     if name == "paper_outcomes":
-        layer = config[name]
+        layer = with_profile(config[name], profiles.get(profile) if profile else None)
+        selection_path = layer.get("selection_path", "output/results_cn/cn_ensemble_selected.csv")
+        if as_of_date:
+            replay = replay_dir(config.get("selection", {}), "output/results_cn", as_of_date, profile)
+            candidate = Path(replay) / "cn_ensemble_selected.csv"
+            if candidate.is_file():
+                selection_path = str(candidate)
+                layer["output_dir"] = f"{layer.get('output_dir', 'output/paper_trading')}/replay_{str(as_of_date).replace('-', '')}_{profile or 'default'}"
+                layer["output_dir"] = f"{layer.get('output_dir', 'output/paper_trading')}/replay_{str(as_of_date).replace('-', '')}_{profile or 'default'}"
         return service.evaluate_cn_paper_outcomes(
-            selection_path=layer.get("selection_path", "output/results_cn/cn_ensemble_selected.csv"),
+            selection_path=selection_path,
             days=int(layer.get("days", p["days"])),
             horizons=tuple(layer.get("horizons", [1, 5, 20, 60])),
             cost_bps=float(layer.get("cost_bps", 10.0)), benchmark_path=layer.get("benchmark_path") or None,
             output_dir=layer.get("output_dir", "output/paper_trading"),
         )
     if name == "paper_account":
-        layer = config[name]
+        layer = with_profile(config[name], profiles.get(profile) if profile else None)
+        selection_path = layer.get("selection_path", "output/results_cn/cn_ensemble_selected.csv")
+        if as_of_date:
+            replay = replay_dir(config.get("selection", {}), "output/results_cn", as_of_date, profile)
+            candidate = Path(replay) / "cn_ensemble_selected.csv"
+            if candidate.is_file():
+                selection_path = str(candidate)
         return service.run_cn_paper_account(
-            selection_path=layer.get("selection_path", "output/results_cn/cn_ensemble_selected.csv"), days=int(layer.get("days", 756)),
+            selection_path=selection_path, days=int(layer.get("days", 756)),
             account_id=layer.get("account_id", "cn_default"), strategy_version=layer.get("strategy_version", "v1"),
             initial_capital=float(layer.get("initial_capital", 1_000_000.0)), commission_bps=float(layer.get("commission_bps", 5.0)),
             slippage_bps=float(layer.get("slippage_bps", 5.0)), lot_size=int(layer.get("lot_size", 100)), output_dir=layer.get("output_dir", "output/paper_trading"),
@@ -285,6 +333,12 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             lookback=int(layer.get("lookback", 60)), epochs=int(layer.get("epochs", 10)),
             batch_size=int(layer.get("batch_size", 256)), max_samples=int(layer.get("max_samples", 200000)),
             max_feature_pairs=int(layer.get("max_feature_pairs", 128)),
+            learning_rate=float(layer.get("learning_rate", 1e-3)),
+            d_model=int(layer.get("d_model", 64)), nhead=int(layer.get("nhead", 4)),
+            num_layers=int(layer.get("num_layers", 2)),
+            seeds=[int(seed) for seed in (layer.get("seeds") or [0])],
+            checkpoint_metric=str(layer.get("checkpoint_metric", "ic")),
+            seed_ensemble=str(layer.get("seed_ensemble", "average")),
             cleaning_version=layer.get("cleaning_version", "p0.2.v1"), model_dir=layer.get("model_dir"),
             min_stock_count=int(p["min_training_stocks"]),
             warm_start_path=layer.get("warm_start_path"), warm_start_manifest_path=layer.get("warm_start_manifest_path"),
@@ -328,10 +382,13 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             show_progress=True,
         )
     if name == "selection":
-        layer = config[name]
+        layer = with_profile(config[name], profiles.get(profile) if profile else None)
+        output_dir = layer.get("output_dir", p["export_csv"])
+        if as_of_date:
+            output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
         return service.select_persisted_model_scores(
             model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
-            output_dir=layer.get("output_dir", p["export_csv"]),
+            output_dir=output_dir,
             model=layer.get("model", "ensemble"), top_n=int(layer.get("top_n", p["top_n"])),
             portfolio_mode=layer.get("portfolio_mode", "topn"), portfolio_constraints=layer.get("portfolio_constraints") or None,
             initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
@@ -341,29 +398,45 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             rebalance_stride_days=int(layer.get("rebalance_stride_days", 1) or 1),
             force_rebalance=force_rebalance,
             show_progress=True,
+            as_of_date=as_of_date,
         )
     if name == "preselection":
-        layer = config.get("selection", {})
+        layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)
+        output_dir = layer.get("output_dir", p["export_csv"])
+        if as_of_date:
+            output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
         return service.select_persisted_model_scores(
             model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
-            output_dir=layer.get("output_dir", p["export_csv"]),
-            model=layer.get("model", "ensemble"), top_n=int(layer.get("preselection_model_slots", 4)),
-            portfolio_mode="topn", initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
+            output_dir=output_dir,
+            model=layer.get("model", "ensemble"), top_n=int(layer.get("preselection_model_slots", p.get("preselection_model_slots", 4))),
+            portfolio_mode="topn", portfolio_constraints=layer.get("portfolio_constraints") or None,
+            initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
             signal_config=layer.get("signals") or None,
             ensemble_weights=layer.get("ensemble_weights") or None,
             affordability=layer.get("affordability") or None,
             rebalance_stride_days=int(layer.get("rebalance_stride_days", 1) or 1),
             force_rebalance=force_rebalance, show_progress=True, preselection_only=True,
+            as_of_date=as_of_date,
         )
     if name == "pk":
-        layer = config.get("selection", {})
+        layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)
+        # risk-control settings travel with the sizing constraints
+        if layer.get("risk_control"):
+            constraints = dict(layer.get("portfolio_constraints") or {})
+            constraints.update(dict(layer.get("risk_control") or {}))
+            layer["portfolio_constraints"] = constraints
+        output_dir = layer.get("output_dir", p["export_csv"])
+        if as_of_date:
+            output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
         preselected_path = layer.get("preselection_path", "output/results_cn/cn_ensemble_preselected.csv")
+        if as_of_date:
+            preselected_path = f"{output_dir}/cn_ensemble_preselected.csv"
         # Re-run the same optimizer on the preselection pool.  Signal floors
         # and max-holdings constraints are applied only at this final PK step.
         return service.select_persisted_model_scores(
             model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
-            output_dir=layer.get("output_dir", p["export_csv"]),
-            model=layer.get("model", "ensemble"), top_n=int(layer.get("preselection_model_slots", 4)),
+            output_dir=output_dir,
+            model=layer.get("model", "ensemble"), top_n=int(layer.get("preselection_model_slots", p.get("preselection_model_slots", 4))),
             portfolio_mode=layer.get("portfolio_mode", "mean_variance_cost_aware"),
             portfolio_constraints=layer.get("portfolio_constraints") or None,
             initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
@@ -372,6 +445,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             affordability=layer.get("affordability") or None,
             rebalance_stride_days=1, force_rebalance=True, show_progress=True,
             candidate_path=str(Path(preselected_path).resolve()),
+            as_of_date=as_of_date,
         )
     return {}
 
@@ -457,6 +531,12 @@ def main() -> int:
     parser.add_argument("--stage", choices=["all", "daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
     parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
+    parser.add_argument("--trade-date", default=None,
+                        help="Replay a historical decision date (YYYY-MM-DD): model cross section, regime row "
+                             "and price windows are taken as of that date and outputs go to "
+                             "<selection.output_dir>/replay_<date>/")
+    parser.add_argument("--profile", default=None,
+                        help="Account profile from [selection.profiles.<name>] (capital, holdings, model slots, price cap)")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue independent data stages after a stage failure")
     args = parser.parse_args()
     config = read_config(args.config if args.config.is_absolute() else ROOT / args.config)
@@ -520,7 +600,8 @@ def main() -> int:
 
             print(f"\n[PIPELINE] stage={stage} (in-process)", flush=True)
             try:
-                summary = run_stage(stage, config, service, force_rebalance=bool(args.force_rebalance))
+                summary = run_stage(stage, config, service, force_rebalance=bool(args.force_rebalance),
+                                    as_of_date=args.trade_date, profile=args.profile)
                 item = {"name": stage, "status": "ok", "summary": summary}
                 if stage == "model_comparison":
                     comparison = summary.get("comparison", {}) if isinstance(summary, dict) else {}

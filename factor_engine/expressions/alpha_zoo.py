@@ -18,6 +18,9 @@ ALPHA_ZOO_HK_COMPONENTS = (
     "valuation_hk",
     "financial_quality_hk",
     "financial_cross_section_hk",
+    # 量能路径 + 波动率 + 盈亏比：现有 1068 个特征里只有"当日量比"，没有
+    # "缩量深度/持续天数/首次放量"的路径信息，也没有多口径波动率与盈亏比。
+    "volume_volatility_hk",
 )
 
 

@@ -446,16 +446,11 @@ target_volatility = 0.18
 # 协方差模型：factor = 统计因子（PCA，K 个因子 + 特质风险），适合持仓数相对窗口偏多时；
 # shrinkage = 样本协方差向对角收缩。两者都做正定性兜底。
 covariance_model = "factor"
-factor_count = 3
-# 行业块收缩：把统计因子的相关矩阵按"同行业相关性 = 行业内部平均相关"做块收缩。
-# 代码已就位且能取到行业（见 data/store/warehouse.py 的 require_values 修复 + 镜像刷新），
-# 但在 2026-09-16 的实测中 blend 0.0/0.35/1.0 对组合波动与权重**没有可观测影响**，
-# 因此默认关闭（0.0）：在拿到"开启后风险估计确有变化"的证据之前不启用未验证的行为。
-industry_block_blend = 0.0
+factor_count = 1
 # 波动目标模式：cap = 只在天花板之上降杠杆；budget = 同时把没用掉的风险预算部署出去
 # （以 max_gross_exposure 与 max_weight 为硬上限）。因子协方差下 09-16 组合波动约 13.7%，
 # 距离 18% 还有约 24% 的额度。
-vol_target_mode = "budget"
+vol_target_mode = "cap"
 max_gross_exposure = 0.65
 # 风险平价目标：把优化权重按比例向"等风险贡献"混合（0=纯 alpha，1=纯风险平价）。
 risk_parity_blend = 0.35      # 组合年化波动上限：超了就整体降杠杆、留现金（不加杠杆）
@@ -499,13 +494,6 @@ threshold = 0.8
 slope = 0.25
 floor = 0.6
 
-
-
-# regime 联动：按当日 regime 收紧/放宽风险预算的敞口上限（静态值与 regime 预算仍为硬上限）
-[selection.risk_control.max_gross_exposure_by_regime]
-bull = 0.85
-sideways = 0.70
-bear = 0.60
 
 [exits]
 # 持仓卖出规则：风险型（ST/流动性/停牌/模型排名下限）+ 兑现型（贴上沿/20日大涨减仓）

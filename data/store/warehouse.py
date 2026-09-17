@@ -161,15 +161,24 @@ class MarketDataWarehouse:
         stores.append(self.parquet_store)
         return stores
 
-    def _read_stock_info_registry(self, filters=None, columns=None, order_by=None):
+    def _read_stock_info_registry(self, filters=None, columns=None, order_by=None, require_values=None):
+        """Read the stock-info registry, preferring a store that has the requested fields.
+
+        ``require_values`` names columns that must carry data.  The parquet mirror
+        can lag the ClickHouse table (it is written by a separate job), so a stale
+        mirror used to answer industry queries with all-null values.  Reading the
+        remaining candidates instead of stopping at the first non-empty frame
+        keeps industry-dependent logic working whichever store is freshest.
+        """
         frame = pd.DataFrame()
+        fallback = pd.DataFrame()
         stores = []
         if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
             stores.append(self.clickhouse_store)
         stores.append(self.parquet_store)
         for store in stores:
             try:
-                frame = store.read_frame(
+                candidate = store.read_frame(
                     self.stock_info_dataset,
                     layer="meta",
                     filters=filters,
@@ -179,9 +188,18 @@ class MarketDataWarehouse:
             except Exception as exc:
                 if store is self.clickhouse_store:
                     self._clickhouse_disabled_reason = str(exc)
-                frame = pd.DataFrame(columns=columns or STOCK_INFO_FIELDS)
-            if frame is not None and not frame.empty:
+                candidate = pd.DataFrame(columns=columns or STOCK_INFO_FIELDS)
+            if candidate is None or candidate.empty:
+                continue
+            if fallback.empty:
+                fallback = candidate
+            if require_values and all(
+                column in candidate.columns and candidate[column].notna().any()
+                for column in require_values
+            ):
+                frame = candidate
                 break
+            frame = fallback
         if frame is None or frame.empty:
             return pd.DataFrame(columns=columns or STOCK_INFO_FIELDS)
         for column in STOCK_INFO_FIELDS:
@@ -1519,10 +1537,18 @@ class MarketDataWarehouse:
             filters["stock_code"] = requested_codes
         if market:
             filters["market"] = market
+        resolved_columns = columns or STOCK_INFO_FIELDS
+        # Industry fields drive the PK industry cap and the covariance's industry
+        # block, so a store that answers with them empty must not win the read.
+        require_values = [
+            column for column in ("industry_l1", "industry_l2")
+            if column in set(resolved_columns)
+        ]
         frame = self._read_stock_info_registry(
             filters=filters,
-            columns=columns or STOCK_INFO_FIELDS,
+            columns=resolved_columns,
             order_by=order_by or "market, stock_code",
+            require_values=require_values,
         )
         if requested_codes and len(requested_codes) > 500 and not frame.empty:
             frame = frame[frame["stock_code"].astype(str).isin(set(map(str, requested_codes)))].copy()

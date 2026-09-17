@@ -308,6 +308,9 @@ def train_transformer_panel(
     min_feature_coverage=0.05,
     drop_constant_features=True,
     max_feature_pairs=128,
+    seeds=None,
+    checkpoint_metric="ic",
+    seed_ensemble="average",
     show_progress=False,
 ) -> dict:
     """Fit an encoder-only temporal Transformer using the same clean panel."""
@@ -386,22 +389,7 @@ def train_transformer_panel(
             flush=True,
         )
     input_dim = len(features) * 2
-    model = TemporalTransformer(input_dim, d_model=d_model, nhead=nhead, num_layers=num_layers)
-    warm_start = _load_transformer_warm_start(
-        model,
-        warm_start_path=warm_start_path,
-        warm_start_manifest_path=warm_start_manifest_path,
-        features=features,
-        cleaning_version=cleaning_version,
-        factor_set=factor_set,
-        input_dim=input_dim,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-    )
     torch_device = resolve_torch_device(device)
-    model.to(torch_device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=1e-4)
     loss_fn = nn.HuberLoss()
     if show_progress:
         print(
@@ -411,34 +399,102 @@ def train_transformer_panel(
         )
     train_loader = _sequence_loader(train_items, batch_size, DataLoader, Dataset)
     valid_loader = _sequence_loader(valid_items, batch_size, DataLoader, Dataset, shuffle=False)
-    best_state, best_loss = None, float("inf")
-    epoch_iter = tqdm(range(max(1, int(epochs))), desc="Transformer epochs", unit="epoch") if show_progress else range(max(1, int(epochs)))
-    for _epoch in epoch_iter:
-        model.train()
-        for values, labels in train_loader:
-            optimizer.zero_grad()
-            prediction = model(values.to(torch_device))
-            loss = loss_fn(prediction, labels.to(torch_device))
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+    valid_dates = np.asarray([item[2] for item in valid_items])
+    seed_list = [int(seed) for seed in (seeds or [0])] or [0]
+    metric = str(checkpoint_metric or "ic").lower()
+
+    def _evaluate(model) -> tuple[float, float]:
+        """Validation Huber loss and mean per-date rank IC of the current weights."""
         model.eval()
-        losses = []
+        losses, predictions, targets = [], [], []
         with torch.no_grad():
             for values, labels in valid_loader:
-                losses.append(float(loss_fn(model(values.to(torch_device)), labels.to(torch_device)).cpu()))
+                output = model(values.to(torch_device))
+                losses.append(float(loss_fn(output, labels.to(torch_device)).cpu()))
+                predictions.append(output.detach().cpu().numpy().reshape(-1))
+                targets.append(labels.numpy().reshape(-1))
         current_loss = float(np.mean(losses)) if losses else float("inf")
-        if current_loss < best_loss:
-            best_loss = current_loss
-            best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+        if not predictions:
+            return current_loss, float("nan")
+        current_ic = mean_daily_rank_ic(np.concatenate(predictions), np.concatenate(targets), valid_dates)
+        return current_loss, current_ic
+
+    def _better(loss: float, ic: float, best_loss: float, best_ic: float) -> bool:
+        """Checkpoint rule: validation rank IC when available, Huber as tie-break."""
+        if metric != "ic" or not np.isfinite(ic):
+            return loss < best_loss
+        if not np.isfinite(best_ic):
+            return True
+        if ic > best_ic + 1e-6:
+            return True
+        return abs(ic - best_ic) <= 1e-6 and loss < best_loss
+
+    best_state, best_loss, best_ic, best_seed = None, float("inf"), float("nan"), seed_list[0]
+    seed_results = []
+    seed_states: list[dict] = []
+    for seed in seed_list:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        model = TemporalTransformer(input_dim, d_model=d_model, nhead=nhead, num_layers=num_layers)
+        warm_start = _load_transformer_warm_start(
+            model,
+            warm_start_path=warm_start_path,
+            warm_start_manifest_path=warm_start_manifest_path,
+            features=features,
+            cleaning_version=cleaning_version,
+            factor_set=factor_set,
+            input_dim=input_dim,
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+        )
+        model.to(torch_device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=1e-4)
+        seed_loss, seed_ic, seed_state = float("inf"), float("nan"), None
+        epoch_iter = (tqdm(range(max(1, int(epochs))), desc=f"Transformer epochs seed={seed}", unit="epoch")
+                      if show_progress else range(max(1, int(epochs))))
+        for _epoch in epoch_iter:
+            model.train()
+            for values, labels in train_loader:
+                optimizer.zero_grad()
+                prediction = model(values.to(torch_device))
+                loss = loss_fn(prediction, labels.to(torch_device))
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+            current_loss, current_ic = _evaluate(model)
+            if _better(current_loss, current_ic, seed_loss, seed_ic):
+                seed_loss, seed_ic = current_loss, current_ic
+                seed_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+            if show_progress:
+                epoch_iter.set_postfix_str(
+                    f"valid_loss={current_loss:.6f} valid_ic={current_ic:.4f} best_ic={seed_ic:.4f}")
+        if show_progress and hasattr(epoch_iter, "close"):
+            epoch_iter.close()
+        seed_results.append({"seed": seed, "best_validation_huber_loss": seed_loss,
+                             "best_validation_rank_ic": None if not np.isfinite(seed_ic) else float(seed_ic),
+                             "warm_start": bool(warm_start.get("used"))})
+        if seed_state is not None:
+            seed_states.append(seed_state)
+        if _better(seed_loss, seed_ic, best_loss, best_ic):
+            best_state, best_loss, best_ic, best_seed = seed_state, seed_loss, seed_ic, seed
         if show_progress:
-            epoch_iter.set_postfix_str(f"train_batches={len(train_loader)} valid_loss={current_loss:.6f}")
-    if show_progress:
-        epoch_iter.close()
+            print(f"[TRANSFORMER] seed={seed} best_ic={seed_ic:.4f} best_loss={seed_loss:.6f}", flush=True)
+    if best_state is None:            # never trained a single epoch
+        best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
     directory = Path(model_dir)
     directory.mkdir(parents=True, exist_ok=True)
     model_path = directory / "model.pt"
-    torch.save({"state_dict": best_state, "input_dim": input_dim, "d_model": d_model, "nhead": nhead, "num_layers": num_layers}, model_path)
+    # Saving every seed's best weights lets inference average the seeds instead of
+    # picking one: with per-seed validation IC spread of ~0.05 and a single-day
+    # scoring spread of ~0.09, averaging is the variance-reducing choice.
+    ensemble_mode = str(seed_ensemble or "average").lower()
+    torch.save({
+        "state_dict": best_state,
+        "state_dicts": seed_states or [best_state],
+        "ensemble_mode": ensemble_mode,
+        "input_dim": input_dim, "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
+    }, model_path)
     manifest = _manifest(
         model_type="temporal_transformer", features=features, label_column=label_column,
         cleaning_version=cleaning_version, factor_set=factor_set,
@@ -452,6 +508,10 @@ def train_transformer_panel(
         extra={
             "epochs": int(epochs), "batch_size": int(batch_size),
             "best_validation_huber_loss": best_loss, "warm_start": warm_start,
+            "seeds": seed_list, "selected_seed": best_seed, "seed_results": seed_results,
+            "checkpoint_metric": metric, "seed_ensemble": ensemble_mode,
+            "saved_seed_states": len(seed_states or [best_state]),
+            "best_validation_rank_ic": None if not np.isfinite(best_ic) else float(best_ic),
             "device": str(torch_device), "split": split,
             "feature_quality": feature_quality,
         },
@@ -558,14 +618,23 @@ def predict_transformer_panel(
             )
             feature_values[:, missing_indicator_indices] = np.clip(indicators, 0.0, 1.0)
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
-    model = TemporalTransformer(
-        int(checkpoint["input_dim"]), d_model=int(checkpoint["d_model"]),
-        nhead=int(checkpoint["nhead"]), num_layers=int(checkpoint["num_layers"]),
-    )
-    model.load_state_dict(checkpoint["state_dict"])
     torch_device = resolve_torch_device(device)
-    model.to(torch_device)
-    model.eval()
+    state_dicts = list(checkpoint.get("state_dicts") or [])
+    if str(checkpoint.get("ensemble_mode", "best")).lower() != "average" or not state_dicts:
+        state_dicts = [checkpoint["state_dict"]]
+    models = []
+    for state in state_dicts:
+        member = TemporalTransformer(
+            int(checkpoint["input_dim"]), d_model=int(checkpoint["d_model"]),
+            nhead=int(checkpoint["nhead"]), num_layers=int(checkpoint["num_layers"]),
+        )
+        member.load_state_dict(state)
+        member.to(torch_device)
+        member.eval()
+        models.append(member)
+    model = models[0]
+    if show_progress and len(models) > 1:
+        print(f"[TRANSFORMER] seed ensemble: averaging {len(models)} checkpoints at inference", flush=True)
     center = np.asarray([scaler["center"].get(feature, 0.0) for feature in features], dtype=np.float32)
     scale = np.asarray([scaler["scale"].get(feature, 1.0) for feature in features], dtype=np.float32)
     scale[~np.isfinite(scale) | (scale == 0)] = 1.0
@@ -607,7 +676,13 @@ def predict_transformer_panel(
                 flush=True,
             )
         with torch.no_grad():
-            predictions = model(torch.from_numpy(batch_inputs).to(torch_device)).detach().cpu().numpy()
+            tensor = torch.from_numpy(batch_inputs).to(torch_device)
+            if len(models) > 1:
+                predictions = np.mean(
+                    [member(tensor).detach().cpu().numpy() for member in models], axis=0,
+                )
+            else:
+                predictions = model(tensor).detach().cpu().numpy()
         batch_count += 1
         rows.extend(
             {
@@ -837,8 +912,14 @@ def select_top_model_scores(
     score_frames: dict[str, pd.DataFrame], *, model="ensemble", top_n=10,
     model_weights: dict[str, float] | None = None,
     metadata: dict | None = None,
+    as_of_date=None,
 ) -> pd.DataFrame:
-    """Combine persisted percentile scores and return the latest Top-N only."""
+    """Combine persisted percentile scores and return the Top-N for one date.
+
+    ``as_of_date`` replays a historical decision date: the cross section used is
+    the latest one common to every required model file that is not newer than
+    the requested date.  Without it the newest common cross section is used.
+    """
     requested = str(model or "ensemble").strip().lower()
     valid = {
         name: frame[["trade_date", "stock_code", "model_score"]].copy()
@@ -851,7 +932,18 @@ def select_top_model_scores(
     missing = [name for name in required if name not in valid]
     if missing:
         raise ValueError(f"persisted score files missing for: {','.join(missing)}")
-    latest_date = min(pd.to_datetime(valid[name]["trade_date"]).max() for name in required)
+    if as_of_date is not None:
+        cutoff = pd.to_datetime(as_of_date).normalize()
+        common: set | None = None
+        for name in required:
+            dates = set(pd.to_datetime(valid[name]["trade_date"]).dt.normalize().unique())
+            common = dates if common is None else (common & dates)
+        eligible = sorted(date for date in (common or set()) if date <= cutoff)
+        if not eligible:
+            raise ValueError(f"no persisted model scores on or before {cutoff.strftime('%Y-%m-%d')}")
+        latest_date = eligible[-1]
+    else:
+        latest_date = min(pd.to_datetime(valid[name]["trade_date"]).max() for name in required)
     merged = None
     for name in required:
         frame = valid[name].copy()
@@ -1259,6 +1351,26 @@ def _fit_sequence_scaler(frame, features, *, preserve_binary_features=()):
             center.loc[feature] = 0.0
             scale.loc[feature] = 1.0
     return {"center": center.to_dict(), "scale": scale.to_dict()}
+
+
+def mean_daily_rank_ic(predictions, targets, dates) -> float:
+    """Mean per-date Spearman correlation between predictions and labels.
+
+    The training label is a within-date cross-sectional rank, so the honest
+    validation statistic is the rank IC *inside each date*, not a pooled
+    correlation that mixes dates with different market moves.
+    """
+    series = pd.DataFrame({"prediction": np.asarray(predictions, dtype=float),
+                           "target": np.asarray(targets, dtype=float),
+                           "trade_date": np.asarray(dates)})
+    values = []
+    for _, group in series.groupby("trade_date"):
+        if len(group) < 5:
+            continue
+        ic = group["prediction"].corr(group["target"], method="spearman")
+        if np.isfinite(ic):
+            values.append(float(ic))
+    return float(np.mean(values)) if values else float("nan")
 
 
 def _build_sequences(

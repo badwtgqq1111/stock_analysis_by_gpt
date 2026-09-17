@@ -11,6 +11,7 @@ from .financial_factors import FinancialCrossSectionHKFactorSet, FinancialQualit
 from .gtja_alpha import GTJAAlpha191FactorSet
 from .qlib_alpha import Alpha158FactorSet, Alpha360FactorSet
 from .ta_operators import compute_ta_features, TA_OPERATOR_REGISTRY, DEFAULT_TA_INDICATORS
+from .volume_volatility import VolumeVolatilityFactorSet, VOLUME_VOLATILITY_FEATURES
 
 __all__ = [
     "AcademicHKFactorSet",
@@ -26,4 +27,6 @@ __all__ = [
     "compute_ta_features",
     "TA_OPERATOR_REGISTRY",
     "DEFAULT_TA_INDICATORS",
+    "VolumeVolatilityFactorSet",
+    "VOLUME_VOLATILITY_FEATURES",
 ]

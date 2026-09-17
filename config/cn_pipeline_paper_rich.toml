@@ -171,26 +171,12 @@ label_horizon = 20
 validation_days = 60
 embargo_days = 20
 lookback = 60
-# 12k 序列 × 10 epoch 的预算下，同配置重复训练的 09-15 rank IC 在 0.164~0.349 之间跳动
-# （sd≈0.093，见 output/verification/retrain_20260916/transformer_probe_baseline-config.csv），
-# 说明"变压器变差"主要是样本/初始化噪声而非特征变多。这里把预算提到 36k 序列 × 20 epoch，
-# 并把特征对上限从 128 提到 256（不删任何特征，让新特征也能进入交互项）。
-epochs = 20
+epochs = 10
 batch_size = 256
-max_samples = 36000
-max_feature_pairs = 256
-# 多随机种子 + 按"验证集 rank IC"选 checkpoint（Huber 只在 IC 并列时做次级判据）。
-# 同配置重复训练的 09-15 rank IC 标准差约 0.093，单次训练不可复现；
-# 种子内选最优 epoch、再在若干种子间取最优，可同时降方差、提均值。
-seeds = [0, 1, 2]
-checkpoint_metric = "ic"
-# 推理时对多个种子的权重取"预测平均"（invalid 的是权重平均，预测平均才有效）。
-# 每种子验证 IC 之间差约 0.05、单日打分离散约 0.09，平均比择优更稳。
-seed_ensemble = "average"
-learning_rate = 0.001
-d_model = 64
-nhead = 4
-num_layers = 2
+# Sequence samples are balanced across stocks. This budget avoids multi-GB
+# copies of 60-day windows while retaining broad universe coverage.
+max_samples = 12000
+max_feature_pairs = 128
 cleaning_version = "p0.2.v1"
 model_dir = "output/models/cn/transformer/alpha_zoo_hk"
 device = "auto" # CUDA -> Apple MPS -> CPU
@@ -241,10 +227,7 @@ initial_capital = 45000.0
 # Optional override of the ensemble weights.  Leave empty to use the weights the
 # regime file publishes (`model_weight_*`); set explicit weights when the regime
 # split is known to bury a model that ranks a name well.
-# 20 个 walk-forward OOS 日期（2026-03..08，20 日前瞻标签）的权重扫描：
-#   lgbm 权重 0.0/0.3/0.5/0.7/0.85/1.0 → 平均 rank IC 0.071/0.092/0.103/0.108/0.106/0.102
-#   Top-20 超额 4.3%/10.6%/11.4%/12.7%/11.6%/10.2%；0.70/0.30 为 IC 与 Top-20 的双优区。
-ensemble_weights = { lightgbm = 0.70, transformer = 0.30 }
+ensemble_weights = { lightgbm = 0.50, transformer = 0.50 }
 # 再平衡节奏：>1 时，距上次再平衡不足 N 个交易日就沿用上一版组合（每日仍跑 exits）。
 rebalance_stride_days = 5
 
@@ -307,8 +290,6 @@ lookback_sessions = 120
 # 两个上限把这两类入场挡在候选层之外，避免用突破的名义买入已经走完的行情。
 max_breakout_extension = 0.05
 max_runup_5d = 0.20
-# setup sleeve 同样受市场投机状态约束（略宽，因其信号本身已要求放量确认）
-max_market_turnover_z = 1.8
 
 # Event study (2024-01..2026-09, 3.42M stock-days, market-neutral): the 20-day
 # channel breakout is ~flat to negative (+0.00% / -0.56% at +1/+5 days) while a
@@ -325,8 +306,6 @@ rank = "volume_ratio_20"
 # 涨停动量只在市场上行的状态里有效：事件研究里 market_trend_20d>0 时 5 日超额 +0.30%
 # （t=3.0），趋势为负时 +0.11%（t=0.86）不显著。硬止损 5% 把期望从 +0.23% 提到 +0.89%。
 require_market_trend_up = true
-# 市场级投机状态过高时不再接受新的 sleeve 入场（与 PK 的市场降杠杆同源）
-max_market_turnover_z = 1.5
 # 入场延后一个交易日：shock 研究（同日 93,218 个事件）显示涨停事件
 # T+1 开盘进场 +0.01%、等一天 T+2 开盘进场 +0.35%，即"事件日次日再买"。
 entry_delay_days = 1
@@ -335,7 +314,6 @@ entry_delay_days = 1
 # 均线/量能确认，覆盖类似老板电器的价值修复候选。
 [selection.signals.reversal_sleeve]
 enabled = true
-max_market_turnover_z = 2.0
 setup_types = ["value_reversal"]
 slots = 1
 min_weight = 0.08
@@ -347,7 +325,6 @@ rank = "score"
 # 与涨停动量 sleeve 一样保持较小，先经纸面组合验证后再调整。
 [selection.signals.bottom_momentum_sleeve]
 enabled = true
-max_market_turnover_z = 1.5
 setup_types = ["bottom_momentum"]
 slots = 1
 min_weight = 0.05
@@ -418,6 +395,23 @@ cost_penalty = 0.10
 require_fillable_lot = true
 lot_size = 100
 drop_unfillable_forced = true
+# 风控层（PK 阶段执行）：波动率目标 + 单名风险贡献上限 + 资格门槛。
+# 依据 2.8M stock-day（2024-06..2026-08）的横截面检验：
+#   vol_cc_20 五分位 → 20 日超额 低波 +1.63% / 中波 +2.3% / 高波 +1.64%（两端都差，胜率 53%→46%）
+#   vol_downside_20 五分位 → +1.97% / +2.31% / +2.26% / +1.82% / +1.78%（高下行波动更差）
+#   vol_max_drawdown_60 五分位 → +2.62% → +1.58%（回撤越深越差）
+#   payoff_reward_risk_20（上沿空间/下沿空间）五分位 → +2.03% → +2.14%（盈亏比越高越好，弱但同向）
+# 实测教训（09-15 → 09-16 回放）：把"全市场横截面"的资格门槛（深回撤/低盈亏比）
+# 套到"模型 Top-N 内部"会双重过滤——rich 组合从 6/6 上涨掉到 2/5，因为模型头部
+# 恰好是 60 日回撤较深的强势股。所以默认只保留"仓位数学"（波动目标 + 单名风险占比），
+# 三个资格门槛默认关闭，需要时再显式打开并单独回测。
+[selection.risk_control]
+target_volatility = 0.18      # 组合年化波动上限：超了就整体降杠杆、留现金（不加杠杆）
+max_name_risk_share = 0.35    # 单名占组合方差上限，超过就压权重并再分配
+# max_downside_vol = 1.20     # 资格门槛（默认关闭，见上方说明）
+# min_reward_risk = 0.10
+# min_drawdown_60 = -0.45
+
 # 模型块保留份额：sleeve 下限合计不得超过 gross*(1-model_min_share)。
 # 依据 20 个 OOS 日期（2026-03-13..07-31，每周一）的 20 日前瞻收益：
 #   模型 Top-8 超额 +9.23%（t=3.68），Top-10 +9.26%（t=3.67），Top-50 +9.23%（t=4.34）
@@ -430,82 +424,6 @@ drop_unfillable_forced = true
 # （0.3 档 +1.5% 优于 0.8 档 +0.8%）。模型训练标签是 20 日，sleeve 的设计持有期是 5 日，
 # 因此按"主仓 20 日 + 卫星 5 日"分配：模型留 80%，sleeve 合计不超过 20%。
 model_min_share = 0.80
-
-# 风控层（PK 阶段执行）：波动率目标 + 单名风险贡献上限 + 资格门槛。
-# 依据 2.8M stock-day（2024-06..2026-08）的横截面检验：
-#   vol_cc_20 五分位 → 20 日超额 低波 +1.63% / 中波 +2.3% / 高波 +1.64%（两端都差，胜率 53%→46%）
-#   vol_downside_20 五分位 → +1.97% / +2.31% / +2.26% / +1.82% / +1.78%（高下行波动更差）
-#   vol_max_drawdown_60 五分位 → +2.62% → +1.58%（回撤越深越差）
-#   payoff_reward_risk_20（上沿空间/下沿空间）五分位 → +2.03% → +2.14%（盈亏比越高越好，弱但同向）
-# 实测教训（09-15 → 09-16 回放）：把"全市场横截面"的资格门槛（深回撤/低盈亏比）
-# 套到"模型 Top-N 内部"会双重过滤——rich 组合从 6/6 上涨掉到 2/5，因为模型头部
-# 恰好是 60 日回撤较深的强势股。所以默认只保留"仓位数学"（波动目标 + 单名风险占比），
-# 三个资格门槛默认关闭，需要时再显式打开并单独回测。
-[selection.risk_control]
-target_volatility = 0.18
-# 协方差模型：factor = 统计因子（PCA，K 个因子 + 特质风险），适合持仓数相对窗口偏多时；
-# shrinkage = 样本协方差向对角收缩。两者都做正定性兜底。
-covariance_model = "factor"
-factor_count = 3
-# 行业块收缩：把统计因子的相关矩阵按"同行业相关性 = 行业内部平均相关"做块收缩。
-# 代码已就位且能取到行业（见 data/store/warehouse.py 的 require_values 修复 + 镜像刷新），
-# 但在 2026-09-16 的实测中 blend 0.0/0.35/1.0 对组合波动与权重**没有可观测影响**，
-# 因此默认关闭（0.0）：在拿到"开启后风险估计确有变化"的证据之前不启用未验证的行为。
-industry_block_blend = 0.0
-# 波动目标模式：cap = 只在天花板之上降杠杆；budget = 同时把没用掉的风险预算部署出去
-# （以 max_gross_exposure 与 max_weight 为硬上限）。因子协方差下 09-16 组合波动约 13.7%，
-# 距离 18% 还有约 24% 的额度。
-vol_target_mode = "budget"
-max_gross_exposure = 0.65
-# 风险平价目标：把优化权重按比例向"等风险贡献"混合（0=纯 alpha，1=纯风险平价）。
-risk_parity_blend = 0.35      # 组合年化波动上限：超了就整体降杠杆、留现金（不加杠杆）
-max_name_risk_share = 0.35    # 单名占组合方差上限，超过就压权重并再分配
-# max_downside_vol = 1.20     # 资格门槛（默认关闭，见上方说明）
-# min_reward_risk = 0.10
-# min_drawdown_60 = -0.45
-# 软风控系数：不剔除名字，只按比例减仓（释放的权重分给更"平静"的名字）。
-# 依据见 output/verification/turnover_20260917/README.md：
-#   换手率 Z >2 → 20 日超额 +1.22%（胜率 43%）vs 正常区 +2.10%
-#   换手率波动 >0.7 → +1.47%（胜率 44%）vs 0.2-0.3 档 +2.25%
-[selection.risk_control.risk_scalers.tr_zscore_20]
-threshold = 1.5
-slope = 0.25
-floor = 0.5
-[selection.risk_control.risk_scalers.tr_volatility_20]
-threshold = 0.55
-slope = 1.0
-floor = 0.6
-# 换手率长期分位 >80%（情绪拥挤）同样减仓；分位低位不加分（缩量已在选股偏好里体现）
-[selection.risk_control.risk_scalers.tr_percentile_252]
-threshold = 0.80
-slope = 1.5
-floor = 0.6
-# 波动率横截面分位：两端都差（低波 +1.63% / 中波 +2.3% / 高波 +1.64%），
-# 因此高分位减仓、极低分位也轻微减仓。
-[selection.risk_control.risk_scalers.vol_cs_percentile]
-threshold = 0.80
-slope = 1.0
-floor = 0.6
-[selection.risk_control.risk_scalers.vol_cs_percentile_low]
-column = "vol_cs_percentile"
-direction = "below"
-threshold = 0.15
-slope = 1.0
-floor = 0.7
-# 组合层：当池内换手率 Z 中位数（市场投机状态代理）过高时整体降杠杆
-[selection.risk_control.market_deleverage]
-column = "market_tr_z"
-threshold = 0.8
-slope = 0.25
-floor = 0.6
-
-
-
-# regime 联动：按当日 regime 收紧/放宽风险预算的敞口上限（静态值与 regime 预算仍为硬上限）
-[selection.risk_control.max_gross_exposure_by_regime]
-bull = 0.85
-sideways = 0.70
-bear = 0.60
 
 [exits]
 # 持仓卖出规则：风险型（ST/流动性/停牌/模型排名下限）+ 兑现型（贴上沿/20日大涨减仓）
@@ -547,7 +465,7 @@ initial_capital = 45000.0
 commission_bps = 5.0
 slippage_bps = 5.0
 lot_size = 100
-output_dir = "output/paper_trading/account"
+output_dir = "output/paper_trading/rich_20260916"
 
 [graph_temporal]
 days = 365
@@ -569,7 +487,7 @@ embargo_days = 0
 [oos_predictions]
 # This stage retrains strictly on each expanding fold. LightGBM and Transformer
 # are the default comparable baselines; add CNN only after its OOS value is needed.
-models = ["transformer", "lightgbm"]
+models = ["transformer"]
 # "lightgbm",
 days = 756
 label_horizon = 20

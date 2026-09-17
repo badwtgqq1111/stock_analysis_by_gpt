@@ -31,7 +31,9 @@ def build_market_regime(
     missing = required - set(ohlcv.columns)
     if missing:
         raise ValueError(f"market regime input missing columns: {','.join(sorted(missing))}")
-    frame = ohlcv[["stock_code", "trade_date", "close"]].copy()
+    has_turnover = "turnover" in ohlcv.columns
+    columns = ["stock_code", "trade_date", "close"] + (["turnover"] if has_turnover else [])
+    frame = ohlcv[columns].copy()
     frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
     frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
     frame = frame.dropna(subset=["stock_code", "trade_date", "close"])
@@ -46,13 +48,35 @@ def build_market_regime(
     frame["ma20"] = grouped["close"].transform(lambda value: value.rolling(int(breadth_window), min_periods=int(breadth_window)).mean())
     frame["above_ma20"] = frame["close"] > frame["ma20"]
     frame["volatility_20d"] = grouped["return_1d"].transform(lambda value: value.rolling(int(volatility_window), min_periods=int(volatility_window)).std() * np.sqrt(252.0))
-    daily = frame.groupby("trade_date", sort=True).agg(
-        stock_count=("stock_code", "nunique"),
-        median_return_20d=("return_20d", "median"),
-        median_return_60d=("return_60d", "median"),
-        breadth_above_ma20=("above_ma20", "mean"),
-        realized_volatility_20d=("volatility_20d", "median"),
-    ).reset_index()
+    # Market speculation state: median cross-sectional turnover-rate Z.  Evidence
+    # (output/verification/turnover_20260917) shows turnover Z > 2 cuts the forward
+    # 20-day excess from +2.10% to +1.22%, so the market-wide value is a usable
+    # third regime dimension next to trend and breadth.
+    if has_turnover:
+        frame["turnover"] = pd.to_numeric(frame["turnover"], errors="coerce")
+        turnover_grouped = frame.groupby("stock_code", sort=False)["turnover"]
+        mean20 = turnover_grouped.transform(lambda value: value.rolling(20, min_periods=10).mean())
+        std20 = turnover_grouped.transform(lambda value: value.rolling(20, min_periods=10).std())
+        frame["turnover_z"] = (frame["turnover"] - mean20) / std20.replace(0.0, np.nan)
+    aggregations = {
+        "stock_count": ("stock_code", "nunique"),
+        "median_return_20d": ("return_20d", "median"),
+        "median_return_60d": ("return_60d", "median"),
+        "breadth_above_ma20": ("above_ma20", "mean"),
+        "realized_volatility_20d": ("volatility_20d", "median"),
+    }
+    if has_turnover and "turnover_z" in frame.columns:
+        aggregations["market_turnover_z"] = ("turnover_z", "median")
+    daily = frame.groupby("trade_date", sort=True).agg(**aggregations).reset_index()
+    if "market_turnover_z" in daily.columns:
+        daily["speculation_state"] = np.select(
+            [daily["market_turnover_z"] >= 1.0, daily["market_turnover_z"] <= -1.0],
+            ["hot", "cold"], default="normal",
+        )
+        daily.loc[daily["market_turnover_z"].isna(), "speculation_state"] = "unknown"
+    else:
+        daily["market_turnover_z"] = np.nan
+        daily["speculation_state"] = "unknown"
     daily["regime"] = "insufficient"
     metric_ready = daily[["median_return_60d", "breadth_above_ma20", "realized_volatility_20d"]].notna().all(axis=1)
     enough = (daily["stock_count"] >= int(min_stocks)) & metric_ready

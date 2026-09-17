@@ -613,3 +613,129 @@ Apple Neural Engine 不是当前 PyTorch 自定义 Transformer 的训练后端�
 公司相关搜索信息应先落为带时间戳的 evidence/事件表，再通过 CN importer 转为日频特征并写入 feature layer。只有完成 PIT 时间对齐、覆盖率检查和缺失标记后，才可以加入 LightGBM 或 Transformer 训练集；在当前实现中请把它视为独立研究输入，不要假定已经参与模型训练。
 
 目前仓库的 `research-stock-tags`、`searxng-research-stock-tags` 和 `stock-intelligence-pipeline` 仍以 HK registry 为默认输入。它们不能直接视为 A 股另类数据管道；CN 需要单独的股票名称/别名 registry 与 importer，避免代码映射、来源覆盖和可得时间出错。
+
+---
+
+# 运维补充（2026-09-16 更新）
+
+## 运行环境：统一使用 `uv run`
+
+所有阶段一律通过项目环境运行：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage <stage>
+```
+
+`uv run` 会先同步 `uv.lock` 再执行，保证解释器与依赖版本一致（当前 `.venv` 即 uv 管理的环境：
+Python 3.12.3 + pandas 3.0.3 + numpy 2.4.5）。直接调用 `.venv/bin/python` 在依赖漂移后会与
+文档/锁文件不一致，排障时容易误判为代码缺陷。
+
+## 历史回放：`--trade-date`
+
+用指定交易日重放整条决策链（模型截面、regime 行、可成交价格窗口、风险窗口全部按该日期截断，不读未来数据）：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage preselection --trade-date 2026-09-15 --profile rich
+uv run python scripts/run_cn_pipeline.py --stage pk           --trade-date 2026-09-15 --profile rich
+uv run python scripts/run_cn_pipeline.py --stage paper_outcomes --trade-date 2026-09-15 --profile rich
+```
+
+- 输出隔离到 `output/results_cn/replay_<YYYYMMDD>[_<profile>]/`，`paper_outcomes` 同理写到
+  `output/paper_trading/replay_<YYYYMMDD>_<profile>/`，**不会覆盖生产文件**。
+- 指定 `--trade-date` 时会绕过 `rebalance_stride_days` 的"沿用上一版"逻辑。
+- 用固定日期做打分（例如让新模型对新旧模型同一天对比）：
+
+```bash
+cp config/cn_pipeline.toml config/cn_pipeline_score0915.toml   # 改 end_date 与 [model_scores] output_dir
+uv run python scripts/run_cn_pipeline.py --config config/cn_pipeline_score0915.toml --stage model_scores
+```
+
+## 账户形态：`--profile`
+
+`[selection.profiles.<name>]` 定义资金、持仓数、模型槽位、价格上限与卫星槽位，`--profile` 选中其一：
+
+```toml
+[selection.profiles.rich]
+initial_capital = 300000.0
+max_holdings = 6
+model_slots = 8
+max_price = "auto"        # auto = equity * gross_exposure / max_holdings / lot_size
+sleeve_slots_max = 2
+```
+
+`max_price = "auto"` 的含义是"一个持仓槽位的预算刚好买得起一手"：
+300k 档 ≈ 175 元、45k 档 ≈ 26.25 元。价格上限同时作用于模型短名单与信号名字。
+
+## 组合风控：`[selection.risk_control]`
+
+```toml
+[selection.risk_control]
+target_volatility = 0.18      # 组合年化波动上限，超过则整体降杠杆、留现金（不加杠杆）
+max_name_risk_share = 0.35    # 单名占组合方差上限（迭代风险预算：压超限名字并再分配）
+# max_downside_vol = 1.20     # 资格门槛：默认关闭
+# min_reward_risk = 0.10
+# min_drawdown_60 = -0.45
+```
+
+**为什么资格门槛默认关闭**：全市场横截面的规律（深回撤更差、低盈亏比更差）套到"模型 Top-N 内部"会双重过滤。
+实测在 2026-09-15 回放中，`min_drawdown_60=-0.45` + `min_reward_risk=0.10` 剔掉了模型头部
+300776/301396/688515/603929（强势股回撤 -0.5~-0.6），rich 组合命中率从 6/6 掉到 2/5。
+开启任一门槛前请单独立项回测，并把结论写入 `output/verification/<topic>/VERIFICATION.txt`。
+
+风控在 PK 阶段执行；波动率/盈亏比/量能等**信息**作为特征放在预选（模型排序）与输出列里。
+
+## 信号层新增配置项
+
+| 配置 | 作用 | 依据 |
+|---|---|---|
+| `require_market_trend_up` | sleeve 仅在 `median_return_20d > 0` 时开火 | 上行 +0.30%/+0.80% vs 下行 +0.11%/+0.04% |
+| `max_breakout_extension` | 收盘价超出通道上沿的比例上限（默认 0.05） | 超出 >5% 后 5 日超额 -0.50%（t=-2.15） |
+| `max_runup_5d` | 近 5 日累计涨幅上限（默认 0.20） | 5 日涨幅 >20% 后 -0.32% |
+| `entry_delay_days` | 用"上一交易日"的事件（决策日买入 = 事件日+2 开盘） | 涨停动量 T+1 +0.01% → T+2 +0.35% |
+| `sleeve_slots_max` | 强制信号最多占用几个槽位 | 小账户每 sleeve 占一槽会把组合塌成 1.4 只 |
+| `model_min_share` | sleeve 下限合计 ≤ gross×(1-model_min_share)（默认 0.80） | 模型 Top-8 的 20 日超额 +9.2%（t=3.7），sleeve 只有 0.2~1.0% |
+
+## 新增因子集（例如量能路径 / 波动率 / 盈亏比）
+
+1. 在 `factor_engine/expressions/` 下新建因子集并用 `@register_factor_set("...")` 注册，
+   在 `factor_engine/expressions/__init__.py` 导出。
+2. 把因子集名加入 `ALPHA_ZOO_HK_COMPONENTS`（生产模型训练用的 `alpha_zoo_hk` 会随之扩展）。
+3. 重跑链路：`features` → `clean_panel` → `lightgbm`/`transformer` → `model_scores`。
+4. 验证：`uv run python -m pytest test/test_volume_volatility_features.py -q`，再用
+   `output/verification/volume_volatility_20260916/feature_increment_study.py` 做增量检验，
+   最后用 `output/verification/retrain_20260916/compare_models.py` 比较新旧模型的同日打分。
+
+已实现的扩展：`volume_volatility_hk`（33 个特征：量能路径 12 + 多口径波动率 17 + 盈亏比 4）。
+
+## 故障排查（2026-09-16 实测踩坑记录）
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| `DateParseError: day is out of range for month: 0` | 新因子集用 `frame.index` 当输出索引，而 worker 给的是 `RangeIndex + trade_date`，`pd.concat` 把日期与 `0,1,2…` 并集 | 因子集内统一用 `trade_date` 构造 DatetimeIndex |
+| `MergeError: incompatible merge keys [0] dtype('<M8[us]') and dtype('<M8[s]')` | 旧特征库分区是秒级、新帧是微秒级 | `parquet_store.upsert_frame` 前统一到 `datetime64[us]`；如需彻底重建，先把 `assets/data/feature/features` 改名备份再以空目录重跑 `features` |
+| 特征列"算出来了但没落库"/全为 NaN | 在 RangeIndex 上计算、再贴 DatetimeIndex 标签 → 按标签对齐 → 全 NaN，随后 `dropna(feature_value)` 把整列丢掉 | 计算前先做**位置式**索引赋值（`series.index = date_index`），并加"非空率"回归测试 |
+
+排查脚本：`output/verification/retrain_20260916/`（`feat_probe.py`、`worker_cols.py`、`worker_vals.py`、`merge_trace.py`）。
+
+## 验证与回滚约定
+
+涉及策略/模型改动的任务，产物统一放在 `output/verification/<topic>_<date>/`：
+
+```
+BASELINE/      改动前的文件快照 + SHA256SUMS
+MODIFIED/      改动后的快照 + SHA256SUMS
+*.diff         BASELINE → MODIFIED 的统一 diff
+ROLLBACK.sh    可执行；restore 并逐文件校验哈希
+VERIFICATION.txt  命令 / 输入 / 输出 / 退出码 / 回滚后行为
+```
+
+评估工具（均为 `uv run python ...` 调用）：
+
+| 脚本 | 用途 |
+|---|---|
+| `output/verification/event_study_20260916/event_study.py` | 各 sleeve 的事件研究（1/5/20 日、分 regime、涨幅/跳空分桶） |
+| `.../exit_policy_study.py` | 退出规则与尾部集中度对比 |
+| `.../shock_study.py` | 次日弱势后的进场时点（"等一天还是立刻进"） |
+| `output/verification/preselect_optimization_20260916/portfolio_backtest.py` | 多日组合回测（`--stride 4` 得到非重叠样本） |
+| `.../validate_20260915.py` | 指定决策日 → 次日验证（命中率/超额/置信区间） |
+| `output/verification/retrain_20260916/compare_models.py` | 新旧模型同日打分对比（Top-N 命中率、rank IC） |

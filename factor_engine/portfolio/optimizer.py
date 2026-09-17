@@ -22,6 +22,24 @@ class PortfolioConstraints:
     cost_penalty: float = 0.10
     max_holdings: int | None = None
     weighting: str = "score_risk"
+    # Risk control: annualised portfolio volatility ceiling and the largest
+    # share of total portfolio variance one name may carry.
+    target_volatility: float | None = None
+    max_name_risk_share: float | None = None
+    risk_vol_column: str = "volatility_20d"
+    # Soft risk scalers: names whose speculative / downside profile is stretched
+    # are de-weighted (never dropped) and the freed budget moves to calmer names.
+    risk_scalers: dict | None = None
+    market_deleverage: dict | None = None
+    covariance: object | None = None
+    # Risk-parity target: blend the optimized weights towards equal risk
+    # contribution.  0.0 keeps pure alpha/vol weights, 1.0 is full risk parity.
+    risk_parity_blend: float = 0.0
+    risk_parity_iterations: int = 150
+    # "cap" only de-levers when the target is breached; "budget" also deploys the
+    # unused risk budget up to max_gross_exposure and max_weight.
+    vol_target_mode: str = "cap"
+    max_gross_exposure: float | None = None
 
 
 def build_risk_snapshot(candidates: pd.DataFrame, *, asof_date=None) -> pd.DataFrame:
@@ -40,7 +58,12 @@ def build_cost_snapshot(candidates: pd.DataFrame, *, initial_capital=1_000_000.0
     frame = candidates.copy()
     provisional = 1.0 / max(1, len(frame))
     costs = [estimate_row_transaction_cost(row, target_weight=provisional, initial_capital=initial_capital) for row in frame.to_dict("records")]
-    return pd.concat([frame.reset_index(drop=True), pd.DataFrame(costs)], axis=1)
+    cost_frame = pd.DataFrame(costs)
+    # Drop columns the cost model re-emits, otherwise the frame carries two
+    # columns with the same label and every later `frame[col]` lookup returns a
+    # DataFrame instead of a Series.
+    frame = frame.drop(columns=[column for column in cost_frame.columns if column in frame.columns], errors="ignore")
+    return pd.concat([frame.reset_index(drop=True), cost_frame], axis=1)
 
 
 def optimize_long_only(
@@ -139,6 +162,8 @@ def optimize_long_only(
         )
     frame["current_weight"] = current
     frame["target_weight"] = target
+    target, risk_control = _apply_risk_control(frame, target, cfg)
+    frame["target_weight"] = target
     frame["trade_weight"] = target - current
     frame["portfolio_mode"] = "mean_variance_cost_aware"
     frame["constraint_status"] = np.where(target > 0, "eligible", "excluded")
@@ -161,6 +186,7 @@ def optimize_long_only(
         "forced_floor_gross": forced_diagnostics["forced_floor_gross"],
         "forced_weighted_count": int(((target > 0) & np.isin(np.arange(len(frame)), forced_index)).sum()),
         "covariance_version": "diagonal-volatility.v1", "cost_version": "costs.v1",
+        "risk_control": risk_control,
     }
     return frame.sort_values("target_weight", ascending=False).reset_index(drop=True), manifest
 
@@ -315,3 +341,237 @@ def _renormalize_capped(weights: np.ndarray, gross: float, max_weight: float) ->
     if total > gross and total > 0:
         result *= gross / total
     return result
+
+
+def _apply_risk_scalers(frame: pd.DataFrame, weights: np.ndarray, cfg) -> tuple[np.ndarray, dict]:
+    """De-weight - never drop - names whose risk profile is stretched.
+
+    Each scaler in ``cfg.risk_scalers`` is ``{column, threshold, slope, floor}``:
+    a name is scaled by ``max(floor, 1 - slope * (value - threshold))`` once the
+    column exceeds the threshold.  The freed weight is redistributed across the
+    remaining names so the book stays fully invested; the total risk ceiling is
+    still enforced afterwards by the volatility target.
+
+    Evidence behind the defaults (see output/verification/turnover_20260917):
+    turnover-rate z > 2 cuts the 20-day excess from +2.10% to +1.22% (win rate
+    43%), turnover volatility > 0.7 cuts it to +1.47%, and both tails of the
+    volatility distribution under-perform the middle.
+    """
+    report: dict = {"applied": [], "scaled_names": [], "scale_by_name": {}}
+    scalers = cfg.risk_scalers or {}
+    if not scalers or float(weights.sum()) <= 0:
+        return weights, report
+    result = weights.copy()
+    live = result > 0
+    for key, spec in scalers.items():
+        column = str(spec.get("column", key))
+        if column not in frame.columns:
+            continue
+        series = frame[column]
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        threshold = spec.get("threshold")
+        if threshold is None:
+            continue
+        slope = float(spec.get("slope", 1.0) or 1.0)
+        floor = float(spec.get("floor", 0.5) or 0.5)
+        direction = str(spec.get("direction", "above")).lower()
+        scales = np.ones(len(result), dtype=float)
+        for index in np.flatnonzero(live):
+            value = values[index]
+            if not np.isfinite(value):
+                continue
+            excess = (value - float(threshold)) if direction != "below" else (float(threshold) - value)
+            if excess <= 0:
+                continue
+            scales[index] = max(floor, 1.0 - slope * excess)
+        if bool((scales < 1.0 - 1e-12).any()):
+            report["applied"].append(column)
+            report["scale_by_name"].update({
+                str(frame["stock_code"].iloc[index]): round(float(scales[index]), 4)
+                for index in np.flatnonzero(scales < 1.0 - 1e-12)
+            })
+            report["scaled_names"] = sorted(set(report["scaled_names"]) | set(report["scale_by_name"]))
+            # shrink the offenders, then hand the freed weight to the rest
+            freed = float((result * (1.0 - scales)).sum())
+            result = result * scales
+            keep = (result > 0) & (scales >= 1.0 - 1e-12)
+            if freed > 0 and bool(keep.any()):
+                base = float(result[keep].sum())
+                if base > 0:
+                    result[keep] += freed * (result[keep] / base)
+    total = float(result.sum())
+    if total > 0 and weights.sum() > 0:      # keep the book at its previous gross
+        result = result * (float(weights.sum()) / total)
+    return result, report
+
+
+def _apply_risk_control(frame: pd.DataFrame, weights: np.ndarray, cfg) -> tuple[np.ndarray, dict]:
+    """Volatility ceiling and per-name risk-share cap on the finished book.
+
+    The covariance snapshot is diagonal, so portfolio variance is the sum of the
+    squared weighted vols.  Two guards are applied in order:
+
+    1. per-name risk share - one name may not carry more than
+       ``max_name_risk_share`` of total variance (cap, redistribute to the rest);
+    2. portfolio volatility - if the ex-ante vol exceeds ``target_volatility``
+       the whole book is scaled down (cash is left idle rather than levered up).
+    """
+    report = {"target_volatility": cfg.target_volatility, "max_name_risk_share": cfg.max_name_risk_share,
+              "enforced": False, "vol_before": None, "vol_after": None, "scale": 1.0, "capped_names": []}
+    if weights.size == 0 or float(weights.sum()) <= 0:
+        return weights, report
+    column = cfg.risk_vol_column if cfg.risk_vol_column in frame.columns else "volatility_20d"
+    if column not in frame.columns:
+        return weights, report
+    raw_vol = frame[column]
+    if isinstance(raw_vol, pd.DataFrame):   # duplicate labels: keep the first
+        raw_vol = raw_vol.iloc[:, 0]
+    vol = pd.to_numeric(raw_vol, errors="coerce").to_numpy(dtype=float)
+    vol = np.where(np.isfinite(vol) & (vol > 0), vol, np.nan)
+    live = weights > 0
+    if not bool(live.any()):
+        return weights, report
+    result = weights.copy()
+    result, scaler_report = _apply_risk_scalers(frame, result, cfg)
+    report["scalers"] = scaler_report
+    covariance = getattr(cfg, "covariance", None)
+    if covariance is not None:
+        covariance = np.asarray(covariance, dtype=float)
+    report["covariance"] = "full" if covariance is not None else "diagonal"
+
+    def _variance(vector: np.ndarray) -> float:
+        if covariance is not None:
+            return float(max(vector @ covariance @ vector, 0.0))
+        return float(np.nansum((vector * np.where(np.isfinite(vol), vol, 0.0)) ** 2))
+
+    def _risk_contributions(vector: np.ndarray) -> np.ndarray:
+        """Marginal risk contribution of each name (w_i (Σw)_i)."""
+        if covariance is not None:
+            return vector * (covariance @ vector)
+        return (vector * np.where(np.isfinite(vol), vol, 0.0)) ** 2
+
+    total_variance = _variance(result)
+    report["vol_before"] = round(float(np.sqrt(max(total_variance, 0.0))), 6) if total_variance > 0 else None
+
+    cap = cfg.max_name_risk_share
+    live_count = int(live.sum())
+    if cap is not None and 0 < float(cap) < 1 and total_variance > 0 and live_count * float(cap) < 1.0 - 1e-9:
+        # Fewer names than the cap can be satisfied with (e.g. two names, 35% cap):
+        # shrinking everyone would drain the book without changing the shares.
+        report["cap_infeasible"] = True
+        cap = None
+    if cap is not None and 0 < float(cap) < 1 and total_variance > 0:
+        live_index = np.flatnonzero(live)
+        # Iterative risk budgeting: shrink the offenders and hand the freed weight
+        # to the names below the cap, otherwise the offender's share never falls
+        # (shrinking alone shrinks the denominator too).
+        for _ in range(50):
+            contributions = _risk_contributions(result)
+            total_variance = float(np.nansum(contributions))
+            if total_variance <= 0:
+                break
+            shares = contributions / total_variance
+            over = shares > float(cap)
+            if not bool(over.any()):
+                break
+            positions = live_index[over]
+            keep = live_index[~over]
+            if keep.size == 0:
+                break                      # nothing can absorb the freed weight
+            freed = 0.0
+            for index in positions:
+                reduction = result[index] * 0.05
+                result[index] -= reduction
+                freed += reduction
+                report["capped_names"].append(int(index))
+            if keep.size and freed > 0:
+                base = result[keep].sum()
+                if base > 0:
+                    result[keep] += freed * (result[keep] / base)
+            report["enforced"] = True
+
+    # Risk-parity target: iterative fixed point on the covariance so each name
+    # contributes the same amount of risk, then blend with the alpha weights.
+    if float(getattr(cfg, "risk_parity_blend", 0.0) or 0.0) > 0 and live_count >= 2:
+        blend = float(np.clip(cfg.risk_parity_blend, 0.0, 1.0))
+        parity = result.copy()
+        gross_target = float(result.sum())
+        for _ in range(int(getattr(cfg, "risk_parity_iterations", 150) or 150)):
+            contributions = _risk_contributions(parity)
+            contributions = np.where(np.isfinite(contributions) & (contributions > 0), contributions, np.nan)
+            if not np.isfinite(contributions[live]).all():
+                break
+            target = float(np.nansum(contributions)) / max(live_count, 1)
+            parity = np.where(live, parity * np.sqrt(target / np.maximum(contributions, 1e-18)) ** 0.5, 0.0)
+            total = float(parity.sum())
+            if total <= 0:
+                break
+            parity = parity * (gross_target / total)
+        result = (1.0 - blend) * result + blend * parity
+        report["risk_parity"] = {"blend": blend, "applied": True}
+    else:
+        report["risk_parity"] = {"blend": 0.0, "applied": False}
+    contributions = _risk_contributions(result)
+    total_contributions = float(np.nansum(contributions))
+    if total_contributions > 0 and live_count > 0:
+        shares = contributions / total_contributions
+        report["risk_shares_before_deleverage"] = {
+            str(frame["stock_code"].iloc[index]): round(float(shares[index]), 4)
+            for index in np.flatnonzero(live)
+        }
+        report["risk_share_max"] = round(float(np.nanmax(shares[live])), 4)
+
+    # Market-state de-leverage: when the book's own turnover state is stretched
+    # (market-wide speculation), cut the whole book rather than one name.
+    scale = 1.0
+    market = cfg.market_deleverage or {}
+    if market:
+        column = str(market.get("column", "tr_zscore_20"))
+        series = frame[column] if column in frame.columns else None
+        if series is not None:
+            if isinstance(series, pd.DataFrame):
+                series = series.iloc[:, 0]
+            values = pd.to_numeric(series, errors="coerce")
+            state = float(values.median()) if values.notna().any() else float("nan")
+            threshold = market.get("threshold")
+            if np.isfinite(state) and threshold is not None and state > float(threshold):
+                slope = float(market.get("slope", 0.3) or 0.3)
+                floor = float(market.get("floor", 0.6) or 0.6)
+                scale = max(floor, 1.0 - slope * (state - float(threshold)))
+                result = result * scale
+                report["enforced"] = True
+            report["market_state"] = {"column": column, "value": None if not np.isfinite(state) else round(state, 4),
+                                      "threshold": threshold, "scale": round(float(scale), 4)}
+
+    if cfg.target_volatility is not None and float(cfg.target_volatility) > 0:
+        portfolio_vol = float(np.sqrt(max(_variance(result), 0.0)))
+        mode = str(getattr(cfg, "vol_target_mode", "cap") or "cap").lower()
+        gross_cap = float(getattr(cfg, "max_gross_exposure", None) or 0.0)
+        if portfolio_vol > float(cfg.target_volatility):
+            scale = scale * (float(cfg.target_volatility) / portfolio_vol)
+            result = result * scale
+            report["enforced"] = True
+        elif mode == "budget" and portfolio_vol > 0:
+            # Risk budget instead of a hard ceiling: deploy the unused volatility
+            # headroom, bounded by the gross ceiling and the per-name cap.
+            headroom = float(cfg.target_volatility) / portfolio_vol
+            gross_now = float(result.sum())
+            if gross_cap > 0 and gross_now > 0:
+                headroom = min(headroom, gross_cap / gross_now)
+            max_weight = float(getattr(cfg, "max_weight", 0.0) or 0.0)
+            if max_weight > 0:
+                live_weights = result[result > 0]
+                if live_weights.size:
+                    headroom = min(headroom, float(max_weight) / float(live_weights.max()))
+            if headroom > 1.0 + 1e-9:
+                result = result * headroom
+                scale = scale * headroom
+                report["budget_deployed"] = True
+                report["enforced"] = True
+    report["scale"] = round(float(scale), 6)
+    report["gross_after"] = round(float(result.sum()), 6)
+    report["vol_after"] = round(float(np.sqrt(max(_variance(result), 0.0))), 6)
+    report["capped_names"] = sorted({str(frame["stock_code"].iloc[index]) for index in report["capped_names"]})
+    return result, report

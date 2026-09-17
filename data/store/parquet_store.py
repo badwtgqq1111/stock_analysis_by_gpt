@@ -495,6 +495,14 @@ class ParquetDataStore:
     ):
         """按主键去重后写回 parquet 数据集。"""
         existing = self.read_frame(dataset_name, layer=layer)
+        # Harmonise datetime resolution before concatenating: partitions written
+        # by an older pandas/pyarrow carry second-resolution timestamps while new
+        # frames carry microseconds, and pandas then refuses to merge the two
+        # ("incompatible merge keys [0] dtype('<M8[us]') and dtype('<M8[s]')").
+        for column in (date_column, "ingest_time"):
+            for side in (existing, frame):
+                if side is not None and not side.empty and column in side.columns:
+                    side[column] = pd.to_datetime(side[column], errors="coerce").astype("datetime64[us]")
         combined = pd.concat([existing, frame], ignore_index=True) if not existing.empty else frame.copy()
         if sort_by:
             combined.sort_values(sort_by, inplace=True)

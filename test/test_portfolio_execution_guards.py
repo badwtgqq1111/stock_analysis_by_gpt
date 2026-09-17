@@ -402,3 +402,42 @@ def test_cap_mode_still_leaves_the_budget_undeployed():
 
     assert manifest["risk_control"].get("budget_deployed") is None
     assert float(optimized["target_weight"].sum()) == pytest.approx(0.35)
+
+
+def test_industry_caps_work_when_an_informative_l2_column_exists():
+    """pandas 3：set 形式的 replace 会抛错，这里回归行业上限的 l1/l2 分支。"""
+    codes = ["A.SZ", "B.SZ", "C.SZ"]
+    frame = _candidates(codes, [10.0] * 3)
+    frame["industry_l1"] = "证监会行业分类"          # 无信息量的分类标签
+    frame["industry_l2"] = "I65软件和信息技术服务业"  # 真正有值的行业
+    constraints = PortfolioConstraints(gross_exposure=0.35, max_weight=0.35, max_holdings=3,
+                                       weighting="inverse_volatility", max_industry_weight=0.20)
+
+    optimized, _manifest = optimize_long_only(frame, constraints=constraints, initial_capital=45_000.0)
+
+    assert float(optimized["target_weight"].sum()) <= 0.35 + 1e-9
+    assert float(optimized["target_weight"].max()) <= 0.20 + 1e-9   # 同一行业被 20% 上限压住
+
+
+def test_risk_share_cap_ignores_zero_weight_candidates():
+    """frame 里含 0 权重候选时，风险占比循环不应出现布尔索引错配。"""
+    codes = ["A.SZ", "B.SZ", "C.SZ", "D.SZ", "IDLE.SZ"]
+    frame = _candidates(codes, [10.0] * 5, model_score=[90.0, 80.0, 70.0, 60.0, 1.0])
+    frame["volatility_20d"] = [0.3, 0.4, 0.5, 0.6, 0.4]
+    weight_frame = frame.iloc[:4].copy()
+    covariance = np.full((4, 4), 0.02)
+    np.fill_diagonal(covariance, 0.08)
+    constraints = PortfolioConstraints(
+        gross_exposure=0.35, max_weight=0.35, max_holdings=4, weighting="inverse_volatility",
+        covariance={"codes": weight_frame["stock_code"].tolist(), "matrix": covariance.tolist()},
+        max_name_risk_share=0.35,
+    )
+
+    optimized, manifest = optimize_long_only(frame, constraints=constraints,
+                                             initial_capital=300_000.0)
+    report = manifest["risk_control"]
+
+    assert report["covariance"] == "full"
+    shares = list(report["risk_shares_before_deleverage"].values())
+    assert shares and max(shares) <= 0.35 + 1e-6
+    assert float(optimized["target_weight"].sum()) <= 0.35 + 1e-9

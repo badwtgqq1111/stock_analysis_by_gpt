@@ -20,7 +20,7 @@ ROOT="$(pwd)"
 # launchd / cron / systemd 的 PATH 很干净，这里补齐 uv 的常见安装位置
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 if ! command -v uv >/dev/null 2>&1; then
-  echo "uv not found on PATH=$PATH；请安装 uv（curl -LsSf https://astral.sh/uv/install.sh | sh）或把其目录加进 PATH" >&2
+  echo "uv not found on PATH=${PATH}；请安装 uv（curl -LsSf https://astral.sh/uv/install.sh | sh）或把其目录加进 PATH" >&2
   exit 127
 fi
 
@@ -39,14 +39,23 @@ done
 # 调度器环境：非交互式 shell 不会读取 ~/.bashrc（而且 ~/.bashrc 开头有 `case $- in *i*)` 守卫，
 # 手动 source 也会立刻返回），所以把交互式环境里的关键变量固化到 config/scheduler_env.sh 后显式加载。
 # 重新采集：bash scripts/capture_scheduler_env.sh
-if [ -f "$ROOT/config/scheduler_env.sh" ]; then
-  set -a; . "$ROOT/config/scheduler_env.sh"; set +a
-fi
-
-# 可选通知渠道配置（webhook / open_id 等敏感值放这里，不要写进 plist 或提交到仓库）
-if [ -f "$ROOT/config/notify.env" ]; then
-  # shellcheck disable=SC1091
-  set -a; . "$ROOT/config/notify.env"; set +a
+#
+# 命令行显式传入的变量优先（便于临时覆盖 DAILY_NOTIFY=0 等）：source 之后再恢复调用方取值。
+CALLER_ENV="$(env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' || true)"
+load_env_file() {
+  [ -f "$1" ] || return 0
+  set -a; . "$1"; set +a
+}
+load_env_file "$ROOT/config/scheduler_env.sh"
+load_env_file "$ROOT/config/notify.env"
+if [ -n "$CALLER_ENV" ]; then
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    case "$key" in
+      PATH|HOME|PWD|SHLVL|_|OLDPWD|SHELL|TERM|TMPDIR|USER|LOGNAME) continue ;;
+    esac
+    export "$key=${line#*=}"
+  done <<< "$CALLER_ENV"
 fi
 
 EARLIEST_HOUR="${DAILY_EARLIEST_HOUR:-16}"
@@ -110,6 +119,29 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 log "env: uv=$(command -v uv) | CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-unset} CLICKHOUSE_PASSWORD=$([ -n "${CLICKHOUSE_PASSWORD:-}" ] && echo set || echo unset) | TUSHARE_KEY=$([ -n "${TUSHARE_RELAY_KEY:-}" ] && echo set || echo unset) | proxy=${HTTPS_PROXY:-none}"
+notify_alert() {
+  # 失败告警：走同一套渠道（飞书/邮件/webhook）；通知本身失败不影响退出码
+  if [ "${DAILY_NOTIFY:-1}" != "1" ]; then
+    return 0
+  fi
+  local subject="$1"; shift
+  local body="$1"
+  uv run python scripts/notify_selection.py --text "$body" --subject "$subject" >> "$LOG_DIR/run.log" 2>&1 || true
+}
+
+# 预检：跑一遍与本次改动相关的回归测试（约 1 秒），把"代码级错误"挡在 70 分钟的重活之前
+PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py -q}"
+if [ "${DAILY_PREFLIGHT:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
+  if eval "$PREFLIGHT_CMD" > "$LOG_DIR/preflight.log" 2>&1; then
+    log "preflight ok: $PREFLIGHT_CMD"
+  else
+    log "preflight FAILED: ${PREFLIGHT_CMD}（见 $LOG_DIR/preflight.log）"
+    notify_alert "CN 自动化预检失败 ${TRADE_DATE}" "预检命令失败：${PREFLIGHT_CMD}
+$(tail -5 "$LOG_DIR/preflight.log")"
+    exit 2
+  fi
+fi
+
 log "start daily production trade_date=$TRADE_DATE force=$FORCE dry_run=$DRY_RUN skip_retrain=$SKIP_RETRAIN"
 FAILED=0
 for entry in "${STAGES[@]}"; do
@@ -130,6 +162,11 @@ for entry in "${STAGES[@]}"; do
     code=$?
     log "stage=$stage FAILED exit=$code -> $LOG_DIR/$stage.log"
     tail -5 "$LOG_DIR/$stage.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+    notify_alert "CN 自动化失败 ${TRADE_DATE} stage=${stage}"       "每日生产在阶段 ${stage} 失败（exit=${code}）。
+日志：$LOG_DIR/$stage.log
+最后几行：
+$(tail -5 "$LOG_DIR/$stage.log")
+后续 20:30 / 22:00 的触发会自动重试；如需立即重跑：bash scripts/run_daily_production.sh --force"
     FAILED=1
     break
   fi

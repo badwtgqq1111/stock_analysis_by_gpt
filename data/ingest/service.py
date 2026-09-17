@@ -7096,6 +7096,7 @@ class MarketDataService:
                         explained = None
                         industry_block_applied = None
                         industry_column_used = None
+                        industry_note = None
                         if covariance_model == "factor" and sample.shape[0] >= 3:
                             # Statistical factor model: PCA on standardised returns, so the
                             # systematic part is captured by K factors and the remainder is
@@ -7122,16 +7123,21 @@ class MarketDataService:
                             industry_column_used = None
                             industry_note = {
                                 "columns": [c for c in selected.columns if "industry" in c],
-                                "non_empty": {c: int(selected[c].fillna("").astype(str)
-                                                     .replace({"": "", "nan": "", "None": "", "证监会行业分类": ""})
-                                                     .ne("").sum())
-                                              for c in selected.columns if "industry" in c},
+                                "non_empty": {
+                                    c: int(selected[c].fillna("").astype(str).str.strip()
+                                           .mask(selected[c].fillna("").astype(str).str.strip().isin(
+                                               {"", "nan", "None", "证监会行业分类"}), "")
+                                           .ne("").sum())
+                                    for c in selected.columns if "industry" in c},
                             }
                             for candidate in ("industry_l2", "industry_l2_y", "industry_l1", "industry_l1_y"):
                                 if candidate not in selected.columns:
                                     continue
-                                values = selected[candidate].fillna("").astype(str).replace(
-                                    {"": "", "nan": "", "None": "", "证监会行业分类": ""})
+                                # pandas 3 对 `replace({"": ""})` 这类自映射会报
+                                # "Series.replace must specify either 'value'..."，用 isin+mask 替代
+                                values = selected[candidate].fillna("").astype(str).str.strip()
+                                values = values.mask(
+                                    values.isin({"", "nan", "None", "证监会行业分类"}), "")
                                 if values[values != ""].nunique() > 1:
                                     industry_map = dict(zip(selected["stock_code"].astype(str), values))
                                     industry_column_used = candidate
@@ -7285,42 +7291,18 @@ class MarketDataService:
                         ]
                         selected = cheapest
             if shrinkage_covariance:
-                try:
-                    order = [str(code) for code in selected["stock_code"].astype(str)]
-                    index_of = {code: position for position, code in enumerate(shrinkage_covariance["codes"])}
-                    matrix = shrinkage_covariance["matrix"]
-                    aligned = np.full((len(order), len(order)), np.nan)
-                    for row, code_row in enumerate(order):
-                        for column, code_column in enumerate(order):
-                            if code_row in index_of and code_column in index_of:
-                                aligned[row, column] = matrix[index_of[code_row]][index_of[code_column]]
-                    # fall back to the diagonal snapshot where a name has no history
-                    vols = pd.to_numeric(selected.get("volatility_20d"), errors="coerce").to_numpy(dtype=float)
-                    diagonal = np.where(np.isfinite(vols) & (vols > 0), vols ** 2, np.nan)
-                    for position in range(len(order)):
-                        if not np.isfinite(aligned[position, position]):
-                            aligned[position, position] = diagonal[position]
-                            for other in range(len(order)):
-                                if other != position:
-                                    aligned[position, other] = 0.0
-                    if np.isfinite(np.diag(aligned)).all():
-                        aligned = (aligned + aligned.T) / 2.0
-                        min_eig = float(np.min(np.linalg.eigvalsh(aligned)))
-                        if min_eig < 1e-10:
-                            aligned = aligned + np.eye(len(order)) * (1e-8 - min_eig)
-                        cfg = replace(cfg, covariance=aligned)
-                        covariance_used = {"assets": int(aligned.shape[0]),
-                                           "model": shrinkage_covariance.get("model"),
-                                           "intensity": shrinkage_covariance.get("intensity"),
-                                           "explained_variance": shrinkage_covariance.get("explained_variance"),
-                                           "industry_block": shrinkage_covariance.get("industry_block"),
-                                           "industry_columns": shrinkage_covariance.get("industry_columns"),
-                                           "industry_note": shrinkage_covariance.get("industry_note"),
-                                           "obs": shrinkage_covariance.get("obs")}
-                    else:
-                        covariance_used = None
-                except Exception:
-                    covariance_used = None
+                # 直接传 {codes, matrix}：优化器按每次迭代的实际 frame 重建子矩阵，
+                # 避免"修复循环裁剪名字"导致的维度错配。
+                cfg = replace(cfg, covariance={"codes": shrinkage_covariance["codes"],
+                                               "matrix": shrinkage_covariance["matrix"]})
+                covariance_used = {"assets": shrinkage_covariance.get("assets"),
+                                   "model": shrinkage_covariance.get("model"),
+                                   "intensity": shrinkage_covariance.get("intensity"),
+                                   "explained_variance": shrinkage_covariance.get("explained_variance"),
+                                   "industry_block": shrinkage_covariance.get("industry_block"),
+                                   "industry_columns": shrinkage_covariance.get("industry_columns"),
+                                   "industry_note": shrinkage_covariance.get("industry_note"),
+                                   "obs": shrinkage_covariance.get("obs")}
             else:
                 covariance_used = None
             selected, portfolio_manifest, lot_summary = _repair_unfillable_targets(

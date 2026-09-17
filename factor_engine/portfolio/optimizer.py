@@ -306,7 +306,9 @@ def _apply_industry_caps(frame: pd.DataFrame, weights: np.ndarray, cap: float) -
     l2 = frame.get("industry_l2")
     if l2 is not None:
         l2 = l2.fillna("").astype(str)
-        informative_l1 = industry.replace({"", "__unknown__", "nan", "None"}).nunique() > 1
+        # pandas 3 不再接受 set 形式的 to_replace（旧写法会把 ""/unknown/nan/None 视为缺失），
+        # 用 where+isin 表达同样的语义：先屏蔽无效标签，再看还有几个不同行业。
+        informative_l1 = industry.where(~industry.isin({"", "__unknown__", "nan", "None"})).nunique() > 1
         if not informative_l1 and int((l2.str.strip() != "").sum()) > 0:
             industry = l2.where(l2.str.strip() != "", industry)
     result = weights.copy()
@@ -437,9 +439,45 @@ def _apply_risk_control(frame: pd.DataFrame, weights: np.ndarray, cfg) -> tuple[
     result, scaler_report = _apply_risk_scalers(frame, result, cfg)
     report["scalers"] = scaler_report
     covariance = getattr(cfg, "covariance", None)
-    if covariance is not None:
+    covariance_note = "diagonal"
+    if isinstance(covariance, dict):
+        # 形如 {"codes": [...], "matrix": [[...]]}：按当前 frame 重建子矩阵，
+        # 这样即使组合在修复循环中被裁剪（名字数变化）也不会维度错配。
+        codes = [str(code) for code in covariance.get("codes") or []]
+        matrix = np.asarray(covariance.get("matrix"), dtype=float)
+        index_of = {code: position for position, code in enumerate(codes)}
+        order = [str(code) for code in frame["stock_code"]]
+        if matrix.ndim == 2 and matrix.shape[0] == matrix.shape[1] == len(codes) and order:
+            subset = np.full((len(order), len(order)), np.nan)
+            vols = pd.to_numeric(frame.get(cfg.risk_vol_column, frame.get("volatility_20d")),
+                                 errors="coerce").to_numpy(dtype=float)
+            for row, code_row in enumerate(order):
+                for column, code_column in enumerate(order):
+                    if code_row in index_of and code_column in index_of:
+                        subset[row, column] = matrix[index_of[code_row]][index_of[code_column]]
+            for position in range(len(order)):
+                if not np.isfinite(subset[position, position]):
+                    # 同时清掉整行与整列，否则残留 NaN 会让特征值分解失败
+                    subset[position, :] = 0.0
+                    subset[:, position] = 0.0
+                    subset[position, position] = (vols[position] ** 2) if np.isfinite(vols[position]) else np.nan
+            if np.isfinite(np.diag(subset)).all():
+                covariance = (subset + subset.T) / 2.0
+                minimum = float(np.min(np.linalg.eigvalsh(covariance)))
+                if minimum < 1e-10:
+                    covariance = covariance + np.eye(len(order)) * (1e-8 - minimum)
+                covariance_note = "full"
+            else:
+                covariance = None
+        else:
+            covariance = None
+    elif covariance is not None:
         covariance = np.asarray(covariance, dtype=float)
-    report["covariance"] = "full" if covariance is not None else "diagonal"
+        if covariance.ndim == 2 and covariance.shape[0] == covariance.shape[1] == len(frame):
+            covariance_note = "full"
+        else:
+            covariance = None                     # 形状不匹配时退回对角线，绝不静默算错
+    report["covariance"] = covariance_note
 
     def _variance(vector: np.ndarray) -> float:
         if covariance is not None:
@@ -468,7 +506,9 @@ def _apply_risk_control(frame: pd.DataFrame, weights: np.ndarray, cfg) -> tuple[
         # to the names below the cap, otherwise the offender's share never falls
         # (shrinking alone shrinks the denominator too).
         for _ in range(50):
-            contributions = _risk_contributions(result)
+            # 只取有持仓的名字：frame 里可能包含权重为 0 的候选，
+            # 全量 contributions 与 live_index 长度不一致会导致布尔索引错配。
+            contributions = _risk_contributions(result)[live_index]
             total_variance = float(np.nansum(contributions))
             if total_variance <= 0:
                 break

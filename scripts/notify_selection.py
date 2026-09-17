@@ -185,10 +185,22 @@ def main() -> int:
     parser.add_argument("--top", type=int, default=12)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--print-payload", action="store_true", help="打印将发送的内容后退出")
+    parser.add_argument("--text", default=None, help="直接发送这段文本（用于失败告警等短消息），跳过报告生成")
+    parser.add_argument("--subject", default=None, help="邮件主题（配合 --text 使用）")
     args = parser.parse_args()
 
     load_env_file(REPO / "config" / "notify.env")
-    content, path = build_report(args.trade_date, args.replay_dir, args.top)
+    if args.text:
+        content, path = args.text, REPO / "output" / "results_cn" / "_notify_text.md"
+        if args.subject:
+            os.environ["MAIL_SUBJECT"] = args.subject
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        (path.with_suffix(".html")).write_text(
+            "<html><body><pre style='font-family:-apple-system,PingFang SC,sans-serif'>"
+            + content.replace("&", "&amp;").replace("<", "&lt;") + "</pre></body></html>", encoding="utf-8")
+    else:
+        content, path = build_report(args.trade_date, args.replay_dir, args.top)
     print(f"report: {path} ({len(content)} chars)")
     if args.print_payload:
         print(content)

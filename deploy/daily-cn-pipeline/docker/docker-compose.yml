@@ -1,0 +1,20 @@
+services:
+  daily-pipeline:
+    build:
+      context: ../..
+      dockerfile: deploy/daily-cn-pipeline/docker/Dockerfile
+    image: cn-quant-pipeline:latest
+    container_name: cn-quant-daily
+    environment:
+      TZ: Asia/Shanghai
+      DAILY_EARLIEST_HOUR: "16"
+      # 容器内没有 MPS：显式让 transformer 走 CPU
+      TRANSFORMER_DEVICE: cpu
+    volumes:
+      - ../../assets:/app/assets
+      - ../../output:/app/output
+      - ../../config:/app/config:ro
+      - ../../docs/runbooks:/app/docs/runbooks:ro
+    # 一次性任务：跑完即退出（用宿主机 cron / 云函数 / compose run 触发）
+    command: ["--force"]
+    restart: "no"

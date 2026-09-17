@@ -739,3 +739,242 @@ VERIFICATION.txt  命令 / 输入 / 输出 / 退出码 / 回滚后行为
 | `output/verification/preselect_optimization_20260916/portfolio_backtest.py` | 多日组合回测（`--stride 4` 得到非重叠样本） |
 | `.../validate_20260915.py` | 指定决策日 → 次日验证（命中率/超额/置信区间） |
 | `output/verification/retrain_20260916/compare_models.py` | 新旧模型同日打分对比（Top-N 命中率、rank IC） |
+
+---
+
+# 每日自动化与部署（2026-09-17）
+
+## 选股入口：用 `preselection` + `pk` 取代 `selection`
+
+`[stages] selection = false`，配置里已默认关闭一步式 `selection`；每日生产固定两步：
+
+```bash
+uv run python scripts/run_cn_pipeline.py --stage preselection   # 阶段一：模型 + 各 sleeve 候选池
+uv run python scripts/run_cn_pipeline.py --stage pk             # 阶段二：组合与风控
+uv run python scripts/render_two_stage_report.py                # 两阶段报告（Markdown + JSON）
+```
+
+- `preselection` 产出 `output/results_cn/cn_ensemble_preselected.csv`（模型 Top-8 + 各 sleeve 候选/强制项）；
+- `pk` 在冻结的候选池上做风险预算与定仓，产出 `cn_ensemble_selected.csv` + `cn_ensemble_portfolio_manifest.json`；
+- 两阶段报告默认写到 `output/results_cn/two_stage_report_<date>.md/json`
+  （回放时用 `--replay-dir output/results_cn/replay_<date>_<profile>`）。
+- 历史对比/回放一律用 `--trade-date`（输出隔离到 `replay_<date>[_<profile>]/`），不要覆盖生产文件。
+
+## 一键每日生产脚本
+
+```bash
+bash scripts/run_daily_production.sh              # 收盘后自动判断 + 幂等 + 生成报告
+bash scripts/run_daily_production.sh --dry-run    # 只打印将执行的阶段
+bash scripts/run_daily_production.sh --force      # 当天重跑
+bash scripts/run_daily_production.sh --skip-retrain   # 跳过 features/clean_panel（重量级）
+```
+
+行为：① 本地时间早于 `DAILY_EARLIEST_HOUR`（默认 16）直接退出；② 当天成功过就跳过
+（标记 `output/pipeline_reports/daily/<date>/production.done`）；③ 阶段顺序
+`daily_bars → regime → features → clean_panel → model_scores → preselection → pk → exits →
+paper_account → paper_outcomes`；④ 每阶段独立日志 + 失败即停 + 末尾生成两阶段报告。
+
+## 调度方式（三选一）
+
+| 环境 | 方式 | 触发 | 说明 |
+|---|---|---|---|
+| **macOS 本地** | launchd（`deploy/daily-cn-pipeline/macos/`） | 每天 16:10 / 18:30 / 21:00 + 开机 `RunAtLoad` | `bash install.sh` 一键安装；能用到 Apple GPU（MPS） |
+| **Linux 云主机** | systemd timer（`deploy/daily-cn-pipeline/linux/`）或 cron | `Mon..Fri 16:10/18:30/21:00` + `Persistent=true`（开机补跑） | 阿里云/腾讯云 ECS；`TZ=Asia/Shanghai` 必设 |
+| **容器** | `deploy/daily-cn-pipeline/docker/` | 宿主 cron / 云定时任务调用 `docker compose run` | 环境可复现；**CPU 推理** |
+
+容器化与硬件加速（macOS Docker vs Linux Docker）：
+
+| 维度 | macOS 上的 Docker | Linux 上的 Docker |
+|---|---|---|
+| 运行时 | Linux VM（Virtualization.framework） | 共享宿主内核 |
+| Apple GPU（Metal/MPS） | **不可用** | 不适用 |
+| Apple NPU（ANE） | **不可用**（仅原生 macOS 进程） | 不适用 |
+| NVIDIA GPU | 不可用 | 需 NVIDIA Container Toolkit + `--gpus all` |
+| 大文件 I/O | 受 VM 限制，明显偏慢 | 接近原生 |
+
+因此：**本机每日生产用原生 venv + launchd（全速、可用 MPS）**；容器用于云端或需要同构复现的场景，
+并在配置里显式 `[transformer] device = "cpu"`，避免"以为在用 MPS 其实在跑 CPU"。
+三种调度器都只调用同一个 `scripts/run_daily_production.sh`，因此行为完全一致。
+
+## 数据与状态
+
+- 必须持久化：`assets/`（OHLCV、特征库、模型）、`output/`（选股、报告、paper 账户）、`config/`；
+  容器部署时挂卷或云盘，不要放进镜像。
+- 节假日：脚本按"本地时间 + 幂等标记"判断，节假日会空跑（数据源无新交易日）；要更严格可接
+  `output/regime/cn_market_regime.csv` 的最新交易日校验。
+- 建议监控：`output/pipeline_reports/daily/<date>/run.log` 与各阶段日志；
+  ClickHouse 被降级（`_clickhouse_disabled_reason`）会静默改变 stock_info 读取来源，值得单独告警。
+
+## 飞书通知（已部署）
+
+每日生产在生成两阶段报告后，会调用 `scripts/notify_feishu.py` 把选股结果发到飞书：
+
+```bash
+uv run python scripts/build_feishu_report.py          # 生成 output/results_cn/feishu_<date>.md|.json
+uv run python scripts/notify_feishu.py --dry-run      # 预览将发送的内容
+uv run python scripts/notify_feishu.py                # 真实发送
+```
+
+通知结构（每只一行，字段与运营表一致）：
+
+| 字段 | 来源 |
+|---|---|
+| 股票 / 名称 / 行业 | `stock_info`（名称、industry_l2） |
+| 路径与选择原因 | `selection_channel`/`selection_sleeve`/`signal_type`/信号分/量比/反弹 ATR/止损价 |
+| 模型分 / 排名 | `cn_ensemble_preselected.csv` 的 `model_score` / `rank` |
+| RPS(5/10/20/30/60) | 横截面分位：各周期收益在全市场的百分位排名 |
+| PK 状态与风险 | `cn_ensemble_selected.csv` 权重与手数、整手剔除/保底记录、风控减仓系数、成交额中位数与流动性评级 |
+
+身份与收件人通过环境变量覆盖：
+
+- `FEISHU_IDENTITY`（默认 `bot`；`user` 需要 `im:message.send_as_user` scope，当前账号缺该 scope，会报
+  `missing_scope`，此时用 bot 身份即可）；
+- `FEISHU_USER_ID`（默认 `ou_53cf03fd06b21154a774194516dc2e95`，即当前账号）；
+- `DAILY_NOTIFY_FEISHU=0` 可关闭通知（通知失败不会影响生产结果，只写日志）。
+
+## 本机自动化已部署（2026-09-17）
+
+```bash
+bash deploy/daily-cn-pipeline/macos/install.sh      # 安装/更新 launchd
+launchctl print gui/$(id -u)/com.quant.cn-pipeline  # 查看状态
+launchctl kickstart -k gui/$(id -u)/com.quant.cn-pipeline   # 立即手动跑一次
+```
+
+- 计划：每天 **16:10 / 18:30 / 21:00** + `RunAtLoad`（开机补跑）；幂等标记
+  `output/pipeline_reports/daily/<date>/production.done`（当天成功过就跳过，`--force` 重跑）。
+- 日志：`output/pipeline_reports/daily/<date>/run.log` 与各阶段 `*.log`；
+  launchd 的 stdout/stderr 在 `output/pipeline_reports/daily/launchd.{out,err}.log`。
+- 若当天要手工补跑：`bash scripts/run_daily_production.sh --force`。
+
+## 微信群 / 企业微信通知（2026-09-17）
+
+**结论：个人微信没有官方群机器人接口，无法合规地自动发到"微信群"。可自动化的等价物是企业微信
+内部群的群机器人 webhook**，本仓库已支持，配好 URL 即生效。
+
+| 目标 | 能否自动发 | 方案 |
+|---|---|---|
+| 企业微信**内部群**（同事群） | ✅ | 群机器人 webhook（`WECOM_WEBHOOK_URL`），本仓库已支持并已用本地 mock 验证 |
+| 企业微信**外部客户群**（群里有微信用户） | ❌ 机器人不支持 | 只能走"群发/客户群群发"（需人工确认），或把消息发到内部群再转发 |
+| 企业微信**成员单聊** | ✅ | 企业自建应用 `corp_id/corp_secret/agentid` + 应用消息（未接入，需要企业应用凭据） |
+| **个人微信群** | ❌ 无官方 API | 非官方方案（Wechaty/itchat 等 hook 个人微信）违反服务协议、封号风险高、需长期在线扫码，**不建议接入每日生产** |
+| 飞书 / 钉钉 / 自建服务 | ✅ | 飞书 bot（已部署）、钉钉 webhook、通用 webhook，同一脚本内多选 |
+
+### 三步启用企业微信群机器人
+
+1. 企业微信里打开目标**内部群** → 右上角设置 → 群机器人 → 添加机器人 → 复制 **webhook 地址**；
+2. 本机创建 `config/notify.env`（模板见 `config/notify.env.example`），写入：
+   ```bash
+   WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx
+   NOTIFY_CHANNELS=feishu,wecom
+   ```
+   （该文件已加入 `.gitignore`；launchd 不需要任何改动，脚本会自动 source 它。）
+3. 验证：
+   ```bash
+   uv run python scripts/notify_selection.py --dry-run        # 预览将发送的内容与渠道
+   uv run python scripts/notify_selection.py                  # 真实发送
+   ```
+
+### 多渠道通知脚本
+
+```bash
+uv run python scripts/notify_selection.py --channels feishu,wecom,dingtalk,generic
+uv run python scripts/notify_selection.py --print-payload     # 只打印内容不发送
+```
+
+- 每条 webhook 消息用 `msgtype=markdown`，正文与飞书通知一致（股票/名称行业/路径原因/模型分排名/
+  RPS/PK 状态与风险，最多 12 只，超出会被截断到 4000 字）；
+- 未配置的渠道记为 `skip`（不影响退出码），真实发送失败才返回非 0；
+- 每日生产脚本在生成两阶段报告后自动调用；`DAILY_NOTIFY=0` 可整体关闭。
+
+## 邮件通知（QQ 邮箱，2026-09-17 已支持）
+
+邮件渠道同样是 `scripts/notify_selection.py` 的一个通道，正文与飞书通知一致，并额外提供
+**HTML 表格**（六列：股票 / 名称行业 / 路径与选择原因 / 模型分排名 / RPS / PK 状态与风险），
+邮件客户端里直接呈现为表格。
+
+```bash
+# 配置（写到 config/notify.env，已 gitignore；脚本会自动 source）
+MAIL_TO=badwtg2222@qq.com
+SMTP_HOST=smtp.qq.com
+SMTP_PORT=465
+SMTP_TLS=ssl
+SMTP_USER=badwtg2222@qq.com
+SMTP_PASSWORD=<QQ 邮箱"授权码"，16 位>
+
+# 预览与发送
+uv run python scripts/notify_selection.py --channels email --dry-run
+uv run python scripts/notify_selection.py --channels email
+```
+
+**QQ 邮箱授权码获取**：QQ 邮箱网页版 → 设置 → 账户 → "POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV 服务"
+→ 开启 **SMTP 服务** → 按提示发送短信 → 生成 16 位授权码（**不是 QQ 登录密码**）。
+`SMTP_PASSWORD` 未配置时邮件渠道会明确报错（不会静默失败），其余渠道不受影响。
+
+验证：`test/test_selection_notify.py`（5 项）覆盖 MIME 多部分结构（纯文本 + HTML 表格）、
+未配置授权码的报错、dry-run 计划输出、企业微信 payload 结构、未配置渠道按 `skip` 处理；
+发送链路另用本地 mock SMTP（`SMTP_HOST=127.0.0.1 SMTP_TLS=none`）实测通过。
+
+产物：`output/results_cn/feishu_<date>.{md,html,json}`（同一份数据同时供飞书/邮件/微信使用）。
+
+### 邮件渠道已上线（2026-09-17 实测）
+
+`config/notify.env` 配置完成并实测投递成功：
+
+```text
+ok   email: sent to badwtg2222@qq.com via smtp.qq.com:465 (ssl)
+```
+
+- `scripts/notify_selection.py` 现在会**自动加载** `config/notify.env`（不覆盖已有环境变量），
+  因此手动运行、launchd、systemd、cron 四种方式的行为一致，凭据只维护一份；
+- 每日生产脚本仍会额外 source 一次该文件（双保险）；
+- 收件人与渠道在 `config/notify.env` 中调整：`MAIL_TO`、`NOTIFY_CHANNELS=feishu,email[,...]`、
+  `DAILY_NOTIFY=0` 可整体关闭通知。
+
+## 调度任务如何拿到 `~/.bashrc` 里的环境变量（2026-09-17）
+
+**结论：拿不到，必须显式处理。** 原因是 shell 启动文件的分工：
+
+| 启动方式 | 读取的文件 | 说明 |
+|---|---|---|
+| 登录 shell（Terminal 打开、`bash -l`） | `/etc/profile` → `~/.bash_profile` → `~/.bash_login` → `~/.profile` | macOS 的 bash 默认走这里；**不读** `~/.bashrc`（除非 `.bash_profile` 里显式 source） |
+| 交互式非登录（在已登录终端里敲 `bash`） | `~/.bashrc` | 你平时手动执行 `uv run ...` 走的就是这条路径，所以一切正常 |
+| **非交互式**（launchd / systemd / cron / 脚本调用） | **都不读** | bash 只会在设置了 `BASH_ENV` 时读那个文件；`~/.zshrc`、`~/.bashrc` 一律不参与 |
+| zsh（macOS 默认交互 shell） | 登录：`~/.zprofile`；交互：`~/.zshrc` | 同上，调度任务都不会读 |
+
+本项目 `~/.bashrc` 里恰好放着这个工程**必需**的东西：`CLICKHOUSE_*`（含密码）、
+`TUSHARE_RELAY_KEY`、`CN_INDUSTRY_RELAY_BASE_KEY`、`HF_TOKEN`、`DEEPSEEK_API_KEY`、
+`HTTP(S)_PROXY`，以及把 `~/.local/bin`（`uv` 所在目录）加进 `PATH` 的那一行。
+更麻烦的是它开头有：
+
+```bash
+case $- in
+	*i*) ;;
+	*) return ;;
+esac
+```
+
+即**非交互式 shell 里手动 source 它也会立刻 return**，什么都拿不到（这正是 18:30 那次
+`uv: command not found` 的根因）。
+
+### 处理方式（已落地）
+
+1. **固化环境文件**：`bash scripts/capture_scheduler_env.sh` 会启动一个真正的交互式 shell
+   （`bash -ic env`）采集完整环境，过滤出与本工程相关的变量（ClickHouse、数据源 key、
+   LLM key、代理、`PATH`），写成 `config/scheduler_env.sh`（`export` 形式，权限 600，已 gitignore）。
+2. **调度脚本显式加载**：`run_daily_production.sh` 在开头 `set -a; . config/scheduler_env.sh; set +a`，
+   并在每次运行的第一行打印脱敏环境摘要，便于日后排查：
+   ```
+   env: uv=/Users/ccs/.local/bin/uv | CLICKHOUSE_HOST=localhost CLICKHOUSE_PASSWORD=set | TUSHARE_KEY=set | proxy=http://127.0.0.1:7897
+   ```
+3. **`BASH_ENV` 双保险**：launchd plist 里设置 `BASH_ENV=<repo>/config/scheduler_env.sh`，
+   任何被任务启动的非交互式 bash 也会自动加载同一份变量。
+4. **`PATH` 兜底**：脚本自身把 `$HOME/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 前置；
+   `install.sh` 还会把 `uv` 所在目录写进 plist 的 `EnvironmentVariables.PATH`。
+
+### 维护
+
+- 改过 `~/.bashrc`（新增 key、改代理、换 ClickHouse 密码）后，重新采集一次即可：
+  `bash scripts/capture_scheduler_env.sh`；
+- 也可以直接编辑 `config/scheduler_env.sh` 追加 `export KEY=VALUE`；
+- 验证调度环境是否完整（模拟 launchd 的干净环境）：
+  `env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash scripts/run_daily_production.sh --dry-run --force`

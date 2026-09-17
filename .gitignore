@@ -16,3 +16,8 @@ docs/hk_company_*_evidence.csv
 deploy/lightrag/.env
 deploy/lightrag/server.env
 deploy/lightrag/data/
+
+# 通知渠道密钥
+config/notify.env
+config/cn_pipeline_blend_*.toml
+config/scheduler_env.sh

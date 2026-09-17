@@ -1,0 +1,15 @@
+[Unit]
+Description=CN stock daily production (daily_bars -> scores -> preselection -> pk -> paper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+WorkingDirectory=/opt/cn-quant/stock_analysis_by_gpt
+Environment=TZ=Asia/Shanghai
+Environment=DAILY_EARLIEST_HOUR=16
+ExecStart=/usr/bin/env bash /opt/cn-quant/stock_analysis_by_gpt/scripts/run_daily_production.sh
+# 失败重试：数据源抖动时自动重跑一次（幂等：成功后写 .done 标记）
+Restart=on-failure
+RestartSec=600

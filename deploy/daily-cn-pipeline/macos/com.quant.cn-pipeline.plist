@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.quant.cn-pipeline</string>
+
+  <!-- 每天 16:10 触发（收盘后）；RunAtLoad 让"开机后"也补跑一次 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/ccs/code/quant/stock_analysis_by_gpt/scripts/run_daily_production.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/ccs/code/quant/stock_analysis_by_gpt</string>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- 15:05 再补一次：覆盖"16:10 时机器关机、之后才开机"的情况 -->
+  <!-- 每天 19:30 起，失败则 20:30 / 22:00 自动重试；当天成功后写 production.done，后续触发直接跳过 -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__UV_DIR__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>DAILY_EARLIEST_HOUR</key>
+    <string>16</string>
+    <!-- 本机 uv 缓存与虚拟环境路径，确保 launchd 环境下能找到 uv / python -->
+    <key>UV_PROJECT_ENVIRONMENT</key>
+    <string>/Users/ccs/code/quant/stock_analysis_by_gpt/.venv</string>
+    <key>HOME</key>
+    <string>/Users/ccs</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/ccs/code/quant/stock_analysis_by_gpt/output/pipeline_reports/daily/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ccs/code/quant/stock_analysis_by_gpt/output/pipeline_reports/daily/launchd.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

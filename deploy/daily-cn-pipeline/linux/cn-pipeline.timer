@@ -1,0 +1,14 @@
+[Unit]
+Description=Run CN stock daily production every trading day afternoon
+
+[Timer]
+# 收盘后：19:30、20:30、22:00（北京时间；当天失败才重试，成功即跳过）
+OnCalendar=Mon..Fri 19:30
+OnCalendar=Mon..Fri 20:30
+OnCalendar=Mon..Fri 22:00
+# 机器关机期间错过的触发，开机后补跑一次
+Persistent=true
+Unit=cn-pipeline.service
+
+[Install]
+WantedBy=timers.target

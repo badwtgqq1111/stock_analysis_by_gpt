@@ -216,6 +216,7 @@ def test_clean_panel_stage_calls_materializer() -> None:
     assert service.kwargs["cleaning_version"] == "p0.2.v1"
     assert service.kwargs["days"] == 365
     assert service.kwargs["feature_batch_size"] == 50
+    assert service.kwargs["moneyflow_path"].endswith("cn_moneyflow_features.parquet")
     assert service.kwargs["show_progress"] is True
 
 

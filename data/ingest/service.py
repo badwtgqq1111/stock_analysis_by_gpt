@@ -36,6 +36,10 @@ from data.ingest.providers import (
     SW2021RelayIndustryFetcher,
     CNDailyBasicRelayFetcher,
     CNAdjustmentFactorRelayFetcher,
+    CNMoneyflowFetcher,
+    build_moneyflow_features,
+    build_second_wave_confirmation_features,
+    fetch_paginated_stock_history,
     HKCorporateActionsFetcher,
     HKMarketListFetcher,
     HistoryDataFetcher,
@@ -85,13 +89,42 @@ from factor_engine.ml.regime import build_market_regime, write_market_regime_rep
 from factor_engine.ml.paper_trading import evaluate_selection_outcomes, write_outcome_report
 from factor_engine.ml.graph_temporal import build_industry_adjacency, train_graph_temporal_panel
 from factor_engine.ml.walk_forward import compare_walk_forward_predictions, write_walk_forward_report
-from factor_engine.ml.oos_predictions import generate_cnn_oos_predictions, generate_graph_temporal_oos_predictions, generate_lightgbm_oos_predictions, generate_transformer_oos_predictions
+from factor_engine.ml.oos_predictions import (
+    AVAILABILITY_RULE,
+    generate_cnn_oos_predictions,
+    generate_graph_temporal_oos_predictions,
+    generate_lightgbm_meta_oos_predictions,
+    generate_lightgbm_oos_predictions,
+    generate_transformer_oos_predictions,
+)
 from factor_engine.expressions.volume_volatility import compute_turnover_features, compute_volatility_features
 from factor_engine.expressions.volume_volatility import compute_volatility_features
 from factor_engine.portfolio.optimizer import PortfolioConstraints, optimize_long_only
 from factor_engine.portfolio.paper_account import persist_paper_account, run_paper_account
 from factor_engine.ml.alternative_data import normalize_cn_alternative_evidence, write_alternative_data_report
+from factor_engine.ml.feature_profiles import resolve_feature_profile
 from factor_engine.ml.strategy_labels import build_cn_strategy_labels
+from factor_engine.ml.meta_labeling import (
+    DEFAULT_META_FEATURES,
+    META_CONTEXT_COLUMNS,
+    META_LABEL_COLUMNS,
+)
+
+# Columns the meta gate needs on top of the primary label: the barrier
+# outcome that defines the second-stage target, plus the executable forward
+# returns used to score the gate and its costs.
+META_GATE_LABEL_COLUMNS = tuple(dict.fromkeys((
+    *META_LABEL_COLUMNS,
+    *META_CONTEXT_COLUMNS,
+    "forward_exec_return_5d",
+    "forward_exec_return_10d",
+    "forward_exec_return_20d",
+    "forward_exec_return_60d",
+    "forward_excess_return_5d",
+    "forward_excess_return_10d",
+    "forward_excess_return_20d",
+    "forward_excess_return_60d",
+)))
 from factor_validation import FactorValidator
 
 
@@ -177,6 +210,77 @@ def _cn_incremental_start_date(base_start, latest_trade_date, frequency):
     return effective_start.strftime("%Y-%m-%d")
 
 
+def _clean_panel_feature_names(dataset_path):
+    """List the model columns of a materialized clean panel without reading rows."""
+    try:
+        import pyarrow.dataset as arrow_dataset
+    except ImportError:  # pragma: no cover - pyarrow is a hard dependency
+        return []
+    try:
+        dataset = arrow_dataset.dataset(str(dataset_path), format="parquet", partitioning="hive")
+    except Exception:
+        return []
+    return [name for name in dataset.schema.names if str(name).endswith(("_clean", "_is_missing"))]
+
+
+def _strategy_label_merge_columns(target, extra_label_columns, labels):
+    """Columns merged from the strategy label frame for one label mode.
+
+    ``startup_price_eligible`` is the eligibility key rather than an extra label,
+    so it is excluded from the caller-provided list; duplicating a merge key
+    silently produces suffixed ``_x``/``_y`` columns downstream.
+    """
+    excluded = {str(target), "startup_price_eligible"}
+    requested = [
+        str(column)
+        for column in (extra_label_columns or ())
+        if str(column) in labels.columns and str(column) not in excluded
+    ]
+    return list(dict.fromkeys(["stock_code", "trade_date", str(target), "startup_price_eligible", *requested]))
+
+
+def _coalesce_moneyflow_feature_rows(frame):
+    """Collapse source-specific money-flow rows to one row per stock and date.
+
+    The persisted money-flow feature file contains one sparse wide row for
+    each provider. Provider-specific columns are already prefixed, so the
+    correct training representation is the non-null union of those rows, not
+    a one-to-many merge against the factor panel.
+    """
+    if frame is None or frame.empty:
+        return pd.DataFrame(), []
+
+    required = ["stock_code", "trade_date"]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            "moneyflow feature panel is missing required columns: "
+            + ", ".join(missing)
+        )
+
+    feature_columns = [
+        column
+        for column in frame.columns
+        if column not in {"stock_code", "trade_date", "market", "source"}
+        and pd.api.types.is_numeric_dtype(frame[column])
+    ]
+    working = frame[required + feature_columns].copy()
+    working["trade_date"] = pd.to_datetime(working["trade_date"], errors="coerce")
+    working["stock_code"] = working["stock_code"].astype(str)
+    working = working.dropna(subset=required)
+    if not feature_columns:
+        return working[required].drop_duplicates().reset_index(drop=True), []
+
+    coalesced = (
+        working[required + feature_columns]
+        .groupby(required, as_index=False, sort=False, dropna=False)
+        .first()
+    )
+    if coalesced.duplicated(required).any():
+        raise ValueError("moneyflow feature coalescing did not produce unique stock/date rows")
+    return coalesced, feature_columns
+
+
 def _cn_sync_socket_timeout():
     """Process-wide default timeout for CN providers that do not expose timeout args."""
     raw_timeout = os.environ.get("CN_SYNC_SOCKET_TIMEOUT", "5")
@@ -227,6 +331,21 @@ def _is_unsupported_cn_ohlcv_code(stock_code):
     normalized = normalize_stock_code(stock_code, market="CN")
     digits = "".join(ch for ch in normalized if ch.isdigit())
     return len(digits) == 6 and digits.startswith("920")
+
+
+def _is_valid_cn_equity_exchange_code(stock_code):
+    """Reject malformed exchange suffixes from stale local equity metadata."""
+    normalized = normalize_stock_code(stock_code, market="CN")
+    if "." not in normalized:
+        return False
+    digits, exchange = normalized.split(".", 1)
+    if exchange == "SH":
+        return digits.startswith(("600", "601", "603", "605", "688", "689", "900"))
+    if exchange == "SZ":
+        return digits.startswith(("000", "001", "002", "003", "200", "300", "301"))
+    if exchange == "BJ":
+        return digits.startswith(("4", "8"))
+    return False
 
 
 CN_SOURCE_PROGRESS_ORDER = ("tencent", "akshare_sina", "baostock", "akshare_eastmoney")
@@ -1757,6 +1876,651 @@ class MarketDataService:
             print(f"[SUMMARY] A 股中继 adj_factor 完成 success={success_count} rows={len(payload)} failed={len(failed)}")
             _print_cn_failure_summary("relay_adj_factor", failed)
         return {"market": "CN", "source": "tushare_relay_adj_factor", "success_count": success_count, "failed_count": len(failed), "rows_written": len(payload), "failed": failed, "snapshot_path": str(path), "dataset_path": str(output_dir)}
+
+    def refresh_cn_moneyflow(
+        self, stock_codes=None, limit=None, start_date=None, end_date=None,
+        max_workers=8, batch_years=1, fetch_standard=True, fetch_dc=True,
+        fetch_ths=True, fetch_top_list=True, fetch_top_inst=True, show_progress=False,
+        require_daily_bar_match=True, min_match_ratio=0.98, raw_dir=None, feature_path=None,
+        fetch_mode="stock",
+    ):
+        """Fetch daily money-flow/Dragon-Tiger data and persist auditable snapshots.
+
+        The operation is intentionally independent of factor generation: it can be
+        retried after a provider outage without recomputing the expensive panel.
+        """
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self._cn_metadata_codes(frequency="daily", adjust="qfq", limit=limit)
+        if limit and stock_codes:
+            codes = codes[:int(limit)]
+        if not codes:
+            return {"market": "CN", "status": "empty", "rows_written": 0, "failed": []}
+        requested_code_count = len(codes)
+        start_date = start_date or (datetime.now().date() - pd.Timedelta(days=756)).strftime("%Y-%m-%d")
+        end_date = end_date or datetime.now().date().strftime("%Y-%m-%d")
+        apis = [api for api, enabled in (("moneyflow", fetch_standard), ("moneyflow_dc", fetch_dc), ("moneyflow_ths", fetch_ths)) if enabled]
+        raw_root = Path(raw_dir) if raw_dir else self.layout.dataset_path("moneyflow_snapshots", layer="raw")
+        raw_root.mkdir(parents=True, exist_ok=True)
+        feature_root = Path(feature_path) if feature_path else self.layout.dataset_path("moneyflow_features", layer="feature") / "cn_moneyflow_features.parquet"
+        feature_root.parent.mkdir(parents=True, exist_ok=True)
+        failed, frames, features = [], {api: [] for api in apis}, {api: [] for api in apis}
+
+        # Reuse already-persisted source snapshots.  A previous run may have
+        # completed some or all dates before being interrupted during a later
+        # source (or while fetching Dragon-Tiger events).  The date-driven
+        # fetcher must only request missing trading dates on the next run.
+        cached_dates_by_api = {api: set() for api in apis}
+        cached_paths_by_api = {api: [] for api in apis}
+        for api in apis:
+            for cached_path in sorted(raw_root.glob(f"{api}_*.parquet")):
+                try:
+                    cached_dates = pd.read_parquet(cached_path, columns=["trade_date"])
+                    dates_found = pd.to_datetime(cached_dates["trade_date"], errors="coerce").dropna().dt.strftime("%Y%m%d")
+                    cached_dates_by_api[api].update(dates_found.tolist())
+                    cached_paths_by_api[api].append(cached_path)
+                except Exception as exc:
+                    failed.append({"code": str(cached_path), "error": f"cache_read:{exc}"})
+
+        # Date-driven full-market requests are dramatically faster than making
+        # one request per stock.  The relay supports trade_date + pagination;
+        # use the local daily-bar calendar so only actual trading days are hit.
+        # Query only the compact trading calendar for date-driven mode.  Reading
+        # every OHLCV column here caused multi-GB allocations on a full CN
+        # universe and defeated the purpose of market-level pagination.
+        bar_dates = pd.DataFrame(columns=["trade_date"])
+        if str(fetch_mode).lower() in {"trade_date", "market", "full_market"}:
+            calendar_values = self.warehouse.parquet_store.values_query(
+                self.warehouse.OHLCV_DATASET, "trade_date", layer="clean", distinct=True,
+                filters={"market": "CN", "asset_type": "equity", "frequency": "daily", "adjust": "qfq"},
+                range_filters={"trade_date": {"gte": str(start_date), "lte": str(end_date)}}, order_by="value",
+            )
+            bar_dates = pd.DataFrame({"trade_date": pd.to_datetime(calendar_values, errors="coerce")})
+        else:
+            bar_dates = self.warehouse.read_ohlcv(market="CN", asset_type="equity", frequency="daily", adjust="qfq", start_date=start_date, end_date=end_date, columns=["stock_code", "trade_date"])
+        if str(fetch_mode).lower() in {"trade_date", "market", "full_market"} and not bar_dates.empty:
+            dates = sorted(pd.to_datetime(bar_dates["trade_date"], errors="coerce").dropna().dt.strftime("%Y%m%d").unique())
+            client = CNMoneyflowFetcher(codes[0]).client
+            for api in apis:
+                api_frames = []
+                missing_dates = [trade_date for trade_date in dates if trade_date not in cached_dates_by_api[api]]
+                if show_progress:
+                    print(
+                        f"[MONEYFLOW] api={api} cache_dates={len(cached_dates_by_api[api])} "
+                        f"skip_dates={len(dates) - len(missing_dates)} missing_dates={len(missing_dates)}",
+                        flush=True,
+                    )
+                if not missing_dates:
+                    continue
+                def fetch_market_date(trade_date):
+                    pages = []
+                    offset = 0
+                    while True:
+                        try:
+                            page, gateway = client.get(api, trade_date=trade_date, limit=5000, offset=offset)
+                            if page.empty:
+                                break
+                            if "ts_code" in page:
+                                page["stock_code"] = page["ts_code"].map(normalize_stock_code, market="CN")
+                            page["trade_date"] = pd.to_datetime(page.get("trade_date", trade_date), errors="coerce")
+                            page["source"] = api; page["retrieved_at"] = pd.Timestamp.utcnow()
+                            pages.append(page)
+                            if len(page) < 5000:
+                                break
+                            offset += len(page)
+                        except Exception as exc:
+                            failed.append({"code": trade_date, "error": f"{api}: {exc}"})
+                            break
+                    return pages
+                with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), 16))) as market_executor:
+                    date_futures = {market_executor.submit(fetch_market_date, trade_date): trade_date for trade_date in missing_dates}
+                    completed = 0
+                    total_dates = len(date_futures)
+                    for date_future in as_completed(date_futures):
+                        trade_date = date_futures[date_future]
+                        try:
+                            api_frames.extend(date_future.result())
+                        except Exception as exc:
+                            failed.append({"code": trade_date, "error": f"{api}: {exc}"})
+                        completed += 1
+                        if show_progress and (completed == 1 or completed % 10 == 0 or completed == total_dates):
+                            print(f"[MONEYFLOW] api={api} dates={completed}/{total_dates} rows={sum(len(x) for x in api_frames)}", flush=True)
+                if api_frames:
+                    payload = pd.concat(api_frames, ignore_index=True)
+                    frames[api].append(payload)
+                    # Build per-stock rolling features after the complete date
+                    # series has been collected, preserving leakage-safe order.
+                    for code, group in payload.groupby("stock_code", sort=False):
+                        feat = build_moneyflow_features(group, source=api)
+                        if not feat.empty:
+                            feat["stock_code"] = code; feat["market"] = "CN"; feat["source"] = api
+                            features[api].append(feat)
+            # Skip the expensive stock-by-stock loop below.
+            codes = []
+
+        if str(fetch_mode).lower() in {"trade_date", "market", "full_market"} and not bar_dates.empty:
+            # Date-driven mode has already populated frames/features.  Keep
+            # downstream persistence and alignment logic, but avoid submitting
+            # an empty executor workload.
+            codes = []
+
+        def fetch_one(code):
+            return code, CNMoneyflowFetcher(code, batch_years=batch_years).fetch(start_date, end_date, apis=apis)
+
+        with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers or 1), len(codes)))) as executor:
+            futures = {executor.submit(fetch_one, code): code for code in codes}
+            progress = tqdm(total=len(futures), desc="refresh CN moneyflow", unit="stock", file=sys.stderr) if show_progress else None
+            try:
+                for future in as_completed(futures):
+                    code = futures[future]
+                    try:
+                        _, result = future.result()
+                        for api, payload in result.items():
+                            frame = payload["frame"]
+                            if frame is not None and not frame.empty:
+                                frame["source"] = api
+                                frame["retrieved_at"] = pd.Timestamp.utcnow()
+                                frames[api].append(frame)
+                                feat = build_moneyflow_features(frame, source=api)
+                                if not feat.empty:
+                                    feat["stock_code"] = code
+                                    feat["market"] = "CN"
+                                    feat["source"] = api
+                                    features[api].append(feat)
+                    except Exception as exc:
+                        failed.append({"code": code, "error": str(exc)})
+                    finally:
+                        if progress is not None:
+                            progress.update(1)
+            finally:
+                if progress is not None:
+                    progress.close()
+        # Persist each source before building the wide feature file.  The THS
+        # full-history payload can exceed 2M rows and converting all grouped
+        # frames plus rolling features in one process temporarily consumed
+        # >10GB RSS on macOS.
+        snapshot_paths, feature_parts, rows_written = [], [], 0
+        fetched_any_source = False
+        for api in apis:
+            if frames[api]:
+                payload = pd.concat(frames[api], ignore_index=True)
+                path = raw_root / f"{api}_{pd.Timestamp.utcnow():%Y%m%d_%H%M%S}.parquet"
+                payload.to_parquet(path, index=False)
+                snapshot_paths.append(str(path)); rows_written += len(payload)
+                fetched_any_source = True
+            if features[api]:
+                feature_parts.append(pd.concat(features[api], ignore_index=True))
+            if show_progress:
+                print(f"[MONEYFLOW] persisted api={api} new_rows={sum(len(x) for x in frames[api])} feature_parts={len(features[api])}", flush=True)
+        if feature_parts:
+            all_features = pd.concat(feature_parts, ignore_index=True)
+            if feature_root.exists():
+                old_features = pd.read_parquet(feature_root)
+                all_features = pd.concat([old_features, all_features], ignore_index=True)
+                dedup_keys = [column for column in ["stock_code", "trade_date", "source"] if column in all_features.columns]
+                if dedup_keys:
+                    all_features = all_features.drop_duplicates(dedup_keys, keep="last")
+            all_features.to_parquet(feature_root, index=False)
+        elif feature_root.exists():
+            # Fully cached run: do not rebuild a multi-million-row rolling
+            # feature table just to prove that the source files exist.
+            all_features = pd.read_parquet(feature_root, columns=["trade_date"])
+        else:
+            all_features = pd.DataFrame()
+        # Dragon-Tiger records are daily sparse events.  Query once per trading
+        # date (rather than once per stock) and persist them as independent raw
+        # tables; this keeps the event semantics auditable and avoids treating
+        # an unlisted stock as a failed request.
+        top_paths = []
+        try:
+            if fetch_top_list or fetch_top_inst:
+                date_values = sorted(pd.to_datetime(bar_dates.get("trade_date", []), errors="coerce").dropna().dt.strftime("%Y%m%d").unique()) if 'bar_dates' in locals() else []
+                client = CNMoneyflowFetcher(codes[0] if codes else "000001.SZ").client
+                for api, enabled in (("top_list", fetch_top_list), ("top_inst", fetch_top_inst)):
+                    if not enabled:
+                        continue
+                    event_frames = []
+                    cached_event_dates = set()
+                    for cached_event_path in sorted(raw_root.glob(f"{api}_*.parquet")):
+                        try:
+                            cached_event = pd.read_parquet(cached_event_path, columns=["trade_date"])
+                            cached_event_dates.update(
+                                pd.to_datetime(cached_event["trade_date"], errors="coerce")
+                                .dropna().dt.strftime("%Y%m%d").tolist()
+                            )
+                        except Exception as exc:
+                            failed.append({"code": str(cached_event_path), "error": f"cache_read:{exc}"})
+                    missing_event_dates = [trade_date for trade_date in date_values if trade_date not in cached_event_dates]
+                    if show_progress:
+                        print(
+                            f"[MONEYFLOW] api={api} cache_dates={len(cached_event_dates)} "
+                            f"skip_dates={len(date_values) - len(missing_event_dates)} "
+                            f"missing_dates={len(missing_event_dates)}",
+                            flush=True,
+                        )
+                    if not missing_event_dates:
+                        continue
+                    def fetch_event_date(trade_date):
+                        event, _ = client.get(api, trade_date=trade_date, limit=5000)
+                        if event.empty:
+                            return None
+                        event["trade_date"] = pd.to_datetime(event.get("trade_date", trade_date), errors="coerce")
+                        event["source"] = api
+                        event["retrieved_at"] = pd.Timestamp.utcnow()
+                        return event
+                    event_futures = {}
+                    event_workers = max(1, min(int(max_workers or 1), 8))
+                    with ThreadPoolExecutor(max_workers=event_workers) as event_executor:
+                        event_futures = {
+                            event_executor.submit(fetch_event_date, trade_date): trade_date
+                            for trade_date in missing_event_dates
+                        }
+                        event_completed = 0
+                        event_total = len(event_futures)
+                        for event_future in as_completed(event_futures):
+                            trade_date = event_futures[event_future]
+                            try:
+                                event = event_future.result()
+                                if event is not None and not event.empty:
+                                    event_frames.append(event)
+                            except Exception as exc:
+                                failed.append({"code": trade_date, "error": f"{api}: {exc}"})
+                            event_completed += 1
+                            if show_progress and (event_completed == 1 or event_completed % 10 == 0 or event_completed == event_total):
+                                print(
+                                    f"[MONEYFLOW] api={api} events={event_completed}/{event_total} "
+                                    f"rows={sum(len(x) for x in event_frames)}",
+                                    flush=True,
+                                )
+                    if event_frames:
+                        event_payload = pd.concat(event_frames, ignore_index=True).drop_duplicates()
+                        event_path = raw_root / f"{api}_{pd.Timestamp.utcnow():%Y%m%d_%H%M%S}.parquet"
+                        event_payload.to_parquet(event_path, index=False)
+                        top_paths.append(str(event_path))
+        except Exception as exc:
+            failed.append({"code": "__" + "top_events", "error": str(exc)})
+        # Compare the standard source with persisted daily bars.  This is a
+        # quality metric, not a filter that silently fabricates zero flow.
+        if str(fetch_mode).lower() in {"trade_date", "market", "full_market"}:
+            valid_dates = set(pd.to_datetime(bar_dates.get("trade_date", []), errors="coerce").dropna())
+            valid_codes = set(self._cn_metadata_codes(frequency="daily", adjust="qfq"))
+            bar_keys = None
+        else:
+            bar_keys = set(zip(bar_dates.get("stock_code", []), pd.to_datetime(bar_dates.get("trade_date", []), errors="coerce"))) if not bar_dates.empty else set()
+        standard = pd.concat(frames.get("moneyflow", []) or [], ignore_index=True) if frames.get("moneyflow") else pd.DataFrame()
+        if not standard.empty and bar_keys is None:
+            matched = sum((str(row.get("stock_code")) in valid_codes) and (pd.to_datetime(row.get("trade_date")) in valid_dates) for _, row in standard.iterrows())
+        else:
+            matched = sum((row.get("stock_code"), pd.to_datetime(row.get("trade_date"))) in bar_keys for _, row in standard.iterrows()) if not standard.empty else 0
+        match_ratio = float(matched / len(standard)) if len(standard) else 0.0
+        status = "ok" if (not require_daily_bar_match or match_ratio >= float(min_match_ratio)) else "degraded"
+        return {"market": "CN", "status": status, "start_date": str(start_date), "end_date": str(end_date),
+                "apis": apis, "success_count": requested_code_count - len(failed), "failed_count": len(failed),
+                "rows_written": rows_written, "feature_rows": len(all_features), "failed": failed,
+                "daily_bar_match_ratio": match_ratio, "snapshot_paths": snapshot_paths,
+                "top_event_paths": top_paths,
+                "feature_path": str(feature_root), "dataset_path": str(raw_root)}
+
+    def refresh_cn_moneyflow_aux(
+        self,
+        stock_codes=None,
+        limit=None,
+        start_date=None,
+        end_date=None,
+        max_workers=8,
+        fetch_daily_basic=False,
+        fetch_cyq_perf=False,
+        fetch_cyq_chips=False,
+        fetch_hm_detail=False,
+        cyq_chips_stock_limit=0,
+        cyq_chips_max_workers=2,
+        cyq_chips_read_timeout=8,
+        cyq_chips_requests_per_minute=180,
+        cyq_chips_base_requests_per_minute=180,
+        cyq_chips_promax_requests_per_minute=180,
+        raw_dir=None,
+        fetch_mode="trade_date",
+        show_progress=False,
+    ):
+        """Refresh official-first auxiliary capital-flow sources.
+
+        ``CNMoneyflowRelayClient`` tries ``TUSHARE_TOKEN`` first and falls back
+        to the documented free relay gateways.  ``cyq_chips`` assigns stock
+        requests across every configured source in parallel; other APIs retain
+        the official-first fallback path.  Daily basic is pulled by
+        trade_date; the chip tables are pulled by stock because Tushare's
+        contract requires ``ts_code`` for those endpoints.  Every response is
+        kept as an independent raw parquet source so a partial run is safe to
+        resume and never silently replaces a different vendor's values.
+        """
+        apis = [api for api, enabled in (
+            ("daily_basic", fetch_daily_basic),
+            ("cyq_perf", fetch_cyq_perf),
+            ("cyq_chips", fetch_cyq_chips),
+            ("hm_detail", fetch_hm_detail),
+        ) if enabled]
+        start_date = start_date or (datetime.now().date() - pd.Timedelta(days=756)).strftime("%Y-%m-%d")
+        end_date = end_date or datetime.now().date().strftime("%Y-%m-%d")
+        raw_root = Path(raw_dir) if raw_dir else self.layout.dataset_path("moneyflow_snapshots", layer="raw")
+        raw_root.mkdir(parents=True, exist_ok=True)
+        manifest_path = raw_root / "aux_request_manifest.jsonl"
+        if not apis:
+            return {"market": "CN", "status": "skipped", "apis": [], "rows_written": 0, "failed": []}
+
+        codes = [normalize_stock_code(code, market="CN") for code in (stock_codes or [])]
+        if not codes:
+            codes = self._cn_metadata_codes(frequency="daily", adjust="qfq", limit=limit)
+        if limit and stock_codes:
+            codes = codes[: int(limit)]
+        codes = [code for code in codes if _is_valid_cn_equity_exchange_code(code)]
+
+        calendar = self.warehouse.parquet_store.values_query(
+            self.warehouse.OHLCV_DATASET, "trade_date", layer="clean", distinct=True,
+            filters={"market": "CN", "asset_type": "equity", "frequency": "daily", "adjust": "qfq"},
+            range_filters={"trade_date": {"gte": str(start_date), "lte": str(end_date)}}, order_by="value",
+        )
+        calendar_index = pd.DatetimeIndex(pd.to_datetime(calendar, errors="coerce")).dropna()
+        trade_dates = sorted(calendar_index.strftime("%Y%m%d").unique())
+        client = CNMoneyflowFetcher(codes[0] if codes else "000001.SZ").client
+        failed, paths, rows_written = [], [], 0
+        completed = set()
+        # Stock-scoped chip requests previously used the literal natural-day
+        # CLI window as their cache key.  On a weekend that shifts by one day,
+        # even though the underlying trading calendar has not changed, and
+        # caused an expensive full-history re-download.  Preserve completed
+        # ranges so a prior wider request covers a later narrower one.
+        completed_stock_ranges: dict[tuple[str, str], list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+        if manifest_path.exists():
+            try:
+                with manifest_path.open("r", encoding="utf-8") as manifest:
+                    for line in manifest:
+                        record = json.loads(line)
+                        if record.get("status") == "ok":
+                            completed.add(str(record.get("key")))
+                            request = record.get("request") or {}
+                            api = str(record.get("api") or "")
+                            code = str(request.get("ts_code") or "")
+                            if api in {"cyq_perf", "cyq_chips"} and code:
+                                begin = pd.to_datetime(request.get("start_date"), errors="coerce")
+                                finish = pd.to_datetime(request.get("end_date"), errors="coerce")
+                                if pd.notna(begin) and pd.notna(finish):
+                                    completed_stock_ranges.setdefault((api, code), []).append((begin, finish))
+            except Exception as exc:
+                failed.append({"api": "aux_manifest", "error": f"read:{exc}"})
+
+        def mark_complete(key, api, request):
+            nonlocal completed
+            if key in completed:
+                return
+            record = {
+                "key": key, "api": api, "request": request, "status": "ok",
+                "completed_at": pd.Timestamp.utcnow().isoformat(),
+            }
+            with manifest_path.open("a", encoding="utf-8") as manifest:
+                manifest.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+            completed.add(key)
+            code = str((request or {}).get("ts_code") or "")
+            if api in {"cyq_perf", "cyq_chips"} and code:
+                begin = pd.to_datetime(request.get("start_date"), errors="coerce")
+                finish = pd.to_datetime(request.get("end_date"), errors="coerce")
+                if pd.notna(begin) and pd.notna(finish):
+                    completed_stock_ranges.setdefault((api, code), []).append((begin, finish))
+
+        def stock_range_is_complete(api, code, begin, finish):
+            request_begin = pd.to_datetime(begin, errors="coerce")
+            request_finish = pd.to_datetime(finish, errors="coerce")
+            return any(
+                cached_begin <= request_begin and cached_finish >= request_finish
+                for cached_begin, cached_finish in completed_stock_ranges.get((api, code), [])
+            )
+
+        def stock_request_range(api, code, begin, finish):
+            """Return only the uncovered suffix when a stock history is contiguous."""
+            request_begin = pd.to_datetime(begin, errors="coerce")
+            request_finish = pd.to_datetime(finish, errors="coerce")
+            ranges = completed_stock_ranges.get((api, code), [])
+            if any(cached_begin <= request_begin and cached_finish >= request_finish for cached_begin, cached_finish in ranges):
+                return None
+            if ranges:
+                earliest = min(item[0] for item in ranges)
+                latest = max(item[1] for item in ranges)
+                # The normal case after initial backfill: request only sessions
+                # after the latest contiguous completed history.
+                if earliest <= request_begin and latest < request_finish:
+                    return (latest + pd.Timedelta(days=1)).strftime("%Y%m%d"), finish
+            return begin, finish
+
+        def persist(api, frame):
+            nonlocal rows_written
+            if frame is None or frame.empty:
+                return
+            frame = frame.copy()
+            if "ts_code" in frame:
+                frame["stock_code"] = frame["ts_code"].map(normalize_stock_code, market="CN")
+            if "trade_date" in frame:
+                frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+            frame["source"] = frame.get("source", api)
+            frame["api"] = api
+            frame["retrieved_at"] = frame.get("retrieved_at", pd.Timestamp.utcnow())
+            if api == "hm_detail":
+                keys = [key for key in ("stock_code", "trade_date", "hm_name", "buy_amount", "sell_amount", "net_amount") if key in frame]
+            else:
+                keys = [key for key in ("stock_code", "trade_date", "price") if key in frame]
+            if keys:
+                frame = frame.drop_duplicates(keys, keep="last")
+            path = raw_root / f"{api}_{pd.Timestamp.utcnow():%Y%m%d_%H%M%S_%f}.parquet"
+            frame.to_parquet(path, index=False)
+            paths.append(str(path))
+            rows_written += len(frame)
+
+        # daily_basic supports a full-market trade_date request and is much
+        # cheaper than issuing one request per stock.
+        if "daily_basic" in apis:
+            frames = []
+            for idx, trade_date in enumerate(trade_dates, 1):
+                request_key = f"daily_basic|{trade_date}"
+                if request_key in completed:
+                    continue
+                try:
+                    offset = 0
+                    while True:
+                        page, gateway = client.get("daily_basic", trade_date=trade_date, limit=5000, offset=offset)
+                        if page.empty:
+                            break
+                        page["source"] = gateway
+                        page["retrieved_at"] = pd.Timestamp.utcnow()
+                        frames.append(page)
+                        if len(page) < 5000:
+                            break
+                        offset += len(page)
+                    mark_complete(request_key, "daily_basic", {"trade_date": trade_date})
+                    if show_progress and (idx == 1 or idx % 10 == 0 or idx == len(trade_dates)):
+                        print(f"[CAPITAL-AUX] api=daily_basic dates={idx}/{len(trade_dates)} rows={sum(len(x) for x in frames)}", flush=True)
+                except Exception as exc:
+                    failed.append({"api": "daily_basic", "trade_date": trade_date, "error": str(exc)})
+            if frames:
+                persist("daily_basic", pd.concat(frames, ignore_index=True))
+
+        # hm_detail is a sparse date-scoped event source.  It adds identifiable
+        # hot-money participation to the existing top_list/top_inst fields.
+        if "hm_detail" in apis:
+            frames = []
+            for idx, trade_date in enumerate(trade_dates, 1):
+                # v2 preserves multiple hot-money desks for one stock/date.
+                request_key = f"hm_detail.v2|{trade_date}"
+                if request_key in completed:
+                    continue
+                try:
+                    offset = 0
+                    while True:
+                        page, gateway = client.get("hm_detail", trade_date=trade_date, limit=2000, offset=offset)
+                        if page.empty:
+                            break
+                        page["source"] = gateway
+                        page["retrieved_at"] = pd.Timestamp.utcnow()
+                        frames.append(page)
+                        if len(page) < 2000:
+                            break
+                        offset += len(page)
+                    mark_complete(request_key, "hm_detail", {"trade_date": trade_date})
+                    if show_progress and (idx == 1 or idx % 10 == 0 or idx == len(trade_dates)):
+                        print(f"[CAPITAL-AUX] api=hm_detail dates={idx}/{len(trade_dates)} rows={sum(len(x) for x in frames)}", flush=True)
+                except Exception as exc:
+                    failed.append({"api": "hm_detail", "trade_date": trade_date, "error": str(exc)})
+            if frames:
+                persist("hm_detail", pd.concat(frames, ignore_index=True))
+
+        # cyq_perf/cyq_chips are stock-scoped.  Keep each stock as a bounded
+        # task and flush its raw response immediately for restartability.
+        for api in ("cyq_perf", "cyq_chips"):
+            if api not in apis:
+                continue
+            # Canonicalise to available trading sessions.  This makes weekend
+            # and holiday invocations reuse the identical completed history.
+            request_start = trade_dates[0] if trade_dates else pd.to_datetime(start_date).strftime("%Y%m%d")
+            request_end = trade_dates[-1] if trade_dates else pd.to_datetime(end_date).strftime("%Y%m%d")
+            source_codes = list(codes)
+            pending_requests = [
+                (code, *request_range)
+                for code in source_codes
+                if (request_range := stock_request_range(api, code, request_start, request_end)) is not None
+            ]
+            total_missing = len(pending_requests)
+            if api == "cyq_chips" and cyq_chips_stock_limit:
+                pending_requests = pending_requests[: int(cyq_chips_stock_limit)]
+            if show_progress:
+                print(
+                    f"[CAPITAL-AUX] api={api} cache_codes={len(source_codes) - total_missing} "
+                    f"missing_codes={total_missing} batch_codes={len(pending_requests)}",
+                    flush=True,
+                )
+            worker_limit = int(cyq_chips_max_workers or 2) if api == "cyq_chips" else int(max_workers or 1)
+            chip_sources = client.available_gateways() if api == "cyq_chips" else []
+            if api == "cyq_chips" and not chip_sources:
+                failed.append({"api": api, "error": "no configured official or relay gateway"})
+                continue
+            # The configured worker count is per source.  Each queue gets its
+            # own HTTP client and limiter, so official/Base/ProMax progress at
+            # the same time without a failed request spilling into another
+            # source's quota.
+            workers = max(1, min(worker_limit * max(1, len(chip_sources)), 48, len(pending_requests) or 1))
+            # Attach source assignment before submitting tasks.  Do not derive
+            # it with list.index() inside a worker: repeated request tuples or
+            # a large resume queue would otherwise make dispatch ambiguous and
+            # needlessly quadratic.
+            assigned_requests = [
+                (*request, chip_sources[index % len(chip_sources)])
+                for index, request in enumerate(pending_requests)
+            ] if chip_sources else pending_requests
+            # Chips are an optional, retryable enhancement.  A stalled proxy
+            # must not let one price-distribution request block an entire
+            # bounded backfill batch for minutes.
+            original_timeout = client.timeout
+            request_times = {source: [] for source in chip_sources}
+            request_lock = threading.Lock()
+
+            def wait_for_chip_request_slot(source):
+                """Keep each cyq_chips source within its own documented budget."""
+                if api != "cyq_chips":
+                    return
+                ceilings = {
+                    "official": cyq_chips_requests_per_minute,
+                    "base": cyq_chips_base_requests_per_minute,
+                    "promax": cyq_chips_promax_requests_per_minute,
+                }
+                ceiling = max(1, int(ceilings.get(source, cyq_chips_requests_per_minute) or 1))
+                while True:
+                    with request_lock:
+                        now = time.monotonic()
+                        source_times = request_times.setdefault(source, [])
+                        source_times[:] = [stamp for stamp in source_times if now - stamp < 60.0]
+                        if len(source_times) < ceiling:
+                            source_times.append(now)
+                            return
+                        wait_seconds = 60.0 - (now - source_times[0]) + 0.01
+                    time.sleep(max(0.01, wait_seconds))
+
+            if api == "cyq_chips":
+                client.timeout = (original_timeout[0], max(0.1, float(cyq_chips_read_timeout or 8)))
+            def fetch_one(request):
+                code, code_start, code_end, *assignment = request
+                # Round-robin is deterministic: restart gaps retain a stable
+                # source assignment while all three queues are active.
+                source = assignment[0] if assignment else None
+                source_client = CNMoneyflowFetcher(code).client if source else client
+                if source:
+                    source_client.timeout = (original_timeout[0], max(0.1, float(cyq_chips_read_timeout or 8)))
+                # Official Tushare accepts this compact stock history in one
+                # request.  The documented free fallback limits date ranges to
+                # one year, so retry in annual slices only when that fast path
+                # fails.  ``cyq_chips`` is price-bucket data and requires
+                # pagination even for a single stock history.
+                try:
+                    page, gateway = fetch_paginated_stock_history(
+                        source_client, api, ts_code=code, start_date=code_start,
+                        end_date=code_end, limit=6000,
+                        before_request=lambda: wait_for_chip_request_slot(source), source=source,
+                    )
+                    return code, code_start, code_end, gateway, page
+                except Exception as first_exc:
+                    slices, gateways = [], []
+                    cursor = pd.Timestamp(code_start)
+                    finish = pd.Timestamp(code_end)
+                    while cursor <= finish:
+                        chunk_end = min(finish, cursor + pd.DateOffset(years=1) - pd.Timedelta(days=1))
+                        page, gateway = fetch_paginated_stock_history(
+                            source_client, api, ts_code=code,
+                            start_date=cursor.strftime("%Y%m%d"),
+                            end_date=chunk_end.strftime("%Y%m%d"), limit=6000,
+                            before_request=lambda: wait_for_chip_request_slot(source), source=source,
+                        )
+                        if page is not None and not page.empty:
+                            slices.append(page)
+                        gateways.append(gateway)
+                        cursor = chunk_end + pd.Timedelta(days=1)
+                    if not slices:
+                        raise first_exc
+                    frame = pd.concat(slices, ignore_index=True)
+                    if "trade_date" in frame:
+                        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+                    keys = [key for key in ("ts_code", "trade_date", "price") if key in frame]
+                    return code, code_start, code_end, gateways[-1] if gateways else "fallback", frame.drop_duplicates(keys, keep="last") if keys else frame
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(fetch_one, request): request for request in assigned_requests}
+                progress = tqdm(total=len(futures), desc=f"refresh CN {api}", unit="stock", file=sys.stderr) if show_progress else None
+                try:
+                    for future in as_completed(futures):
+                        request = futures[future]
+                        code = request[0]
+                        try:
+                            _code, completed_start, completed_end, gateway, page = future.result()
+                            if page is not None and not page.empty:
+                                page["source"] = gateway
+                                page["retrieved_at"] = pd.Timestamp.utcnow()
+                                persist(api, page)
+                            mark_complete(
+                                f"{api}|{_code}|{completed_start}|{completed_end}", api,
+                                {"ts_code": _code, "start_date": completed_start, "end_date": completed_end},
+                            )
+                        except Exception as exc:
+                            failed.append({"api": api, "stock_code": code, "error": str(exc)})
+                        finally:
+                            if progress is not None:
+                                progress.update(1)
+                finally:
+                    if progress is not None:
+                        progress.close()
+                    client.timeout = original_timeout
+        status = "ok" if not failed else ("degraded" if paths else "failed")
+        return {
+            "market": "CN", "status": status, "apis": apis,
+            "start_date": str(start_date), "end_date": str(end_date),
+            "stock_count": len(codes), "trade_date_count": len(trade_dates),
+            "rows_written": rows_written, "snapshot_paths": paths, "failed": failed,
+            "official_first": bool(os.environ.get("TUSHARE_TOKEN")),
+            "fallback": "智能体数据中心免费版 relay",
+            "dataset_path": str(raw_root),
+        }
 
     def refresh_cn_baidu_valuation_history(
         self,
@@ -5940,14 +6704,14 @@ class MarketDataService:
         report = write_alternative_data_report(evidence, output_dir=directory)
         return {"status": "completed", "data_path": str(data_path), **report}
 
-    def build_cn_strategy_labels(self, *, days=756, output_dir="output/strategy_labels"):
+    def build_cn_strategy_labels(self, *, days=756, output_dir="output/strategy_labels", **label_kwargs):
         end_ts = pd.to_datetime(datetime.now().date()).normalize()
         bars = self.warehouse.read_ohlcv(
             market="CN", asset_type="equity", frequency="daily", adjust="qfq",
             start_date=(end_ts - pd.Timedelta(days=int(days))).strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
-            columns=["stock_code", "trade_date", "close"],
+            columns=["stock_code", "trade_date", "open", "high", "low", "close"],
         )
-        labels = build_cn_strategy_labels(bars)
+        labels = build_cn_strategy_labels(bars, **label_kwargs)
         directory = Path(output_dir); directory.mkdir(parents=True, exist_ok=True)
         path = directory / "cn_daily_strategy_labels.csv"; labels.to_csv(path, index=False)
         return {"status": "completed", "rows": int(len(labels)), "path": str(path), "execution_ready": False}
@@ -5976,12 +6740,31 @@ class MarketDataService:
         paths = write_walk_forward_report(report, summary, output_dir=output_dir, prefix=prefix)
         return {**paths, "comparison": summary}
 
-    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=12_000, transformer_max_feature_pairs=128, transformer_device="auto", prediction_stride=1, industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None, show_progress=False):
-        """Generate historical predictions with one strictly prior model per OOS fold."""
+    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, label_mode="forward_return", startup_only=False, label_path_horizon=60, preserve_startup_context=False, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=12_000, transformer_max_feature_pairs=128, transformer_protected_features=(), transformer_seeds=None, transformer_checkpoint_metric="ic", transformer_seed_ensemble="average", transformer_device="auto", prediction_stride=1, industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None, show_progress=False, meta_labeling=False, meta_features=None, meta_label_column="label_tb_class", meta_candidate_quantile=0.10, meta_act_quantile=0.50, meta_min_probability=None, meta_inner_share=0.30, meta_inner_purge_days=20, meta_validation_share=0.30, meta_purge_days=20, meta_n_estimators=300, meta_learning_rate=0.05, meta_num_leaves=31, meta_max_depth=5, meta_min_child_samples=50, meta_reg_lambda=10.0, meta_random_state=42, meta_gate_mode="learned", meta_rule_column="dist_from_120d_low", meta_rule_threshold=0.15, meta_rule_direction="le", meta_top_k=20, meta_evaluation_dir="output/evaluations", meta_evaluation_prefix=None, meta_realized_return_column="forward_excess_return_20d", meta_commission_bps=5.0, meta_slippage_bps=5.0, meta_stamp_duty_bps=5.0, feature_profile="full", feature_include_patterns=(), feature_exclude_patterns=()):
+        """Generate historical predictions with one strictly prior model per OOS fold.
+
+        With ``meta_labeling=True`` the LightGBM leg also fits the second-stage
+        gate on a nested inner block and persists the gated decisions, the gate
+        manifest and the realized-outcome comparison.  The primary predictions
+        keep the historical column contract, so existing comparisons still run.
+        """
+        requested_meta = bool(meta_labeling) and label_mode in {"path", "path_score", "path_score_20d", "startup_path"}
         panel, features, label_column = self._clean_panel_training_data(
             market="CN", factor_set=factor_set, days=days, label_horizon=label_horizon,
+            label_mode=label_mode, startup_only=startup_only, label_path_horizon=label_path_horizon,
+            preserve_startup_context=preserve_startup_context,
+            extra_label_columns=META_GATE_LABEL_COLUMNS if requested_meta else (),
+            feature_profile=feature_profile,
+            feature_include_patterns=feature_include_patterns,
+            feature_exclude_patterns=feature_exclude_patterns,
             cleaning_version=cleaning_version, min_stock_count=2, end_date=end_date,
         )
+        label_frame = pd.DataFrame()
+        if requested_meta:
+            available_meta_columns = [
+                column for column in META_GATE_LABEL_COLUMNS if column in panel.columns
+            ]
+            label_frame = panel.loc[:, ["stock_code", "trade_date", *available_meta_columns]].copy()
         requested = [str(item).lower() for item in models]
         results = {}
         common = {
@@ -5992,13 +6775,36 @@ class MarketDataService:
             "prediction_stride": prediction_stride,
             "show_progress": show_progress,
         }
-        if "lightgbm" in requested:
+        if "lightgbm" in requested and requested_meta:
+            results["lightgbm"] = generate_lightgbm_meta_oos_predictions(
+                panel, features, **common, label_frame=label_frame,
+                meta_features=meta_features, meta_label_column=meta_label_column,
+                candidate_quantile=meta_candidate_quantile, act_quantile=meta_act_quantile,
+                min_probability=meta_min_probability, inner_share=meta_inner_share,
+                inner_purge_days=meta_inner_purge_days, meta_validation_share=meta_validation_share,
+                meta_purge_days=meta_purge_days, meta_n_estimators=meta_n_estimators,
+                meta_learning_rate=meta_learning_rate, meta_num_leaves=meta_num_leaves,
+                meta_max_depth=meta_max_depth, meta_min_child_samples=meta_min_child_samples,
+                meta_reg_lambda=meta_reg_lambda, meta_random_state=meta_random_state,
+                gate_mode=meta_gate_mode, rule_column=meta_rule_column,
+                rule_threshold=meta_rule_threshold, rule_direction=meta_rule_direction,
+                top_k=meta_top_k, evaluation_dir=meta_evaluation_dir,
+                evaluation_prefix=meta_evaluation_prefix,
+                realized_return_column=meta_realized_return_column,
+                commission_bps=meta_commission_bps, slippage_bps=meta_slippage_bps,
+                stamp_duty_bps=meta_stamp_duty_bps,
+            )
+        elif "lightgbm" in requested:
             results["lightgbm"] = generate_lightgbm_oos_predictions(panel, features, **common)
         if "transformer" in requested:
             results["transformer"] = generate_transformer_oos_predictions(
                 panel, features, **common, lookback=transformer_lookback, epochs=transformer_epochs,
                 batch_size=transformer_batch_size, max_samples=transformer_max_samples,
-                max_feature_pairs=transformer_max_feature_pairs, device=transformer_device,
+                max_feature_pairs=transformer_max_feature_pairs, protected_features=transformer_protected_features,
+                preserve_unlabeled=bool(preserve_startup_context),
+                seeds=transformer_seeds, checkpoint_metric=transformer_checkpoint_metric,
+                seed_ensemble=transformer_seed_ensemble,
+                device=transformer_device,
             )
         if "cnn" in requested:
             results["cnn"] = generate_cnn_oos_predictions(
@@ -6021,7 +6827,14 @@ class MarketDataService:
         unsupported = sorted(set(requested) - {"lightgbm", "transformer", "cnn", "graph_temporal"})
         if unsupported:
             raise ValueError(f"OOS prediction generator does not support: {','.join(unsupported)}")
-        return {"status": "completed", "label_column": label_column, "results": results}
+        if requested_meta and "lightgbm" not in requested:
+            raise ValueError("meta_labeling requires the lightgbm OOS leg")
+        return {
+            "status": "completed", "label_column": label_column, "results": results,
+            "meta_labeling_enabled": requested_meta,
+            "availability": dict(AVAILABILITY_RULE),
+            "feature_profile": getattr(self, "_last_training_feature_audit", None),
+        }
 
     def materialize_clean_feature_panel(
         self,
@@ -6037,6 +6850,7 @@ class MarketDataService:
         show_progress=False,
         feature_batch_size=10,
         factor_config=None,
+        moneyflow_path=None,
     ):
         """Materialize a versioned, auditable panel from persisted features.
 
@@ -6070,6 +6884,47 @@ class MarketDataService:
         _log(f"daily bars loaded rows={len(ohlcv_frame):,}")
         if ohlcv_frame.empty:
             raise ValueError("daily OHLCV is empty; run --stage daily_bars before --stage clean_panel")
+        moneyflow_frame = pd.DataFrame()
+        moneyflow_feature_columns = []
+        if moneyflow_path:
+            flow_path = Path(moneyflow_path)
+            if flow_path.is_file():
+                raw_moneyflow_frame = pd.read_parquet(
+                    flow_path,
+                    filters=[
+                        ("trade_date", ">=", start_ts),
+                        ("trade_date", "<=", end_ts),
+                    ],
+                )
+                raw_moneyflow_rows = len(raw_moneyflow_frame)
+                moneyflow_frame, moneyflow_feature_columns = _coalesce_moneyflow_feature_rows(
+                    raw_moneyflow_frame
+                )
+                del raw_moneyflow_frame
+                if not moneyflow_frame.empty:
+                    second_wave_features = build_second_wave_confirmation_features(
+                        ohlcv_frame,
+                        moneyflow_frame,
+                    )
+                    second_wave_columns = [
+                        column
+                        for column in second_wave_features.columns
+                        if column not in {"stock_code", "trade_date"}
+                    ]
+                    if second_wave_columns:
+                        moneyflow_frame = moneyflow_frame.merge(
+                            second_wave_features,
+                            on=["stock_code", "trade_date"],
+                            how="left",
+                            validate="one_to_one",
+                        )
+                        moneyflow_feature_columns.extend(second_wave_columns)
+                _log(
+                    "moneyflow features coalesced "
+                    f"source_rows={raw_moneyflow_rows:,} "
+                    f"stock_date_rows={len(moneyflow_frame):,} "
+                    f"features={len(moneyflow_feature_columns)}"
+                )
 
         # The source feature layer is long-format and can contain billions of
         # rows. Materialize a compact (trade_date, stock_code) wide snapshot,
@@ -6085,6 +6940,9 @@ class MarketDataService:
         expected_factor_names = list((factor_metadata.get("extra") or {}).get("feature_names") or [])
         expected_factor_names.extend(f"RPS_{window}" for window in (5, 10, 20, 30, 60))
         snapshot_features = list(dict.fromkeys(expected_factor_names + PRICE_FEATURE_COLUMNS))
+        if not moneyflow_frame.empty:
+            snapshot_features.extend(moneyflow_feature_columns)
+            snapshot_features = list(dict.fromkeys(snapshot_features))
         target_path = self.layout.dataset_path("clean_feature_panel", layer="feature")
         # Build into a private sibling dataset and atomically publish only
         # after every stock has been processed. A terminated run must never
@@ -6108,6 +6966,8 @@ class MarketDataService:
             "storage_format": "qlib_wide_v1",
             "mode": "vectorized_stock_batches",
             "stocks": len(stock_codes),
+            "primary_key": ["stock_code", "trade_date"],
+            "primary_key_unique": True,
             "features": snapshot_features,
             "materialization": materialization,
         }
@@ -6164,6 +7024,19 @@ class MarketDataService:
                     market=normalized_market, frequency=frequency,
                     adjust=normalized_adjust, factor_set=factor_set,
                 )
+                if not moneyflow_frame.empty:
+                    flow_batch = moneyflow_frame.loc[moneyflow_frame["stock_code"].isin(batch_codes)].copy()
+                    if not flow_batch.empty:
+                        panel = panel.merge(
+                            flow_batch,
+                            on=["stock_code", "trade_date"],
+                            how="left",
+                            validate="one_to_one",
+                        )
+                if panel.duplicated(["stock_code", "trade_date"]).any():
+                    raise ValueError(
+                        "clean feature panel contains duplicate stock/date rows before cleaning"
+                    )
                 if not panel.empty:
                     compact, _, batch_manifest = compact_training_panel(
                         panel,
@@ -6207,6 +7080,7 @@ class MarketDataService:
         report = {
             "market": normalized_market, "rows": int(total_rows),
             "stored_rows": int(total_rows), "feature_count": len(feature_names),
+            "primary_key_unique": True,
             "error_count": total_invalid, "warning_count": 0,
             "passed": total_invalid == 0, "issue_stock_count": len(issue_stocks),
             "details": [
@@ -6237,6 +7111,8 @@ class MarketDataService:
             "end_date": end_ts.strftime("%Y-%m-%d"),
             "rows": int(total_rows),
             "stored_rows": int(total_rows),
+            "primary_key": ["stock_code", "trade_date"],
+            "primary_key_unique": True,
             "feature_count": len(feature_names),
             "storage_format": "qlib_wide_v1",
             "quality_report": report_paths,
@@ -6269,6 +7145,7 @@ class MarketDataService:
             "status": "completed",
             "rows": int(total_rows),
             "stored_rows": int(total_rows),
+            "primary_key_unique": True,
             "feature_count": len(feature_names),
             "dataset_path": str(self.layout.dataset_path("clean_feature_panel", layer="feature")),
             "report_paths": report_paths,
@@ -6329,6 +7206,11 @@ class MarketDataService:
                 "rerun --stage clean_panel with the requested version"
             )
         storage_format = marker.get("storage_format", "audit_long_v1")
+        if storage_format == "qlib_wide_v1" and marker.get("primary_key_unique") is not True:
+            raise ValueError(
+                "clean_feature_panel primary-key uniqueness is unverified; "
+                "rerun --stage clean_panel before model training"
+            )
         requested_features = set(feature_columns or [])
         read_columns = None
         if metadata_only:
@@ -6337,11 +7219,26 @@ class MarketDataService:
                 "trade_date", "stock_code", "available_at", "quality_status", "pit_valid",
             ]
         elif requested_features:
+            # The compact panel stores each requested factor as a value/mask
+            # pair. Public callers may provide the raw factor name, so map it
+            # to the persisted columns before reading the parquet snapshot.
+            compact_feature_columns = []
+            for feature in requested_features:
+                name = str(feature)
+                if name.endswith(("_clean", "_is_missing")):
+                    compact_feature_columns.append(name)
+                else:
+                    compact_feature_columns.extend((f"{name}_clean", f"{name}_is_missing"))
+            audit_columns = (
+                ()
+                if storage_format == "qlib_wide_v1"
+                else ("feature_name", "value_clean", "is_missing")
+            )
             read_columns = [
                 column for column in (
                     "market", "exchange", "asset_type", "frequency", "adjust", "year",
-                    "trade_date", "stock_code", "feature_name", "value_clean", "is_missing",
-                    "available_at", "quality_status", "pit_valid", *requested_features,
+                    "trade_date", "stock_code", *audit_columns,
+                    "available_at", "quality_status", "pit_valid", *compact_feature_columns,
                 )
                 if column
             ]
@@ -6371,6 +7268,14 @@ class MarketDataService:
         if frame.empty:
             return pd.DataFrame(), []
         if storage_format == "qlib_wide_v1":
+            key_columns = ["stock_code", "trade_date"]
+            duplicate_count = int(frame.duplicated(key_columns).sum())
+            if duplicate_count:
+                raise ValueError(
+                    "clean_feature_panel contains "
+                    f"{duplicate_count:,} duplicate stock/date rows; "
+                    "rerun --stage clean_panel before model training"
+                )
             feature_columns = sorted(
                 column for column in frame.columns
                 if column.endswith(("_clean", "_is_missing"))
@@ -6400,6 +7305,14 @@ class MarketDataService:
         adjust="qfq",
         days=365,
         label_horizon=20,
+        label_mode="forward_return",
+        startup_only=False,
+        label_path_horizon=60,
+        preserve_startup_context=False,
+        extra_label_columns=(),
+        feature_profile="full",
+        feature_include_patterns=(),
+        feature_exclude_patterns=(),
         cleaning_version="p0.2.v1",
         min_stock_count=50,
         end_date=None,
@@ -6409,10 +7322,24 @@ class MarketDataService:
         end_ts = pd.to_datetime(end_date or datetime.now().date()).normalize()
         start_ts = end_ts - pd.Timedelta(days=max(1, int(days)))
         try:
+            requested_profile = str(feature_profile or "full").strip().lower()
+            profile_audit = None
+            requested_features = None
+            if requested_profile not in {"", "full"} or feature_include_patterns or feature_exclude_patterns:
+                available = _clean_panel_feature_names(self.layout.dataset_path("clean_feature_panel", layer="feature"))
+                selected_features, profile_audit = resolve_feature_profile(
+                    available, profile=requested_profile or "full",
+                    include_patterns=feature_include_patterns, exclude_patterns=feature_exclude_patterns,
+                )
+                if not selected_features:
+                    raise ValueError(
+                        f"feature profile {requested_profile!r} selected no columns from the clean panel"
+                    )
+                requested_features = selected_features
             panel, feature_columns = self.read_clean_feature_panel(
                 market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
                 start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
-                cleaning_version=cleaning_version,
+                cleaning_version=cleaning_version, feature_columns=requested_features,
             )
             if progress is not None:
                 progress.set_postfix_str(f"panel_rows={len(panel):,} features={len(feature_columns)}")
@@ -6441,7 +7368,7 @@ class MarketDataService:
                 adjust=normalize_adjust(adjust),
                 start_date=start_ts.strftime("%Y-%m-%d"), end_date=end_ts.strftime("%Y-%m-%d"),
             )
-            prices = prices[["stock_code", "trade_date", "close"]].copy()
+            prices = prices[[column for column in ["stock_code", "trade_date", "open", "high", "low", "close"] if column in prices.columns]].copy()
             prices["trade_date"] = pd.to_datetime(prices["trade_date"], errors="coerce")
             prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
             prices = prices.sort_values(["stock_code", "trade_date"]).drop_duplicates(
@@ -6450,15 +7377,35 @@ class MarketDataService:
             if progress is not None:
                 progress.set_postfix_str(f"price_rows={len(prices):,}")
                 progress.update(1)
-            prices[f"forward_return_{int(label_horizon)}d"] = prices.groupby("stock_code")["close"].shift(-int(label_horizon)) / prices["close"] - 1.0
-            panel = panel.merge(
-                prices[["stock_code", "trade_date", f"forward_return_{int(label_horizon)}d"]],
-                on=["stock_code", "trade_date"], how="left",
-            )
+            mode = str(label_mode or "forward_return").strip().lower()
+            if mode in {"path", "path_score", "path_score_20d", "startup_path"}:
+                labels = build_cn_strategy_labels(prices, path_horizon=int(label_path_horizon))
+                target = "label_path_score_20d" if mode != "path_score_60d" else "label_path_score_60d"
+                labels = labels[
+                    _strategy_label_merge_columns(target, extra_label_columns, labels)
+                ]
+                panel = panel.merge(labels, on=["stock_code", "trade_date"], how="left")
+                if startup_only and not preserve_startup_context:
+                    panel = panel.loc[panel["startup_price_eligible"].fillna(False)].copy()
+                elif startup_only:
+                    panel.loc[~panel["startup_price_eligible"].fillna(False), target] = np.nan
+                label_column = target
+            else:
+                prices[f"forward_return_{int(label_horizon)}d"] = prices.groupby("stock_code")["close"].shift(-int(label_horizon)) / prices["close"] - 1.0
+                panel = panel.merge(
+                    prices[["stock_code", "trade_date", f"forward_return_{int(label_horizon)}d"]],
+                    on=["stock_code", "trade_date"], how="left",
+                )
+                label_column = f"forward_return_{int(label_horizon)}d"
             if progress is not None:
-                progress.set_postfix_str(f"labeled_rows={len(panel):,} horizon={label_horizon}d")
+                progress.set_postfix_str(
+                    f"labeled_rows={len(panel):,} horizon={label_horizon}d features={len(feature_columns)}"
+                )
                 progress.update(1)
-            return panel, feature_columns, f"forward_return_{int(label_horizon)}d"
+            self._last_training_feature_audit = profile_audit or {
+                "profile": "full", "selected_feature_count": len(feature_columns),
+            }
+            return panel, feature_columns, label_column
         finally:
             if progress is not None:
                 progress.close()
@@ -8217,6 +9164,10 @@ class MarketDataService:
         adjust="qfq",
         days=365,
         label_horizon=20,
+        label_mode="forward_return",
+        startup_only=False,
+        label_path_horizon=60,
+        preserve_startup_context=False,
         validation_days=60,
         cleaning_version="p0.2.v1",
         model_dir=None,
@@ -8242,6 +9193,8 @@ class MarketDataService:
         panel, features, label_column = self._clean_panel_training_data(
             market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
             days=days, label_horizon=label_horizon, cleaning_version=cleaning_version,
+            label_mode=label_mode, startup_only=startup_only, label_path_horizon=label_path_horizon,
+            preserve_startup_context=preserve_startup_context,
             min_stock_count=min_stock_count,
             end_date=end_date,
             show_progress=show_progress,
@@ -8267,12 +9220,17 @@ class MarketDataService:
         adjust="qfq",
         days=365,
         label_horizon=20,
+        label_mode="forward_return",
+        startup_only=False,
+        label_path_horizon=60,
+        preserve_startup_context=True,
         validation_days=60,
         lookback=60,
         epochs=10,
         batch_size=256,
         max_samples=12_000,
         max_feature_pairs=128,
+        protected_features=(),
         learning_rate=1e-3,
         d_model=64,
         nhead=4,
@@ -8297,6 +9255,8 @@ class MarketDataService:
         panel, features, label_column = self._clean_panel_training_data(
             market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
             days=days, label_horizon=label_horizon, cleaning_version=cleaning_version,
+            label_mode=label_mode, startup_only=startup_only, label_path_horizon=label_path_horizon,
+            preserve_startup_context=True,
             min_stock_count=min_stock_count,
             end_date=end_date,
             show_progress=show_progress,
@@ -8307,8 +9267,10 @@ class MarketDataService:
             validation_days=validation_days, lookback=lookback, epochs=epochs,
             batch_size=batch_size, max_samples=max_samples,
             max_feature_pairs=max_feature_pairs,
+            protected_features=protected_features,
             learning_rate=learning_rate, d_model=d_model, nhead=nhead, num_layers=num_layers,
             seeds=seeds, checkpoint_metric=checkpoint_metric, seed_ensemble=seed_ensemble,
+            preserve_unlabeled=bool(preserve_startup_context),
             cleaning_version=cleaning_version, factor_set=factor_set,
             warm_start_path=warm_start_path, warm_start_manifest_path=warm_start_manifest_path,
             device=device, embargo_days=embargo_days,
@@ -8341,6 +9303,7 @@ class MarketDataService:
         min_feature_coverage=0.05,
         drop_constant_features=True,
         max_feature_pairs=128,
+        protected_features=(),
         end_date=None,
         show_progress=False,
     ):
@@ -8361,6 +9324,7 @@ class MarketDataService:
             factor_set=factor_set, device=device, embargo_days=embargo_days,
             min_feature_coverage=min_feature_coverage, drop_constant_features=drop_constant_features,
             max_feature_pairs=max_feature_pairs,
+            protected_features=protected_features,
             show_progress=show_progress,
         )
 

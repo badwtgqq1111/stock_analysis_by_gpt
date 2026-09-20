@@ -128,7 +128,7 @@ def test_read_clean_panel_reads_completed_qlib_wide_snapshot(tmp_path):
     marker = layout.dataset_path("clean_feature_panel", layer="feature") / "_SUCCESS.json"
     marker.write_text(json.dumps({
         "status": "completed", "storage_format": "qlib_wide_v1",
-        "cleaning_version": "p0.2.v1",
+        "cleaning_version": "p0.2.v1", "primary_key_unique": True,
     }), encoding="utf-8")
     service = MarketDataService.__new__(MarketDataService)
     service.layout = layout
@@ -139,6 +139,33 @@ def test_read_clean_panel_reads_completed_qlib_wide_snapshot(tmp_path):
     assert len(restored) == 3
     assert set(columns) == set(expected_columns)
     assert "feature_name" not in restored.columns
+
+    selected, selected_columns = service.read_clean_feature_panel(
+        market="CN", factor_set="demo", feature_columns=["factor_a"]
+    )
+    assert set(selected_columns) == {"factor_a_clean", "factor_a_is_missing"}
+    assert selected["factor_a_clean"].notna().all()
+
+
+def test_read_clean_panel_rejects_duplicate_stock_date_rows(tmp_path):
+    layout = DataLayout(str(tmp_path / "data"))
+    warehouse = MarketDataWarehouse(layout)
+    factors, ohlcv = _frames(days=1, stocks=("000001.SZ",))
+    panel = build_feature_panel(factors, ohlcv, market="CN", factor_set="demo")
+    compact, _, _ = compact_training_panel(panel, feature_columns=["factor_a"])
+    duplicated = pd.concat([compact, compact], ignore_index=True)
+    warehouse.parquet_store.write_frame("clean_feature_panel", duplicated, layer="feature")
+    marker = layout.dataset_path("clean_feature_panel", layer="feature") / "_SUCCESS.json"
+    marker.write_text(json.dumps({
+        "status": "completed", "storage_format": "qlib_wide_v1",
+        "cleaning_version": "p0.2.v1", "primary_key_unique": True,
+    }), encoding="utf-8")
+    service = MarketDataService.__new__(MarketDataService)
+    service.layout = layout
+    service.warehouse = warehouse
+
+    with pytest.raises(ValueError, match="duplicate stock/date rows"):
+        service.read_clean_feature_panel(market="CN", factor_set="demo")
 
 
 def test_parquet_distinct_values_uses_statistics_with_mixed_row_group_fallback(tmp_path):
@@ -322,6 +349,71 @@ def test_temporal_feature_selection_caps_clean_values_and_keeps_masks():
     )
     assert selected == ["signal_clean", "signal_is_missing"]
     assert quality["selected_clean_feature_count"] == 1
+
+
+def test_temporal_feature_selection_protects_sparse_event_features():
+    rows = []
+    for index in range(20):
+        rows.append({
+            "trade_date": pd.Timestamp("2025-01-01") + pd.Timedelta(days=index),
+            "stock_code": f"S{index % 2}", "label": float(index),
+            "ordinary_clean": float(index), "ordinary_is_missing": False,
+            "flow_second_wave_flag_clean": 1.0 if index == 10 else 0.0,
+            "flow_second_wave_flag_is_missing": False,
+        })
+    selected, quality = _select_temporal_feature_pairs(
+        pd.DataFrame(rows),
+        ["ordinary_clean", "ordinary_is_missing", "flow_second_wave_flag_clean", "flow_second_wave_flag_is_missing"],
+        max_feature_pairs=1, protected_features=["flow_second_wave_flag"],
+    )
+    assert selected == ["flow_second_wave_flag_clean", "flow_second_wave_flag_is_missing"]
+    assert quality["protected_features_applied"] == ["flow_second_wave_flag_clean"]
+
+
+def test_strategy_labels_use_next_open_and_emit_path_targets():
+    dates = pd.date_range("2025-01-01", periods=90, freq="D")
+    close = np.ones(len(dates)) * 10.0
+    close[60:70] = np.linspace(10.0, 12.0, 10)
+    close[70:] = np.linspace(12.0, 13.0, 20)
+    bars = pd.DataFrame({
+        "stock_code": ["A"] * len(dates), "trade_date": dates,
+        "open": close, "high": close * 1.01, "low": close * .99, "close": close,
+    })
+    labels = build_cn_strategy_labels(bars, path_horizon=20)
+    assert {"startup_price_eligible", "label_path_score_20d", "label_tb_class"}.issubset(labels.columns)
+    # Last row has no next-session entry and therefore no mature path target.
+    assert pd.isna(labels.iloc[-1]["label_tb_class"])
+    assert labels["label_tb_class"].notna().sum() == len(labels) - 20
+
+
+def test_strategy_labels_ignore_zero_entry_prices_without_runtime_warning():
+    dates = pd.date_range("2025-01-01", periods=30, freq="D")
+    close = np.full(len(dates), 10.0)
+    close[5] = 0.0
+    bars = pd.DataFrame({
+        "stock_code": ["A"] * len(dates), "trade_date": dates,
+        "open": close, "high": close, "low": close, "close": close,
+    })
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        labels = build_cn_strategy_labels(bars, path_horizon=20)
+    assert not any(item.category is RuntimeWarning for item in captured)
+    assert labels["label_mfe_20d"].notna().sum() == 9
+
+
+def test_prepare_labeled_panel_preserves_unlabeled_sequence_context():
+    dates = pd.date_range("2025-01-01", periods=10)
+    panel = pd.DataFrame({
+        "trade_date": dates, "stock_code": ["A"] * 10,
+        "factor_clean": np.arange(10, dtype=float), "factor_is_missing": False,
+        "target": [0.1] * 8 + [np.nan, np.nan],
+    })
+    prepared, _, _ = _prepare_labeled_panel(
+        panel, ["factor_clean", "factor_is_missing"], "target",
+        filter_features=False, preserve_unlabeled=True,
+    )
+    assert len(prepared) == 10
+    assert prepared["label"].notna().sum() == 8
 
 
 def test_temporal_feature_selection_handles_extreme_values_without_warning():

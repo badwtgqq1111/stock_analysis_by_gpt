@@ -8,7 +8,7 @@
 #   2. 同一天只跑一次：成功后写 output/pipeline_reports/daily/<date>.done，重复触发直接跳过
 #      （--force 覆盖）。
 #   3. 阶段顺序与 docs/runbooks/cn-data-pipeline.md 的"每日生产"一致：
-#      daily_bars → regime → features → clean_panel → model_scores
+#      daily_bars → moneyflow → regime → features → clean_panel → model_scores
 #      → preselection → pk → exits → paper_account → paper_outcomes
 #      不再使用旧的一步式 --stage selection（它默认在配置里关闭）。
 #   4. 每个阶段写独立日志，最后按阶段生成两阶段选股报告。
@@ -82,6 +82,7 @@ fi
 
 STAGES=(
   "daily_bars:false"
+  "moneyflow:false"
   "regime:false"
   "features:$SKIP_RETRAIN"
   "clean_panel:$SKIP_RETRAIN"

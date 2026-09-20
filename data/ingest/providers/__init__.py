@@ -16,6 +16,20 @@ from .cn_info import CNStockInfoFetcher
 from .cn_sw2021 import SW2021IndustryFetcher
 from .cn_sw2021_relay import SW2021RelayIndustryFetcher
 from .cn_tushare_relay import CNAdjustmentFactorRelayFetcher, CNDailyBasicRelayFetcher, CNTushareRelayClient
+from .cn_moneyflow import (
+    CNMoneyflowFetcher,
+    CNMoneyflowRelayClient,
+    build_moneyflow_features,
+    build_second_wave_confirmation_features,
+    fetch_paginated_stock_history,
+)
+from .cn_tushare_official import (
+    TushareOfficialClient,
+    CNDailyBasicOfficialFetcher,
+    CNCyqPerfOfficialFetcher,
+    CNCyqChipsOfficialFetcher,
+    CNHmDetailOfficialFetcher,
+)
 from .cn_universe import CNMarketListFetcher
 from .cn_valuation_history import CNEastmoneyValuationHistoryFetcher
 from .hk_corporate_actions import HKCorporateActionsFetcher
@@ -39,6 +53,16 @@ __all__ = [
     "CNDailyBasicRelayFetcher",
     "CNAdjustmentFactorRelayFetcher",
     "CNTushareRelayClient",
+    "CNMoneyflowFetcher",
+    "CNMoneyflowRelayClient",
+    "build_moneyflow_features",
+    "build_second_wave_confirmation_features",
+    "fetch_paginated_stock_history",
+    "TushareOfficialClient",
+    "CNDailyBasicOfficialFetcher",
+    "CNCyqPerfOfficialFetcher",
+    "CNCyqChipsOfficialFetcher",
+    "CNHmDetailOfficialFetcher",
     "CNEastmoneyValuationHistoryFetcher",
     "HKCorporateActionsFetcher",
     "HKIndustryFetcher",

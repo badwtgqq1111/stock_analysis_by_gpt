@@ -308,6 +308,8 @@ def train_transformer_panel(
     min_feature_coverage=0.05,
     drop_constant_features=True,
     max_feature_pairs=128,
+    protected_features=(),
+    preserve_unlabeled=False,
     seeds=None,
     checkpoint_metric="ic",
     seed_ensemble="average",
@@ -331,10 +333,11 @@ def train_transformer_panel(
         label_column,
         min_feature_coverage=min_feature_coverage,
         drop_constant_features=drop_constant_features,
+        preserve_unlabeled=bool(preserve_unlabeled),
     )
     prepared["trade_date"] = pd.to_datetime(prepared["trade_date"])
     features, temporal_feature_quality = _select_temporal_feature_pairs(
-        prepared, features, max_feature_pairs=max_feature_pairs,
+        prepared, features, max_feature_pairs=max_feature_pairs, protected_features=protected_features,
     )
     feature_quality["temporal_feature_selection"] = temporal_feature_quality
     # Drop the unselected wide feature columns before cross-sectional work and
@@ -357,13 +360,30 @@ def train_transformer_panel(
             flush=True,
         )
     embargo_days = _resolve_embargo_days(label_column, embargo_days)
+    labeled_dates = prepared.loc[prepared["label"].notna(), "trade_date"]
+    split_frame = prepared[prepared["trade_date"].isin(set(labeled_dates))].copy()
     train_rows, validation_rows, split = _purged_time_split(
-        prepared, validation_days=validation_days, embargo_days=embargo_days
+        split_frame, validation_days=validation_days, embargo_days=embargo_days
     )
-    if train_rows["trade_date"].nunique() < int(lookback):
+    if preserve_unlabeled:
+        # The split is defined by labeled startup endpoints, but sequence
+        # inputs must retain the unlabeled bars immediately before each
+        # endpoint.  Rebuild the row frames from the endpoint date sets so a
+        # sparse startup label distribution cannot make a 60-bar context look
+        # like fewer than 60 training dates.
+        train_endpoint_dates = set(train_rows["trade_date"])
+        validation_endpoint_dates = set(validation_rows["trade_date"])
+        train_cutoff = max(train_endpoint_dates) if train_endpoint_dates else None
+        if train_cutoff is not None:
+            train_rows = prepared[prepared["trade_date"] <= train_cutoff].copy()
+        validation_rows = prepared[prepared["trade_date"].isin(validation_endpoint_dates)].copy()
+    if train_rows["trade_date"].nunique() < int(lookback) and not preserve_unlabeled:
         raise ValueError("not enough dates for Transformer train/validation split")
     scaler = _fit_sequence_scaler(
-        train_rows, features, preserve_binary_features=_missing_indicator_features(features)
+        train_rows, features, preserve_binary_features=(
+            _missing_indicator_features(features)
+            + [feature for feature in features if str(feature).endswith(("_flag", "_source_count"))]
+        )
     )
     if show_progress:
         print(
@@ -371,17 +391,63 @@ def train_transformer_panel(
             f"valid_rows={len(validation_rows):,} lookback={int(lookback)}",
             flush=True,
         )
+    # Use one canonical integer key for all date membership checks.  Depending
+    # on the source frame, pandas may hand us ``Timestamp`` values while the
+    # grouped NumPy arrays below contain ``datetime64`` scalars; those values
+    # usually compare equal but can disagree across timezone/unit boundaries.
+    # A normalized nanosecond key keeps train/validation sequence assignment
+    # deterministic in both the in-sample and OOS paths.
+    def _date_key(value):
+        stamp = pd.Timestamp(value)
+        if pd.isna(stamp):
+            return None
+        return int(stamp.normalize().value)
+
+    train_date_keys = {_date_key(value) for value in train_rows["trade_date"]}
+    validation_date_keys = {_date_key(value) for value in validation_rows["trade_date"]}
     sequences = _build_sequences(
         prepared, features, lookback, scaler, missing_columns=missing_columns,
         max_samples=max_samples, show_progress=show_progress,
         progress_label="Transformer sequence windows",
+        # Preserve every labeled endpoint in both sides of the split.  Startup
+        # labels are sparse by design; sampling only evenly spaced windows can
+        # otherwise select validation endpoints while dropping all training
+        # endpoints, leaving an apparently non-empty but unusable fold.
+        required_endpoint_dates=train_date_keys | validation_date_keys,
     )
-    train_dates = set(pd.to_datetime(train_rows["trade_date"]).to_numpy())
-    validation_dates = set(pd.to_datetime(validation_rows["trade_date"]).to_numpy())
-    train_items = [item for item in sequences if item[2] in train_dates]
-    valid_items = [item for item in sequences if item[2] in validation_dates]
+    train_items = [item for item in sequences if _date_key(item[2]) in train_date_keys]
+    valid_items = [item for item in sequences if _date_key(item[2]) in validation_date_keys]
+    # A bounded sampler can still return only a few endpoint dates when the
+    # training side is short.  In that case, retain its supervised windows by
+    # assigning the sampled pre-validation tail to training; never fabricate a
+    # target or silently train on validation labels.
+    if preserve_unlabeled and not train_items:
+        train_items = [
+            item for item in sequences
+            if _date_key(item[2]) in train_date_keys
+            or _date_key(item[2]) < min(validation_date_keys, default=np.iinfo(np.int64).max)
+        ]
     if not train_items or not valid_items:
-        raise ValueError("not enough complete sequences for Transformer train/validation split")
+        if preserve_unlabeled and validation_date_keys:
+            # A date-level endpoint may be absent for every individual stock
+            # in a bounded sequence sample.  Use the actual endpoint dates as
+            # a diagnostic fallback rather than silently training without a
+            # validation set.
+            available_validation_dates = {
+                _date_key(item[2]) for item in sequences
+            } & validation_date_keys
+            if available_validation_dates:
+                valid_items = [
+                    item for item in sequences if _date_key(item[2]) in available_validation_dates
+                ]
+
+    if not train_items or not valid_items:
+        raise ValueError(
+            "not enough complete sequences for Transformer train/validation split "
+            f"(sequences={len(sequences)}, train_items={len(train_items)}, "
+            f"valid_items={len(valid_items)}, train_dates={len(train_date_keys)}, "
+            f"validation_dates={len(validation_date_keys)}, preserve_unlabeled={bool(preserve_unlabeled)})"
+        )
     if show_progress:
         print(
             f"[TRANSFORMER] sequences ready train={len(train_items):,} valid={len(valid_items):,} "
@@ -753,6 +819,8 @@ def train_cnn_panel(
     min_feature_coverage=0.05,
     drop_constant_features=True,
     max_feature_pairs=128,
+    protected_features=(),
+    preserve_unlabeled=False,
     show_progress=False,
 ) -> dict:
     """Fit a 1D temporal CNN from the same clean-panel sequence contract."""
@@ -766,10 +834,11 @@ def train_cnn_panel(
         label_column,
         min_feature_coverage=min_feature_coverage,
         drop_constant_features=drop_constant_features,
+        preserve_unlabeled=preserve_unlabeled,
     )
     prepared["trade_date"] = pd.to_datetime(prepared["trade_date"])
     features, temporal_feature_quality = _select_temporal_feature_pairs(
-        prepared, features, max_feature_pairs=max_feature_pairs,
+        prepared, features, max_feature_pairs=max_feature_pairs, protected_features=protected_features,
     )
     feature_quality["temporal_feature_selection"] = temporal_feature_quality
     prepared = prepared.loc[:, list(dict.fromkeys(["trade_date", "stock_code", "label", *features]))].copy()
@@ -980,6 +1049,7 @@ def _prepare_labeled_panel(
     min_feature_coverage=0.05,
     drop_constant_features=True,
     filter_features=True,
+    preserve_unlabeled=False,
 ):
     features = [column for column in feature_columns if column in panel.columns]
     if not features:
@@ -989,14 +1059,25 @@ def _prepare_labeled_panel(
     numeric_features = panel.loc[:, features].apply(pd.to_numeric, errors="coerce")
     working = pd.concat([panel.drop(columns=features).copy(), numeric_features], axis=1)
     working["trade_date"] = pd.to_datetime(working["trade_date"], errors="coerce")
-    working = working.dropna(subset=["trade_date", "stock_code", label_column])
-    # Labels are normalized only within their decision-date cross section.
-    working["label"] = working.groupby("trade_date")[label_column].rank(pct=True) - 0.5
-    working = working.dropna(subset=["label"])
+    working = working.dropna(subset=["trade_date", "stock_code"])
+    if preserve_unlabeled:
+        target = pd.to_numeric(working[label_column], errors="coerce")
+        working[label_column] = target
+        working["label"] = np.nan
+        eligible = target.notna()
+        if eligible.any():
+            ranked = target.loc[eligible].groupby(working.loc[eligible, "trade_date"]).rank(pct=True) - 0.5
+            working.loc[eligible, "label"] = ranked.to_numpy()
+    else:
+        working = working.dropna(subset=[label_column])
+        # Labels are normalized only within their decision-date cross section.
+        working["label"] = working.groupby("trade_date")[label_column].rank(pct=True) - 0.5
+        working = working.dropna(subset=["label"])
     if not filter_features:
         return working, features, _empty_feature_quality(features, min_feature_coverage, drop_constant_features)
+    feature_frame = working.loc[working["label"].notna()].copy() if preserve_unlabeled else working
     features, feature_quality = _select_model_features(
-        working,
+        feature_frame,
         features,
         min_feature_coverage=min_feature_coverage,
         drop_constant_features=drop_constant_features,
@@ -1064,7 +1145,7 @@ def _empty_feature_quality(feature_columns, min_feature_coverage, drop_constant_
     }
 
 
-def _select_temporal_feature_pairs(frame, feature_columns, *, max_feature_pairs=128):
+def _select_temporal_feature_pairs(frame, feature_columns, *, max_feature_pairs=128, protected_features=()):
     """Select a bounded, auditable temporal feature set before sequence expansion.
 
     A temporal input doubles each feature with its raw-missingness mask.  Passing
@@ -1076,12 +1157,22 @@ def _select_temporal_feature_pairs(frame, feature_columns, *, max_feature_pairs=
     limit = max(0, int(max_feature_pairs or 0))
     columns = [column for column in feature_columns if column in frame.columns]
     clean_columns = [column for column in columns if str(column).endswith("_clean")]
+    requested_protected = {str(value) for value in (protected_features or ())}
+    protected_clean = sorted({
+        value if value.endswith("_clean") else f"{value}_clean"
+        for value in requested_protected
+        if (value if value.endswith("_clean") else f"{value}_clean") in clean_columns
+    })
     if not limit or len(clean_columns) <= limit:
         return columns, {
             "max_feature_pairs": limit,
             "input_clean_feature_count": len(clean_columns),
             "selected_clean_feature_count": len(clean_columns),
             "selection_applied": False,
+            "protected_features_applied": protected_clean,
+            "protected_features_missing": sorted(
+                requested_protected - {c.removesuffix("_clean") for c in protected_clean}
+            ),
         }
     numeric = frame.loc[:, clean_columns].apply(pd.to_numeric, errors="coerce")
     # Feature ranking needs a stable scale estimate only. Raw Alpha formulas
@@ -1101,7 +1192,12 @@ def _select_temporal_feature_pairs(frame, feature_columns, *, max_feature_pairs=
     # Coverage is capped at one and variance is log-compressed so one
     # large-scale factor cannot crowd out all other predictive candidates.
     score = correlation * coverage * np.log1p(variability.clip(lower=0.0))
-    ranked_clean = sorted(clean_columns, key=lambda column: (-float(score[column]), str(column)))[:limit]
+    remaining_limit = max(0, limit - len(protected_clean))
+    ranked_remaining = sorted(
+        [column for column in clean_columns if column not in protected_clean],
+        key=lambda column: (-float(score[column]), str(column)),
+    )[:remaining_limit]
+    ranked_clean = protected_clean + ranked_remaining
     selected = set(ranked_clean)
     for clean_column in ranked_clean:
         missing_column = f"{clean_column[:-len('_clean')]}_is_missing"
@@ -1116,6 +1212,10 @@ def _select_temporal_feature_pairs(frame, feature_columns, *, max_feature_pairs=
         "method": "abs_rank_label_correlation_x_coverage_x_log_variance",
         "ranking_extreme_clip_value": extreme_limit,
         "ranking_extreme_value_count": extreme_count,
+        "protected_features_applied": protected_clean,
+        "protected_features_missing": sorted(
+            requested_protected - {c.removesuffix("_clean") for c in protected_clean}
+        ),
     }
 
 
@@ -1383,6 +1483,7 @@ def _build_sequences(
     max_samples,
     show_progress=False,
     progress_label="sequence windows",
+    required_endpoint_dates=(),
 ):
     """Build a balanced bounded sample of stock-level temporal windows.
 
@@ -1397,6 +1498,16 @@ def _build_sequences(
     scale = np.asarray([scaler["scale"].get(feature, 1.0) for feature in features], dtype=np.float32)
     scale[~np.isfinite(scale) | (scale == 0)] = 1.0
     ordered = panel.sort_values(["stock_code", "trade_date"], kind="stable")
+    def _date_key(value):
+        stamp = pd.Timestamp(value)
+        if pd.isna(stamp):
+            return None
+        return int(stamp.normalize().value)
+
+    required_dates = {
+        value if isinstance(value, (int, np.integer)) else _date_key(value)
+        for value in (required_endpoint_dates or ())
+    }
     group_count = int(ordered["stock_code"].nunique())
     base_per_stock, remainder = divmod(max_samples, max(1, group_count))
     items = []
@@ -1421,7 +1532,17 @@ def _build_sequences(
         endpoints = np.arange(int(lookback) - 1, len(group), dtype=int)
         if len(endpoints) > sample_count:
             endpoints = endpoints[np.linspace(0, len(endpoints) - 1, num=sample_count, dtype=int)]
+        if required_dates:
+            required = np.asarray(
+                [index for index in range(int(lookback) - 1, len(group))
+                 if _date_key(dates[index]) in required_dates and np.isfinite(labels[index])],
+                dtype=int,
+            )
+            if len(required):
+                endpoints = np.unique(np.concatenate([endpoints, required]))
         for index in endpoints:
+            if not np.isfinite(labels[index]):
+                continue
             items.append((inputs[index - int(lookback) + 1:index + 1], labels[index], dates[index]))
     return items
 

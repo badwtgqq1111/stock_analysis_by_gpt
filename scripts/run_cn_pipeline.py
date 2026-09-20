@@ -170,6 +170,67 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
                 f"< {summary['industry'].get('min_coverage', 0):.1%}"
             )
         return summary
+    if name == "moneyflow":
+        layer = config.get("moneyflow", {})
+        moneyflow_end = layer.get("end_date") or p.get("end_date") or None
+        moneyflow_start = layer.get("start_date") or None
+        if not moneyflow_start and layer.get("lookback_days"):
+            reference = datetime.fromisoformat(str(moneyflow_end)).date() if moneyflow_end else datetime.now().date()
+            moneyflow_start = (reference - timedelta(days=int(layer["lookback_days"]))).isoformat()
+        base_summary = service.refresh_cn_moneyflow(
+            start_date=moneyflow_start or p.get("start_date"), end_date=moneyflow_end,
+            max_workers=int(layer.get("max_workers", 4)), batch_years=int(layer.get("batch_years", 1)),
+            fetch_standard=bool(layer.get("fetch_standard", True)), fetch_dc=bool(layer.get("fetch_dc", True)),
+            fetch_ths=bool(layer.get("fetch_ths", True)),
+            fetch_top_list=bool(layer.get("fetch_top_list", False)),
+            fetch_top_inst=bool(layer.get("fetch_top_inst", False)),
+            show_progress=True, require_daily_bar_match=bool(layer.get("require_daily_bar_match", True)),
+            min_match_ratio=float(layer.get("min_match_ratio", 0.98)), raw_dir=layer.get("raw_dir"),
+            feature_path=layer.get("feature_path"),
+            fetch_mode=layer.get("fetch_mode", "trade_date"),
+        )
+        aux_enabled = any(bool(layer.get(key, False)) for key in ("fetch_daily_basic", "fetch_cyq_perf", "fetch_cyq_chips", "fetch_hm_detail"))
+        if not aux_enabled:
+            return base_summary
+        aux_summary = service.refresh_cn_moneyflow_aux(
+            start_date=moneyflow_start or p.get("start_date"),
+            end_date=moneyflow_end,
+            max_workers=int(layer.get("max_workers", 4)),
+            fetch_daily_basic=bool(layer.get("fetch_daily_basic", False)),
+            fetch_cyq_perf=bool(layer.get("fetch_cyq_perf", False)),
+            fetch_cyq_chips=bool(layer.get("fetch_cyq_chips", False)),
+            fetch_hm_detail=bool(layer.get("fetch_hm_detail", False)),
+            cyq_chips_stock_limit=int(layer.get("cyq_chips_stock_limit", 0) or 0),
+            cyq_chips_max_workers=int(layer.get("cyq_chips_max_workers", 2) or 2),
+            cyq_chips_read_timeout=float(layer.get("cyq_chips_read_timeout", 8) or 8),
+            cyq_chips_requests_per_minute=int(layer.get("cyq_chips_requests_per_minute", 180) or 180),
+            cyq_chips_base_requests_per_minute=int(layer.get("cyq_chips_base_requests_per_minute", 180) or 180),
+            cyq_chips_promax_requests_per_minute=int(layer.get("cyq_chips_promax_requests_per_minute", 180) or 180),
+            raw_dir=layer.get("raw_dir"),
+            fetch_mode=layer.get("fetch_mode", "trade_date"),
+            show_progress=True,
+        )
+        base_summary["auxiliary_sources"] = aux_summary
+        return base_summary
+    if name == "cyq_chips":
+        layer = config.get("moneyflow", {})
+        moneyflow_end = layer.get("end_date") or p.get("end_date") or None
+        moneyflow_start = layer.get("start_date") or None
+        if not moneyflow_start and layer.get("lookback_days"):
+            reference = datetime.fromisoformat(str(moneyflow_end)).date() if moneyflow_end else datetime.now().date()
+            moneyflow_start = (reference - timedelta(days=int(layer["lookback_days"]))).isoformat()
+        return service.refresh_cn_moneyflow_aux(
+            start_date=moneyflow_start or p.get("start_date"), end_date=moneyflow_end,
+            max_workers=int(layer.get("max_workers", 4)),
+            fetch_cyq_chips=True,
+            cyq_chips_stock_limit=int(layer.get("cyq_chips_stock_limit", 0) or 0),
+            cyq_chips_max_workers=int(layer.get("cyq_chips_max_workers", 2) or 2),
+            cyq_chips_read_timeout=float(layer.get("cyq_chips_read_timeout", 8) or 8),
+            cyq_chips_requests_per_minute=int(layer.get("cyq_chips_requests_per_minute", 180) or 180),
+            cyq_chips_base_requests_per_minute=int(layer.get("cyq_chips_base_requests_per_minute", 180) or 180),
+            cyq_chips_promax_requests_per_minute=int(layer.get("cyq_chips_promax_requests_per_minute", 180) or 180),
+            raw_dir=layer.get("raw_dir"), fetch_mode=layer.get("fetch_mode", "trade_date"), show_progress=True,
+        )
     if name == "alternative":
         layer = config[name]
         return service.import_cn_alternative_evidence(
@@ -178,7 +239,16 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         )
     if name == "strategy_labels":
         layer = config[name]
-        return service.build_cn_strategy_labels(days=int(layer.get("days", 756)), output_dir=layer.get("output_dir", "output/strategy_labels"))
+        label_keys = {
+            "entry_delay", "path_horizon", "startup_low_window", "startup_min_rise",
+            "startup_max_rise", "startup_max_return_60d", "startup_max_high_distance",
+            "take_profit", "stop_loss", "limit_up_threshold",
+        }
+        label_kwargs = {key: layer[key] for key in label_keys if key in layer}
+        return service.build_cn_strategy_labels(
+            days=int(layer.get("days", 756)), output_dir=layer.get("output_dir", "output/strategy_labels"),
+            **label_kwargs,
+        )
     if name == "features":
         stock_codes = service.get_all_stock_codes(
             market=p["market"], asset_type="equity", frequency="daily", adjust=p.get("adjust", "qfq")
@@ -262,26 +332,74 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             prediction_paths=layer.get("prediction_paths", {}), output_dir=layer.get("output_dir", "output/evaluations"),
             prefix=layer.get("prefix", "cn_model_comparison"), target_col=layer.get("target_col", "forward_return_20d"),
             n_splits=int(layer.get("n_splits", 5)), min_train_days=int(layer.get("min_train_days", 120)),
-            test_days=layer.get("test_days"), purge_days=int(layer.get("purge_days", 20)), embargo_days=int(layer.get("embargo_days", 0)),
+            test_days=layer.get("test_days"), purge_days=int(layer.get("purge_days", 20)),
+            # A path label needs a 60-session *purge* unless configured
+            # otherwise.  An explicit zero embargo must remain zero: applying
+            # 60 here skips most of the already-scarce OOS blocks.
+            embargo_days=int(layer.get("embargo_days", 0)),
         )
     if name == "oos_predictions":
         layer = config[name]
+        meta = dict(config.get("meta_labeling") or {})
         feature_quality = config.get("model_features", {})
+        meta_min_probability = meta.get("min_probability")
+        if meta_min_probability is not None and float(meta_min_probability) <= 0.0:
+            meta_min_probability = None
+        meta_features = [str(value) for value in (meta.get("features") or [])] or None
         return service.generate_cn_oos_predictions(
             models=tuple(layer.get("models", ["lightgbm"])), factor_set=p["factor_set"],
             days=int(layer.get("days", 756)), label_horizon=int(layer.get("label_horizon", 20)),
+            label_mode=layer.get("label_mode", "forward_return"), startup_only=bool(layer.get("startup_only", False)),
+            label_path_horizon=int(layer.get("path_horizon", 60)),
+            preserve_startup_context=bool(layer.get("preserve_startup_context", False)),
             cleaning_version=layer.get("cleaning_version", "p0.2.v1"), output_dir=layer.get("output_dir", "output/oos_predictions"),
             n_splits=int(layer.get("n_splits", 5)), min_train_days=int(layer.get("min_train_days", 120)),
-            test_days=layer.get("test_days"), purge_days=int(layer.get("purge_days", 20)), embargo_days=int(layer.get("embargo_days", 0)),
+            test_days=layer.get("test_days"), purge_days=int(layer.get("purge_days", 20)),
+            embargo_days=int(layer.get("embargo_days", 0)),
             transformer_lookback=int(layer.get("transformer_lookback", 60)), transformer_epochs=int(layer.get("transformer_epochs", 5)),
             transformer_batch_size=int(layer.get("transformer_batch_size", 256)), transformer_max_samples=int(layer.get("transformer_max_samples", 200000)),
             transformer_device=layer.get("transformer_device", "auto"), industry_mapping_path=layer.get("industry_mapping_path") or None,
             transformer_max_feature_pairs=int(layer.get("transformer_max_feature_pairs", 128)),
+            transformer_protected_features=tuple(layer.get("protected_features", [])),
+            transformer_seeds=[int(seed) for seed in (layer.get("transformer_seeds") or [0])],
+            transformer_checkpoint_metric=str(layer.get("checkpoint_metric", "ic")),
+            transformer_seed_ensemble=str(layer.get("seed_ensemble", "average")),
             prediction_stride=int(layer.get("prediction_stride", 1)),
             min_feature_coverage=float(feature_quality.get("min_feature_coverage", 0.05)),
             drop_constant_features=bool(feature_quality.get("drop_constant_features", True)),
             end_date=str(p["end_date"]) or None,
             show_progress=True,
+            meta_labeling=bool(meta.get("enabled", False)) or bool(layer.get("meta_labeling", False)),
+            meta_features=meta_features,
+            meta_label_column=str(meta.get("label_column", "label_tb_class")),
+            meta_candidate_quantile=float(meta.get("candidate_quantile", 0.10)),
+            meta_act_quantile=meta.get("act_quantile", 0.50),
+            meta_min_probability=meta_min_probability,
+            meta_inner_share=float(meta.get("inner_share", 0.30)),
+            meta_inner_purge_days=int(meta.get("inner_purge_days", 20)),
+            meta_validation_share=float(meta.get("validation_share", 0.30)),
+            meta_purge_days=int(meta.get("purge_days", 20)),
+            meta_n_estimators=int(meta.get("n_estimators", 300)),
+            meta_learning_rate=float(meta.get("learning_rate", 0.05)),
+            meta_num_leaves=int(meta.get("num_leaves", 31)),
+            meta_max_depth=int(meta.get("max_depth", 5)),
+            meta_min_child_samples=int(meta.get("min_child_samples", 50)),
+            meta_reg_lambda=float(meta.get("reg_lambda", 10.0)),
+            meta_random_state=int(meta.get("random_state", 42)),
+            meta_gate_mode=str(meta.get("gate_mode", "learned")),
+            meta_rule_column=str(meta.get("rule_column", "dist_from_120d_low")),
+            meta_rule_threshold=float(meta.get("rule_threshold", 0.15)),
+            meta_rule_direction=str(meta.get("rule_direction", "le")),
+            meta_top_k=int(meta.get("top_k", 20)),
+            meta_evaluation_dir=str(meta.get("evaluation_dir", "output/evaluations")),
+            meta_evaluation_prefix=str(meta.get("evaluation_prefix") or "") or None,
+            meta_realized_return_column=str(meta.get("realized_return_column", "forward_excess_return_20d")),
+            meta_commission_bps=float(meta.get("commission_bps", 5.0)),
+            meta_slippage_bps=float(meta.get("slippage_bps", 5.0)),
+            meta_stamp_duty_bps=float(meta.get("stamp_duty_bps", 5.0)),
+            feature_profile=str(feature_quality.get("profile", "full")),
+            feature_include_patterns=[str(value) for value in (feature_quality.get("include_features") or [])],
+            feature_exclude_patterns=[str(value) for value in (feature_quality.get("exclude_features") or [])],
         )
     if name == "clean_panel":
         layer = config[name]
@@ -293,6 +411,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             report_dir=p.get("quality_report_dir", "output/data_quality"),
             feature_batch_size=int(layer.get("feature_batch_size", 10)),
             factor_config=config.get("factor_config") or None,
+            moneyflow_path=(config.get("moneyflow") or {}).get("feature_path"),
             show_progress=True,
         )
     if name == "lightgbm":
@@ -303,11 +422,14 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             days=int(layer.get("days", p["days"])),
             end_date=str(p["end_date"]) or None,
             label_horizon=int(layer.get("label_horizon", 20)),
+            label_mode=layer.get("label_mode", "forward_return"), startup_only=bool(layer.get("startup_only", False)),
+            label_path_horizon=int(layer.get("path_horizon", 60)),
+            preserve_startup_context=bool(layer.get("preserve_startup_context", True)),
             validation_days=int(layer.get("validation_days", 60)),
             cleaning_version=layer.get("cleaning_version", "p0.2.v1"),
             model_dir=layer.get("model_dir"), warm_start_path=layer.get("warm_start_path"),
             min_stock_count=int(p["min_training_stocks"]),
-            embargo_days=int(layer.get("embargo_days", layer.get("label_horizon", 20))),
+            embargo_days=(60 if str(layer.get("label_mode", "forward_return")).startswith("path") and not int(layer.get("embargo_days", 0) or 0) else int(layer.get("embargo_days", layer.get("label_horizon", 20)))),
             min_feature_coverage=float(feature_quality.get("min_feature_coverage", 0.05)),
             drop_constant_features=bool(feature_quality.get("drop_constant_features", True)),
             n_estimators=int(layer.get("n_estimators", 500)),
@@ -329,10 +451,14 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             days=int(layer.get("days", p["days"])),
             end_date=str(p["end_date"]) or None,
             label_horizon=int(layer.get("label_horizon", 20)),
+            label_mode=layer.get("label_mode", "forward_return"), startup_only=bool(layer.get("startup_only", False)),
+            label_path_horizon=int(layer.get("path_horizon", 60)),
+            preserve_startup_context=bool(layer.get("preserve_startup_context", True)),
             validation_days=int(layer.get("validation_days", 60)),
             lookback=int(layer.get("lookback", 60)), epochs=int(layer.get("epochs", 10)),
             batch_size=int(layer.get("batch_size", 256)), max_samples=int(layer.get("max_samples", 200000)),
             max_feature_pairs=int(layer.get("max_feature_pairs", 128)),
+            protected_features=tuple(layer.get("protected_features", [])),
             learning_rate=float(layer.get("learning_rate", 1e-3)),
             d_model=int(layer.get("d_model", 64)), nhead=int(layer.get("nhead", 4)),
             num_layers=int(layer.get("num_layers", 2)),
@@ -343,7 +469,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             min_stock_count=int(p["min_training_stocks"]),
             warm_start_path=layer.get("warm_start_path"), warm_start_manifest_path=layer.get("warm_start_manifest_path"),
             device=layer.get("device", "auto"),
-            embargo_days=int(layer.get("embargo_days", layer.get("label_horizon", 20))),
+            embargo_days=(60 if str(layer.get("label_mode", "forward_return")).startswith("path") and not int(layer.get("embargo_days", 0) or 0) else int(layer.get("embargo_days", layer.get("label_horizon", 20)))),
             min_feature_coverage=float(feature_quality.get("min_feature_coverage", 0.05)),
             drop_constant_features=bool(feature_quality.get("drop_constant_features", True)),
             show_progress=True,
@@ -358,6 +484,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             lookback=int(layer.get("lookback", 60)), epochs=int(layer.get("epochs", 10)),
             batch_size=int(layer.get("batch_size", 256)), max_samples=int(layer.get("max_samples", 200000)),
             max_feature_pairs=int(layer.get("max_feature_pairs", 128)),
+            protected_features=tuple(layer.get("protected_features", [])),
             channels=int(layer.get("channels", 64)), kernel_size=int(layer.get("kernel_size", 3)),
             num_layers=int(layer.get("num_layers", 3)), cleaning_version=layer.get("cleaning_version", "p0.2.v1"),
             model_dir=layer.get("model_dir"), min_stock_count=int(p["min_training_stocks"]),
@@ -528,7 +655,7 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run CN data, feature, model, OOS evaluation and selection stages.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="TOML pipeline configuration")
-    parser.add_argument("--stage", choices=["all", "daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
+    parser.add_argument("--stage", choices=["all", "daily_bars", "moneyflow", "cyq_chips", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
     parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
     parser.add_argument("--trade-date", default=None,
@@ -542,7 +669,7 @@ def main() -> int:
     config = read_config(args.config if args.config.is_absolute() else ROOT / args.config)
     started = datetime.now().isoformat(timespec="seconds")
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
-    stages = ["daily_bars", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
+    stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
     pipeline_config = config["pipeline"]
@@ -602,7 +729,13 @@ def main() -> int:
             try:
                 summary = run_stage(stage, config, service, force_rebalance=bool(args.force_rebalance),
                                     as_of_date=args.trade_date, profile=args.profile)
-                item = {"name": stage, "status": "ok", "summary": summary}
+                stage_status = "ok"
+                if stage == "moneyflow" and isinstance(summary, dict):
+                    # Preserve degraded data-quality state at the orchestration
+                    # layer; a completed function call is not the same as a
+                    # complete, model-safe dataset.
+                    stage_status = str(summary.get("status") or "ok")
+                item = {"name": stage, "status": stage_status, "summary": summary}
                 if stage == "model_comparison":
                     comparison = summary.get("comparison", {}) if isinstance(summary, dict) else {}
                     common_rows = comparison.get("common_universe_rows")

@@ -1,7 +1,7 @@
 [pipeline]
 market = "CN"
-start_date = "2014-01-01"
-end_date = ""
+start_date = "2026-01-01"
+end_date = "2026-09-16"
 adjust = "qfq"
 days = 365
 factor_set = "alpha_zoo_hk"
@@ -74,37 +74,17 @@ complete_data = false
 [moneyflow]
 # 每日资金流与日 K 使用同一交易日窗口；历史回补按年度分段，避免中继日期范围限制。
 enabled = true
-start_date = ""
-end_date = ""
+start_date = "2026-01-01"
+end_date = "2026-09-16"
 lookback_days = 756
 batch_years = 1
-max_workers = 16
-fetch_top_list = true
-fetch_top_inst = true
 fetch_mode = "trade_date"
+max_workers = 16
 fetch_standard = true
-fetch_dc = true
-fetch_ths = true
-# 官方 Token 优先；官方接口失败时回退到“智能体数据中心免费版”兼容接口。
-# daily_basic/cyq_perf/cyq_chips 是三把锁的增强源。cyq_chips 采用股票级
-# 分页、断点续跑，初次历史回补耗时较长但后续每日仅补新窗口。
-fetch_daily_basic = true
-fetch_cyq_perf = true
-# cyq_chips 是可选的全量价格档位历史，改由 --stage cyq_chips 分批回补；
-# 不阻塞每日 moneyflow 同步和模型更新。
-fetch_cyq_chips = false
-fetch_hm_detail = true
-cyq_chips_stock_limit = 0
-# cyq_chips 的官方、Base Relay、ProMax Relay 会分片并行。workers 是每个
-# 来源的并发数；每个来源保有独立的一分钟请求预算与 429 Retry-After 退避。
-cyq_chips_max_workers = 8
-cyq_chips_read_timeout = 20
-# Tushare 10,000 积分档为 200/min；ProMax IP 档为 200/min，均保留余量。
-cyq_chips_requests_per_minute = 195
-cyq_chips_base_requests_per_minute = 180
-cyq_chips_promax_requests_per_minute = 180
-official_first = true
-capital_features_mode = "source_bundle_with_official_fallback"
+fetch_dc = false
+fetch_ths = false
+fetch_top_list = false
+fetch_top_inst = false
 require_daily_bar_match = true
 min_match_ratio = 0.98
 raw_dir = "assets/data/raw/moneyflow_snapshots"
@@ -153,15 +133,6 @@ adjustment_factors_enabled = false
 [strategy_labels]
 days = 756
 output_dir = "output/strategy_labels"
-entry_delay = 1
-path_horizon = 60
-startup_low_window = 120
-startup_min_rise = 0.05
-startup_max_rise = 0.30
-startup_max_return_60d = 0.35
-startup_max_high_distance = -0.05
-take_profit = 0.20
-stop_loss = 0.10
 
 [clean_panel]
 days = 365
@@ -190,8 +161,6 @@ output_dir = "output/regime"
 [lightgbm]
 days = 365
 label_horizon = 20
-label_mode = "forward_return" # path_score_20d enables the new startup path target
-startup_only = false
 validation_days = 60
 embargo_days = 20
 cleaning_version = "p0.2.v1"
@@ -219,8 +188,6 @@ eval_metric = "daily_ic" # daily_ic | l2 | none
 [transformer]
 days = 365
 label_horizon = 20
-label_mode = "forward_return" # path_score_20d enables the new startup path target
-startup_only = false
 validation_days = 60
 embargo_days = 20
 lookback = 60
@@ -232,14 +199,6 @@ epochs = 20
 batch_size = 256
 max_samples = 36000
 max_feature_pairs = 256
-protected_features = [
-  "flow_second_wave_flag",
-  "flow_second_wave_source_count",
-  "flow_second_wave_max_z5",
-  "flow_second_wave_seed_age",
-  "flow_second_wave_pullback_pct",
-  "flow_second_wave_price_recovery_1d",
-]
 # 多随机种子 + 按"验证集 rank IC"选 checkpoint（Huber 只在 IC 并列时做次级判据）。
 # 同配置重复训练的 09-15 rank IC 标准差约 0.093，单次训练不可复现；
 # 种子内选最优 epoch、再在若干种子间取最优，可同时降方差、提均值。
@@ -269,14 +228,6 @@ epochs = 10
 batch_size = 256
 max_samples = 12000
 max_feature_pairs = 128
-protected_features = [
-  "flow_second_wave_flag",
-  "flow_second_wave_source_count",
-  "flow_second_wave_max_z5",
-  "flow_second_wave_seed_age",
-  "flow_second_wave_pullback_pct",
-  "flow_second_wave_price_recovery_1d",
-]
 channels = 64
 kernel_size = 3
 num_layers = 3
@@ -313,7 +264,7 @@ initial_capital = 45000.0
 # 20 个 walk-forward OOS 日期（2026-03..08，20 日前瞻标签）的权重扫描：
 #   lgbm 权重 0.0/0.3/0.5/0.7/0.85/1.0 → 平均 rank IC 0.071/0.092/0.103/0.108/0.106/0.102
 #   Top-20 超额 4.3%/10.6%/11.4%/12.7%/11.6%/10.2%；0.70/0.30 为 IC 与 Top-20 的双优区。
-ensemble_weights = { lightgbm = 0.50, transformer = 0.50 }
+ensemble_weights = { lightgbm = 0.70, transformer = 0.30 }
 # 再平衡节奏：>1 时，距上次再平衡不足 N 个交易日就沿用上一版组合（每日仍跑 exits）。
 rebalance_stride_days = 5
 
@@ -642,8 +593,6 @@ models = ["transformer", "lightgbm"]
 # "lightgbm",
 days = 756
 label_horizon = 20
-label_mode = "forward_return"
-startup_only = false
 cleaning_version = "p0.2.v1"
 output_dir = "output/oos_predictions"
 n_splits = 5

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import subprocess
 import sys
@@ -129,7 +130,13 @@ def send_generic(content: str, url: str, *, dry_run: bool) -> tuple[bool, str]:
     return post_json(url, {"text": content})
 
 
-def send_email(content: str, html: str, *, dry_run: bool) -> tuple[bool, str]:
+def send_email(
+    content: str,
+    html: str,
+    *,
+    attachments: list[Path] | None = None,
+    dry_run: bool,
+) -> tuple[bool, str]:
     """SMTP 发信（默认 QQ 邮箱：smtp.qq.com:465 SSL，密码用"授权码"而不是登录密码）。
 
     环境变量：MAIL_TO / MAIL_FROM / SMTP_HOST / SMTP_PORT / SMTP_TLS(ssl|starttls|none)
@@ -147,8 +154,11 @@ def send_email(content: str, html: str, *, dry_run: bool) -> tuple[bool, str]:
     sender = os.environ.get("MAIL_FROM", user)
     subject = os.environ.get("MAIL_SUBJECT", f"CN 选股结果 {os.environ.get('MAIL_DATE', '')}".strip())
 
+    attachment_list = attachments or []
     if dry_run:
         plan = f"[dry-run] SMTP {host}:{port} ({tls_mode}) {sender} -> {to_addr}"
+        if attachment_list:
+            plan += f"；附件 {', '.join(path.name for path in attachment_list)}"
         if not password:
             plan += "；SMTP_PASSWORD（QQ 授权码）未配置，真实发送会失败"
         return True, plan
@@ -161,6 +171,15 @@ def send_email(content: str, html: str, *, dry_run: bool) -> tuple[bool, str]:
     message["To"] = to_addr
     message.set_content(content)
     message.add_alternative(html, subtype="html")
+    for attachment in attachment_list:
+        mime_type, _ = mimetypes.guess_type(attachment.name)
+        maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
+        message.add_attachment(
+            attachment.read_bytes(),
+            maintype=maintype,
+            subtype=subtype,
+            filename=attachment.name,
+        )
     try:
         if port == 465 and tls_mode == "ssl":
             with smtplib.SMTP_SSL(host, port, timeout=20) as server:
@@ -185,11 +204,24 @@ def main() -> int:
     parser.add_argument("--top", type=int, default=12)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--print-payload", action="store_true", help="打印将发送的内容后退出")
+    parser.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        help="附加文件（相对仓库路径，可重复）",
+    )
     parser.add_argument("--text", default=None, help="直接发送这段文本（用于失败告警等短消息），跳过报告生成")
     parser.add_argument("--subject", default=None, help="邮件主题（配合 --text 使用）")
     args = parser.parse_args()
 
     load_env_file(REPO / "config" / "notify.env")
+    attachments: list[Path] = []
+    for raw_path in args.attach:
+        candidate = Path(raw_path)
+        resolved = (REPO / candidate).resolve()
+        if candidate.is_absolute() or not resolved.is_relative_to(REPO) or not resolved.is_file():
+            raise ValueError(f"attachment must be a repository-relative file: {raw_path}")
+        attachments.append(resolved)
     if args.text:
         content, path = args.text, REPO / "output" / "results_cn" / "_notify_text.md"
         if args.subject:
@@ -236,7 +268,7 @@ def main() -> int:
             html_path = path.with_suffix(".html")
             html = html_path.read_text(encoding="utf-8") if html_path.is_file() else ""
             os.environ.setdefault("MAIL_DATE", path.stem.split("_")[-1])
-            results.append(("email", *send_email(content, html, dry_run=args.dry_run)))
+            results.append(("email", *send_email(content, html, attachments=attachments, dry_run=args.dry_run)))
         else:
             results.append((channel, False, "未知渠道"))
 

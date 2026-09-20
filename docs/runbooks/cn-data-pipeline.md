@@ -35,6 +35,7 @@ uv run python scripts/run_cn_pipeline.py --config config/cn_pipeline.research.to
 | 层 | 阶段 | 内容 | 是否训练硬门禁 |
 |---|---|---|---|
 | 日 K | `daily_bars` | 日频 OHLCV、成交额、换手率与复权标记 | 是 |
+| 资金流 | `moneyflow` | 个股资金流、来源交叉口径、龙虎榜及滚动特征 | 是（日期对齐） |
 | 分时 | `intraday_bars` | 1/5/15/30/60 分钟线，服务于微结构和执行研究 | 否，默认关闭 |
 | 基本面 | `fundamental` | 股票快照、历史估值、PIT 财务、行业分类 | 是 |
 | 另类数据 | `alternative` | 新闻、公告、事件、搜索证据、主题机会的本地 PIT 导入 | 可选；当前导入后不会自动并入训练面板 |
@@ -66,6 +67,7 @@ min_daily_rows_for_intraday = 120
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage daily_bars
+uv run python scripts/run_cn_pipeline.py --stage moneyflow
 uv run python scripts/run_cn_pipeline.py --stage intraday_bars
 uv run python scripts/run_cn_pipeline.py --stage fundamental
 uv run python scripts/run_cn_pipeline.py --stage features
@@ -97,7 +99,7 @@ uv run python scripts/run_cn_pipeline.py --stage pk
 uv run python scripts/run_cn_pipeline.py --stage all
 ```
 
-`daily_bars` 只下载并写入日 K，不会自动刷新基本面；`intraday_bars` 也只处理分时。
+`daily_bars` 只下载并写入日 K，不会自动刷新基本面；`moneyflow` 按同一交易日窗口拉取资金流和龙虎榜，并保存原始快照与滚动特征；`intraday_bars` 也只处理分时。资金流默认要求与日 K 匹配率达到 98%；缺失保留 `is_missing`，不填零。
 日 K 默认以腾讯为主、BaoStock 和东方财富为回退；默认链路不使用新浪日线，避免 macOS 上
 `py-mini-racer` / V8 在并发初始化时终止同步进程。只有排查特定新浪数据时才在独立配置中显式设置
 `daily_bars.data_source = "sina"`；该调用会串行执行。
@@ -117,7 +119,7 @@ LightGBM 和 Transformer 均启用，因此它会重训模型。日常生产应�
 | 工作流 | 阶段 | 建议频率 | 触发条件 | 主要产物 |
 |---|---|---|---|---|
 | 首次构建/数据修复 | `daily_bars`、`fundamental`、`features`、`regime`、`clean_panel`、训练、打分、选股 | 首次；历史数据或清洗契约变更后 | 新机器、重建历史数据、特征 schema/清洗版本变化 | clean panel、模型工件、最新候选 |
-| 每日生产 | `daily_bars`、`features`、`regime`、`clean_panel`、`model_scores`、`selection`、`paper_account`、`paper_outcomes` | 每个交易日收盘数据完整后 | 有新的日 K 或新的选股日 | 最新分数、候选、纸面成交、净值和成熟信号收益 |
+| 每日生产 | `daily_bars`、`moneyflow`、`features`、`regime`、`clean_panel`、`model_scores`、`selection`、`paper_account`、`paper_outcomes` | 每个交易日收盘数据完整后 | 有新的日 K 或新的选股日 | 最新分数、候选、纸面成交、净值和成熟信号收益 |
 | 基本面刷新 | `fundamental` | 按数据源披露节奏，建议每周；财报季可每日 | 新财报、估值或行业信息需要刷新 | 股票快照、PIT 财务和估值数据 |
 | 定期重训 | `lightgbm`、`transformer`，随后 `model_scores`、`selection` | 每 20 个交易日或每月 | 训练窗口滚动到期；模型/特征/标签参数变化 | 新模型和新选股结果 |
 | 严格研究评估 | `oos_predictions`、`model_comparison` | 每月/每季；模型提升和晋升前 | 模型、标签、特征或训练配置变化 | 按折 OOS 预测和模型对比报告 |
@@ -157,6 +159,7 @@ uv run python scripts/run_cn_pipeline.py
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage daily_bars
+uv run python scripts/run_cn_pipeline.py --stage moneyflow
 uv run python scripts/run_cn_pipeline.py --stage features
 uv run python scripts/run_cn_pipeline.py --stage regime
 uv run python scripts/run_cn_pipeline.py --stage clean_panel

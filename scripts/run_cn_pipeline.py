@@ -337,11 +337,21 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             # otherwise.  An explicit zero embargo must remain zero: applying
             # 60 here skips most of the already-scarce OOS blocks.
             embargo_days=int(layer.get("embargo_days", 0)),
+            label_path=layer.get("label_path") or None,
+            top_k=layer.get("top_k"),
+            horizon_days=layer.get("horizon_days"),
+            overlap_correction=str(layer.get("overlap_correction", "split_1_over_h")),
+            commission_bps=float(layer.get("commission_bps", 5.0)),
+            slippage_bps=float(layer.get("slippage_bps", 5.0)),
+            stamp_duty_bps=float(layer.get("stamp_duty_bps", 5.0)),
+            cost_bps=layer.get("cost_bps"),
+            industry_column=str(layer.get("industry_column", "industry_l1")),
         )
     if name == "oos_predictions":
         layer = config[name]
         meta = dict(config.get("meta_labeling") or {})
         feature_quality = config.get("model_features", {})
+        neutralization = dict(config.get("neutralization") or {})
         meta_min_probability = meta.get("min_probability")
         if meta_min_probability is not None and float(meta_min_probability) <= 0.0:
             meta_min_probability = None
@@ -400,6 +410,9 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             feature_profile=str(feature_quality.get("profile", "full")),
             feature_include_patterns=[str(value) for value in (feature_quality.get("include_features") or [])],
             feature_exclude_patterns=[str(value) for value in (feature_quality.get("exclude_features") or [])],
+            feature_include_families=[str(value) for value in (feature_quality.get("include_families") or [])],
+            feature_exclude_families=[str(value) for value in (feature_quality.get("exclude_families") or [])],
+            neutralization=neutralization or None,
         )
     if name == "clean_panel":
         layer = config[name]
@@ -526,6 +539,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             force_rebalance=force_rebalance,
             show_progress=True,
             as_of_date=as_of_date,
+            startup_gate=layer.get("startup_gate") or None,
         )
     if name == "preselection":
         layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)
@@ -543,7 +557,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             affordability=layer.get("affordability") or None,
             rebalance_stride_days=int(layer.get("rebalance_stride_days", 1) or 1),
             force_rebalance=force_rebalance, show_progress=True, preselection_only=True,
-            as_of_date=as_of_date,
+            as_of_date=as_of_date, startup_gate=layer.get("startup_gate") or None,
         )
     if name == "pk":
         layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)

@@ -563,17 +563,31 @@ def test_model_comparison_uses_persisted_oos_folds_and_common_universe():
     assert summary["common_universe_rows"] == len(transformer)
 
 
-def test_walk_forward_suppresses_compounded_proxy_for_overlapping_forward_labels():
+def test_walk_forward_handles_overlapping_forward_labels():
+    """Overlapping windows either get the 1/H correction or stay suppressed.
+
+    Reported raw compounding of overlapping 20-day labels is not a NAV, so the
+    default is the 1/H split (P1.17 section 6); ``overlap_correction="none"``
+    keeps the older behaviour of publishing no cumulative/drawdown at all.
+    """
     dates = pd.to_datetime(["2025-01-03", "2025-01-10", "2025-01-17"])
     predictions = pd.DataFrame([
         {"trade_date": date, "stock_code": code, "fold": 1,
          "model_score": float(score), "forward_return_20d": float(score) / 100}
         for date in dates for score, code in enumerate(["A", "B", "C"], start=1)
     ])
-    report, _ = evaluate_walk_forward_predictions(predictions)
-    assert bool(report.iloc[0]["overlapping_forward_windows"])
-    assert pd.isna(report.iloc[0]["cumulative_top_return"])
-    assert pd.isna(report.iloc[0]["max_drawdown"])
+    corrected, summary = evaluate_walk_forward_predictions(predictions)
+    assert bool(corrected.iloc[0]["overlapping_forward_windows"])
+    assert corrected.iloc[0]["overlap_correction"] == "split_1_over_h"
+    assert corrected.iloc[0]["horizon_days"] == 20
+    assert pd.notna(corrected.iloc[0]["cumulative_top_return"])
+    assert pd.notna(corrected.iloc[0]["max_drawdown"])
+    assert summary["chained_cumulative_return"] is not None
+
+    suppressed, _ = evaluate_walk_forward_predictions(predictions, overlap_correction="none")
+    assert bool(suppressed.iloc[0]["overlapping_forward_windows"])
+    assert pd.isna(suppressed.iloc[0]["cumulative_top_return"])
+    assert pd.isna(suppressed.iloc[0]["max_drawdown"])
 
 
 def test_lightgbm_oos_predictions_are_folded_and_include_realized_labels(tmp_path):
@@ -747,3 +761,33 @@ def test_walk_forward_evaluation_compares_models_on_same_folds():
     assert summary["rank_ic_mean"] > 0.9
     assert set(combined["model"]) == {"demo", "demo_copy"}
     assert comparison["ranking"][0]["model"] == "demo"
+
+
+def test_apply_startup_gate_modes():
+    """The selection-layer gate can use the built-in rule, explicit caps, or both."""
+    from factor_engine.ml.strategy_labels import apply_startup_gate
+
+    labels = pd.DataFrame({
+        "stock_code": ["A", "B", "C", "D"],
+        "startup_price_eligible": [True, False, True, False],
+        "dist_from_120d_low": [0.10, 0.93, 0.45, 0.20],
+        "return_60d": [0.05, 0.25, 0.60, 0.10],
+        "dist_from_60d_high": [-0.10, -0.02, -0.30, -0.01],
+    })
+    built_in = apply_startup_gate(labels, {"mode": "eligibility"}).set_index("stock_code")["startup_eligible"]
+    assert built_in.to_dict() == {"A": True, "B": False, "C": True, "D": False}
+
+    distance_only = apply_startup_gate(
+        labels, {"mode": "thresholds", "max_dist_from_120d_low": 0.30}
+    ).set_index("stock_code")["startup_eligible"]
+    assert distance_only.to_dict() == {"A": True, "B": False, "C": False, "D": True}
+
+    both = apply_startup_gate(
+        labels, {"mode": "both", "max_dist_from_120d_low": 0.30, "max_return_60d": 0.35}
+    ).set_index("stock_code")["startup_eligible"]
+    assert both.to_dict() == {"A": True, "B": False, "C": False, "D": False}
+
+    with pytest.raises(ValueError, match="requires at least one cap"):
+        apply_startup_gate(labels, {"mode": "thresholds"})
+    with pytest.raises(ValueError, match="startup_price_eligible column"):
+        apply_startup_gate(labels.drop(columns=["startup_price_eligible"]), {"mode": "eligibility"})

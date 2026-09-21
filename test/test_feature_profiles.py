@@ -71,3 +71,33 @@ def test_unknown_profile_is_rejected():
     with pytest.raises(ValueError, match="unknown feature profile"):
         resolve_feature_profile(AVAILABLE, profile="tiny")
     assert set(FEATURE_PROFILES) == {"full", "compact", "core"}
+
+
+def test_named_families_can_be_switched_off_wholesale():
+    from factor_engine.ml.feature_profiles import FEATURE_FAMILIES, family_patterns
+
+    available = [
+        "moneyflow_net_z_5d_clean", "moneyflow_dc_net_z_5d_clean", "flow_second_wave_flag_clean",
+        "flow_second_wave_source_count_clean", "pv_volume_ratio_20d_clean", "tr_dryup_days_10_clean",
+        "turnover_rate_clean", "valuation_market_cap_log_clean",
+    ]
+    assert set(FEATURE_FAMILIES) >= {"moneyflow", "valuation", "fundamental", "academic", "price_volume"}
+    assert "moneyflow*" in family_patterns(["moneyflow"])
+
+    with_moneyflow, _ = resolve_feature_profile(available, profile="full")
+    without, audit = resolve_feature_profile(available, profile="full", exclude_families=["moneyflow"])
+    assert "moneyflow_net_z_5d" in with_moneyflow and "flow_second_wave_flag" in with_moneyflow
+    assert "moneyflow_net_z_5d" not in without
+    assert "moneyflow_dc_net_z_5d" not in without
+    assert "flow_second_wave_flag" not in without and "flow_second_wave_source_count" not in without
+    assert "pv_volume_ratio_20d" in without and "turnover_rate" in without
+    assert audit["exclude_families"] == ["moneyflow"]
+    assert sorted(set(with_moneyflow) - set(without)) == [
+        "flow_second_wave_flag", "flow_second_wave_source_count",
+        "moneyflow_dc_net_z_5d", "moneyflow_net_z_5d",
+    ]
+
+
+def test_unknown_feature_family_is_rejected():
+    with pytest.raises(ValueError, match="unknown feature families"):
+        resolve_feature_profile(["pv_return_20d_clean"], profile="full", exclude_families=["funding"])

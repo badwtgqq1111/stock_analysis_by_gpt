@@ -214,7 +214,11 @@ def test_clean_panel_stage_calls_materializer() -> None:
     result = MODULE.run_stage("clean_panel", config, service)
     assert result["status"] == "completed"
     assert service.kwargs["cleaning_version"] == "p0.2.v1"
-    assert service.kwargs["days"] == 365
+    # The panel window is a shared-dataset parameter: the stage must forward the
+    # configured value rather than a literal, so a config change cannot be
+    # silently ignored (see P1.17 section 11.D1).
+    assert service.kwargs["days"] == config["clean_panel"]["days"]
+    assert service.kwargs["days"] >= 365
     assert service.kwargs["feature_batch_size"] == 50
     assert service.kwargs["moneyflow_path"].endswith("cn_moneyflow_features.parquet")
     assert service.kwargs["show_progress"] is True
@@ -319,3 +323,28 @@ def test_fundamental_coverage_is_reported_not_a_hard_gate() -> None:
     detail = MODULE.fundamental_availability(report, 0.80)
 
     assert "optional fields below target" in detail
+
+
+def test_neutralization_features_never_overlap_their_control_columns() -> None:
+    """Residualising a control against itself only produces a noise column.
+
+    The first W4 A/B run shipped that mistake (four controls also listed as
+    residualised features), which made the comparison uninterpretable.  Guard
+    every shipped config against it.
+    """
+    import tomllib
+    from pathlib import Path
+
+    checked = 0
+    for path in sorted((ROOT / "config").glob("cn_pipeline*.toml")):
+        try:
+            config = tomllib.loads(path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError:
+            continue
+        block = config.get("neutralization") or {}
+        features = {str(value) for value in (block.get("features") or [])}
+        controls = {str(value) for value in (block.get("control_columns") or [])}
+        overlap = features & controls
+        assert not overlap, f"{path.name}: residualised features also used as controls: {sorted(overlap)}"
+        checked += 1
+    assert checked > 0

@@ -415,3 +415,29 @@ def test_strategy_label_merge_columns_are_unique_and_keep_extra_context():
     # A duplicate merge key is what produced suffixed _x/_y columns downstream.
     for column in columns:
         assert not column.endswith(("_x", "_y"))
+
+
+def test_binary_preserve_features_survive_the_clean_suffix():
+    """Panel columns are ``*_clean``; a bare endswith("_flag") test never matched."""
+    from factor_engine.ml.model_training import _binary_preserve_features, _fit_sequence_scaler
+
+    features = [
+        "flow_second_wave_flag_clean",
+        "flow_second_wave_source_count_clean",
+        "flow_second_wave_max_z5_clean",
+        "turnover_rate_clean",
+        "turnover_rate_is_missing",
+    ]
+    preserved = _binary_preserve_features(features)
+    assert preserved == [
+        "flow_second_wave_flag_clean", "flow_second_wave_source_count_clean", "turnover_rate_is_missing",
+    ]
+    rng = np.random.default_rng(5)
+    frame = pd.DataFrame({name: rng.normal(size=120) for name in features})
+    frame["flow_second_wave_flag_clean"] = rng.integers(0, 2, 120)
+    scaler = _fit_sequence_scaler(frame, features, preserve_binary_features=preserved)
+    for name in preserved:
+        assert scaler["center"][name] == 0.0
+        assert scaler["scale"][name] == 1.0
+    assert scaler["scale"]["turnover_rate_clean"] != 1.0
+    assert set(scaler["preserved_features"]) == set(preserved)

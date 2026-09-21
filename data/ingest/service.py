@@ -103,7 +103,8 @@ from factor_engine.portfolio.optimizer import PortfolioConstraints, optimize_lon
 from factor_engine.portfolio.paper_account import persist_paper_account, run_paper_account
 from factor_engine.ml.alternative_data import normalize_cn_alternative_evidence, write_alternative_data_report
 from factor_engine.ml.feature_profiles import resolve_feature_profile
-from factor_engine.ml.strategy_labels import build_cn_strategy_labels
+from factor_engine.ml.neutralization import neutralize_features
+from factor_engine.ml.strategy_labels import apply_startup_gate, build_cn_strategy_labels
 from factor_engine.ml.meta_labeling import (
     DEFAULT_META_FEATURES,
     META_CONTEXT_COLUMNS,
@@ -208,6 +209,54 @@ def _cn_incremental_start_date(base_start, latest_trade_date, frequency):
     if normalize_period(frequency) == "daily":
         effective_start = effective_start.normalize()
     return effective_start.strftime("%Y-%m-%d")
+
+
+def _startup_gate_columns(labels, settings):
+    """Thin wrapper so callers can log which rule produced the gate."""
+    gate = apply_startup_gate(labels, settings)
+    return gate, str((settings or {}).get("mode", "eligibility") or "eligibility")
+
+
+def _clean_panel_window(dataset_path):
+    """Read the published window of an existing clean panel, if any."""
+    marker = Path(dataset_path) / "_SUCCESS.json"
+    if not marker.is_file():
+        return None
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return {
+        "start_date": payload.get("start_date"),
+        "end_date": payload.get("end_date"),
+        "rows": payload.get("rows"),
+        "feature_count": payload.get("feature_count"),
+        "created_at": payload.get("created_at"),
+    }
+
+
+def _neutralization_summary(audit):
+    """Trim the neutralization audit to what a manifest should carry."""
+    if not audit:
+        return None
+    payload = {
+        "mode": audit.get("mode"),
+        "residual_suffix": audit.get("residual_suffix"),
+        "control_columns_used": audit.get("control_columns_used"),
+        "control_columns_missing": audit.get("control_columns_missing"),
+        "residual_column_count": audit.get("residual_column_count"),
+        "features_neutralized": audit.get("features_neutralized"),
+    }
+    correlations = audit.get("correlation_audit") or {}
+    means = [
+        (entry.get("mean_before"), entry.get("mean_after"))
+        for entry in correlations.values()
+        if entry.get("mean_before") is not None
+    ]
+    if means:
+        payload["mean_abs_control_corr_before"] = float(np.mean([value[0] for value in means]))
+        payload["mean_abs_control_corr_after"] = float(np.mean([value[1] or 0.0 for value in means]))
+    return payload
 
 
 def _clean_panel_feature_names(dataset_path):
@@ -6729,18 +6778,62 @@ class MarketDataService:
         graph_meta.update({"asof_date": end_ts.strftime("%Y-%m-%d"), "available_at_rule": "industry registry as-of run", "cleaning_version": cleaning_version})
         return train_graph_temporal_panel(panel, features, model_dir=model_dir, lookback=lookback, epochs=epochs, adjacency=adjacency, graph_metadata=graph_meta)
 
-    def evaluate_cn_model_comparison(self, *, prediction_paths, output_dir="output/evaluations", prefix="cn_model_comparison", target_col="forward_return_20d", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0):
+    def evaluate_cn_model_comparison(self, *, prediction_paths, output_dir="output/evaluations", prefix="cn_model_comparison", target_col="forward_return_20d", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, label_path=None, top_k=None, horizon_days=None, overlap_correction="split_1_over_h", commission_bps=5.0, slippage_bps=5.0, stamp_duty_bps=5.0, cost_bps=None, industry_column="industry_l1", market="CN"):
+        """Compare persisted OOS predictions on one common target column.
+
+        ``label_path`` optionally supplies the target column (a strategy-label
+        export with T+1-open executable and benchmark-relative returns); without
+        it the prediction files must already carry ``target_col``.  Industry HHI
+        is computed from the current stock-info registry, which is a *diagnostic*
+        of concentration rather than a point-in-time industry classification.
+        """
         predictions = {name: pd.read_csv(path) for name, path in (prediction_paths or {}).items() if path and Path(path).is_file()}
         if not predictions:
             raise ValueError("no persisted prediction files available for model comparison")
+        label_frame = None
+        if label_path and Path(label_path).is_file():
+            label_frame = pd.read_csv(label_path)
+            label_frame["trade_date"] = pd.to_datetime(label_frame["trade_date"], errors="coerce")
+        if label_frame is not None:
+            extra = [
+                column for column in label_frame.columns
+                if column not in {"stock_code", "trade_date"} and column.startswith(("forward_", "label_"))
+            ]
+            enriched = {}
+            for name, frame in predictions.items():
+                frame = frame.copy()
+                frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+                drop = [column for column in extra if column in frame.columns]
+                frame = frame.drop(columns=drop, errors="ignore")
+                enriched[name] = frame.merge(
+                    label_frame[["stock_code", "trade_date", *extra]], on=["stock_code", "trade_date"], how="left",
+                )
+            predictions = enriched
+        industry_map = None
+        if industry_column:
+            codes = sorted({str(value) for frame in predictions.values() for value in frame.get("stock_code", [])})
+            if codes:
+                try:
+                    info = self.warehouse.read_stock_info(stock_codes=codes, market=str(market).upper())
+                    if industry_column in info.columns:
+                        industry_map = dict(zip(info["stock_code"].astype(str), info[industry_column].astype(str)))
+                except Exception:
+                    industry_map = None
         report, summary = compare_walk_forward_predictions(
             predictions, target_col=target_col, n_splits=n_splits, min_train_days=min_train_days,
             test_days=test_days, purge_days=purge_days, embargo_days=embargo_days,
+            top_k=top_k, horizon_days=horizon_days, overlap_correction=overlap_correction,
+            commission_bps=commission_bps, slippage_bps=slippage_bps, stamp_duty_bps=stamp_duty_bps,
+            cost_bps=cost_bps, industry_map=industry_map,
         )
+        summary["industry_map_used"] = bool(industry_map)
+        summary["industry_column"] = industry_column if industry_map else None
+        summary["target_column"] = target_col
+        summary["label_path"] = str(label_path) if label_frame is not None else None
         paths = write_walk_forward_report(report, summary, output_dir=output_dir, prefix=prefix)
         return {**paths, "comparison": summary}
 
-    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, label_mode="forward_return", startup_only=False, label_path_horizon=60, preserve_startup_context=False, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=12_000, transformer_max_feature_pairs=128, transformer_protected_features=(), transformer_seeds=None, transformer_checkpoint_metric="ic", transformer_seed_ensemble="average", transformer_device="auto", prediction_stride=1, industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None, show_progress=False, meta_labeling=False, meta_features=None, meta_label_column="label_tb_class", meta_candidate_quantile=0.10, meta_act_quantile=0.50, meta_min_probability=None, meta_inner_share=0.30, meta_inner_purge_days=20, meta_validation_share=0.30, meta_purge_days=20, meta_n_estimators=300, meta_learning_rate=0.05, meta_num_leaves=31, meta_max_depth=5, meta_min_child_samples=50, meta_reg_lambda=10.0, meta_random_state=42, meta_gate_mode="learned", meta_rule_column="dist_from_120d_low", meta_rule_threshold=0.15, meta_rule_direction="le", meta_top_k=20, meta_evaluation_dir="output/evaluations", meta_evaluation_prefix=None, meta_realized_return_column="forward_excess_return_20d", meta_commission_bps=5.0, meta_slippage_bps=5.0, meta_stamp_duty_bps=5.0, feature_profile="full", feature_include_patterns=(), feature_exclude_patterns=()):
+    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, label_mode="forward_return", startup_only=False, label_path_horizon=60, preserve_startup_context=False, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=12_000, transformer_max_feature_pairs=128, transformer_protected_features=(), transformer_seeds=None, transformer_checkpoint_metric="ic", transformer_seed_ensemble="average", transformer_device="auto", prediction_stride=1, industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None, show_progress=False, meta_labeling=False, meta_features=None, meta_label_column="label_tb_class", meta_candidate_quantile=0.10, meta_act_quantile=0.50, meta_min_probability=None, meta_inner_share=0.30, meta_inner_purge_days=20, meta_validation_share=0.30, meta_purge_days=20, meta_n_estimators=300, meta_learning_rate=0.05, meta_num_leaves=31, meta_max_depth=5, meta_min_child_samples=50, meta_reg_lambda=10.0, meta_random_state=42, meta_gate_mode="learned", meta_rule_column="dist_from_120d_low", meta_rule_threshold=0.15, meta_rule_direction="le", meta_top_k=20, meta_evaluation_dir="output/evaluations", meta_evaluation_prefix=None, meta_realized_return_column="forward_excess_return_20d", meta_commission_bps=5.0, meta_slippage_bps=5.0, meta_stamp_duty_bps=5.0, feature_profile="full", feature_include_patterns=(), feature_exclude_patterns=(), feature_include_families=(), feature_exclude_families=(), neutralization=None):
         """Generate historical predictions with one strictly prior model per OOS fold.
 
         With ``meta_labeling=True`` the LightGBM leg also fits the second-stage
@@ -6757,6 +6850,9 @@ class MarketDataService:
             feature_profile=feature_profile,
             feature_include_patterns=feature_include_patterns,
             feature_exclude_patterns=feature_exclude_patterns,
+            feature_include_families=feature_include_families,
+            feature_exclude_families=feature_exclude_families,
+            neutralization=neutralization,
             cleaning_version=cleaning_version, min_stock_count=2, end_date=end_date,
         )
         label_frame = pd.DataFrame()
@@ -6834,6 +6930,7 @@ class MarketDataService:
             "meta_labeling_enabled": requested_meta,
             "availability": dict(AVAILABILITY_RULE),
             "feature_profile": getattr(self, "_last_training_feature_audit", None),
+            "neutralization": _neutralization_summary(getattr(self, "_last_neutralization_audit", None)),
         }
 
     def materialize_clean_feature_panel(
@@ -7119,6 +7216,25 @@ class MarketDataService:
             "manifest": str(manifest_path),
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
+        # The clean panel is a single shared dataset: a rebuild with a narrower
+        # window silently deletes history that models and OOS comparisons were
+        # measured on.  Record it loudly instead of letting the window shrink.
+        previous_window = _clean_panel_window(target_path)
+        if previous_window:
+            shrank = (
+                str(start_ts.date()) > str(previous_window.get("start_date"))
+                or str(end_ts.date()) < str(previous_window.get("end_date"))
+            )
+            success_marker["previous_window"] = previous_window
+            success_marker["window_shrank"] = bool(shrank)
+            if shrank:
+                _log(
+                    "warning: rebuilding clean_feature_panel with a narrower window "
+                    f"({start_ts.date()}..{end_ts.date()}) than the existing panel "
+                    f"({previous_window.get('start_date')}..{previous_window.get('end_date')}, "
+                    f"rows={previous_window.get('rows')}); any OOS baseline measured on the "
+                    "wider window becomes incomparable"
+                )
         marker_path = temp_dataset_path / "_SUCCESS.json"
         marker_path.write_text(json.dumps(success_marker, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         # Publish the complete dataset only after its report and manifest are
@@ -7313,6 +7429,9 @@ class MarketDataService:
         feature_profile="full",
         feature_include_patterns=(),
         feature_exclude_patterns=(),
+        feature_include_families=(),
+        feature_exclude_families=(),
+        neutralization=None,
         cleaning_version="p0.2.v1",
         min_stock_count=50,
         end_date=None,
@@ -7325,11 +7444,16 @@ class MarketDataService:
             requested_profile = str(feature_profile or "full").strip().lower()
             profile_audit = None
             requested_features = None
-            if requested_profile not in {"", "full"} or feature_include_patterns or feature_exclude_patterns:
+            if (
+                requested_profile not in {"", "full"}
+                or feature_include_patterns or feature_exclude_patterns
+                or feature_include_families or feature_exclude_families
+            ):
                 available = _clean_panel_feature_names(self.layout.dataset_path("clean_feature_panel", layer="feature"))
                 selected_features, profile_audit = resolve_feature_profile(
                     available, profile=requested_profile or "full",
                     include_patterns=feature_include_patterns, exclude_patterns=feature_exclude_patterns,
+                    include_families=feature_include_families, exclude_families=feature_exclude_families,
                 )
                 if not selected_features:
                     raise ValueError(
@@ -7390,6 +7514,23 @@ class MarketDataService:
                 elif startup_only:
                     panel.loc[~panel["startup_price_eligible"].fillna(False), target] = np.nan
                 label_column = target
+            elif mode in {"excess", "excess_return", "excess_ret"} or mode.startswith("excess_return_"):
+                target = f"forward_excess_return_{int(label_horizon)}d"
+                labels = build_cn_strategy_labels(prices, path_horizon=int(label_path_horizon))
+                if target not in labels.columns:
+                    raise ValueError(f"strategy labels do not provide {target!r}; available horizons are 5/10/20/60")
+                requested_extra = [
+                    str(column)
+                    for column in (extra_label_columns or ())
+                    if str(column) in labels.columns and str(column) != target
+                ]
+                labels = labels[["stock_code", "trade_date", target, "startup_price_eligible", *requested_extra]]
+                panel = panel.merge(labels, on=["stock_code", "trade_date"], how="left")
+                if startup_only and not preserve_startup_context:
+                    panel = panel.loc[panel["startup_price_eligible"].fillna(False)].copy()
+                elif startup_only:
+                    panel.loc[~panel["startup_price_eligible"].fillna(False), target] = np.nan
+                label_column = target
             else:
                 prices[f"forward_return_{int(label_horizon)}d"] = prices.groupby("stock_code")["close"].shift(-int(label_horizon)) / prices["close"] - 1.0
                 panel = panel.merge(
@@ -7397,6 +7538,54 @@ class MarketDataService:
                     on=["stock_code", "trade_date"], how="left",
                 )
                 label_column = f"forward_return_{int(label_horizon)}d"
+                if startup_only:
+                    # Label-mode comparisons must run on the same row set: the
+                    # startup gate is a universe definition, not a property of
+                    # the path label, so apply it to plain forward returns too.
+                    eligibility = build_cn_strategy_labels(prices, path_horizon=int(label_path_horizon))[
+                        ["stock_code", "trade_date", "startup_price_eligible"]
+                    ]
+                    panel = panel.merge(eligibility, on=["stock_code", "trade_date"], how="left")
+                    if preserve_startup_context:
+                        panel.loc[~panel["startup_price_eligible"].fillna(False), label_column] = np.nan
+                    else:
+                        panel = panel.loc[panel["startup_price_eligible"].fillna(False)].copy()
+            neutralization_audit = None
+            settings = dict(neutralization or {})
+            if settings.get("enabled"):
+                available = set(panel.columns)
+
+                def _resolve(name):
+                    name = str(name)
+                    for candidate in (f"{name}_clean", name):
+                        if candidate in available:
+                            return candidate
+                    return None
+
+                targets = [value for value in (_resolve(name) for name in (settings.get("features") or [])) if value]
+                controls = [value for value in (_resolve(name) for name in (settings.get("control_columns") or [])) if value]
+                if targets:
+                    panel, neutralization_audit = neutralize_features(
+                        panel, targets,
+                        mode=str(settings.get("mode", "industry_size")),
+                        control_columns=controls,
+                        residual_suffix=str(settings.get("suffix", "_resid")),
+                        neutralize_target=False,
+                        compute_correlation_audit=bool(settings.get("audit", True)),
+                    )
+                    residual_columns = list(neutralization_audit.get("residual_columns") or [])
+                    if settings.get("replace"):
+                        # Residual-only mode: keeping the raw column alongside its
+                        # residual cannot reduce a model's style exposure, because
+                        # the raw column is still available to the tree.  Drop the
+                        # raw value columns (their missingness masks stay, they
+                        # describe data availability rather than exposure).
+                        feature_columns = [
+                            column for column in feature_columns if column not in set(targets)
+                        ]
+                        feature_columns = list(dict.fromkeys(list(feature_columns) + residual_columns))
+                    else:
+                        feature_columns = list(dict.fromkeys(list(feature_columns) + residual_columns))
             if progress is not None:
                 progress.set_postfix_str(
                     f"labeled_rows={len(panel):,} horizon={label_horizon}d features={len(feature_columns)}"
@@ -7405,6 +7594,7 @@ class MarketDataService:
             self._last_training_feature_audit = profile_audit or {
                 "profile": "full", "selected_feature_count": len(feature_columns),
             }
+            self._last_neutralization_audit = neutralization_audit
             return panel, feature_columns, label_column
         finally:
             if progress is not None:
@@ -7558,6 +7748,45 @@ class MarketDataService:
             return result
         return result
 
+
+    def _cn_startup_gate_frame(self, *, as_of, settings):
+        """Compute the startup-eligibility gate for one decision date.
+
+        Labels are rebuilt from adjusted daily bars for a trailing window and
+        sliced to the decision date, so the gate uses only information available
+        at that close (the same convention as the path labels).
+        """
+        settings = dict(settings or {})
+        # Live runs pass no as_of_date: the gate then evaluates the newest
+        # session available up to today, which is the cross-section being scored.
+        if as_of is None or pd.isna(pd.Timestamp(as_of)):
+            day = pd.Timestamp(datetime.now().date()).normalize()
+        else:
+            day = pd.Timestamp(as_of).normalize()
+        lookback = int(settings.get("lookback_days", 400) or 400)
+        start = (day - pd.Timedelta(days=lookback)).strftime("%Y-%m-%d")
+        prices = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            start_date=start, end_date=day.strftime("%Y-%m-%d"),
+        )
+        if prices.empty:
+            raise ValueError(f"startup gate has no daily bars up to {day.date()}")
+        keep = [column for column in ["stock_code", "trade_date", "open", "high", "low", "close"] if column in prices.columns]
+        prices = prices[keep].copy()
+        prices["trade_date"] = pd.to_datetime(prices["trade_date"], errors="coerce")
+        prices = prices.sort_values(["stock_code", "trade_date"]).drop_duplicates(["stock_code", "trade_date"], keep="last")
+        session = max(value for value in prices["trade_date"].dropna().unique() if pd.Timestamp(value) <= day)
+        labels = build_cn_strategy_labels(
+            prices, path_horizon=int(settings.get("path_horizon", 60)),
+            startup_low_window=int(settings.get("low_window", 120)),
+            entry_delay=1,
+        )
+        labels = labels.loc[labels["trade_date"] == pd.Timestamp(session)].copy()
+        gate, mode = _startup_gate_columns(labels, settings)
+        gate["startup_gate_mode"] = mode
+        gate["startup_gate_session"] = str(pd.Timestamp(session).date())
+        return gate
+
     def select_persisted_model_scores(
         self,
         *,
@@ -7577,6 +7806,7 @@ class MarketDataService:
         preselection_only=False,
         candidate_path=None,
         as_of_date=None,
+        startup_gate=None,
     ):
         """Select from saved model predictions without rebuilding factors or retraining.
 
@@ -7714,6 +7944,30 @@ class MarketDataService:
                 progress.set_postfix_str(
                     f"affordability max_price={max_price:.1f} kept={len(affordable)}/{before}"
                 )
+            # The startup gate defines the investable universe, so it must run
+            # before the Top-N cut: filtering after the cut can empty the pool
+            # (the ungated top ranks are exactly the names the gate excludes).
+            gate_settings = dict(startup_gate or {})
+            if gate_settings.get("enabled") and not candidate_path:
+                gate = self._cn_startup_gate_frame(as_of=as_of_date or selection_date, settings=gate_settings)
+                gate_codes = set(gate.loc[gate["startup_eligible"].fillna(False).astype(bool), "stock_code"].astype(str))
+                universe_before_gate = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
+                frames = {
+                    name: frame[frame["stock_code"].astype(str).isin(gate_codes)].copy()
+                    for name, frame in frames.items()
+                }
+                universe_after_gate = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
+                startup_gate_summary = {
+                    "enabled": True,
+                    "mode": gate["startup_gate_mode"].iloc[0] if not gate.empty else None,
+                    "session": gate["startup_gate_session"].iloc[0] if not gate.empty else None,
+                    "applied_before_top_n": True,
+                    "universe_before": universe_before_gate,
+                    "universe_after": universe_after_gate,
+                    "eligible_source": "strategy_labels",
+                }
+                if not universe_after_gate:
+                    raise ValueError("startup gate removed every scored name; relax the caps or disable it")
         regime = "unknown"
         regime_version = None
         regime_trade_date = None
@@ -7767,6 +8021,8 @@ class MarketDataService:
         }
         if requested_weights:
             applied_model_weights = requested_weights
+        startup_gate_summary: dict = {"enabled": False}
+        ranked_all = None
         if candidate_path and Path(candidate_path).is_file():
             selected = pd.read_csv(candidate_path)
             if selected.empty:
@@ -7785,6 +8041,36 @@ class MarketDataService:
                           "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
                 as_of_date=as_of,
             )
+        startup_gate_summary = dict(startup_gate_summary or {"enabled": False})
+        gate_settings = dict(startup_gate or {})
+        if gate_settings.get("enabled") and not selected.empty:
+            gate = self._cn_startup_gate_frame(as_of=as_of_date or selection_date, settings=gate_settings)
+            before = len(selected)
+            channel_column = "selection_channel" if "selection_channel" in selected.columns else None
+            merged = selected.merge(gate[["stock_code", "startup_eligible"]], on="stock_code", how="left")
+            keep_mask = merged["startup_eligible"].fillna(False).astype(bool)
+            dropped = merged.loc[~keep_mask]
+            selected = merged.loc[keep_mask].drop(columns=["startup_eligible"]).reset_index(drop=True)
+            if selected.empty:
+                raise ValueError(
+                    "startup gate removed every candidate; relax the caps or disable [selection.startup_gate]"
+                )
+            startup_gate_summary.update({
+                "enabled": True,
+                "mode": gate["startup_gate_mode"].iloc[0] if not gate.empty else None,
+                "session": gate["startup_gate_session"].iloc[0] if not gate.empty else None,
+                "candidates_before_top_n": int(before),
+                "candidates_after_top_n": int(len(selected)),
+                "candidates_dropped": int(len(dropped)),
+                "dropped_by_channel": (
+                    dropped[channel_column].astype(str).value_counts().to_dict() if channel_column else {}
+                ),
+                "dropped_codes": dropped["stock_code"].astype(str).tolist()[:40],
+            })
+            if ranked_all is not None and not ranked_all.empty:
+                ranked_all = ranked_all.loc[
+                    ranked_all["stock_code"].astype(str).isin(set(selected["stock_code"].astype(str)))
+                ].copy()
         if progress is not None:
             progress.set_postfix_str(f"candidates={len(selected):,} model={model}")
             progress.update(1)

@@ -686,14 +686,20 @@ cleaning_version = "p0.2.v1"
 model_dir = "output/models/cn/graph_temporal/alpha_zoo_hk"
 
 [model_comparison]
-prediction_paths = { lightgbm = "output/oos_predictions_p1_17_startup_aligned/cn_lightgbm_oos_predictions.csv", transformer = "output/oos_predictions_p1_17_startup_aligned/cn_transformer_oos_predictions.csv" }
+# B2 评估口径：非重叠/1-H 修正净值 + 扣成本 + 行业 HHI（行业映射为当前注册表，非 PIT，
+# 仅作集中度诊断）
+prediction_paths = { baseline_forward_return = "output/oos_predictions_p1_17_label_forward_return/cn_lightgbm_oos_predictions.csv", path_label = "output/oos_predictions_p1_17_extended/cn_lightgbm_oos_predictions.csv", w4_resid_replace = "output/oos_predictions_p1_17_w4_resid_v3/cn_lightgbm_oos_predictions.csv" }
 output_dir = "output/evaluations"
-prefix = "cn_model_comparison_p1_17_startup_aligned"
-target_col = "label_path_score_20d"
-n_splits = 4
-# Startup sequences need lookback + an internal validation tail after the
-# 60-session purge.  With 120 total dates the first fold had only 60 usable
-# training dates and produced no complete train windows; 180 leaves 120.
+prefix = "cn_model_comparison_p1_17_b2"
+target_col = "forward_excess_return_20d"
+label_path = "output/strategy_labels_p1_17_startup/cn_daily_strategy_labels.csv"
+top_k = 20
+overlap_correction = "split_1_over_h"
+commission_bps = 5.0
+slippage_bps = 5.0
+stamp_duty_bps = 5.0
+industry_column = "industry_l2"
+n_splits = 13
 min_train_days = 180
 purge_days = 60
 embargo_days = 0

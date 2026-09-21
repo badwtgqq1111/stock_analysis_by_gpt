@@ -168,17 +168,14 @@ stop_loss = 0.10
 # W4：把"资金流族"和"位置/动量族"对同期风格变量（市值、成交额、换手、20 日涨幅、
 # 20 日波动）做逐日截面回归，保留原始列并新增 <列名>_resid 残差列。
 # 回归只在同一交易日内拟合，因此对 train/valid/test 分别施加不会泄露未来信息。
-# 注意：
-#   1) 干净面板不含行业列（行业在 stock_info 里），所以这里退化为"风格变量"控制，
-#      行业哑变量要等 PIT 有效的行业映射接进面板后再加。
-#   2) `features` 与 `control_columns` 不能重叠：把控制变量自己也残差化等于对自身回归，
-#      只会留下一列噪声（2026-09-20 第一版 A/B 踩过这个坑）。
-# 2026-09-20 13 折 A/B 结论：特征级暴露降 87%，但模型级无增益（Top10% 波动不降、收益中性），
-# 因此默认关闭；要复检把下行的 false 改成 true。
+# 注意：干净面板不含行业列（行业在 stock_info 里），所以这里退化为"风格变量"控制，
+# 行业哑变量要等 PIT 有效的行业映射接进面板后再加。
+# W4 残差在 13 折 A/B 出结论前不开启（见计划 11.B1）
 enabled = false
 mode = "industry_size"      # 有市值列即生效；无行业列时只用市值 + control_columns
 suffix = "_resid"
 audit = true
+# 控制变量（同期可得，均为可观测风格）
 control_columns = [
   "valuation_market_cap_log",
   "liquidity_amount_ma20",
@@ -186,6 +183,7 @@ control_columns = [
   "pv_return_20d",
   "tr_volatility_20",
 ]
+# 需要残差化的特征族：资金流 + 位置/动量
 features = [
   "moneyflow_net_amount_pct",
   "moneyflow_net_z_5d",
@@ -234,6 +232,10 @@ profile = "full"
 # 在画像基础上追加/剔除（fnmatch 通配符，匹配基础因子名）
 include_features = []
 exclude_features = []
+# 命名族开关（见 factor_engine.ml.feature_profiles.FEATURE_FAMILIES）：
+#   exclude_families = ["moneyflow"] -> 同时去掉 moneyflow_*（57）与 flow_second_wave_*（7），
+#   共 64 个基础因子（约 128 个模型列）。两组模型除这一行外完全相同。
+exclude_families = ["moneyflow"]
 
 [regime]
 days = 756
@@ -248,7 +250,7 @@ output_dir = "output/regime"
 [lightgbm]
 days = 365
 label_horizon = 20
-label_mode = "path_score_20d"
+label_mode = "forward_return"
 startup_only = true
 preserve_startup_context = true
 validation_days = 60
@@ -278,7 +280,7 @@ eval_metric = "daily_ic" # daily_ic | l2 | none
 [transformer]
 days = 365
 label_horizon = 20
-label_mode = "path_score_20d"
+label_mode = "forward_return"
 startup_only = true
 preserve_startup_context = true
 validation_days = 60
@@ -701,15 +703,15 @@ embargo_days = 0
 [oos_predictions]
 # This stage retrains strictly on each expanding fold. LightGBM and Transformer
 # are the default comparable baselines; add CNN only after its OOS value is needed.
-models = ["transformer", "lightgbm"]
+models = ["lightgbm"]
 # "lightgbm",
 days = 756
 label_horizon = 20
-label_mode = "path_score_20d"
+label_mode = "forward_return"
 startup_only = true
 cleaning_version = "p0.2.v1"
-output_dir = "output/oos_predictions_p1_17_startup_aligned"
-n_splits = 4
+output_dir = "output/oos_predictions_p1_17_mf_off"
+n_splits = 13
 min_train_days = 180
 purge_days = 60
 embargo_days = 0
@@ -741,9 +743,6 @@ industry_mapping_path = ""
 # W2 元标签门禁：主模型只回答"谁排在前面"，二级二分类器回答"这次入场值不值得
 # 执行"。二级标签取自三重障碍结果（先触止盈为 1），特征取主模型分数 + 候选自身
 # 的路径与资金流上下文；所有统计量都在训练折内拟合，不接触评估窗口的结果。
-# 2026-09-20 扩样本复检（13 折 / 169 个决策日）：规则门禁同样不通过
-# （门禁后 0.38% vs 无门禁 1.48%；放行 0.92% vs 拒绝 1.65%，t=-4.68），
-# 因此生产默认关闭，两种形态都先不要接入排序或仓位。
 enabled = false
 label_column = "label_tb_class"
 # 候选集 = 每个决策日主模型分数最高的这一比例
@@ -768,7 +767,7 @@ random_state = 42
 top_k = 20
 realized_return_column = "forward_excess_return_20d"
 evaluation_dir = "output/evaluations"
-evaluation_prefix = ""  # 留空则按 oos 输出目录名生成
+evaluation_prefix = "cn_meta_gate_mf_off"
 commission_bps = 5.0   # 单边佣金
 slippage_bps = 5.0     # 单边滑点
 stamp_duty_bps = 5.0   # 卖出印花税

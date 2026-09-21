@@ -68,6 +68,56 @@ def _first_barrier_class(
     return classes, barrier_return, hold_days
 
 
+def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd.DataFrame:
+    """Return ``(stock_code, startup_eligible)`` for a decision date's labels.
+
+    The gate answers "may this name be bought as a half-year-low startup".  Two
+    modes exist because the built-in eligibility rule couples three conditions:
+
+    ``eligibility``
+        use ``startup_price_eligible`` as computed by
+        :func:`build_cn_strategy_labels` (dist-from-low band + return cap +
+        distance from the 60-day high).
+    ``thresholds``
+        ignore the built-in flag and apply only the explicit caps below, which
+        lets a run keep, say, the low-distance rule without the high-distance
+        rule.
+
+    A ``thresholds`` (or ``both``) mode applies every cap that is not ``None``.
+    """
+    settings = dict(settings or {})
+    mode = str(settings.get("mode", "eligibility") or "eligibility").strip().lower()
+    required = {"stock_code", "startup_price_eligible"}
+    if labels is None or labels.empty or not {"stock_code"}.issubset(labels.columns):
+        return pd.DataFrame(columns=["stock_code", "startup_eligible"])
+    eligible = pd.Series(True, index=labels.index)
+    used: list[str] = []
+    if mode in {"eligibility", "both"}:
+        if "startup_price_eligible" not in labels.columns:
+            raise ValueError("startup gate mode 'eligibility' needs a startup_price_eligible column")
+        eligible &= labels["startup_price_eligible"].fillna(False).astype(bool)
+        used.append("startup_price_eligible")
+    if mode in {"thresholds", "both"}:
+        caps = (
+            ("dist_from_120d_low", settings.get("max_dist_from_120d_low"), "le"),
+            ("return_60d", settings.get("max_return_60d"), "le"),
+            ("dist_from_60d_high", settings.get("max_dist_from_60d_high"), "le"),
+        )
+        applied = False
+        for column, cap, direction in caps:
+            if cap is None:
+                continue
+            if column not in labels.columns:
+                raise ValueError(f"startup gate cap needs a {column} column")
+            applied = True
+            used.append(column)
+            values = pd.to_numeric(labels[column], errors="coerce")
+            eligible &= values.le(float(cap)) if direction == "le" else values.ge(float(cap))
+        if not applied:
+            raise ValueError("startup gate mode 'thresholds' requires at least one cap")
+    return pd.DataFrame({"stock_code": labels["stock_code"].astype(str), "startup_eligible": eligible})
+
+
 def build_cn_strategy_labels(
     ohlcv: pd.DataFrame,
     *,

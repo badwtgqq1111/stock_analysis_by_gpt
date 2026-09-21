@@ -92,7 +92,7 @@ fetch_cyq_chips = false
 fetch_hm_detail = true
 cyq_chips_stock_limit = 0
 official_first = true
-capital_features_mode = "source_bundle_with_official_fallback"
+# 原文件重复定义了该键（TOML 不允许），保留后出现的取值：
 capital_features_mode = "source_bundle_partial"
 require_daily_bar_match = true
 min_match_ratio = 0.98

@@ -1,7 +1,7 @@
 [pipeline]
 market = "CN"
 start_date = "2014-01-01"
-end_date = ""
+end_date = "2026-09-11"
 adjust = "qfq"
 days = 365
 factor_set = "alpha_zoo_hk"
@@ -37,14 +37,14 @@ min_fundamental_coverage = 0.80
 stale_after_trading_days = 20
 
 [stages]
-daily_bars = false
-moneyflow = false
+daily_bars = true
+moneyflow = true
 intraday_bars = false
-fundamental = false
+fundamental = true
 alternative = false
-features = false
-regime = false
-clean_panel = false
+features = true
+regime = true
+clean_panel = true
 lightgbm = true
 transformer = true
 cnn = false
@@ -52,15 +52,15 @@ model_scores = true
 # 最终选股由 preselection → pk 两阶段完成；保留 selection 命令仅用于
 # 临时对照或人工显式调用，默认全流程不运行它。
 selection = false
-preselection = false
-pk = false
-exits = false
+preselection = true
+pk = true
+exits = true
 paper_outcomes = false
 paper_account = false
 graph_temporal = false
 model_comparison = false
-oos_predictions = true
-strategy_labels = true
+oos_predictions = false
+strategy_labels = false
 
 [daily_bars]
 # Tencent is primary; fallbacks are BaoStock and Eastmoney.  The default chain
@@ -152,7 +152,7 @@ adjustment_factors_enabled = false
 
 [strategy_labels]
 days = 756
-output_dir = "output/strategy_labels_p1_17_startup"
+output_dir = "output/strategy_labels"
 entry_delay = 1
 path_horizon = 60
 startup_low_window = 120
@@ -163,57 +163,9 @@ startup_max_high_distance = -0.05
 take_profit = 0.20
 stop_loss = 0.10
 
-
-[neutralization]
-# W4：把"资金流族"和"位置/动量族"对同期风格变量（市值、成交额、换手、20 日涨幅、
-# 20 日波动）做逐日截面回归，保留原始列并新增 <列名>_resid 残差列。
-# 回归只在同一交易日内拟合，因此对 train/valid/test 分别施加不会泄露未来信息。
-# 注意：
-#   1) 干净面板不含行业列（行业在 stock_info 里），所以这里退化为"风格变量"控制，
-#      行业哑变量要等 PIT 有效的行业映射接进面板后再加。
-#   2) `features` 与 `control_columns` 不能重叠：把控制变量自己也残差化等于对自身回归，
-#      只会留下一列噪声（2026-09-20 第一版 A/B 踩过这个坑）。
-# 2026-09-20 13 折 A/B 结论：特征级暴露降 87%，但模型级无增益（Top10% 波动不降、收益中性），
-# 因此默认关闭；要复检把下行的 false 改成 true。
-enabled = false
-mode = "industry_size"      # 有市值列即生效；无行业列时只用市值 + control_columns
-suffix = "_resid"
-audit = true
-control_columns = [
-  "valuation_market_cap_log",
-  "liquidity_amount_ma20",
-  "turnover_rate",
-  "pv_return_20d",
-  "tr_volatility_20",
-]
-features = [
-  "moneyflow_net_amount_pct",
-  "moneyflow_net_z_5d",
-  "moneyflow_net_z_10d",
-  "moneyflow_net_z_20d",
-  "moneyflow_positive_ratio_5d",
-  "moneyflow_dc_net_z_5d",
-  "moneyflow_dc_net_z_10d",
-  "moneyflow_ths_net_z_5d",
-  "moneyflow_ths_net_z_10d",
-  "flow_second_wave_flag",
-  "flow_second_wave_source_count",
-  "flow_second_wave_max_z5",
-  "flow_second_wave_pullback_pct",
-  "price_position_52w_high",
-  "pv_close_to_ma20",
-  "pv_volume_ratio_20d",
-  "RPS_20",
-  "RPS_60",
-  "vol_atr_pct_14",
-  "vol_max_drawdown_60",
-]
-
 [clean_panel]
-# 2026-09-20 扩窗：365 -> 560 天。因子库（feature/features，当前
-# feature_config_hash=236efa35ecb499f6）最早只到 2025-03-20，所以 560 天正好把
-# 可用历史全部纳入（再往前是空的）。重建后会话数 242 -> 约 370，OOS 折数 4 -> 约 13。
-# 注意：本步只读因子库，不重算因子（无需 --stage features）。
+# 与 config/cn_pipeline_p1_17_startup.toml 保持一致：干净面板是共享数据集，
+# 若这里用更小的窗口重建，会把 13 折 OOS 基准所依赖的历史删掉（service 会告警但不会阻止）。
 days = 560
 cleaning_version = "p0.2.v1"
 # Stock-aware row-group indexing makes larger batches efficient while keeping
@@ -226,14 +178,6 @@ feature_batch_size = 50
 # their masks; all-missing and constant inputs never enter model artifacts.
 min_feature_coverage = 0.05
 drop_constant_features = true
-# 特征画像：full = 683 个因子全用；compact = 量价/资金流族（约 140）；core = 与
-# "半年低点启动 + 短期回调 + 资金流"命题直接相关的显式短名单（约 57）。
-# 画像只是成本/广度的旋钮，不是信号声明：换画像必须用同一套 OOS 口径（RankIC +
-# Top-20 扣成本净值）复验，结果记入 manifest 的 feature_profile 审计块。
-profile = "full"
-# 在画像基础上追加/剔除（fnmatch 通配符，匹配基础因子名）
-include_features = []
-exclude_features = []
 
 [regime]
 days = 756
@@ -248,13 +192,12 @@ output_dir = "output/regime"
 [lightgbm]
 days = 365
 label_horizon = 20
-label_mode = "path_score_20d"
-startup_only = true
-preserve_startup_context = true
+label_mode = "forward_return" # path_score_20d enables the new startup path target
+startup_only = false
 validation_days = 60
-embargo_days = 45
+embargo_days = 20
 cleaning_version = "p0.2.v1"
-model_dir = "output/models/cn/lightgbm/alpha_zoo_hk_p1_17_startup"
+model_dir = "output/models/cn/lightgbm/alpha_zoo_hk"
 # Leave empty for a fresh scheduled retrain; set a compatible model.txt for warm-start.
 warm_start_path = ""
 # The label is a within-date cross-sectional rank, so plain L2 has a floor equal
@@ -278,9 +221,8 @@ eval_metric = "daily_ic" # daily_ic | l2 | none
 [transformer]
 days = 365
 label_horizon = 20
-label_mode = "path_score_20d"
-startup_only = true
-preserve_startup_context = true
+label_mode = "forward_return" # path_score_20d enables the new startup path target
+startup_only = false
 validation_days = 60
 embargo_days = 20
 lookback = 60
@@ -313,7 +255,7 @@ d_model = 64
 nhead = 4
 num_layers = 2
 cleaning_version = "p0.2.v1"
-model_dir = "output/models/cn/transformer/alpha_zoo_hk_p1_17_startup"
+model_dir = "output/models/cn/transformer/alpha_zoo_hk"
 device = "auto" # CUDA -> Apple MPS -> CPU
 # Set both values to a prior compatible checkpoint for incremental fine-tuning.
 warm_start_path = ""
@@ -350,7 +292,7 @@ cleaning_version = "p0.2.v1"
 # Do not select from a partially materialized latest date. The scorer falls
 # back to the newest date that covers at least this share of the universe.
 min_cross_section_coverage = 0.95
-output_dir = "output/model_scores"
+output_dir = "output/model_scores_replay_20260911"
 lightgbm_model_path = "output/models/cn/lightgbm/alpha_zoo_hk/model.txt"
 lightgbm_manifest_path = "output/models/cn/lightgbm/alpha_zoo_hk/model_manifest.json"
 transformer_model_path = "output/models/cn/transformer/alpha_zoo_hk/model.pt"
@@ -361,7 +303,7 @@ cnn_manifest_path = ""
 cnn_device = "auto"
 
 [selection]
-model_scores_dir = "output/model_scores"
+model_scores_dir = "output/model_scores_replay_20260911"
 output_dir = "output/results_cn"
 model = "ensemble" # lightgbm, transformer, or ensemble
 top_n = 10
@@ -379,6 +321,19 @@ rebalance_stride_days = 5
 
 # 可执行性约束：A 股按手交易，价格太高的小账户根本买不起一手。
 # 候选需满足 price * lot_size <= equity * budget_ratio（budget_ratio ≈ gross/持仓数）。
+# 启动资格门（P1.17 §0.8/§0.9）：在生产选股层把"已经涨上去"的候选挡在外面。
+# mode = "eligibility" 用 build_cn_strategy_labels 的 startup_price_eligible
+#        （dist_from_120d_low ∈ [0.05,0.30] 且 return_60d ≤ 0.35 且 dist_from_60d_high ≤ −0.05）；
+# mode = "thresholds"  只用下面写明的上限；
+# mode = "both"        两者都要求。判定使用决策日当天的可得数据。
+[selection.startup_gate]
+enabled = false
+mode = "eligibility"
+lookback_days = 400
+max_dist_from_120d_low = 0.30
+max_return_60d = 0.35
+max_dist_from_60d_high = -0.05
+
 [selection.affordability]
 enabled = true
 equity = 43137.82
@@ -686,16 +641,13 @@ cleaning_version = "p0.2.v1"
 model_dir = "output/models/cn/graph_temporal/alpha_zoo_hk"
 
 [model_comparison]
-prediction_paths = { lightgbm = "output/oos_predictions_p1_17_startup_aligned/cn_lightgbm_oos_predictions.csv", transformer = "output/oos_predictions_p1_17_startup_aligned/cn_transformer_oos_predictions.csv" }
+prediction_paths = { lightgbm = "output/oos_predictions/cn_lightgbm_oos_predictions.csv", transformer = "output/oos_predictions/cn_transformer_oos_predictions.csv" }
 output_dir = "output/evaluations"
-prefix = "cn_model_comparison_p1_17_startup_aligned"
-target_col = "label_path_score_20d"
-n_splits = 4
-# Startup sequences need lookback + an internal validation tail after the
-# 60-session purge.  With 120 total dates the first fold had only 60 usable
-# training dates and produced no complete train windows; 180 leaves 120.
-min_train_days = 180
-purge_days = 60
+prefix = "cn_model_comparison"
+target_col = "forward_return_20d"
+n_splits = 5
+min_train_days = 120
+purge_days = 20
 embargo_days = 0
 
 [oos_predictions]
@@ -705,81 +657,24 @@ models = ["transformer", "lightgbm"]
 # "lightgbm",
 days = 756
 label_horizon = 20
-label_mode = "path_score_20d"
-startup_only = true
+label_mode = "forward_return"
+startup_only = false
 cleaning_version = "p0.2.v1"
-output_dir = "output/oos_predictions_p1_17_startup_aligned"
-n_splits = 4
-min_train_days = 180
-purge_days = 60
+output_dir = "output/oos_predictions"
+n_splits = 5
+min_train_days = 120
+purge_days = 20
 embargo_days = 0
-preserve_startup_context = true
 transformer_lookback = 60
-transformer_epochs = 20
-prediction_stride = 1
+transformer_epochs = 5
+# Use every fifth OOS decision date for a weekly-rebalanced deep-model study.
+# Set to 1 for daily OOS predictions when runtime permits.
+prediction_stride = 5
 transformer_batch_size = 256
-transformer_max_samples = 36000
-transformer_max_feature_pairs = 256
+transformer_max_samples = 12000
+transformer_max_feature_pairs = 128
 transformer_device = "auto"
-transformer_seeds = [0, 1, 2]
-checkpoint_metric = "ic"
-seed_ensemble = "average"
-protected_features = [
-  "flow_second_wave_flag",
-  "flow_second_wave_source_count",
-  "flow_second_wave_max_z5",
-  "flow_second_wave_seed_age",
-  "flow_second_wave_pullback_pct",
-  "flow_second_wave_price_recovery_1d",
-]
 # Required only when models contains graph_temporal. The CSV must have
 # stock_code, industry_l1 and available_at; current industry labels are invalid
 # for historical graph OOS evaluation.
 industry_mapping_path = ""
-
-[meta_labeling]
-# W2 元标签门禁：主模型只回答"谁排在前面"，二级二分类器回答"这次入场值不值得
-# 执行"。二级标签取自三重障碍结果（先触止盈为 1），特征取主模型分数 + 候选自身
-# 的路径与资金流上下文；所有统计量都在训练折内拟合，不接触评估窗口的结果。
-# 2026-09-20 扩样本复检（13 折 / 169 个决策日）：规则门禁同样不通过
-# （门禁后 0.38% vs 无门禁 1.48%；放行 0.92% vs 拒绝 1.65%，t=-4.68），
-# 因此生产默认关闭，两种形态都先不要接入排序或仓位。
-enabled = false
-label_column = "label_tb_class"
-# 候选集 = 每个决策日主模型分数最高的这一比例
-candidate_quantile = 0.10
-# 门禁放行比例（按门禁概率在每个决策日内排序）；设为 1.0 等于不设门禁
-act_quantile = 0.50
-# 绝对概率下限，<=0 表示关闭，只用分位门禁
-min_probability = 0.0
-# 嵌套内层划分：训练窗尾部这一段用于训练门禁，之前留 inner_purge_days 做间隔
-inner_share = 0.30
-inner_purge_days = 20
-validation_share = 0.30
-purge_days = 20
-n_estimators = 300
-learning_rate = 0.05
-num_leaves = 31
-max_depth = 5
-min_child_samples = 50
-reg_lambda = 10.0
-random_state = 42
-# 评估口径：Top-K 组合、扣成本后的可执行超额收益
-top_k = 20
-realized_return_column = "forward_excess_return_20d"
-evaluation_dir = "output/evaluations"
-evaluation_prefix = ""  # 留空则按 oos 输出目录名生成
-commission_bps = 5.0   # 单边佣金
-slippage_bps = 5.0     # 单边滑点
-stamp_duty_bps = 5.0   # 卖出印花税
-# 空列表 = 使用 factor_engine.ml.meta_labeling.DEFAULT_META_FEATURES
-features = []
-
-# 门禁形态选择：
-#   learned = 二级分类器（P1.17 W2 实测在 4 折 40 个 OOS 日上不迁移，默认不要开启）
-#   rule    = 显式阈值规则（唯一在 OOS 上通过的形态，见 W2 证据）
-# 切换只需改下面一行；两种形态输出相同的 meta_act / meta_weight 列。
-gate_mode = "rule"
-rule_column = "dist_from_120d_low"
-rule_threshold = 0.15
-rule_direction = "le"

@@ -164,7 +164,9 @@ take_profit = 0.20
 stop_loss = 0.10
 
 [clean_panel]
-days = 365
+# 与 config/cn_pipeline_p1_17_startup.toml 保持一致：干净面板是共享数据集，
+# 若这里用更小的窗口重建，会把 13 折 OOS 基准所依赖的历史删掉（service 会告警但不会阻止）。
+days = 560
 cleaning_version = "p0.2.v1"
 # Stock-aware row-group indexing makes larger batches efficient while keeping
 # the wide pivot bounded. The source parquet is indexed once per clean-panel run.
@@ -319,6 +321,19 @@ rebalance_stride_days = 5
 
 # 可执行性约束：A 股按手交易，价格太高的小账户根本买不起一手。
 # 候选需满足 price * lot_size <= equity * budget_ratio（budget_ratio ≈ gross/持仓数）。
+# 启动资格门（P1.17 §0.8/§0.9）：在生产选股层把"已经涨上去"的候选挡在外面。
+# mode = "eligibility" 用 build_cn_strategy_labels 的 startup_price_eligible
+#        （dist_from_120d_low ∈ [0.05,0.30] 且 return_60d ≤ 0.35 且 dist_from_60d_high ≤ −0.05）；
+# mode = "thresholds"  只用下面写明的上限；
+# mode = "both"        两者都要求。判定使用决策日当天的可得数据。
+[selection.startup_gate]
+enabled = true
+mode = "eligibility"
+lookback_days = 400
+max_dist_from_120d_low = 0.30
+max_return_60d = 0.35
+max_dist_from_60d_high = -0.05
+
 [selection.affordability]
 enabled = true
 equity = 43137.82

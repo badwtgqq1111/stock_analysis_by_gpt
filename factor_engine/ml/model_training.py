@@ -380,10 +380,10 @@ def train_transformer_panel(
     if train_rows["trade_date"].nunique() < int(lookback) and not preserve_unlabeled:
         raise ValueError("not enough dates for Transformer train/validation split")
     scaler = _fit_sequence_scaler(
-        train_rows, features, preserve_binary_features=(
-            _missing_indicator_features(features)
-            + [feature for feature in features if str(feature).endswith(("_flag", "_source_count"))]
-        )
+        train_rows, features,
+        preserve_binary_features=(
+            _missing_indicator_features(features) + _binary_preserve_features(features)
+        ),
     )
     if show_progress:
         print(
@@ -850,7 +850,10 @@ def train_cnn_panel(
     if train_rows["trade_date"].nunique() < int(lookback):
         raise ValueError("not enough dates for CNN train/validation split")
     scaler = _fit_sequence_scaler(
-        train_rows, features, preserve_binary_features=_missing_indicator_features(features)
+        train_rows, features,
+        preserve_binary_features=(
+            _missing_indicator_features(features) + _binary_preserve_features(features)
+        ),
     )
     sequences = _build_sequences(
         prepared, features, lookback, scaler, missing_columns=missing_columns,
@@ -1442,15 +1445,32 @@ def _missing_indicator_features(features):
     return [feature for feature in features if str(feature).endswith("_is_missing")]
 
 
+def _binary_preserve_features(features):
+    """Columns whose raw 0/1 or count semantics must survive scaling.
+
+    Panel columns carry a ``_clean`` suffix, so a plain ``endswith("_flag")``
+    test never matched them and the "preserve binary" intent silently did
+    nothing (P1.17 section 11.A2).  Match on the base name instead.
+    """
+    preserved = []
+    for feature in features:
+        base = re.sub(r"_(clean|is_missing)$", "", str(feature))
+        if base.endswith(("_flag", "_source_count")) or str(feature).endswith("_is_missing"):
+            preserved.append(feature)
+    return preserved
+
+
 def _fit_sequence_scaler(frame, features, *, preserve_binary_features=()):
     values = frame[features].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     center = values.median().fillna(0.0)
     scale = values.std(ddof=0).replace(0, np.nan).fillna(1.0)
+    preserved = []
     for feature in preserve_binary_features:
         if feature in center.index:
             center.loc[feature] = 0.0
             scale.loc[feature] = 1.0
-    return {"center": center.to_dict(), "scale": scale.to_dict()}
+            preserved.append(str(feature))
+    return {"center": center.to_dict(), "scale": scale.to_dict(), "preserved_features": sorted(preserved)}
 
 
 def mean_daily_rank_ic(predictions, targets, dates) -> float:

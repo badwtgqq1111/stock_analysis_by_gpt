@@ -123,6 +123,36 @@ CORE_FEATURES = (
     "calendar_month_end",
 )
 
+
+# Named feature families a run can switch off wholesale.  ``moneyflow`` is the
+# one that changes selection behaviour most visibly: dropping it removes both the
+# vendor flow aggregates and the derived second-wave confirmation block.
+FEATURE_FAMILIES = {
+    "moneyflow": ("moneyflow*", "flow_second_wave_*"),
+    "valuation": ("valuation_*", "pe_*", "pb_*"),
+    "fundamental": ("financial_*", "gross_margin*", "*_ind_pct", "quality_value_score"),
+    "academic": ("academic_*",),
+    "price_volume": ("pv_*", "tr_*", "vr_*", "vol_*", "liquidity_*", "turnover*", "RPS_*", "calendar_*"),
+}
+
+
+def family_patterns(families) -> list[str]:
+    """Expand named families into fnmatch patterns, rejecting unknown names."""
+    patterns: list[str] = []
+    unknown = []
+    for family in families or ():
+        name = str(family).strip().lower()
+        if name not in FEATURE_FAMILIES:
+            unknown.append(str(family))
+            continue
+        patterns.extend(FEATURE_FAMILIES[name])
+    if unknown:
+        raise ValueError(
+            f"unknown feature families: {','.join(sorted(unknown))}; expected one of {','.join(sorted(FEATURE_FAMILIES))}"
+        )
+    return patterns
+
+
 FEATURE_PROFILES = ("full", "compact", "core")
 
 
@@ -132,6 +162,8 @@ def resolve_feature_profile(
     profile: str = "full",
     include_patterns=(),
     exclude_patterns=(),
+    include_families=(),
+    exclude_families=(),
 ) -> tuple[list[str], dict]:
     """Return the base feature names a run should consume, plus an audit record.
 
@@ -139,6 +171,8 @@ def resolve_feature_profile(
     ``*_is_missing``) or bare base names; both are accepted.
     """
     base_names = sorted(_base_names(available_columns))
+    include_patterns = [*(str(value) for value in (include_patterns or ())), *family_patterns(include_families)]
+    exclude_patterns = [*(str(value) for value in (exclude_patterns or ())), *family_patterns(exclude_families)]
     requested = str(profile or "full").strip().lower() or "full"
     if requested not in FEATURE_PROFILES:
         raise ValueError(f"unknown feature profile {requested!r}; expected one of {','.join(FEATURE_PROFILES)}")
@@ -169,8 +203,10 @@ def resolve_feature_profile(
         "selected_feature_count": len(selected),
         "selected_features": selected,
         "dropped_feature_count": len(base_names) - len(selected),
-        "include_patterns": [str(value) for value in (include_patterns or ())],
-        "exclude_patterns": [str(value) for value in (exclude_patterns or ())],
+        "include_patterns": [str(value) for value in include_patterns],
+        "exclude_patterns": [str(value) for value in exclude_patterns],
+        "include_families": [str(value) for value in (include_families or ())],
+        "exclude_families": [str(value) for value in (exclude_families or ())],
     }
     if requested == "core":
         missing = [name for name in CORE_FEATURES if name not in set(base_names)]
@@ -192,6 +228,8 @@ def _base_names(columns) -> set[str]:
 
 
 __all__ = [
+    "FEATURE_FAMILIES",
+    "family_patterns",
     "COMPACT_DROP_PATTERNS",
     "COMPACT_PATTERNS",
     "CORE_FEATURES",

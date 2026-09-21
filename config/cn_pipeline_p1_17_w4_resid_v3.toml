@@ -173,12 +173,12 @@ stop_loss = 0.10
 #      行业哑变量要等 PIT 有效的行业映射接进面板后再加。
 #   2) `features` 与 `control_columns` 不能重叠：把控制变量自己也残差化等于对自身回归，
 #      只会留下一列噪声（2026-09-20 第一版 A/B 踩过这个坑）。
-# 2026-09-20 13 折 A/B 结论：特征级暴露降 87%，但模型级无增益（Top10% 波动不降、收益中性），
-# 因此默认关闭；要复检把下行的 false 改成 true。
-enabled = false
+enabled = true
 mode = "industry_size"      # 有市值列即生效；无行业列时只用市值 + control_columns
 suffix = "_resid"
 audit = true
+# 残差替换模式：把原始特征列从模型特征集中移除，只留残差列
+replace = true
 control_columns = [
   "valuation_market_cap_log",
   "liquidity_amount_ma20",
@@ -248,7 +248,7 @@ output_dir = "output/regime"
 [lightgbm]
 days = 365
 label_horizon = 20
-label_mode = "path_score_20d"
+label_mode = "forward_return"
 startup_only = true
 preserve_startup_context = true
 validation_days = 60
@@ -278,7 +278,7 @@ eval_metric = "daily_ic" # daily_ic | l2 | none
 [transformer]
 days = 365
 label_horizon = 20
-label_mode = "path_score_20d"
+label_mode = "forward_return"
 startup_only = true
 preserve_startup_context = true
 validation_days = 60
@@ -701,15 +701,15 @@ embargo_days = 0
 [oos_predictions]
 # This stage retrains strictly on each expanding fold. LightGBM and Transformer
 # are the default comparable baselines; add CNN only after its OOS value is needed.
-models = ["transformer", "lightgbm"]
+models = ["lightgbm"]
 # "lightgbm",
 days = 756
 label_horizon = 20
-label_mode = "path_score_20d"
+label_mode = "forward_return"
 startup_only = true
 cleaning_version = "p0.2.v1"
-output_dir = "output/oos_predictions_p1_17_startup_aligned"
-n_splits = 4
+output_dir = "output/oos_predictions_p1_17_w4_resid_v3"
+n_splits = 13
 min_train_days = 180
 purge_days = 60
 embargo_days = 0
@@ -768,7 +768,7 @@ random_state = 42
 top_k = 20
 realized_return_column = "forward_excess_return_20d"
 evaluation_dir = "output/evaluations"
-evaluation_prefix = ""  # 留空则按 oos 输出目录名生成
+evaluation_prefix = "cn_meta_gate_w4_resid_v3"
 commission_bps = 5.0   # 单边佣金
 slippage_bps = 5.0     # 单边滑点
 stamp_duty_bps = 5.0   # 卖出印花税

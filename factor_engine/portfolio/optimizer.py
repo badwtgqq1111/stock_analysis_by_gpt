@@ -22,6 +22,13 @@ class PortfolioConstraints:
     cost_penalty: float = 0.10
     max_holdings: int | None = None
     weighting: str = "score_risk"
+    # score-linked sizing (weighting="score_inverse_vol")
+    alpha_power: float = 1.0
+    alpha_weight_floor: float = 0.0
+    vol_exponent: float = 0.5
+    # a forced (signal-override) floor must be earned by the score
+    forced_floor_score_scaling: bool = False
+    forced_floor_max_weight: float | None = None
     # Risk control: annualised portfolio volatility ceiling and the largest
     # share of total portfolio variance one name may carry.
     target_volatility: float | None = None
@@ -127,8 +134,41 @@ def optimize_long_only(
                 chosen.append(int(index))
                 chosen_set.add(int(index))
         active[np.asarray(chosen, dtype=int)] = True
-    if str(cfg.weighting).lower() in {"inverse_volatility", "inverse-volatility", "volatility"}:
+    weighting_mode = str(cfg.weighting).lower()
+    if weighting_mode in {"inverse_volatility", "inverse-volatility", "volatility"}:
         raw = np.where(active, 1.0 / np.sqrt(np.maximum(risk, 1e-12)), 0.0)
+    elif weighting_mode in {"score_inverse_vol", "score_x_inverse_vol", "rank_inverse_vol"}:
+        # Rank-linked sizing: the model score drives the weight, tempered by
+        # inverse volatility.  ``alpha_weight_floor`` keeps the weakest selected
+        # name from being sized to zero when the book is small.
+        span = float(np.nanmax(alpha)) if len(alpha) else 0.0
+        normalized = (alpha / span) if span > 0 else np.zeros_like(alpha)
+        alpha_floor = min(max(float(getattr(cfg, "alpha_weight_floor", 0.0) or 0.0), 0.0), 1.0)
+        score_term = alpha_floor + (1.0 - alpha_floor) * np.power(
+            np.maximum(normalized, 0.0), max(float(getattr(cfg, "alpha_power", 1.0) or 1.0), 1e-6)
+        )
+        # ``vol_exponent`` tempers the risk tilt: 0.5 keeps a mild inverse-vol
+        # adjustment, 0.0 makes the book purely score-proportional.
+        vol_term = 1.0 / np.power(np.maximum(risk, 1e-12), max(float(getattr(cfg, "vol_exponent", 0.5) or 0.0), 1e-6))
+        raw = np.where(active, score_term * vol_term, 0.0)
+    elif weighting_mode in {"rank_power", "rank_score", "rank"}:
+        # Explicit rank sizing: the Top-1 name receives the largest score term
+        # and each following rank decays as ((N-rank+1)/N)^alpha_power.  This is
+        # what "排名靠前的拿更多仓位" means; ``score_inverse_vol`` could not
+        # deliver it because the model scores of the leading block are nearly
+        # identical once the signal candidates are in the same normalization pool.
+        active_indices = np.flatnonzero(active)
+        count = len(active_indices)
+        score_term = np.zeros_like(alpha)
+        if count:
+            ordered = active_indices[np.argsort(-alpha[active_indices], kind="stable")]
+            power = max(float(getattr(cfg, "alpha_power", 1.0) or 1.0), 1e-6)
+            alpha_floor = min(max(float(getattr(cfg, "alpha_weight_floor", 0.0) or 0.0), 0.0), 1.0)
+            for position, index in enumerate(ordered):
+                share = (count - position) / count
+                score_term[index] = alpha_floor + (1.0 - alpha_floor) * float(share) ** power
+        vol_term = 1.0 / np.power(np.maximum(risk, 1e-12), max(float(getattr(cfg, "vol_exponent", 0.5) or 0.0), 1e-6))
+        raw = np.where(active, score_term * vol_term, 0.0)
     else:
         raw = np.where(
             active,
@@ -151,6 +191,29 @@ def optimize_long_only(
     target = _renormalize_capped(target, float(cfg.gross_exposure), float(cfg.max_weight))
     forced_floors = {str(frame["stock_code"].iloc[index]): _forced_value(forced_min_weight, str(frame["stock_code"].iloc[index]), 0.0) for index in forced_index}
     forced_caps = {str(frame["stock_code"].iloc[index]): _forced_value(forced_max_weight, str(frame["stock_code"].iloc[index]), None) for index in forced_index}
+    floor_scaling_report: dict = {}
+    if forced_floors and bool(getattr(cfg, "forced_floor_score_scaling", False)):
+        # A signal override used to keep a full floor even when the model ranked it
+        # last (observed: rank 4628 of 5,209 taking 9.5% of the book).  Scale the
+        # floor by the name's score percentile so the override still enters, but
+        # only claims capital the score supports.
+        span = float(np.nanmax(alpha)) if len(alpha) else 0.0
+        normalized = (alpha / span) if span > 0 else np.zeros_like(alpha)
+        floor_cap = getattr(cfg, "forced_floor_max_weight", None)
+        scaled: dict = {}
+        for index in forced_index:
+            code = str(frame["stock_code"].iloc[index])
+            floor = float(forced_floors.get(code, 0.0) or 0.0)
+            if floor <= 0:
+                scaled[code] = floor
+                continue
+            earned = floor * float(min(max(normalized[index], 0.0), 1.0))
+            if floor_cap is not None:
+                earned = min(earned, float(floor_cap))
+            scaled[code] = earned
+            floor_scaling_report[code] = {"declared": round(floor, 6), "score_percentile": round(float(normalized[index]), 4),
+                                          "effective": round(float(earned), 6)}
+        forced_floors = scaled
     forced_diagnostics = {
         "forced_min_weight_effective": {}, "forced_floor_scale": 1.0,
         "forced_floor_feasible": True, "forced_floor_honoured": True, "forced_floor_gross": 0.0,
@@ -160,6 +223,8 @@ def optimize_long_only(
             target, forced_index, active, codes, forced_floors, forced_caps,
             float(cfg.gross_exposure), float(cfg.max_weight),
         )
+    if floor_scaling_report:
+        forced_diagnostics["floor_score_scaling"] = floor_scaling_report
     frame["current_weight"] = current
     frame["target_weight"] = target
     target, risk_control = _apply_risk_control(frame, target, cfg)

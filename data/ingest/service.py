@@ -9,6 +9,7 @@ from datetime import datetime
 import json
 from dataclasses import replace
 import os
+import re
 import math
 from pathlib import Path
 import platform
@@ -209,6 +210,48 @@ def _cn_incremental_start_date(base_start, latest_trade_date, frequency):
     if normalize_period(frequency) == "daily":
         effective_start = effective_start.normalize()
     return effective_start.strftime("%Y-%m-%d")
+
+
+def filter_selection_universe(codes, *, names=None, median_amount=None, settings=None):
+    """Return the codes an ST / liquidity filter removes, for one decision date.
+
+    Split out of the service so the rule can be unit-tested without a warehouse:
+    ``names`` maps stock_code -> security name and ``median_amount`` maps
+    stock_code -> median traded amount over the lookback window.
+    """
+    settings = dict(settings or {})
+    audit = {"enabled": bool(settings.get("enabled")), "st_dropped": [], "illiquid_dropped": [],
+             "missing_amount": []}
+    dropped: list[str] = []
+    if not audit["enabled"]:
+        return dropped, audit
+    ordered = [str(code) for code in (codes or [])]
+    if bool(settings.get("exclude_st", True)):
+        pattern = re.compile(str(settings.get("st_pattern", r"(?:\*?ST|退)")))
+        if names:
+            for code in ordered:
+                name = str(names.get(code, "") or "")
+                if pattern.search(name):
+                    audit["st_dropped"].append(code)
+    floor = settings.get("min_median_amount_20d")
+    if floor is not None and float(floor) > 0:
+        for code in ordered:
+            if code in audit["st_dropped"]:
+                continue
+            value = None if median_amount is None else median_amount.get(code)
+            if value is None or not np.isfinite(value):
+                audit["missing_amount"].append(code)
+                continue
+            if float(value) < float(floor):
+                audit["illiquid_dropped"].append(code)
+    dropped = list(dict.fromkeys([*audit["st_dropped"], *audit["illiquid_dropped"]]))
+    audit.update({
+        "dropped": len(dropped),
+        "st_dropped_count": len(audit["st_dropped"]),
+        "illiquid_dropped_count": len(audit["illiquid_dropped"]),
+        "min_median_amount_20d": None if floor is None else float(floor),
+    })
+    return dropped, audit
 
 
 def _startup_gate_columns(labels, settings):
@@ -7749,6 +7792,42 @@ class MarketDataService:
         return result
 
 
+
+    def _cn_universe_filter_drop(self, *, as_of, settings, codes):
+        """Drop ST / illiquid names for one decision date, with an audit trail."""
+        settings = dict(settings or {})
+        if not settings.get("enabled"):
+            return set(), {"enabled": False}
+        ordered = sorted({str(code) for code in (codes or [])})
+        if not ordered:
+            return set(), {"enabled": True, "dropped": 0}
+        names = None
+        if bool(settings.get("exclude_st", True)):
+            try:
+                info = self.warehouse.read_stock_info(stock_codes=ordered, market="CN")
+                names = dict(zip(info["stock_code"].astype(str), info.get("name", pd.Series(dtype=str)).astype(str)))
+            except Exception:
+                names = None
+        median_amount = None
+        floor = settings.get("min_median_amount_20d")
+        if floor is not None and float(floor) > 0:
+            day = pd.Timestamp(as_of).normalize() if as_of is not None and not pd.isna(pd.Timestamp(as_of)) else pd.Timestamp(datetime.now().date()).normalize()
+            window = int(settings.get("liquidity_window_days", 40) or 40)
+            bars = self.warehouse.read_ohlcv(
+                market="CN", asset_type="equity", frequency="daily", adjust="qfq", stock_code=ordered,
+                start_date=(day - pd.Timedelta(days=window)).strftime("%Y-%m-%d"),
+                end_date=day.strftime("%Y-%m-%d"),
+                columns=["stock_code", "trade_date", "amount"],
+            )
+            if bars is not None and not bars.empty and "amount" in bars.columns:
+                bars = bars.copy()
+                bars["amount"] = pd.to_numeric(bars["amount"], errors="coerce")
+                median_amount = bars.groupby(bars["stock_code"].astype(str))["amount"].median().to_dict()
+        dropped, audit = filter_selection_universe(
+            ordered, names=names, median_amount=median_amount, settings=settings,
+        )
+        return set(dropped), audit
+
     def _cn_startup_gate_frame(self, *, as_of, settings):
         """Compute the startup-eligibility gate for one decision date.
 
@@ -7807,6 +7886,7 @@ class MarketDataService:
         candidate_path=None,
         as_of_date=None,
         startup_gate=None,
+        universe_filter=None,
     ):
         """Select from saved model predictions without rebuilding factors or retraining.
 
@@ -7968,6 +8048,23 @@ class MarketDataService:
                 }
                 if not universe_after_gate:
                     raise ValueError("startup gate removed every scored name; relax the caps or disable it")
+            universe_filter_settings = dict(universe_filter or {})
+            if universe_filter_settings.get("enabled") and not candidate_path:
+                scored_codes = sorted({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)})
+                dropped_codes, universe_filter_summary = self._cn_universe_filter_drop(
+                    as_of=as_of_date or selection_date, settings=universe_filter_settings, codes=scored_codes,
+                )
+                if dropped_codes:
+                    frames = {
+                        name: frame[~frame["stock_code"].astype(str).isin(dropped_codes)].copy()
+                        for name, frame in frames.items()
+                    }
+                remaining = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
+                universe_filter_summary = {**universe_filter_summary, "universe_before": len(scored_codes), "universe_after": remaining}
+                if not remaining:
+                    raise ValueError("universe filter removed every scored name; relax [selection.universe_filter]")
+            elif universe_filter_settings.get("enabled"):
+                universe_filter_summary = {"enabled": True, "applied_before_top_n": False}
         regime = "unknown"
         regime_version = None
         regime_trade_date = None
@@ -8022,6 +8119,7 @@ class MarketDataService:
         if requested_weights:
             applied_model_weights = requested_weights
         startup_gate_summary: dict = {"enabled": False}
+        universe_filter_summary: dict = {"enabled": False}
         ranked_all = None
         if candidate_path and Path(candidate_path).is_file():
             selected = pd.read_csv(candidate_path)
@@ -8041,6 +8139,19 @@ class MarketDataService:
                           "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
                 as_of_date=as_of,
             )
+        filter_settings = dict(universe_filter or {})
+        if filter_settings.get("enabled") and not selected.empty and "stock_code" in selected.columns:
+            pool_codes = sorted({str(code) for code in selected["stock_code"].dropna().astype(str)})
+            pool_drop, pool_audit = self._cn_universe_filter_drop(
+                as_of=as_of_date or selection_date, settings=filter_settings, codes=pool_codes,
+            )
+            if pool_drop:
+                selected = selected[~selected["stock_code"].astype(str).isin(pool_drop)].reset_index(drop=True)
+                if ranked_all is not None and not ranked_all.empty:
+                    ranked_all = ranked_all[~ranked_all["stock_code"].astype(str).isin(pool_drop)].copy()
+                if selected.empty:
+                    raise ValueError("universe filter removed every candidate; relax [selection.universe_filter]")
+            universe_filter_summary = {**pool_audit, "pool_before": len(pool_codes), "pool_after": int(len(selected))}
         startup_gate_summary = dict(startup_gate_summary or {"enabled": False})
         gate_settings = dict(startup_gate or {})
         if gate_settings.get("enabled") and not selected.empty:

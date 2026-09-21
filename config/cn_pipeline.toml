@@ -334,6 +334,15 @@ max_dist_from_120d_low = 0.30
 max_return_60d = 0.35
 max_dist_from_60d_high = -0.05
 
+# 选股层 universe 过滤（P1.17 §0.12）：
+#   exclude_st              名称含 ST / *ST / 退 的标的不进候选（本次实测两只 ST 合计 -1.28 万）
+#   min_median_amount_20d   近 20 个交易日成交额中位数下限（元）；过滤疑似停牌/极端缩量的标
+[selection.universe_filter]
+enabled = true
+exclude_st = true
+min_median_amount_20d = 10000000.0
+liquidity_window_days = 40
+
 [selection.affordability]
 enabled = true
 equity = 43137.82
@@ -488,7 +497,16 @@ stop_atr = 1.5
 gross_exposure = 0.95
 max_weight = 0.60
 max_holdings = 6
-weighting = "inverse_volatility"
+# 权重与模型分数挂钩（原来 inverse_volatility 完全忽略排名，导致排名 8 的票权重高于排名 2）。
+# score_inverse_vol = 归一化分数^alpha_power × 1/sqrt(特质方差)；alpha_weight_floor 保证
+# 入选最末一名也有基础权重，避免"选中但零仓"。
+weighting = "rank_power"
+alpha_power = 2.0        # 分数平方：排名越高权重越大
+alpha_weight_floor = 0.25
+vol_exponent = 0.25      # 波动只做轻微调整，让排名主导
+# 信号覆盖（override）的保底权重必须由分数支撑：floor × 归一化分数，并设硬上限。
+forced_floor_score_scaling = true
+forced_floor_max_weight = 0.05
 max_industry_weight = 0.30
 max_turnover = 0.50
 max_participation = 0.05

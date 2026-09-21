@@ -540,6 +540,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             show_progress=True,
             as_of_date=as_of_date,
             startup_gate=layer.get("startup_gate") or None,
+            universe_filter=layer.get("universe_filter") or None,
         )
     if name == "preselection":
         layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)
@@ -558,6 +559,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             rebalance_stride_days=int(layer.get("rebalance_stride_days", 1) or 1),
             force_rebalance=force_rebalance, show_progress=True, preselection_only=True,
             as_of_date=as_of_date, startup_gate=layer.get("startup_gate") or None,
+            universe_filter=layer.get("universe_filter") or None,
         )
     if name == "pk":
         layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)

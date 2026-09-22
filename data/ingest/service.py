@@ -460,6 +460,47 @@ def _is_unsupported_cn_ohlcv_code(stock_code):
     return len(digits) == 6 and digits.startswith("920")
 
 
+# SSE/SZSE tradable-stock prefixes.  The SSE ``000xxx`` range is index space
+# (000001.SH is 上证指数), and 128 of those codes had entered the OHLCV/feature
+# layers as if they were equity: 395,008 rows from 2014-01-02 to 2026-09-09,
+# which is 2.43% of every cross-section inside the 2025-09-19..2026-04-27
+# training window.  They also produce a universe discontinuity (2026-09-10:
+# -129 rows/day).  Downstream universes filter on this whitelist instead of
+# trusting "whatever the local store happens to contain" (P1.19 §1).
+CN_EQUITY_PREFIXES = {
+    "SH": ("600", "601", "603", "605", "688", "689"),
+    "SZ": ("000", "001", "002", "003", "300", "301", "302"),
+}
+
+
+def is_cn_equity_code(stock_code) -> bool:
+    """True only for tradable SSE/SZSE A-share stocks.
+
+    Excludes SSE index codes (``000xxx``), B shares (SH ``900`` / SZ ``200``)
+    and Beijing Stock Exchange codes -- none of them are tradable here, and the
+    first group used to leak into model training as rows.
+    """
+    normalized = normalize_stock_code(stock_code, market="CN")
+    if "." not in normalized:
+        return False
+    digits, exchange = normalized.split(".", 1)
+    if len(digits) != 6 or not digits.isdigit():
+        return False
+    return digits.startswith(CN_EQUITY_PREFIXES.get(exchange, ()))
+
+
+def filter_cn_equity_codes(codes):
+    """Split an iterable of CN codes into ``(kept, dropped)``, order-preserving."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    for code in codes or ():
+        normalized = normalize_stock_code(code, market="CN")
+        bucket = kept if is_cn_equity_code(normalized) else dropped
+        if normalized not in bucket:
+            bucket.append(normalized)
+    return kept, dropped
+
+
 def _is_valid_cn_equity_exchange_code(stock_code):
     """Reject malformed exchange suffixes from stale local equity metadata."""
     normalized = normalize_stock_code(stock_code, market="CN")
@@ -1130,12 +1171,17 @@ class MarketDataService:
         """返回 clean 层中可用的全部证券代码。"""
         normalized_market = (market or "HK").upper()
         normalized_adjust = normalize_adjust(adjust)
-        return self.warehouse.get_all_stock_codes(
+        codes = self.warehouse.get_all_stock_codes(
             market=normalized_market,
             asset_type=asset_type,
             frequency=frequency,
             adjust=normalized_adjust,
         )
+        if normalized_market == "CN":
+            # The store still holds historical SSE index codes; a factor run
+            # must never compute them as if they were stocks (P1.19 §1).
+            codes, _dropped = filter_cn_equity_codes(codes)
+        return codes
 
     def sync_hk_stock(self, stock_code, start_date=None, end_date=None, num_records=None, adjust="qfq", period="daily"):
         """同步单只港股到统一数据层。"""
@@ -1236,6 +1282,23 @@ class MarketDataService:
             ]
         unsupported_codes = [stock["code"] for stock in unsupported_stocks]
 
+        # Second gate: the market list can still contain non-equity codes (the
+        # SSE 000xxx index family shows up in local caches and in some vendor
+        # lists).  Drop them here and report the count, so "the fetch list" and
+        # "the tradable universe" stop being two different things.
+        non_equity_stocks = [
+            stock for stock in stocks
+            if not is_cn_equity_code(normalize_stock_code(stock["code"], market="CN"))
+        ]
+        if non_equity_stocks:
+            stocks = [
+                stock for stock in stocks
+                if is_cn_equity_code(normalize_stock_code(stock["code"], market="CN"))
+            ]
+        non_equity_codes = [
+            normalize_stock_code(stock["code"], market="CN") for stock in non_equity_stocks
+        ]
+
         if not stocks:
             return {
                 "status": "completed",
@@ -1244,6 +1307,8 @@ class MarketDataService:
                 "total_stocks": 0,
                 "unsupported_count": len(unsupported_codes),
                 "unsupported_codes": unsupported_codes,
+                "excluded_non_equity_count": len(non_equity_codes),
+                "excluded_non_equity_codes": non_equity_codes[:50],
                 "success_count": 0,
                 "skipped_count": 0,
                 "failed_count": 0,
@@ -1500,6 +1565,8 @@ class MarketDataService:
             "total_stocks": len(stocks),
             "unsupported_count": len(unsupported_codes),
             "unsupported_codes": unsupported_codes,
+            "excluded_non_equity_count": len(non_equity_codes),
+            "excluded_non_equity_codes": non_equity_codes[:50],
             "success_count": success_count,
             "skipped_count": skipped_count,
             "failed_count": len(failed),
@@ -1636,6 +1703,7 @@ class MarketDataService:
                 market="CN", frequency=frequency, adjust=normalize_adjust(adjust)
             )
         codes = list(dict.fromkeys(normalize_stock_code(code, market="CN") for code in codes))
+        codes = [code for code in codes if is_cn_equity_code(code)]
         return codes[: int(limit)] if limit else codes
 
     def refresh_cn_stock_info(self, stock_codes=None, limit=None, max_workers=8, data_source=None, show_progress=False):
@@ -7107,6 +7175,18 @@ class MarketDataService:
         # matching Qlib's handler contract, without producing an audit-long
         # copy of every value.
         stock_codes = sorted(ohlcv_frame["stock_code"].dropna().astype(str).unique())
+        excluded_non_equity_codes: list[str] = []
+        if normalized_market == "CN":
+            stock_codes, excluded_non_equity_codes = filter_cn_equity_codes(stock_codes)
+            if excluded_non_equity_codes:
+                ohlcv_frame = ohlcv_frame[
+                    ohlcv_frame["stock_code"].astype(str).isin(set(stock_codes))
+                ].copy()
+                _log(
+                    "non-equity codes excluded "
+                    f"count={len(excluded_non_equity_codes)} "
+                    f"sample={','.join(excluded_non_equity_codes[:5])}"
+                )
         factor_metadata = create_factor_set(factor_set, config=factor_config).metadata().to_dict()
         materialization = build_feature_materialization_metadata(
             factor_set=factor_set,
@@ -7142,6 +7222,8 @@ class MarketDataService:
             "storage_format": "qlib_wide_v1",
             "mode": "vectorized_stock_batches",
             "stocks": len(stock_codes),
+            "excluded_non_equity_codes": excluded_non_equity_codes[:50],
+            "excluded_non_equity_count": len(excluded_non_equity_codes),
             "primary_key": ["stock_code", "trade_date"],
             "primary_key_unique": True,
             "features": snapshot_features,
@@ -7342,6 +7424,9 @@ class MarketDataService:
             "stored_rows": int(total_rows),
             "primary_key_unique": True,
             "feature_count": len(feature_names),
+            "stocks": len(stock_codes),
+            "excluded_non_equity_count": len(excluded_non_equity_codes),
+            "excluded_non_equity_codes": excluded_non_equity_codes[:50],
             "dataset_path": str(self.layout.dataset_path("clean_feature_panel", layer="feature")),
             "report_paths": report_paths,
             "manifest_path": str(manifest_path),
@@ -7554,6 +7639,25 @@ class MarketDataService:
                     f"(path={dataset_path}); run `uv run python scripts/run_cn_pipeline.py --stage clean_panel` "
                     "after `--stage features`"
                 )
+            if str(market).upper() == "CN":
+                # Defence in depth: `clean_panel` already drops non-equity codes,
+                # but a panel built before that fix (or by an older checkout)
+                # must never reach training with SSE index rows in it (P1.19 §1).
+                equity_mask = panel["stock_code"].astype(str).map(is_cn_equity_code)
+                dropped_rows = int((~equity_mask).sum())
+                if dropped_rows:
+                    dropped_codes = sorted(set(panel.loc[~equity_mask, "stock_code"].astype(str)))
+                    if progress is not None:
+                        progress.set_postfix_str(
+                            f"dropped_non_equity_rows={dropped_rows} codes={len(dropped_codes)}"
+                        )
+                    panel = panel.loc[equity_mask].reset_index(drop=True)
+                    prices_note = (
+                        f"clean panel dropped {dropped_rows} rows from {len(dropped_codes)} "
+                        f"non-equity codes ({','.join(dropped_codes[:5])}...); "
+                        "rerun --stage clean_panel to rebuild it cleanly"
+                    )
+                    print(f"[WARN] {prices_note}", file=sys.stderr, flush=True)
             if "pit_valid" in panel.columns:
                 invalid_rows = int((~panel["pit_valid"].fillna(False).astype(bool)).sum())
                 if invalid_rows:

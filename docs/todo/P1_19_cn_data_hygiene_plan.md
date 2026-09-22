@@ -1,6 +1,6 @@
 # P1.19 CN 数据卫生与自动化稳定性修复计划
 
-状态：问题已定证并记录，修复待执行（基线 2026-09-21 实测）
+状态：§1 已执行并验证（2026-09-22），§2~§5 待执行
 关联：`docs/runbooks/cn-data-pipeline.md`、P1.17 §0.12/§0.18、P1_18 龙虎榜计划
 证据：`output/pipeline_reports/cn_pipeline_20260921_195432.json`、
 `output/data_quality/cn_ohlcv_20260921_195430_cn.md`、本文件 §1~§4 的内联实测输出
@@ -56,10 +56,86 @@ $ 读 assets/data/meta/stock_info_registry
 
 ### 验收
 
-- [ ] `daily_bars` 之后，库内代码全部通过交易所前缀校验（不再出现 `000xxx.SH`）；
-- [ ] `clean_feature_panel` 任一交易日的行数在 09-10 边界前后连续（无 ±129 跳变）；
-- [ ] `model_manifest.json` 的训练窗口统计中不再包含指数代码；
-- [ ] `test/` 新增一条"universe 前缀白名单"回归测试。
+- [x] `daily_bars` 之后，库内代码全部通过交易所前缀校验（不再出现 `000xxx.SH`）；
+- [x] `clean_feature_panel` 任一交易日的行数在 09-10 边界前后连续（无 ±129 跳变）；
+- [ ] `model_manifest.json` 的训练窗口统计中不再包含指数代码（需重训，§1.4 待做）；
+- [x] `test/` 新增"universe 前缀白名单"回归测试（`test/test_cn_equity_universe.py`，30 例）。
+
+### 执行记录（2026-09-22 已落地）
+
+代码（`data/ingest/service.py`）：
+
+| 位置 | 改动 |
+|---|---|
+| 模块级 | 新增 `CN_EQUITY_PREFIXES`（沪 600/601/603/605/688/689、深 000/001/002/003/300/301/302）、`is_cn_equity_code()`、`filter_cn_equity_codes()` |
+| `_cn_metadata_codes()` | 过滤（覆盖 moneyflow/估值/财务/stock_info 的 universe 来源） |
+| `get_all_stock_codes()` | 仅 `market="CN"` 时过滤，HK 与其他市场不受影响 |
+| `download_cn_market_data()` | 抓取列表二次过滤，新增 `excluded_non_equity_count` / `excluded_non_equity_codes` 报告字段（不再静默跳过） |
+| `materialize_clean_feature_panel()` | 面板构建前过滤 `stock_codes` 并同步裁剪 OHLCV 帧；manifest / 返回摘要记录被剔除代码 |
+| `_clean_panel_training_data()` | 训练前兜底过滤 + `[WARN]` 提示需要重建面板（防旧面板复活污染） |
+
+数据：
+
+```bash
+$ uv run python scripts/prune_cn_non_equity_codes.py --dataset stock_info            # dry-run
+[would prune] .../part-b14615fa...parquet: 128/2446 rows
+dataset=stock_info rows=5347 non_equity_rows=128 files_changed=1 mode=DRY-RUN
+$ uv run python scripts/prune_cn_non_equity_codes.py --dataset stock_info --apply
+[prune] ...: 128/2446 rows ; backup -> ...parquet.bak-20260922_094607
+# 复核：registry rows 5347 -> 5219，000xxx.SH = 0
+
+$ uv run python scripts/run_cn_pipeline.py --stage clean_panel        # exit 0
+  clean_panel ok: stocks=5221 rows=1,934,773 excluded_non_equity_count=128
+  start_date=2025-03-11 end_date=2026-09-22 feature_count=683
+$ uv run python scripts/run_cn_pipeline.py --stage model_scores       # exit 0
+  cn_lightgbm_scores.csv    5209 行 / 5209 只 / index_rows 0（此前会含 128 行指数）
+  cn_transformer_scores.csv 5108 行 / 5108 只 / index_rows 0
+```
+
+面板前后对比（同一脚本口径，`artifacts/p1_19_cn_equity_whitelist/PANEL_{BEFORE,AFTER}.json`）：
+
+| 指标 | 前 | 后 |
+|---|---:|---:|
+| 代码数 | 5,349 | **5,221** |
+| 指数代码 / 行数 | 128 / 47,232 | **0 / 0** |
+| 每日行数最大跳变 | 2026-09-10 **−129** | 2026-05-06 +29（正常上市） |
+| 2026-09-10 跳变 | −129 | **−1** |
+| 总行数 | 1,987,079 | 1,934,773 |
+
+测试：`test/test_cn_equity_universe.py` 30 passed；相关 8 文件回归 172 passed / 3 failed，
+3 个失败经 `git stash` 对照确认为**改动前既有**失败（pandas 3 时区 `astype` 问题，
+`test_cn_data_chain.py`），与本次改动无关。
+
+### §1.4 重训与 OOS 量化（2026-09-22 已完成）
+
+重训（生产配置，全部 exit 0）：
+
+| 模型 | 训练窗口 | 训练行数 | 特征列 | 校验指标 | 对比（污染面板，09-19） |
+|---|---|---:|---:|---|---|
+| LightGBM | 2025-09-22~2026-04-28 | 731,342 | 1,249 | daily_ic −0.00002 | 1,267 列 / 749,475 行 / daily_ic −0.0152 |
+| Transformer | 2025-09-22~2026-04-28 | 426,014 | 492 | huber 0.05473 | 500 列 / 19,691 行 / huber 0.05241 |
+
+OOS A/B（**同配置、同 5 折、同 50 个决策日 2025-09-02~2026-08-20**，唯一差异是面板里有没有
+那 128 行/日指数）：把代码切回改动前重跑一次 `clean_panel` + `--stage oos_predictions`（只跑
+lightgbm），生成"污染臂"，与"干净臂"用同一脚本（`evaluate_cn_model_comparison`）评估：
+
+| 臂 | 预测行数 | 指数行 | RankIC | IC | Top10% 净 | 多空 | 链式净 | 最大回撤 | 换手 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 污染面板 | 264,197 | 6,144 | 0.0993 | 0.0699 | +1.84% | +3.43% | +4.25% | −1.17% | 0.619 |
+| 干净面板 | 258,053 | 0 | 0.0996 | 0.0698 | +1.78% | +3.53% | +4.09% | −1.18% | 0.617 |
+
+逐日配对检验（同一批 50 个决策日，剔除指数代码后的股票口径）：
+`污染 mean RankIC 0.10182 vs 干净 0.09963`，差值 **−0.0022（t=−1.31, p=0.195, 胜 20/50）**。
+
+**结论：指数行的存在既没帮也没害（差异不显著）**。§1 的价值是数据卫生——训练集里不再有
+2.43% 的非个股行、universe 断点消失、报告口径自洽；**不是**性能杠杆。因此也不必为此重跑
+历史结论：P1.17 的 13 折/169 日结论仍然有效。Transformer 臂的 A/B 未跑（同一机制，预计同向），
+需要时可再用 `output/verification/p1_19_index_pollution_20260922/evaluate_oos_pair.py --arm polluted_lgbm|clean_lgbm` 复现。
+
+另外，横截面值的污染也已量化（`probe_cross_sectional_shift.py`）：剔除 128 行后 RPS_5/20/60
+的 mean|Δ| 只有 0.22~0.59 个百分点、max 1.2，**Spearman = 1.000000**，所以因子层不需要全量重算。
+
+原始 OHLCV/feature 层仍保留历史指数行（读路径已全部过滤，属惰性数据）；物理清除留待需要时再做。
 
 ---
 
@@ -102,8 +178,10 @@ $ 读 assets/data/meta/stock_info_registry
 代码集"非空即置该告警。当前触发它的是：128 个指数代码（历史有行但窗口内不足 120）+ 12 只停牌股
 + 次新股。它不阻塞（`backtest_ready=true`、`blocking_reasons=[]`），但告警信息量低。
 
-改进：把告警拆成三个具名原因（`index_codes_in_universe`、`suspended_codes`、
-`new_listing_codes`），并各自附前 10 个代码，使告警能被直接判断而不用人工跑一遍 python。
+改进：把告警拆成三个具名原因（`suspended_codes`、`new_listing_codes`、`short_history_codes`），
+并各自附前 10 个代码，使告警能被直接判断而不用人工跑一遍 python。
+
+注：§1 修完后，"universe 里的指数代码"这一项已消失，剩下的都是停牌/次新，属于正常业务状态。
 
 ---
 

@@ -97,6 +97,7 @@ def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd
             raise ValueError("startup gate mode 'eligibility' needs a startup_price_eligible column")
         eligible &= labels["startup_price_eligible"].fillna(False).astype(bool)
         used.append("startup_price_eligible")
+    tier = pd.Series("core", index=labels.index)
     if mode in {"thresholds", "both"}:
         caps = (
             ("dist_from_120d_low", settings.get("max_dist_from_120d_low"), "le"),
@@ -115,7 +116,31 @@ def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd
             eligible &= values.le(float(cap)) if direction == "le" else values.ge(float(cap))
         if not applied:
             raise ValueError("startup gate mode 'thresholds' requires at least one cap")
-    return pd.DataFrame({"stock_code": labels["stock_code"].astype(str), "startup_eligible": eligible})
+    if bool(settings.get("second_tier_enabled", False)):
+        # Second tier: names that already left the half-year-low band but are in a
+        # quiet pullback with flow support (P1.17 section 0.16: both case studies
+        # had their best entry at the end of a shrinking-volume pullback).
+        required = ["dist_from_120d_low"]
+        missing = [column for column in required if column not in labels.columns]
+        if missing:
+            raise ValueError(f"second tier needs columns: {','.join(missing)}")
+        low = pd.to_numeric(labels["dist_from_120d_low"], errors="coerce")
+        second = low.gt(float(settings.get("second_tier_min_dist_from_120d_low", 0.30))) & low.le(
+            float(settings.get("second_tier_max_dist_from_120d_low", 0.55))
+        )
+        if "volume_ratio" in labels.columns:
+            ratio = pd.to_numeric(labels["volume_ratio"], errors="coerce")
+            second &= ratio.lt(float(settings.get("second_tier_volume_ratio_max", 1.0)))
+        if bool(settings.get("second_tier_requires_flow", True)) and "flow_z" in labels.columns:
+            flow = pd.to_numeric(labels["flow_z"], errors="coerce")
+            second &= flow.ge(float(settings.get("second_tier_flow_z_min", 0.0)))
+        tier = tier.where(~second, "second")
+        eligible = eligible | second
+    return pd.DataFrame({
+        "stock_code": labels["stock_code"].astype(str),
+        "startup_eligible": eligible,
+        "selection_tier": tier,
+    })
 
 
 def build_cn_strategy_labels(

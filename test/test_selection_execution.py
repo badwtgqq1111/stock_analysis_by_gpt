@@ -130,3 +130,27 @@ def test_force_rebalance_bypasses_the_stride(tmp_path):
 
     assert result["status"] == "completed"
     assert result["selected_count"] == 1
+
+
+def test_universe_audit_is_surfaced_for_the_pipeline_report(tmp_path):
+    """The gate/filter audit must reach the report, not stay a local variable."""
+    scores = tmp_path / "scores"
+    _write_scores(scores, [("2026-09-11", "MID.SZ", 0.9, 99.0), ("2026-09-11", "BAD.SZ", 0.8, 90.0)])
+    service = MarketDataService.__new__(MarketDataService)
+    service.warehouse = _StubWarehouse(
+        _bars({"MID.SZ": 60.0, "BAD.SZ": 20.0}),
+        info=pd.DataFrame({"stock_code": ["BAD.SZ"], "name": ["*ST坏"], "market_cap": [1e9]}),
+    )
+
+    result = service.select_persisted_model_scores(
+        model_scores_dir=str(scores), output_dir=str(tmp_path / "out"), top_n=2,
+        portfolio_mode="topn", initial_capital=43_137.82, show_progress=False,
+        startup_gate={"enabled": False},
+        universe_filter={"enabled": True, "exclude_st": True, "min_median_amount_20d": 1e7},
+    )
+
+    assert result["startup_gate"]["enabled"] is False
+    audit = result["universe_filter"]
+    assert audit["enabled"] is True
+    assert audit["st_dropped"] == ["BAD.SZ"]
+    assert audit["pool_before"] == 2 and audit["pool_after"] == 1

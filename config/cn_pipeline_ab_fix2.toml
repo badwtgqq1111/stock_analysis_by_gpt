@@ -328,7 +328,7 @@ rebalance_stride_days = 5
 # mode = "both"        两者都要求。判定使用决策日当天的可得数据。
 [selection.startup_gate]
 enabled = true
-# 第二梯队：0.30 < 离 120 日低点 <= 0.55 且缩量回调 + 资金流入 -> 小仓位准入（单只上限 5%）
+# 第二梯队：已离开半年低点带但"缩量回调 + 资金流入"的标的给小仓位（案例研究结论）
 second_tier_enabled = true
 second_tier_min_dist_from_120d_low = 0.30
 second_tier_max_dist_from_120d_low = 0.55
@@ -350,9 +350,11 @@ enabled = true
 exclude_st = true
 min_median_amount_20d = 10000000.0
 liquidity_window_days = 40
-# P1.17 §0.18/§0.19：剔除"放量上涨"，但资金流确认（z5>=1）的保留；缺数据按剔除处理
+# P1.17 §0.14 A/B：剔除"放量上涨"（5 日上涨 且 20 日量比 > 1.5）。自有数据（336 日、170 万股票日）
+# 显示该桶 20 日超额 -0.63%（全市场）/-0.75%（启动域），且离散度最高、命中率最低。
 exclude_volume_breakout = true
 volume_breakout_ratio = 1.5
+# 资金流确认：只有 z5 >= 1.0 的放量才保留（Llorente et al. 2002 的"知情 vs 流动性"框架）
 volume_breakout_flow_z_min = 1.0
 volume_breakout_missing_flow = "drop"
 
@@ -520,7 +522,7 @@ vol_exponent = 0.25      # 波动只做轻微调整，让排名主导
 # 信号覆盖（override）的保底权重必须由分数支撑：floor × 归一化分数，并设硬上限。
 forced_floor_score_scaling = true
 forced_floor_max_weight = 0.05
-# 资金流 tilt（确认/降权，不设硬门禁）
+# 资金流 tilt：权重按 (1 + 0.25*tanh(z5)) 微调（确认/降权，不设硬门禁）
 flow_tilt_strength = 0.25
 flow_column = "moneyflow_net_z_5d_clean"
 max_industry_weight = 0.30
@@ -644,11 +646,7 @@ take_profit_ret20 = 0.15
 take_profit_reduce_ratio = 0.34
 max_weight = 0.35
 lot_size = 100 # A 股按手交易；减仓数量向下取整到整手
-stop_loss_pct = 0.0 # 固定百分比止损：样本期无效，保持关闭
-# ATR 缩放止损（P1.17 §0.19）：k×ATR14，夹取 [4%, 10%]；15 周 A/B 以 19% 触发率把 5 日 std 压 28%
-stop_loss_atr_multiple = 2.5
-stop_loss_min_pct = 0.04
-stop_loss_max_pct = 0.10
+stop_loss_pct = 0.0 # 样本期该规则无效，默认关闭
 
 [paper_outcomes]
 selection_path = "output/results_cn/cn_ensemble_selected.csv"

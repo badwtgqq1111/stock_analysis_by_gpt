@@ -43,8 +43,9 @@ uv run python scripts/run_cn_pipeline.py --config config/cn_pipeline.research.to
 | 清洗面板 | `clean_panel` | 已物化因子、日 K 派生量价、缺失/PIT/质量标记 | 是 |
 | 模型 | `lightgbm` / `transformer` / `cnn` | 保存模型工件并输出训练验证指标 | 是 |
 | 模型推理 | `model_scores` | 加载已保存模型，对最新 clean panel 截面打分 | 是 |
-| 预选 | `preselection` | 模型取 4 只，并按每种信号类型各取 2 只，形成候选池 | 是 |
+| 预选 | `preselection` | 模型取 `pipeline.preselection_model_slots` 只（当前 8），并按每种信号类型各取 2 只，形成候选池 | 是 |
 | PK 持仓 | `pk` | 对预选池执行风险、成本、流动性和持仓数优化，生成最终组合 | 是 |
+| 卖出评估 | `exits` | 对持仓清单逐日评估风控/兑现/结构规则，产出退出计划（含 ATR 缩放止损） | 否（只读） |
 | 兼容选股 | `selection` | 旧版一步式 Top-N 选股入口；研究新流程应使用 `preselection`→`pk` | 是 |
 
 日 K 与分时是独立阶段。日 K 默认启用，因为因子和 LightGBM 依赖它；分时默认关闭，只有需要微结构特征、TCA 或执行模型时才打开：
@@ -118,10 +119,10 @@ LightGBM 和 Transformer 均启用，因此它会重训模型。日常生产应�
 
 | 工作流 | 阶段 | 建议频率 | 触发条件 | 主要产物 |
 |---|---|---|---|---|
-| 首次构建/数据修复 | `daily_bars`、`fundamental`、`features`、`regime`、`clean_panel`、训练、打分、选股 | 首次；历史数据或清洗契约变更后 | 新机器、重建历史数据、特征 schema/清洗版本变化 | clean panel、模型工件、最新候选 |
-| 每日生产 | `daily_bars`、`moneyflow`、`features`、`regime`、`clean_panel`、`model_scores`、`selection`、`paper_account`、`paper_outcomes` | 每个交易日收盘数据完整后 | 有新的日 K 或新的选股日 | 最新分数、候选、纸面成交、净值和成熟信号收益 |
+| 首次构建/数据修复 | `daily_bars`、`fundamental`、`features`、`regime`、`clean_panel`、训练、打分、`preselection`、`pk`、`exits` | 首次；历史数据或清洗契约变更后 | 新机器、重建历史数据、特征 schema/清洗版本变化 | clean panel、模型工件、最新候选与组合变更 |
+| 每日生产 | `daily_bars`、`moneyflow`、`regime`、`features`、`clean_panel`、`model_scores`、`preselection`、`pk`、`exits`、`paper_account`、`paper_outcomes` | 每个交易日收盘数据完整后 | 有新的日 K 或新的选股日 | 最新分数、候选、最终组合、退出计划、纸面成交、净值和成熟信号收益 |
 | 基本面刷新 | `fundamental` | 按数据源披露节奏，建议每周；财报季可每日 | 新财报、估值或行业信息需要刷新 | 股票快照、PIT 财务和估值数据 |
-| 定期重训 | `lightgbm`、`transformer`，随后 `model_scores`、`selection` | 每 20 个交易日或每月 | 训练窗口滚动到期；模型/特征/标签参数变化 | 新模型和新选股结果 |
+| 定期重训 | `lightgbm`、`transformer`，随后 `model_scores`、`preselection`、`pk`、`exits` | 每 20 个交易日或每月 | 训练窗口滚动到期；模型/特征/标签参数变化 | 新模型、新选股结果和新的退出计划 |
 | 严格研究评估 | `oos_predictions`、`model_comparison` | 每月/每季；模型提升和晋升前 | 模型、标签、特征或训练配置变化 | 按折 OOS 预测和模型对比报告 |
 | 可选研究 | `cnn`、`graph_temporal`、`intraday_bars`、`alternative`、`strategy_labels` | 按研究计划 | 对应数据和实验假设就绪 | 可选模型或研究数据集 |
 
@@ -157,20 +158,71 @@ uv run python scripts/run_cn_pipeline.py
 `daily_bars` 与 `features` 之间。训练工件会被 `model_scores` 复用，因子只在 `features` 更新，
 不会在打分阶段重算。
 
+先加载环境文件。非交互式 shell（launchd / systemd / cron / 直接跑脚本）不读 `~/.bashrc`，
+ClickHouse、Tushare 或代理变量缺失会让 `daily_bars`、`moneyflow` 立刻失败：
+
+```bash
+set -a; . config/scheduler_env.sh; [ -f config/notify.env ] && . config/notify.env; set +a
+```
+
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage daily_bars
 uv run python scripts/run_cn_pipeline.py --stage moneyflow
-uv run python scripts/run_cn_pipeline.py --stage features
 uv run python scripts/run_cn_pipeline.py --stage regime
+uv run python scripts/run_cn_pipeline.py --stage features
 uv run python scripts/run_cn_pipeline.py --stage clean_panel
 uv run python scripts/run_cn_pipeline.py --stage model_scores
 uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
 uv run python scripts/run_cn_pipeline.py --stage pk
+uv run python scripts/run_cn_pipeline.py --stage exits
 uv run python scripts/run_cn_pipeline.py --stage paper_account
 uv run python scripts/run_cn_pipeline.py --stage paper_outcomes
 ```
 
-`paper_account` 在 `selection` 之后每日运行：它会按 T+1 规则推进已有虚拟订单、更新持仓与净值。
+顺序与 `scripts/run_daily_production.sh` 的阶段序列一致（`daily_bars → moneyflow → regime →
+features → clean_panel → model_scores → preselection → pk → exits → paper_account → paper_outcomes`）；
+自动化脚本另外负责单实例锁、收盘时间判断、幂等标记和报告/通知，手工补跑时按上面逐条执行即可。
+
+三个最容易踩的点：
+
+- **`preselection` 受 stride 限制**：`[selection].rebalance_stride_days = 5`，距上次再平衡不足 5 个
+  交易日时会返回 `carried_forward` 并沿用上一版预选池。需要当天立刻换池时加 `--force-rebalance`；
+  `pk` 对传入的候选池固定按 `stride=1` 重算权重，因此它不需要这个参数（写上只是显式声明本次强制重算）。
+- **`exits` 是独立阶段，不在 `pk` 里**：选股侧只产生买入组合，止损/减仓/风控退出由 `--stage exits`
+  读 `config/holdings_cn.csv` 单独评估。漏跑它，持仓当天不会接受任何风控规则检查。
+- **`model_scores` 不重训**：它只加载已保存的模型，对最新 clean panel 截面打分；当前生产模型的训练
+  窗口是 2025-09-19~2026-04-27，所以每日只需要 `clean_panel` → `model_scores`。要让打分用上新数据
+  学到的东西，必须同时重跑 `--stage lightgbm` 与 `--stage transformer`：集成权重同时使用两个模型，
+  只重训一个会让两半来自不同特征版本。
+
+跑完后的三个检查点：
+
+```bash
+# 1) 候选池与最终组合是不是当天、有没有通过整手可买约束
+head -2 output/results_cn/cn_ensemble_preselected.csv
+head -2 output/results_cn/cn_ensemble_selected.csv
+
+# 2) 资格门 / universe 过滤是否按配置开火（读最新流水线报告的 preselection 摘要）
+uv run python -c "import json,glob,os;f=max(glob.glob('output/pipeline_reports/*.json'),key=os.path.getmtime);d=json.load(open(f));print(os.path.basename(f));[print(' ',s['name'],json.dumps(s.get('summary',{}).get('startup_gate'),ensure_ascii=False),json.dumps((s.get('summary') or {}).get('universe_filter'),ensure_ascii=False)) for s in d['stages'] if (s.get('summary') or {}).get('startup_gate')]"
+
+# 2b) 组合定权与波动目标
+uv run python -c "import json;d=json.load(open('output/results_cn/cn_ensemble_portfolio_manifest.json'));print(d['constraints']['weighting'], d['risk_control']['target_volatility'], d['risk_control'].get('scale'))"
+
+# 3) 卖出计划有没有接入 ATR 止损
+grep "收益型止损" output/results_cn/cn_exit_plan.md
+uv run python -c "import pandas as pd;d=pd.read_csv('output/results_cn/cn_exit_plan.csv');print(d[['stock_code','pnl_pct','atr_pct_14','effective_stop','action','reasons']].to_string(index=False))"
+```
+
+`cn_exit_plan.md` 会写成 `收益型止损：固定百分比关闭（样本期该规则无效）；ATR 缩放开启 = 2.5 ×
+ATR14%，夹取 4.0%~10.0%`；逐票的 `effective_stop` 是当天真正生效的止损位，触发时 `reasons`
+出现 `触发止损（ATR×2.5 = x%）`。若报告说"固定百分比关闭"但 `effective_stop` 全为空，说明
+`[exits.rules].stop_loss_atr_multiple` 被改回 0（关闭）。
+
+检查点 2 的输出里 `startup_gate.mode` 应为 `eligibility`、`universe_filter.enabled` 应为 `true`；
+若某个开关的 `enabled` 是 `false`，说明该段过滤当天没有参与决策，选股结果不能按"低位启动 + 非放量"
+口径解释。
+
+`paper_account` 在 `pk` 之后每日运行：它会按 T+1 规则推进已有虚拟订单、更新持仓与净值。
 `paper_outcomes` 也建议每日运行：它不重新训练，只把历史信号与新到达的 1/5/20/60 日结果对齐；
 也可以按周补跑，但每日执行更容易及时发现成熟信号表现异常。
 
@@ -185,6 +237,7 @@ uv run python scripts/run_cn_pipeline.py --stage transformer
 uv run python scripts/run_cn_pipeline.py --stage model_scores
 uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
 uv run python scripts/run_cn_pipeline.py --stage pk
+uv run python scripts/run_cn_pipeline.py --stage exits
 ```
 
 ### 严格样本外评估
@@ -203,7 +256,7 @@ uv run python scripts/run_cn_pipeline.py --stage model_comparison
 
 ## 选股质量验证与虚拟持仓
 
-`selection` 只生成候选和目标权重，不代表已经验证盈利。建议每次选股后执行：
+`preselection`/`pk` 只生成候选和目标权重，不代表已经验证盈利。建议每次选股后执行：
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage paper_outcomes
@@ -308,6 +361,54 @@ LightGBM 和 Transformer，并执行模型打分与持久化分数选股；CNN �
 结果写入 `model_manifest.json` 的 `extra.feature_quality`。该规则只影响新训练工件，因此修改阈值后
 需要重训对应模型，已存在的模型仍按自身 manifest 推理。
 
+### 标签口径与特征剖面（缩小搜索空间的两个旋钮）
+
+样本量变大后不需要把全部 `alpha_zoo_hk` 因子一次性塞给模型：面板是"一个因子 = 值 + 缺失掩码"
+两列，全量约 680 因子；当前 LightGBM 工件 1,267 列、Transformer 500 列，扩窗口时成本按折数相乘。
+两个官方旋钮：
+
+**标签口径**：`[lightgbm].label_mode` 与 `[transformer].label_mode`（默认 `forward_return`）。
+
+| 写法 | 实际目标列 | 说明 |
+|---|---|---|
+| `forward_return` | `forward_return_{label_horizon}d` | 默认，收盘到收盘 |
+| `excess` / `excess_return` / `excess_ret` | `forward_excess_return_{label_horizon}d` | 按 `label_horizon` 取 5/10/20/60 日横截面超额 |
+| `excess_return_{N}d` | `forward_excess_return_{N}d` | 显式指定窗口，不复用 `label_horizon` |
+| `path` / `path_score` / `path_score_20d` / `startup_path` | `label_path_score_20d` | 启动路径标签，`embargo_days` 默认抬到 60 |
+| `path_score_60d` | `label_path_score_60d` | 60 日路径标签 |
+
+`startup_only = true` 会把样本限制在 `startup_price_eligible`（或把不合格行标签置空，取决于
+`preserve_startup_context`），这是"换样本域"，必须在同一样本域上比较标签口径。`extra_label_columns`
+可以把同一次 `strategy_labels` 产出的其他列一并带出训练面板用于研究。
+
+**待接线的标签**：`strategy_labels` 已经产出 `forward_exec_return_{N}d`（T+1 开盘成交口径）以及
+波动率调整版标签列，但 `_clean_panel_training_data` 的 `label_mode` 目前只识别上表这些名字，
+`exec_return` / `vol20` 一类写法会落进 `forward_return` 分支而静默换标签。接入前请用
+`extra_label_columns` 显式带列做研究，不要在配置里写未支持的模式名。
+
+**特征剖面**：`[model_features]` 支持
+
+```toml
+[model_features]
+profile = "full"            # full | compact | core
+min_feature_coverage = 0.05
+drop_constant_features = true
+include_features = []       # 额外白名单 glob（对应 feature_include_patterns）
+exclude_features = []       # 额外黑名单 glob
+include_families = []       # 家族白名单，取值：moneyflow | valuation | fundamental | academic | price_volume
+exclude_families = []       # 家族黑名单（如 ["moneyflow"] 得到"无资金流"对照组）
+```
+
+- `compact`：只留价量/流动性/资金流家族，去掉财报与估值块；
+- `core`：P1.17 论点显式短名单（半年低位位置、短周期动量与回调、缩量/放量、通道结构、资金流），
+  约 60 个因子；
+- `exclude_families = ["moneyflow"]` 展开为 `moneyflow*` + `flow_second_wave_*`，是"关闭资金流特征"
+  的官方开关（未知家族名会直接报错，不会静默忽略），用来跑"含资金流 / 不含资金流"两组对照模型；
+  两组各自训练后用同一 `preselection` → `pk` 流程比较选股结果。
+
+剖面解析结果（命中、丢弃、未命中的 glob）会写进 manifest，便于审计；但**剖面本身不是信号主张**，
+任何剖面/标签切换都要走 `oos_predictions` + `model_comparison` 或规则级 A/B 才能进入生产配置。
+
 `model_scores.min_cross_section_coverage = 0.95` 防止一只股票的孤立新日期覆盖完整市场截面。评分器会
 选择满足该阈值的最近交易日，并在输出中记录 `score_date_quality`，其中包括原始最新日期、其股票数和
 是否跳过该不完整日期。
@@ -344,7 +445,7 @@ output/model_scores/cn_cnn_scores.csv
 `preselection` 读取 `output/model_scores` 中的模型分数，不会调用旧 `core/lightgbm_analysis.py`，也不会
 重新计算因子或重新训练模型。它只负责构造候选集，不分配最终仓位：
 
-1. ensemble 模型按最新横截面分数取 `preselection_model_slots = 4`；
+1. ensemble 模型按最新横截面分数取 `preselection_model_slots`（当前 8）；
 2. 对每个命中的 `signal_type` 按 `signal_score` 排序，至少保留 2 只；
 3. 模型候选与信号候选去重后写入 `output/results_cn/cn_ensemble_preselected.csv`；
 4. 候选行保留 `selection_channel`（`model`/`signal_candidate`/`signal_override`）和信号证据，供下一阶段 PK。
@@ -423,15 +524,26 @@ uv run python scripts/run_cn_pipeline.py --stage pk --force-rebalance
 `[selection]` 关键配置：
 
 ```toml
-preselection_model_slots = 4
+[pipeline]
+preselection_model_slots = 8   # 原为 4：模型 Top-4 会被 sleeve 下限整体挤出候选池
+
+[selection]
 preselection_path = "output/results_cn/cn_ensemble_preselected.csv"
+rebalance_stride_days = 5     # 不足 5 个交易日则沿用上一版预选池；--force-rebalance 可跳过
 
 [selection.signals]
 recommendations_per_type = 2
 
 [selection.portfolio_constraints]
 max_holdings = 6
-weighting = "inverse_volatility"
+weighting = "rank_power"      # 原 inverse_volatility 完全忽略排名，排名 8 的票权重高于排名 2
+alpha_power = 2.0
+model_min_share = 0.80        # sleeve 下限合计 ≤ gross×20%，模型块承担主仓
+
+[selection.risk_control]
+vol_target_mode = "cap"       # cap = 只在天花板之上降杠杆（原 budget 会把风险预算部署出去）
+target_volatility = 0.18
+max_gross_exposure = 0.65
 ```
 
 ### 让模型学到 Donchian 通道状态
@@ -541,8 +653,25 @@ uv run python scripts/run_cn_pipeline.py --stage exits
 - **兑现型（减仓 1/3，不清仓）**：Donchian 位置 ≥ 0.80 或 20 日涨幅 ≥ +15%；
 - **结构型（减到上限）**：单只权重 > `max_weight`（默认 35%）。
 
-`[exits.rules].stop_loss_pct` 默认 0（关闭）：2024-2026 样本里 20 日跌幅 > 15% 的标的未来
-20 日超额 +1.6~2.2%，固定百分比止损会卖在期望最优的状态上。需要传统止损时显式设置该值。
+止损有两套开关（都读 `[exits.rules]`），默认只有"随波动缩放"的那套在打：
+
+```toml
+[exits.rules]
+stop_loss_pct = 0.0             # 固定百分比止损：样本期无效，保持关闭
+stop_loss_atr_multiple = 2.5    # ATR 缩放止损：k × ATR14%，夹取到 [stop_loss_min_pct, stop_loss_max_pct]
+stop_loss_min_pct = 0.04
+stop_loss_max_pct = 0.10
+```
+
+- `stop_loss_pct` 默认 0（关闭）：2024-2026 样本里 20 日跌幅 > 15% 的标的未来 20 日超额
+  +1.6~2.2%，固定百分比止损会卖在期望最优的状态上。
+- `stop_loss_atr_multiple` 生产配置为 2.5（代码默认 0，即关闭）：止损位 = `k × ATR14%` 之后再夹取到
+  `[stop_loss_min_pct, stop_loss_max_pct]`。依据见
+  [P1_17 §0.19](../todo/P1_17_path_labels_meta_labeling_plan.md) 的 15 个决策日 A/B：固定 6% 止损
+  触发率 43%、5 日收益 +0.68%；ATR×2.5 触发率 19%、5 日收益 +1.00%，同时把 5 日 std 从 6.67%
+  压到 6.09%、最差单日从 −10.99% 抬到 −9.33%。要压尾部就压"随波动缩放"的止损，不要用固定百分比。
+- 生效止损位与依据逐票写入 `cn_exit_plan.csv` 的 `atr_pct_14` / `effective_stop`；触发时
+  `cn_exit_plan.md` 的说明列会写成 `触发止损（ATR×2.5 = x%）`。
 
 #### 执行层约束：整手可买 + 每周再平衡
 
@@ -669,11 +798,60 @@ sleeve_slots_max = 2
 `max_price = "auto"` 的含义是"一个持仓槽位的预算刚好买得起一手"：
 300k 档 ≈ 175 元、45k 档 ≈ 26.25 元。价格上限同时作用于模型短名单与信号名字。
 
+## 选股域：启动资格门与 universe 过滤（P1.17）
+
+选股的第一步不是排序，而是决定"哪些票有资格进候选池"。两段过滤都在 Top-N 截断**之前**执行
+（在 Top-N 之后再过滤会把池子清空——门槛排除的名字恰好就是未经门槛时排名最高的那批）。
+
+```toml
+# 启动资格门（P1.17 §0.8/§0.9）：把"已经涨上去"的名字挡在池外
+[selection.startup_gate]
+enabled = true
+mode = "eligibility"           # eligibility | thresholds | both
+max_dist_from_120d_low = 0.30  # 距 120 日低点涨幅上限
+max_return_60d = 0.35
+max_dist_from_60d_high = -0.05
+# 第二梯队：确实开始启动，但缩量回调 + 资金流入确认 → 小仓位准入
+second_tier_enabled = true
+second_tier_min_dist_from_120d_low = 0.30
+second_tier_max_dist_from_120d_low = 0.55
+second_tier_volume_ratio_max = 1.0
+second_tier_flow_z_min = 0.0
+second_tier_max_weight = 0.05
+
+# 选股层 universe 过滤（P1.17 §0.12/§0.18）
+[selection.universe_filter]
+enabled = true
+exclude_st = true
+min_median_amount_20d = 10000000.0
+exclude_volume_breakout = true      # 剔除"放量上涨"，除非资金流确认
+volume_breakout_ratio = 1.5
+volume_breakout_flow_z_min = 1.0
+volume_breakout_missing_flow = "drop"
+```
+
+- `mode = "eligibility"` 直接复用 `strategy_labels` 的 `startup_price_eligible`：`dist_from_120d_low ∈
+  [0.05, 0.30]` 且 `return_60d ≤ 0.35` 且 `dist_from_60d_high ≤ −0.05`，只用决策日当天可得数据
+  （收盘后判定，T+1 开盘执行）；`thresholds` 只用配置里的上限，`both` 两者都要满足。
+- 第二梯队命中的标的打上 `selection_tier = second`，在 PK 阶段按 `second_tier_max_weight`
+  （默认 5%）封顶，避免"半启动"的票占满仓位。
+- `exclude_volume_breakout` 只剔除"放量上涨且资金流没有确认"的名字：`pv_volume_ratio_20d ≥ 1.5`
+  且 `moneyflow_net_z_5d < 1.0`；资金流缺失按 `missing_flow = "drop"` 处理（剔除），不按"未知即放行"。
+- 任一过滤器把候选清空会直接抛错（而不是静默返回空组合）：空池意味着阈值与当前 regime 不匹配，
+  应当人工复核，而不是当作正常结果。
+
+审计：两段过滤的结果现在会随选股结果一起返回，并出现在 `output/pipeline_reports/*.json` 的
+`preselection` 阶段摘要里（`startup_gate` / `universe_filter` 两个键，含
+`universe_before`/`universe_after`、`second_tier_codes`、`st_dropped`、`illiquid_dropped`、
+`volume_breakout_dropped` 等）。逐票理由仍看 `cn_ensemble_explanations.md`。
+
 ## 组合风控：`[selection.risk_control]`
 
 ```toml
 [selection.risk_control]
 target_volatility = 0.18      # 组合年化波动上限，超过则整体降杠杆、留现金（不加杠杆）
+vol_target_mode = "cap"       # cap = 只在天花板之上降杠杆；budget = 把没用掉的风险预算部署出去
+max_gross_exposure = 0.65
 max_name_risk_share = 0.35    # 单名占组合方差上限（迭代风险预算：压超限名字并再分配）
 # max_downside_vol = 1.20     # 资格门槛：默认关闭
 # min_reward_risk = 0.10
@@ -720,6 +898,26 @@ max_name_risk_share = 0.35    # 单名占组合方差上限（迭代风险预算
 
 排查脚本：`output/verification/retrain_20260916/`（`feat_probe.py`、`worker_cols.py`、`worker_vals.py`、`merge_trace.py`）。
 
+## 数据卫生与已知问题（2026-09-21 实测，详见 [P1_19](../todo/P1_19_cn_data_hygiene_plan.md)）
+
+这一节的每一条都带有实测数字，处理方式未落地前不要假设数据是干净的。
+
+| # | 问题 | 实测证据 | 现行处理 |
+|---|---|---|---|
+| D1 | **128 个上证指数代码（`000001.SH` 上证指数 … `000148.SH`）被当成个股落库** | OHLCV 库 395,008 行、2014-01-02→2026-09-09；clean panel 47,232 行；训练窗口 2025-09-19~2026-04-27 里占 18,176 行 = 2.43%（每天 128 行），价量特征填充率 1.000、资金流/估值全 NaN；`stock_info_registry` 仍有这 128 个代码 | 抓取侧自 2026-09-10 起不再收，但**历史与面板仍有**；修复见 P1_19 §1（前缀白名单 + 清理 + 重跑 `clean_panel`） |
+| D2 | **universe 断点**：2026-09-10 单日行数 −129（5,335→5,206） | 全库单日行数最大跳变就是这一天（D1 的副作用） | 跨 09-10 的回测/折要显式说明前后 universe 不同 |
+| D3 | **停牌股表现为"缺行"**，不是抓漏 | 09-21 有 12 只无 bar，实时行情全为 `vol=0`（中金/东兴/信达/广汽/园林/华之杰/*ST清越/奥克/奥联/*ST元道/*ST萃华/*ST康佳A）；09-21 vs 09-18 只差 4 只（出 300082/300585 停牌，入 600301/600825 复牌），独立源 K 线逐日一致 | 停牌期不写行、复牌只写当天、**不回填**；`exits` 用 `max_suspend_sessions=5` 兜长期停牌 |
+| D4 | 预检告警 `cn_ohlcv_rows_below_threshold` | = universe 代码集里有窗口内行数 <120 的代码（D1 的指数 + D3 的停牌 + 次新），不阻塞（`backtest_ready=true`） | 建议拆成具名原因（P1_19 §3） |
+| D5 | **自动化停摆**：`launchctl print gui/501/com.quant.cn-pipeline` 返回 `Could not find service`；09-18 的 `features` 跑到 96%（52 分钟）被杀、没写 `production.done`，09-19/20 周末、09-21 无触发 | `launchd.out.log` 最后一行停在 09-18 20:53；机器自 09-09 连续运行 12 天（排除重启） | `bash deploy/daily-cn-pipeline/macos/install.sh` 重装加载，`RunAtLoad` 会自动补跑当天；加固项见 P1_19 §4.1/§4.2 |
+
+**每日收盘后最少核对三条**（都在 `output/pipeline_reports/daily/<date>/`）：
+
+```bash
+grep -c "stage=.*FAILED"  output/pipeline_reports/daily/$(date +%Y-%m-%d)/run.log   # 期望 0
+ls output/pipeline_reports/daily/$(date +%Y-%m-%d)/production.done                    # 期望存在
+launchctl list | grep com.quant.cn-pipeline                                           # 期望进程仍在
+```
+
 ## 验证与回滚约定
 
 涉及策略/模型改动的任务，产物统一放在 `output/verification/<topic>_<date>/`：
@@ -749,16 +947,19 @@ VERIFICATION.txt  命令 / 输入 / 输出 / 退出码 / 回滚后行为
 
 ## 选股入口：用 `preselection` + `pk` 取代 `selection`
 
-`[stages] selection = false`，配置里已默认关闭一步式 `selection`；每日生产固定两步：
+`[stages] selection = false`，配置里已默认关闭一步式 `selection`；每日生产固定三步：
 
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage preselection   # 阶段一：模型 + 各 sleeve 候选池
 uv run python scripts/run_cn_pipeline.py --stage pk             # 阶段二：组合与风控
+uv run python scripts/run_cn_pipeline.py --stage exits          # 阶段三：持仓卖出/风控规则
 uv run python scripts/render_two_stage_report.py                # 两阶段报告（Markdown + JSON）
 ```
 
 - `preselection` 产出 `output/results_cn/cn_ensemble_preselected.csv`（模型 Top-8 + 各 sleeve 候选/强制项）；
+  它遵守 `rebalance_stride_days`，当天必须换池时加 `--force-rebalance`。
 - `pk` 在冻结的候选池上做风险预算与定仓，产出 `cn_ensemble_selected.csv` + `cn_ensemble_portfolio_manifest.json`；
+- `exits` 独立读 `config/holdings_cn.csv` 逐日给出退出计划（含 ATR 缩放止损），不受选股 stride 影响；
 - 两阶段报告默认写到 `output/results_cn/two_stage_report_<date>.md/json`
   （回放时用 `--replay-dir output/results_cn/replay_<date>_<profile>`）。
 - 历史对比/回放一律用 `--trade-date`（输出隔离到 `replay_<date>[_<profile>]/`），不要覆盖生产文件。
@@ -774,15 +975,17 @@ bash scripts/run_daily_production.sh --skip-retrain   # 跳过 features/clean_pa
 
 行为：① 本地时间早于 `DAILY_EARLIEST_HOUR`（默认 16）直接退出；② 当天成功过就跳过
 （标记 `output/pipeline_reports/daily/<date>/production.done`）；③ 阶段顺序
-`daily_bars → regime → features → clean_panel → model_scores → preselection → pk → exits →
-paper_account → paper_outcomes`；④ 每阶段独立日志 + 失败即停 + 末尾生成两阶段报告。
+`daily_bars → moneyflow → regime → features → clean_panel → model_scores → preselection → pk →
+exits → paper_account → paper_outcomes`；④ 每阶段独立日志 + 失败即停 + 末尾生成两阶段报告；
+⑤ 运行前先加载 `config/scheduler_env.sh` 与 `config/notify.env`，并跑一遍
+`DAILY_PREFLIGHT_CMD`（默认 3 个回归测试文件）把代码级错误挡在重活之前。
 
 ## 调度方式（三选一）
 
 | 环境 | 方式 | 触发 | 说明 |
 |---|---|---|---|
-| **macOS 本地** | launchd（`deploy/daily-cn-pipeline/macos/`） | 每天 16:10 / 18:30 / 21:00 + 开机 `RunAtLoad` | `bash install.sh` 一键安装；能用到 Apple GPU（MPS） |
-| **Linux 云主机** | systemd timer（`deploy/daily-cn-pipeline/linux/`）或 cron | `Mon..Fri 16:10/18:30/21:00` + `Persistent=true`（开机补跑） | 阿里云/腾讯云 ECS；`TZ=Asia/Shanghai` 必设 |
+| **macOS 本地** | launchd（`deploy/daily-cn-pipeline/macos/`） | 每天 19:30 / 20:30 / 22:00 + 开机 `RunAtLoad` | `bash install.sh` 一键安装；能用到 Apple GPU（MPS） |
+| **Linux 云主机** | systemd timer（`deploy/daily-cn-pipeline/linux/`）或 cron | `Mon..Fri 19:30/20:30/22:00`（北京时间）+ `Persistent=true`（开机补跑） | 阿里云/腾讯云 ECS；`TZ=Asia/Shanghai` 必设 |
 | **容器** | `deploy/daily-cn-pipeline/docker/` | 宿主 cron / 云定时任务调用 `docker compose run` | 环境可复现；**CPU 推理** |
 
 容器化与硬件加速（macOS Docker vs Linux Docker）：
@@ -843,11 +1046,24 @@ launchctl print gui/$(id -u)/com.quant.cn-pipeline  # 查看状态
 launchctl kickstart -k gui/$(id -u)/com.quant.cn-pipeline   # 立即手动跑一次
 ```
 
-- 计划：每天 **16:10 / 18:30 / 21:00** + `RunAtLoad`（开机补跑）；幂等标记
+- 计划：每天 **19:30 / 20:30 / 22:00** + `RunAtLoad`（开机补跑）；`DAILY_EARLIEST_HOUR=16` 保证
+  16:00 之前触发只会直接退出（收盘数据未就绪）。幂等标记
   `output/pipeline_reports/daily/<date>/production.done`（当天成功过就跳过，`--force` 重跑）。
 - 日志：`output/pipeline_reports/daily/<date>/run.log` 与各阶段 `*.log`；
   launchd 的 stdout/stderr 在 `output/pipeline_reports/daily/launchd.{out,err}.log`。
 - 若当天要手工补跑：`bash scripts/run_daily_production.sh --force`。
+- **健康自检（2026-09-21 事故后新增）**：agent 可能处于未加载状态（`launchctl print
+  gui/$(id -u)/com.quant.cn-pipeline` 报 `Could not find service`），此时三种触发全部失效且
+  **不会有任何告警**（告警脚本本身也是被它调起来的）。每周（或每次看结果前）跑一次：
+
+  ```bash
+  launchctl list | grep com.quant.cn-pipeline                      # 没输出 = agent 未加载
+  launchctl print gui/$(id -u)/com.quant.cn-pipeline | grep state   # 期望 state = running
+  bash deploy/daily-cn-pipeline/macos/install.sh                    # 重装并立即补跑（RunAtLoad）
+  ```
+
+  另外，`features` 这类长阶段被杀不会触发失败告警（阶段没返回非 0），只表现为"当天没有
+  `production.done`"。所以当天没收到选股通知时，先看 `run.log` 最后一行停在哪。
 
 ## 微信群 / 企业微信通知（2026-09-17）
 

@@ -47,9 +47,14 @@ class ExitRules:
     lot_size: int = 100  # A 股按手交易，减仓数量向下取整到手
     # 可选的收益型止损（本样本中未获得支持，默认关闭）
     stop_loss_pct: float = 0.0
+    # ATR 缩放止损（P1.17 §0.19：触发率 ~19% 即可把 5 日 std 压 28%，优于固定百分比）
+    stop_loss_atr_multiple: float = 0.0
+    stop_loss_min_pct: float = 0.04
+    stop_loss_max_pct: float = 0.10
     # 记录用
     notes: tuple = field(default_factory=lambda: (
         "stop_loss_pct 默认 0：样本期 20 日跌幅 > 15% 的标的未来 20 日超额 +1.6~2.2%，止损会卖在最优点",
+        "stop_loss_atr_multiple 默认 0：开启后按 k×ATR14（夹取 min/max）设止损，15 周 A/B 里以 19% 触发率压住尾部",
         "take_profit 的负期望在 2026 年已衰减到接近 0，减仓比例保持保守",
     ))
 
@@ -113,6 +118,15 @@ def evaluate_exit_plan(
         model_pct = _f(row.get("model_percentile"))
         suspend = _f(row.get("sessions_since_last_bar"), 0.0)
         loss = _f(pnl_pct[index] if index < len(pnl_pct) else np.nan)
+        atr_pct = _f(row.get("atr_pct_14"))
+        effective_stop = abs(float(cfg.stop_loss_pct or 0.0))
+        stop_basis = "fixed" if effective_stop > 0 else ""
+        if float(cfg.stop_loss_atr_multiple or 0.0) > 0 and np.isfinite(atr_pct) and atr_pct > 0:
+            effective_stop = float(np.clip(
+                float(cfg.stop_loss_atr_multiple) * atr_pct,
+                float(cfg.stop_loss_min_pct or 0.0), float(cfg.stop_loss_max_pct or 1.0),
+            ))
+            stop_basis = f"ATR×{cfg.stop_loss_atr_multiple:g}"
 
         reasons = []
         action = "HOLD"
@@ -131,8 +145,8 @@ def evaluate_exit_plan(
             action, reasons = "EXIT", reasons + [f"模型排名跌出下限 {model_pct:.0f} < {cfg.min_model_percentile:.0f} 分位"]
 
         # 2) optional return-based stop (off by default)
-        if action == "HOLD" and cfg.stop_loss_pct > 0 and np.isfinite(loss) and loss <= -abs(cfg.stop_loss_pct):
-            action, reasons = "EXIT", reasons + [f"触发止损 {loss:.1%}"]
+        if action == "HOLD" and effective_stop > 0 and np.isfinite(loss) and loss <= -effective_stop:
+            action, reasons = "EXIT", reasons + [f"触发止损（{stop_basis} = {effective_stop:.1%}）{loss:.1%}"]
 
         # 3) profit taking (reduce, do not exit)
         if action == "HOLD":
@@ -172,6 +186,8 @@ def evaluate_exit_plan(
             "weight": round(float(weight), 4) if np.isfinite(weight) else np.nan,
             "invested_weight": round(float(invested_weight), 4) if np.isfinite(invested_weight) else np.nan,
             "pnl_pct": round(float(loss), 4) if np.isfinite(loss) else np.nan,
+            "atr_pct_14": round(float(atr_pct), 4) if np.isfinite(atr_pct) else np.nan,
+            "effective_stop": round(float(effective_stop), 4) if effective_stop > 0 else 0.0,
             "action": action,
             "reduce_ratio": round(float(reduce_ratio), 4),
             "suggested_shares_to_sell": _sell_quantity(action, float(shares.iloc[index]), float(reduce_ratio), cfg.lot_size),
@@ -215,7 +231,20 @@ def render_exit_plan_markdown(plan: pd.DataFrame, *, as_of=None) -> str:
     lines.append(f"- 持仓市值：{plan.attrs.get('total_market_value', 0):,.0f} 元 ｜ 现金：{plan.attrs.get('cash', 0):,.0f} 元 ｜ 总资产：{plan.attrs.get('total_equity', 0):,.0f} 元")
     lines.append("- 规则：风险型（ST/流动性/停牌/模型排名下限）+ 兑现型（贴上沿/20日大涨 → 减仓）+ 结构型（单只权重上限）")
     lines.append(f"- 委托单位：{int(rules.get('lot_size', 100))} 股/手，减仓数量按手向下取整（卖出也需为整手）")
-    lines.append(f"- 收益型止损：{'关闭（样本期该规则无效）' if not rules.get('stop_loss_pct') else rules.get('stop_loss_pct')}")
+    atr_multiple = float(rules.get("stop_loss_atr_multiple") or 0.0)
+    fixed_stop = rules.get("stop_loss_pct")
+    if atr_multiple > 0:
+        # The ATR stop is the live rule; the fixed-percentage one is kept off.
+        # Reporting only ``stop_loss_pct`` made a plan whose names were armed with
+        # ``effective_stop`` look like it had no return-based stop at all.
+        lines.append(
+            f"- 收益型止损：固定百分比关闭（样本期该规则无效）；"
+            f"ATR 缩放开启 = {atr_multiple:g} × ATR14%，夹取 "
+            f"{float(rules.get('stop_loss_min_pct') or 0.0):.1%}~{float(rules.get('stop_loss_max_pct') or 1.0):.1%}"
+            "，逐票生效止损位见 `effective_stop` 列"
+        )
+    else:
+        lines.append(f"- 收益型止损：{'关闭（样本期该规则无效）' if not fixed_stop else fixed_stop}")
     lines.append("")
     lines.append("| 代码 | 名称 | 持股 | 成本 | 现价 | 市值 | 权重(总资产) | 权重(持仓内) | 盈亏 | 模型分位 | 20日 | 回撤60日 | 通道位置 | 操作 | 建议卖出股数 | 理由 |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|")

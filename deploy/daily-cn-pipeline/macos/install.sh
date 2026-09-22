@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 安装/更新 macOS launchd 定时任务（每天 16:10 / 18:30 / 21:00，开机补跑）
+# 安装/更新 macOS launchd 定时任务（每天 19:30 / 20:30 / 22:00，开机补跑）
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"

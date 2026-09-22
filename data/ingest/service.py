@@ -212,7 +212,7 @@ def _cn_incremental_start_date(base_start, latest_trade_date, frequency):
     return effective_start.strftime("%Y-%m-%d")
 
 
-def filter_selection_universe(codes, *, names=None, median_amount=None, settings=None):
+def filter_selection_universe(codes, *, names=None, median_amount=None, volume_breakout=None, flow_z=None, settings=None):
     """Return the codes an ST / liquidity filter removes, for one decision date.
 
     Split out of the service so the rule can be unit-tested without a warehouse:
@@ -221,7 +221,7 @@ def filter_selection_universe(codes, *, names=None, median_amount=None, settings
     """
     settings = dict(settings or {})
     audit = {"enabled": bool(settings.get("enabled")), "st_dropped": [], "illiquid_dropped": [],
-             "missing_amount": []}
+             "missing_amount": [], "volume_breakout_dropped": [], "volume_breakout_unconfirmed": []}
     dropped: list[str] = []
     if not audit["enabled"]:
         return dropped, audit
@@ -244,11 +244,46 @@ def filter_selection_universe(codes, *, names=None, median_amount=None, settings
                 continue
             if float(value) < float(floor):
                 audit["illiquid_dropped"].append(code)
-    dropped = list(dict.fromkeys([*audit["st_dropped"], *audit["illiquid_dropped"]]))
+    if bool(settings.get("exclude_volume_breakout", False)) and volume_breakout:
+        # P1.17 section 0.14: "放量上涨" (5-day up move on >1.5x volume) is the worst
+        # forward-return bucket in this panel (20-day excess -0.63% all / -0.75%
+        # startup, with the highest dispersion).
+        ratio_cap = float(settings.get("volume_breakout_ratio", 1.5))
+        for code in ordered:
+            if code in audit["st_dropped"] or code in audit["illiquid_dropped"]:
+                continue
+            values = volume_breakout.get(code)
+            if not values:
+                continue
+            change, ratio = values
+            if change is None or ratio is None:
+                continue
+            if float(change) <= 0 or float(ratio) <= ratio_cap:
+                continue
+            # Flow confirmation: a volume spike escorted by strong net inflow is
+            # the "informed" variant (Llorente et al. 2002) and is kept; the
+            # unconfirmed spike is the one that historically reverses.
+            confirm_min = settings.get("volume_breakout_flow_z_min")
+            if confirm_min is None:
+                audit["volume_breakout_dropped"].append(code)
+                continue
+            value = None if flow_z is None else flow_z.get(code)
+            if value is None or not np.isfinite(value):
+                if str(settings.get("volume_breakout_missing_flow", "drop")).strip().lower() == "keep":
+                    continue
+                audit["volume_breakout_unconfirmed"].append(code)
+                audit["volume_breakout_dropped"].append(code)
+                continue
+            if float(value) < float(confirm_min):
+                audit["volume_breakout_unconfirmed"].append(code)
+                audit["volume_breakout_dropped"].append(code)
+    dropped = list(dict.fromkeys([*audit["st_dropped"], *audit["illiquid_dropped"], *audit["volume_breakout_dropped"]]))
     audit.update({
         "dropped": len(dropped),
         "st_dropped_count": len(audit["st_dropped"]),
         "illiquid_dropped_count": len(audit["illiquid_dropped"]),
+        "volume_breakout_dropped_count": len(audit["volume_breakout_dropped"]),
+        "volume_breakout_ratio": settings.get("volume_breakout_ratio", 1.5) if settings.get("exclude_volume_breakout") else None,
         "min_median_amount_20d": None if floor is None else float(floor),
     })
     return dropped, audit
@@ -755,6 +790,7 @@ def _repair_unfillable_targets(
     forced_max_weight=None,
     require_fillable_lot: bool = True,
     drop_unfillable_forced: bool = True,
+    weight_caps=None,
     max_rounds: int | None = None,
 ):
     """Optimize, then drop names whose one lot does not fit their own target.
@@ -835,7 +871,7 @@ def _repair_unfillable_targets(
         optimized, manifest = optimize(
             pool, constraints=constraints, initial_capital=float(initial_capital),
             forced_codes=forced_codes, forced_min_weight=forced_min_weight,
-            forced_max_weight=forced_max_weight,
+            forced_max_weight=forced_max_weight, weight_caps=weight_caps,
         )
         optimized = _attach_lot_columns(optimized, capital=initial_capital, lot_size=lot_size)
         unfillable = optimized[(optimized["target_weight"] > 0) & (~optimized["lot_fillable"])]
@@ -7823,8 +7859,34 @@ class MarketDataService:
                 bars = bars.copy()
                 bars["amount"] = pd.to_numeric(bars["amount"], errors="coerce")
                 median_amount = bars.groupby(bars["stock_code"].astype(str))["amount"].median().to_dict()
+        volume_breakout = None
+        if bool(settings.get("exclude_volume_breakout", False)):
+            day = pd.Timestamp(as_of).normalize() if as_of is not None and not pd.isna(pd.Timestamp(as_of)) else pd.Timestamp(datetime.now().date()).normalize()
+            try:
+                features, _ = self.read_clean_feature_panel(
+                    start_date=day.strftime("%Y-%m-%d"), end_date=day.strftime("%Y-%m-%d"),
+                    feature_columns=["pv_return_5d", "pv_volume_ratio_20d", "moneyflow_net_z_5d"],
+                )
+            except Exception:
+                features = pd.DataFrame()
+            if features is not None and not features.empty:
+                change = pd.to_numeric(features.get("pv_return_5d_clean"), errors="coerce")
+                ratio = pd.to_numeric(features.get("pv_volume_ratio_20d_clean"), errors="coerce")
+                flow_series = pd.to_numeric(features.get("moneyflow_net_z_5d_clean"), errors="coerce")
+                volume_breakout = {
+                    str(code): (
+                        None if pd.isna(change.iloc[index]) else float(change.iloc[index]),
+                        None if pd.isna(ratio.iloc[index]) else float(ratio.iloc[index]),
+                    )
+                    for index, code in enumerate(features["stock_code"].astype(str))
+                }
+                flow_by_code = {
+                    str(code): (None if pd.isna(flow_series.iloc[index]) else float(flow_series.iloc[index]))
+                    for index, code in enumerate(features["stock_code"].astype(str))
+                }
         dropped, audit = filter_selection_universe(
-            ordered, names=names, median_amount=median_amount, settings=settings,
+            ordered, names=names, median_amount=median_amount, volume_breakout=volume_breakout,
+            flow_z=locals().get("flow_by_code"), settings=settings,
         )
         return set(dropped), audit
 
@@ -7861,6 +7923,19 @@ class MarketDataService:
             entry_delay=1,
         )
         labels = labels.loc[labels["trade_date"] == pd.Timestamp(session)].copy()
+        if bool(settings.get("second_tier_enabled", False)):
+            context, _ = self.read_clean_feature_panel(
+                start_date=pd.Timestamp(session).strftime("%Y-%m-%d"),
+                end_date=pd.Timestamp(session).strftime("%Y-%m-%d"),
+                feature_columns=["pv_volume_ratio_20d", "moneyflow_net_z_5d"],
+            )
+            if context is not None and not context.empty:
+                context = context.rename(columns={
+                    "pv_volume_ratio_20d_clean": "volume_ratio",
+                    "moneyflow_net_z_5d_clean": "flow_z",
+                })
+                keep = [c for c in ["stock_code", "volume_ratio", "flow_z"] if c in context.columns]
+                labels = labels.merge(context[keep], on="stock_code", how="left")
         gate, mode = _startup_gate_columns(labels, settings)
         gate["startup_gate_mode"] = mode
         gate["startup_gate_session"] = str(pd.Timestamp(session).date())
@@ -8046,6 +8121,18 @@ class MarketDataService:
                     "universe_after": universe_after_gate,
                     "eligible_source": "strategy_labels",
                 }
+                # Second-tier bookkeeping runs after the summary exists, otherwise
+                # enabling the tier raises a NameError (which silently left pk
+                # consuming a stale preselection file).
+                if gate_settings.get("second_tier_enabled") and "selection_tier" in gate.columns:
+                    tier_cap = float(gate_settings.get("second_tier_max_weight", 0.05))
+                    second_tier_caps = {
+                        str(code): tier_cap
+                        for code in gate.loc[gate["selection_tier"].astype(str).eq("second"), "stock_code"].astype(str)
+                    }
+                    startup_gate_summary["second_tier_codes"] = sorted(second_tier_caps)
+                    startup_gate_summary["second_tier_max_weight"] = tier_cap
+                    startup_gate_summary["second_tier_count"] = len(second_tier_caps)
                 if not universe_after_gate:
                     raise ValueError("startup gate removed every scored name; relax the caps or disable it")
             universe_filter_settings = dict(universe_filter or {})
@@ -8649,6 +8736,23 @@ class MarketDataService:
                                    "obs": shrinkage_covariance.get("obs")}
             else:
                 covariance_used = None
+            # Flow tilt needs the flow column on the candidate frame; the model
+            # score file does not carry it, so join it from the clean panel for
+            # the decision date only when a tilt is configured.
+            flow_column_name = str(getattr(cfg, "flow_column", "") or "")
+            if flow_column_name and float(getattr(cfg, "flow_tilt_strength", 0.0) or 0.0) != 0.0 and flow_column_name not in selected.columns:
+                tilt_day = pd.Timestamp(selection_date).normalize() if selection_date is not None else pd.Timestamp(datetime.now().date()).normalize()
+                try:
+                    tilt_ctx, _ = self.read_clean_feature_panel(
+                        start_date=tilt_day.strftime("%Y-%m-%d"), end_date=tilt_day.strftime("%Y-%m-%d"),
+                        feature_columns=["moneyflow_net_z_5d"],
+                    )
+                except Exception:
+                    tilt_ctx = pd.DataFrame()
+                if tilt_ctx is not None and not tilt_ctx.empty and flow_column_name in tilt_ctx.columns:
+                    selected = selected.merge(
+                        tilt_ctx[["stock_code", flow_column_name]], on="stock_code", how="left",
+                    )
             selected, portfolio_manifest, lot_summary = _repair_unfillable_targets(
                 optimize_long_only, selected.copy(), constraints=cfg,
                 initial_capital=float(initial_capital), lot_size=lot_size,
@@ -8709,6 +8813,12 @@ class MarketDataService:
             "regime_trade_date": regime_trade_date, "model_weights": model_weights or {},
             "regime_budget": regime_budget, "strategy_id": regime_strategy_id, "portfolio": portfolio_manifest,
             "signals": signal_summary,
+            # The gate/filter audit decides the investable universe, so it is part
+            # of the run's evidence, not an internal detail: without these keys the
+            # pipeline report cannot show whether [selection.startup_gate] or
+            # [selection.universe_filter] removed anything on this decision date.
+            "startup_gate": startup_gate_summary,
+            "universe_filter": universe_filter_summary,
             "affordability": affordability_summary,
             "rebalance_stride_days": stride,
             "lot_execution": lot_summary if str(portfolio_mode).lower() == "mean_variance_cost_aware" else None,
@@ -8804,6 +8914,11 @@ class MarketDataService:
                 "median_amount_20": float(g["amount"].tail(20).median()) if g["amount"].notna().any() else np.nan,
                 "volume_ratio_20": float(g["volume"].iloc[-1] / g["volume"].tail(20).mean()) if g["volume"].tail(20).mean() else np.nan,
                 "sessions_since_last_bar": after,
+                "atr_pct_14": (
+                    float(((g["high"] - g["low"]).tail(14).mean()) / close.iloc[-1])
+                    if "high" in g.columns and "low" in g.columns and pd.notna(close.iloc[-1]) and close.iloc[-1] > 0
+                    else np.nan
+                ),
                 "last_bar_date": pd.Timestamp(last_date).strftime("%Y-%m-%d"),
             })
         state = pd.DataFrame(states)

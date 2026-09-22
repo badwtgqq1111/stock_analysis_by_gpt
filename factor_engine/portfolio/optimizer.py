@@ -29,6 +29,9 @@ class PortfolioConstraints:
     # a forced (signal-override) floor must be earned by the score
     forced_floor_score_scaling: bool = False
     forced_floor_max_weight: float | None = None
+    # flow confirmation: tilt the raw weights by a flow z-score column
+    flow_tilt_strength: float = 0.0
+    flow_column: str = "moneyflow_net_z_5d_clean"
     # Risk control: annualised portfolio volatility ceiling and the largest
     # share of total portfolio variance one name may carry.
     target_volatility: float | None = None
@@ -83,6 +86,7 @@ def optimize_long_only(
     forced_codes: list[str] | None = None,
     forced_min_weight: float | dict | None = 0.0,
     forced_max_weight: float | dict | None = None,
+    weight_caps: dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Return target weights under explicit long-only, industry and capacity limits.
 
@@ -175,6 +179,18 @@ def optimize_long_only(
             alpha / (1.0 + float(cfg.risk_aversion) * risk + float(cfg.cost_penalty) * cost),
             0.0,
         )
+    flow_tilt_report = None
+    if float(getattr(cfg, "flow_tilt_strength", 0.0) or 0.0) != 0.0:
+        flow_column = str(getattr(cfg, "flow_column", "") or "")
+        if flow_column and flow_column in frame.columns:
+            flow_values = pd.to_numeric(frame[flow_column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            tilt = np.clip(1.0 + float(cfg.flow_tilt_strength) * np.tanh(flow_values), 0.4, 1.6)
+            raw = np.where(active, raw * tilt, 0.0)
+            flow_tilt_report = {
+                "column": flow_column, "strength": float(cfg.flow_tilt_strength),
+                "tilt_min": float(tilt.min()), "tilt_max": float(tilt.max()),
+                "coverage": float(pd.to_numeric(frame[flow_column], errors="coerce").notna().mean()),
+            }
     raw = raw / max(float(raw.sum()), 1e-12) * float(cfg.gross_exposure)
     target = np.minimum(raw, float(cfg.max_weight))
     tradable = frame.get("tradable_flag", pd.Series(True, index=frame.index)).fillna(True).astype(bool).to_numpy()
@@ -225,6 +241,32 @@ def optimize_long_only(
         )
     if floor_scaling_report:
         forced_diagnostics["floor_score_scaling"] = floor_scaling_report
+    cap_report = None
+    if weight_caps:
+        caps = {str(code): float(value) for code, value in weight_caps.items() if value is not None}
+        if caps:
+            gross_before = float(target.sum())
+            capped = target.copy()
+            hit = []
+            for index, code in enumerate(codes.astype(str)):
+                cap = caps.get(code)
+                if cap is not None and capped[index] > cap:
+                    capped[index] = cap
+                    hit.append(code)
+            # `_renormalize_capped` only scales down, so the budget freed by a cap
+            # must be handed back explicitly: redistribute proportionally to the
+            # uncapped active names, respecting the per-name ceiling.
+            freed = gross_before - float(capped.sum())
+            if freed > 1e-12:
+                eligible = active & ~np.isin(codes.astype(str), list(caps))
+                base = np.where(eligible, capped, 0.0)
+                if base.sum() > 0:
+                    room = np.where(eligible, np.maximum(0.0, float(cfg.max_weight) - capped), 0.0)
+                    add = base / base.sum() * freed
+                    capped = capped + np.minimum(add, room)
+            target = _renormalize_capped(capped, float(cfg.gross_exposure), float(cfg.max_weight))
+            cap_report = {"capped_codes": sorted(hit), "cap_count": len(caps),
+                          "gross_before": gross_before, "gross_after": float(target.sum())}
     frame["current_weight"] = current
     frame["target_weight"] = target
     target, risk_control = _apply_risk_control(frame, target, cfg)
@@ -238,6 +280,8 @@ def optimize_long_only(
         "candidate_count": int(len(frame)), "selected_count": int((target > 0).sum()),
         "max_holdings": int(cfg.max_holdings) if cfg.max_holdings is not None else None,
         "weighting": str(cfg.weighting),
+        "flow_tilt": flow_tilt_report,
+        "weight_caps": cap_report,
         "forced_codes": sorted(str(frame["stock_code"].iloc[index]) for index in forced_index),
         "forced_min_weight": forced_min_weight if isinstance(forced_min_weight, dict) else float(forced_min_weight or 0.0),
         "forced_max_weight": forced_max_weight if isinstance(forced_max_weight, dict) else forced_max_weight,

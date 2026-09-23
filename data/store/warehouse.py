@@ -33,6 +33,7 @@ from data.model import (
     VALUATION_SNAPSHOT_FIELDS,
 )
 import os
+import warnings
 
 from data.store.parquet_store import ParquetDataStore
 
@@ -172,6 +173,7 @@ class MarketDataWarehouse:
         """
         frame = pd.DataFrame()
         fallback = pd.DataFrame()
+        errors: list[str] = []
         stores = []
         if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
             stores.append(self.clickhouse_store)
@@ -189,6 +191,7 @@ class MarketDataWarehouse:
                 if store is self.clickhouse_store:
                     self._clickhouse_disabled_reason = str(exc)
                 candidate = pd.DataFrame(columns=columns or STOCK_INFO_FIELDS)
+                errors.append(f"{type(store).__name__}: {exc}")
             if candidate is None or candidate.empty:
                 continue
             if fallback.empty:
@@ -201,6 +204,14 @@ class MarketDataWarehouse:
                 break
             frame = fallback
         if frame is None or frame.empty:
+            if errors:
+                # Never let a broken store look like "this market has no names":
+                # the ST exclusion reads this frame and either fails open (ST
+                # names pass) or, with drop_missing_name, wipes the universe.
+                warnings.warn(
+                    "stock-info registry read returned no rows; store errors: " + " | ".join(errors),
+                    RuntimeWarning, stacklevel=2,
+                )
             return pd.DataFrame(columns=columns or STOCK_INFO_FIELDS)
         for column in STOCK_INFO_FIELDS:
             if column not in frame.columns:

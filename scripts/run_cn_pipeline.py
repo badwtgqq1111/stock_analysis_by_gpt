@@ -86,6 +86,29 @@ def replay_dir(layer: dict, export_default: str, as_of_date, profile: str | None
         suffix = f"{suffix}_{profile}"
     return f"{output_dir}/replay_{suffix}"
 
+
+def write_selection_config_snapshot(layer: dict, *, output_dir: str, stage: str,
+                                    config_path: Path, trade_date: str | None, profile: str | None) -> str:
+    """Persist the effective selection parameters beside each result.
+
+    The snapshot is intentionally JSON so later reviews can reproduce the exact
+    preselection/PK inputs after TOML defaults or account profiles change.
+    """
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    date_tag = str(trade_date or layer.get("trade_date") or "latest").replace("-", "")
+    path = destination / f"cn_ensemble_{stage}_config_{date_tag}.json"
+    payload = {
+        "stage": stage,
+        "config_path": str(config_path),
+        "trade_date": trade_date,
+        "profile": profile,
+        "effective_selection_config": layer,
+        "snapshot_created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return str(path)
+
 def run_stage(name: str, config: dict, service: MarketDataService, *, force_rebalance: bool = False,
               as_of_date: str | None = None, profile: str | None = None) -> dict:
     """Execute one configured stage in-process."""
@@ -526,6 +549,10 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         output_dir = layer.get("output_dir", p["export_csv"])
         if as_of_date:
             output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
+        snapshot_path = write_selection_config_snapshot(
+            layer, output_dir=output_dir, stage="selection", config_path=Path(config.get("_config_path", DEFAULT_CONFIG)),
+            trade_date=as_of_date, profile=profile,
+        )
         return service.select_persisted_model_scores(
             model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
             output_dir=output_dir,
@@ -547,6 +574,10 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         output_dir = layer.get("output_dir", p["export_csv"])
         if as_of_date:
             output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
+        snapshot_path = write_selection_config_snapshot(
+            layer, output_dir=output_dir, stage="preselection", config_path=Path(config.get("_config_path", DEFAULT_CONFIG)),
+            trade_date=as_of_date, profile=profile,
+        )
         return service.select_persisted_model_scores(
             model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
             output_dir=output_dir,
@@ -571,6 +602,10 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         output_dir = layer.get("output_dir", p["export_csv"])
         if as_of_date:
             output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
+        snapshot_path = write_selection_config_snapshot(
+            layer, output_dir=output_dir, stage="pk", config_path=Path(config.get("_config_path", DEFAULT_CONFIG)),
+            trade_date=as_of_date, profile=profile,
+        )
         preselected_path = layer.get("preselection_path", "output/results_cn/cn_ensemble_preselected.csv")
         if as_of_date:
             preselected_path = f"{output_dir}/cn_ensemble_preselected.csv"
@@ -589,6 +624,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             rebalance_stride_days=1, force_rebalance=True, show_progress=True,
             candidate_path=str(Path(preselected_path).resolve()),
             as_of_date=as_of_date,
+            universe_filter=layer.get("universe_filter") or None,
         )
     return {}
 
@@ -680,9 +716,23 @@ def main() -> int:
                              "<selection.output_dir>/replay_<date>/")
     parser.add_argument("--profile", default=None,
                         help="Account profile from [selection.profiles.<name>] (capital, holdings, model slots, price cap)")
+    parser.add_argument("--gate-mode", default=None,
+                        choices=["eligibility", "score", "thresholds", "both"],
+                        help="Override [selection.startup_gate].mode for this run (A/B without editing the config)")
+    parser.add_argument("--gate-strength", type=float, default=None,
+                        help="Override [selection.startup_gate].score_strength for this run (score-mode tilt)")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue independent data stages after a stage failure")
     args = parser.parse_args()
     config = read_config(args.config if args.config.is_absolute() else ROOT / args.config)
+    config["_config_path"] = str((args.config if args.config.is_absolute() else ROOT / args.config).resolve())
+    if args.gate_mode or args.gate_strength is not None:
+        gate_layer = config.setdefault("selection", {}).setdefault("startup_gate", {})
+        if args.gate_mode:
+            gate_layer["mode"] = args.gate_mode
+        if args.gate_strength is not None:
+            gate_layer["score_strength"] = float(args.gate_strength)
+        print(f"[PIPELINE] startup_gate override: mode={gate_layer.get('mode')} "
+              f"score_strength={gate_layer.get('score_strength')}", flush=True)
     started = datetime.now().isoformat(timespec="seconds")
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
     stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]

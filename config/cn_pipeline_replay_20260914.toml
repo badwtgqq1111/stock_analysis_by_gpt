@@ -1,7 +1,7 @@
 [pipeline]
 market = "CN"
 start_date = "2014-01-01"
-end_date = ""
+end_date = "2026-09-14"
 adjust = "qfq"
 days = 365
 factor_set = "alpha_zoo_hk"
@@ -292,7 +292,7 @@ cleaning_version = "p0.2.v1"
 # Do not select from a partially materialized latest date. The scorer falls
 # back to the newest date that covers at least this share of the universe.
 min_cross_section_coverage = 0.95
-output_dir = "output/model_scores"
+output_dir = "output/model_scores_replay_20260914"
 lightgbm_model_path = "output/models/cn/lightgbm/alpha_zoo_hk/model.txt"
 lightgbm_manifest_path = "output/models/cn/lightgbm/alpha_zoo_hk/model_manifest.json"
 transformer_model_path = "output/models/cn/transformer/alpha_zoo_hk/model.pt"
@@ -303,7 +303,7 @@ cnn_manifest_path = ""
 cnn_device = "auto"
 
 [selection]
-model_scores_dir = "output/model_scores"
+model_scores_dir = "output/model_scores_replay_20260914"
 output_dir = "output/results_cn"
 model = "ensemble" # lightgbm, transformer, or ensemble
 top_n = 10
@@ -317,57 +317,20 @@ initial_capital = 45000.0
 #   Top-20 超额 4.3%/10.6%/11.4%/12.7%/11.6%/10.2%；0.70/0.30 为 IC 与 Top-20 的双优区。
 ensemble_weights = { lightgbm = 0.50, transformer = 0.50 }
 # 再平衡节奏：>1 时，距上次再平衡不足 N 个交易日就沿用上一版组合（每日仍跑 exits）。
-# 2026-09-23：改为 1 —— 之前 5 天节奏 + 自动化没带 --force-rebalance，导致新选出的票
-# 几天都不换（cn_ensemble_rebalance_state.json 里 trade_date 停在旧日期）。
-# 想恢复"每 5 个交易日才换一次"，把这里改回 5，并确认不想每日换股时脚本用
-# DAILY_FORCE_REBALANCE=0 运行（否则 --force-rebalance 会覆盖 stride）。
-rebalance_stride_days = 1
+rebalance_stride_days = 5
 
 # 可执行性约束：A 股按手交易，价格太高的小账户根本买不起一手。
 # 候选需满足 price * lot_size <= equity * budget_ratio（budget_ratio ≈ gross/持仓数）。
 # 启动资格门（P1.17 §0.8/§0.9）：在生产选股层把"已经涨上去"的候选挡在外面。
-# 本轮对照：取消距 120 日低点涨幅 <= 30% 限制，保留显式的 60 日涨幅及距 60 日高点阈值。
-# thresholds 模式只执行下面写明的上限；不设置 max_dist_from_120d_low 即不应用该项。
+# mode = "eligibility" 用 build_cn_strategy_labels 的 startup_price_eligible
+#        （dist_from_120d_low ∈ [0.05,0.30] 且 return_60d ≤ 0.35 且 dist_from_60d_high ≤ −0.05）；
+# mode = "thresholds"  只用下面写明的上限；
+# mode = "both"        两者都要求。判定使用决策日当天的可得数据。
 [selection.startup_gate]
-enabled = true
-# 门禁形态（P1.21）：
-#   eligibility  现行硬门禁（离 120 日低点落在 5%~30% 带内 + 60 日涨幅<=35% + 距 60 日高点<=-5%）
-#   score        连续打分制：不硬剔，只把同一信息变成对模型分的倾斜（硬护栏见下）
-#   thresholds   只按下面写明的上限裁剪；both 两者都要求
-# 59 个 OOS 决策日（2026-06-01~08-21，T+1 开盘买入、持有 20 个交易日的等权 6 只组合，
-# 相对可投池均值的超额）实测：
-#   eligibility 均值 +2.11% / 中位 +1.06% / 胜率 54%   （t=+1.02，不显著；优势集中在 6 月）
-#   score 0.20  -0.31% / +0.58% / 56%   |  score 0.15  -0.51% / +0.74% / 58%
-#   score 0.10  -0.65% / +0.69% / 56%   |  score 0.05  -1.45% / +0.50% / 54%
-#   thresholds  -4.59% / -1.91% / 42%   |  不过门禁    -4.47% / -2.21% / 41%
-# 两者均值差 2.4pp 但都不显著；score 的中位数与胜率更好、且不会因链路异常清空池子。
-# 2026-09-23 起默认切到 score（用户判断 + 中位数/胜率证据），eligibility 保留为 A/B 对照。
-mode = "score"
-score_strength = 0.20                       # 仅 score 模式使用：model_score += 100*strength*(tilt - mean(tilt))
-score_band_min_dist_from_120d_low = 0.05    # 启动带下沿：尚未启动不加分
-score_band_max_dist_from_120d_low = 0.30    # 启动带上沿：带内满分
-score_decay_max_dist_from_120d_low = 0.55   # 中段线性衰减到 0
-score_high_distance_floor = -0.05           # 距 60 日高点 -5% 起加分
-score_high_distance_span = 0.15             # 距高点 -20% 及以下满分
-score_volume_ratio_max = 1.2                # 放量不加分
-score_volume_ratio_span = 0.4               # 缩量到 0.8 倍及以下满分
-score_flow_z_reference = 1.0                # 资金流 z>=1 满分；缺数据记 0（中性，不剔除）
-score_weight_dist = 1.0
-score_weight_high = 0.6
-score_weight_volume = 0.4
-score_weight_flow = 0.6
-# 硬护栏：只拦极端离群（离 120 日低点 >100% 或 60 日涨幅 >60%）
-hard_max_dist_from_120d_low = 1.0
-hard_max_return_60d = 0.60
-# 兼容保留：eligibility/thresholds 模式与第二梯队仍可用（默认关，打分制已含其信息）
-second_tier_enabled = false
-second_tier_min_dist_from_120d_low = 0.30
-second_tier_max_dist_from_120d_low = 0.55
-second_tier_volume_ratio_max = 1.0
-second_tier_requires_flow = true
-second_tier_flow_z_min = 0.0
-second_tier_max_weight = 0.05
+enabled = false
+mode = "eligibility"
 lookback_days = 400
+max_dist_from_120d_low = 0.30
 max_return_60d = 0.35
 max_dist_from_60d_high = -0.05
 
@@ -379,14 +342,6 @@ enabled = true
 exclude_st = true
 min_median_amount_20d = 10000000.0
 liquidity_window_days = 40
-# P1.17 §0.18/§0.19：剔除"放量上涨"，但资金流确认（z5>=1）的保留；缺数据按剔除处理
-exclude_volume_breakout = true
-volume_breakout_ratio = 1.5
-volume_breakout_flow_z_min = 1.0
-volume_breakout_missing_flow = "keep"
-# 资金流覆盖不足时该规则整体降级为"保留"：2026-09-21/22 资金流特征整块失效时，
-# 旧的 "drop" 语义把 661 只（12.7%）放量上涨票全部盲剔，候选池直接空掉。
-volume_breakout_min_flow_coverage = 0.5
 
 [selection.affordability]
 enabled = true
@@ -552,9 +507,6 @@ vol_exponent = 0.25      # 波动只做轻微调整，让排名主导
 # 信号覆盖（override）的保底权重必须由分数支撑：floor × 归一化分数，并设硬上限。
 forced_floor_score_scaling = true
 forced_floor_max_weight = 0.05
-# 资金流 tilt（确认/降权，不设硬门禁）
-flow_tilt_strength = 0.25
-flow_column = "moneyflow_net_z_5d_clean"
 max_industry_weight = 0.30
 max_turnover = 0.50
 max_participation = 0.05
@@ -605,7 +557,7 @@ industry_block_blend = 0.0
 # 波动目标模式：cap = 只在天花板之上降杠杆；budget = 同时把没用掉的风险预算部署出去
 # （以 max_gross_exposure 与 max_weight 为硬上限）。因子协方差下 09-16 组合波动约 13.7%，
 # 距离 18% 还有约 24% 的额度。
-vol_target_mode = "cap"
+vol_target_mode = "budget"
 max_gross_exposure = 0.65
 # 风险平价目标：把优化权重按比例向"等风险贡献"混合（0=纯 alpha，1=纯风险平价）。
 risk_parity_blend = 0.35      # 组合年化波动上限：超了就整体降杠杆、留现金（不加杠杆）
@@ -676,11 +628,7 @@ take_profit_ret20 = 0.15
 take_profit_reduce_ratio = 0.34
 max_weight = 0.35
 lot_size = 100 # A 股按手交易；减仓数量向下取整到整手
-stop_loss_pct = 0.0 # 固定百分比止损：样本期无效，保持关闭
-# ATR 缩放止损（P1.17 §0.19）：k×ATR14，夹取 [4%, 10%]；15 周 A/B 以 19% 触发率把 5 日 std 压 28%
-stop_loss_atr_multiple = 2.5
-stop_loss_min_pct = 0.04
-stop_loss_max_pct = 0.10
+stop_loss_pct = 0.0 # 样本期该规则无效，默认关闭
 
 [paper_outcomes]
 selection_path = "output/results_cn/cn_ensemble_selected.csv"

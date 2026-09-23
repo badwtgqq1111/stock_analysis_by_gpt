@@ -985,12 +985,20 @@ def select_top_model_scores(
     model_weights: dict[str, float] | None = None,
     metadata: dict | None = None,
     as_of_date=None,
+    score_adjust: dict[str, float] | None = None,
+    score_adjust_strength: float = 0.0,
 ) -> pd.DataFrame:
     """Combine persisted percentile scores and return the Top-N for one date.
 
     ``as_of_date`` replays a historical decision date: the cross section used is
     the latest one common to every required model file that is not newer than
     the requested date.  Without it the newest common cross section is used.
+
+    ``score_adjust`` maps ``stock_code -> 0..1`` (the soft startup-gate tilt) and
+    ``score_adjust_strength`` scales it into (percentile) score points before the
+    Top-N cut: ``model_score + 100 * strength * (tilt - mean(tilt))``.  Demeaning
+    keeps the tilt centred, so turning it on cannot inflate the whole book, and a
+    missing entry is treated as neutral instead of dropping the name.
     """
     requested = str(model or "ensemble").strip().lower()
     valid = {
@@ -1034,6 +1042,16 @@ def select_top_model_scores(
     else:
         merged["ensemble_score"] = merged[score_columns].mean(axis=1)
     merged["model_score"] = merged[score_columns[0]] if requested != "ensemble" else merged["ensemble_score"]
+    merged["gate_tilt"] = np.nan
+    if score_adjust and float(score_adjust_strength) != 0.0:
+        tilt = (
+            merged["stock_code"].astype(str).map({str(k): v for k, v in score_adjust.items()})
+            .astype(float)
+        )
+        centred = tilt - tilt.mean(skipna=True)
+        merged["gate_tilt"] = centred
+        merged["model_score_pre_tilt"] = merged["model_score"]
+        merged["model_score"] = merged["model_score"] + 100.0 * float(score_adjust_strength) * centred.fillna(0.0)
     merged = merged.sort_values(["model_score", "stock_code"], ascending=[False, True]).reset_index(drop=True)
     merged["rank"] = np.arange(1, len(merged) + 1)
     selected = merged.head(max(1, int(top_n)))

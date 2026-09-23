@@ -619,6 +619,9 @@ class ClickHouseStore:
         self.user = user
         self.password = password
         self.database = database
+        # The HTTP interface rejects queries with a few thousand bound
+        # parameters ("Too many form fields"); bulk universe reads are split.
+        self.max_filter_values = 500
 
     def _connect(self):
         return get_client(
@@ -665,6 +668,38 @@ class ClickHouseStore:
 
     def read_frame(self, dataset_name, layer="clean", filters=None, columns=None,
                    order_by=None, range_filters=None):
+        """Read a frame, chunking oversized ``IN`` filters.
+
+        The HTTP interface answers "Too many form fields" once a parameter list
+        grows past a few thousand entries (bulk universe reads pass >5,000
+        ``stock_code`` values).  That error used to disable ClickHouse for the
+        rest of the process and silently push every later read onto the stale
+        Parquet mirror — on 2026-09-23 that turned the ST/name lookup into an
+        empty map and wiped the whole candidate pool.  Split the query instead
+        of failing it.
+        """
+        chunk_codes = self._oversized_filter_values(filters)
+        if chunk_codes is not None:
+            column, values = chunk_codes
+            chunk_size = max(1, int(getattr(self, "max_filter_values", 500)))
+            frames = []
+            for start in range(0, len(values), chunk_size):
+                part_filters = dict(filters or {})
+                part_filters[column] = values[start:start + chunk_size]
+                part = self.read_frame(
+                    dataset_name, layer=layer, filters=part_filters, columns=columns,
+                    order_by=order_by, range_filters=range_filters,
+                )
+                if part is not None and not part.empty:
+                    frames.append(part)
+            if not frames:
+                return pd.DataFrame(columns=columns or None)
+            merged = pd.concat(frames, ignore_index=True)
+            if order_by:
+                keys = [item.strip() for item in str(order_by).split(",") if item.strip()]
+                merged = merged.sort_values(keys, kind="stable")
+            return merged.reset_index(drop=True)
+
         if not self.dataset_exists(dataset_name, layer=layer):
             return pd.DataFrame()
 
@@ -714,6 +749,16 @@ class ClickHouseStore:
             return client.query_df(query, parameters=params)
         finally:
             client.close()
+
+    def _oversized_filter_values(self, filters):
+        """Return ``(column, values)`` for the first list filter that is too long."""
+        limit = max(1, int(getattr(self, "max_filter_values", 500)))
+        for column, value in (filters or {}).items():
+            if isinstance(value, (list, tuple, set)):
+                values = [item for item in value if item is not None]
+                if len(values) > limit:
+                    return column, list(values)
+        return None
 
     def scalar_query(self, dataset_name, expression, layer="clean", filters=None,
                      range_filters=None):

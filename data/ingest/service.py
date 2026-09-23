@@ -212,27 +212,42 @@ def _cn_incremental_start_date(base_start, latest_trade_date, frequency):
     return effective_start.strftime("%Y-%m-%d")
 
 
-def filter_selection_universe(codes, *, names=None, median_amount=None, volume_breakout=None, flow_z=None, settings=None):
+def filter_selection_universe(codes, *, names=None, median_amount=None, volume_breakout=None, flow_z=None,
+                              flow_coverage=None, settings=None):
     """Return the codes an ST / liquidity filter removes, for one decision date.
 
     Split out of the service so the rule can be unit-tested without a warehouse:
     ``names`` maps stock_code -> security name and ``median_amount`` maps
     stock_code -> median traded amount over the lookback window.
+
+    ``flow_coverage`` is the share of the scored cross-section that carries a
+    money-flow confirmation value.  The volume-breakout rule needs that value to
+    separate informed breakouts from the ones that reverse; when the feed is
+    broken the rule degrades to *keeping* the name (and says so in the audit)
+    instead of blind-dropping every volume-backed advance, which emptied the
+    candidate pool on 2026-09-22.
     """
     settings = dict(settings or {})
-    audit = {"enabled": bool(settings.get("enabled")), "st_dropped": [], "illiquid_dropped": [],
-             "missing_amount": [], "volume_breakout_dropped": [], "volume_breakout_unconfirmed": []}
+    audit = {"enabled": bool(settings.get("enabled")), "st_dropped": [], "missing_name": [], "illiquid_dropped": [],
+             "missing_amount": [], "volume_breakout_dropped": [], "volume_breakout_unconfirmed": [],
+             "volume_breakout_flow_coverage": None, "volume_breakout_missing_flow_kept": []}
     dropped: list[str] = []
     if not audit["enabled"]:
         return dropped, audit
     ordered = [str(code) for code in (codes or [])]
     if bool(settings.get("exclude_st", True)):
         pattern = re.compile(str(settings.get("st_pattern", r"(?:\*?ST|退)")))
-        if names:
-            for code in ordered:
-                name = str(names.get(code, "") or "")
-                if pattern.search(name):
-                    audit["st_dropped"].append(code)
+        for code in ordered:
+            name = str((names or {}).get(code, "") or "")
+            if not name:
+                if bool(settings.get("drop_missing_name", False)):
+                    audit["missing_name"].append(code)
+                continue
+            if pattern.search(name):
+                audit["st_dropped"].append(code)
+        if audit["missing_name"]:
+            # Missing reference metadata must not silently pass an ST exclusion.
+            audit["st_dropped"].extend(audit["missing_name"])
     floor = settings.get("min_median_amount_20d")
     if floor is not None and float(floor) > 0:
         for code in ordered:
@@ -249,6 +264,14 @@ def filter_selection_universe(codes, *, names=None, median_amount=None, volume_b
         # forward-return bucket in this panel (20-day excess -0.63% all / -0.75%
         # startup, with the highest dispersion).
         ratio_cap = float(settings.get("volume_breakout_ratio", 1.5))
+        coverage_floor = settings.get("volume_breakout_min_flow_coverage")
+        audit["volume_breakout_flow_coverage"] = None if flow_coverage is None else float(flow_coverage)
+        confirmation_usable = True
+        if coverage_floor is not None and flow_coverage is not None and float(flow_coverage) < float(coverage_floor):
+            # Degrade to keep: without a usable confirmation column the rule would
+            # delete the strongest names in the cross-section.
+            confirmation_usable = False
+            audit["volume_breakout_confirmation_skipped"] = True
         for code in ordered:
             if code in audit["st_dropped"] or code in audit["illiquid_dropped"]:
                 continue
@@ -259,6 +282,9 @@ def filter_selection_universe(codes, *, names=None, median_amount=None, volume_b
             if change is None or ratio is None:
                 continue
             if float(change) <= 0 or float(ratio) <= ratio_cap:
+                continue
+            if not confirmation_usable:
+                audit["volume_breakout_missing_flow_kept"].append(code)
                 continue
             # Flow confirmation: a volume spike escorted by strong net inflow is
             # the "informed" variant (Llorente et al. 2002) and is kept; the
@@ -293,6 +319,89 @@ def _startup_gate_columns(labels, settings):
     """Thin wrapper so callers can log which rule produced the gate."""
     gate = apply_startup_gate(labels, settings)
     return gate, str((settings or {}).get("mode", "eligibility") or "eligibility")
+
+
+MONEYFLOW_WINDOWS = (3, 5, 10, 20, 60)
+
+
+def rebuild_moneyflow_rolling_tail(frame, *, dates=None, sessions=90, windows=MONEYFLOW_WINDOWS):
+    """Recompute rolling money-flow features on the trailing window.
+
+    The daily fetch path feeds :func:`build_moneyflow_features` only the slice
+    it just downloaded (usually one trading day), so the appended dates land
+    with a one-row window: ``*_net_Nd`` collapses to the daily amount and every
+    ``*_net_z_Nd`` is NaN.  On 2026-09-21/22 that made the whole flow block
+    unusable (0% coverage), silently disabling the flow tilt, the second-tier
+    gate and the "volume breakout needs flow confirmation" rule.
+
+    ``frame`` is the merged feature table (old rows + new rows).  Rolling values
+    are recomputed from the intact per-day amount columns over the last
+    ``sessions`` sessions per stock/source, and only the rows in ``dates`` are
+    written back, so history that was already computed correctly is untouched.
+    """
+    if frame is None or frame.empty or "trade_date" not in frame.columns:
+        return frame
+    data = frame.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    sources = (
+        sorted(str(value) for value in data["source"].dropna().unique())
+        if "source" in data.columns
+        else list(data.get("market", pd.Series(dtype=object)).index[:0]) or [None]
+    )
+    target_dates = None
+    if dates is not None:
+        target_dates = set(pd.to_datetime(pd.Index(list(dates)), errors="coerce").dropna())
+    if target_dates is not None and not target_dates:
+        return frame
+    session_order = sorted(data["trade_date"].dropna().unique())
+    if len(session_order) > int(sessions):
+        cutoff = session_order[-int(sessions)]
+        tail = data.loc[data["trade_date"] >= cutoff].copy()
+        index_of_full = data.index[data["trade_date"] >= cutoff]
+    else:
+        tail = data.copy()
+        index_of_full = data.index
+    for source in sources:
+        prefix = "" if source is None else f"{source}_"
+        amount_column = f"{prefix}net_amount"
+        if amount_column not in tail.columns:
+            continue
+        subset = tail if source is None else tail.loc[tail["source"].astype(str) == str(source)]
+        if subset.empty:
+            continue
+        subset = subset.sort_values(["stock_code", "trade_date"], kind="stable")
+        keys = ["stock_code"] + (["source"] if "source" in subset.columns else [])
+        amount = pd.to_numeric(subset[amount_column], errors="coerce")
+        grouped = amount.groupby([subset[key] for key in keys], sort=False)
+        for window in windows:
+            net_column = f"{prefix}net_{window}d"
+            z_column = f"{prefix}net_z_{window}d"
+            ratio_column = f"{prefix}positive_ratio_{window}d"
+            columns = [column for column in (net_column, z_column, ratio_column) if column in tail.columns]
+            if not columns:
+                continue
+            rolling = grouped.transform(lambda values, w=window: values.rolling(int(w), min_periods=1).sum())
+            mean = grouped.transform(lambda values, w=window: values.rolling(int(w), min_periods=2).mean())
+            std = grouped.transform(lambda values, w=window: values.rolling(int(w), min_periods=2).std())
+            if net_column in columns:
+                tail.loc[subset.index, net_column] = pd.to_numeric(rolling, errors="coerce").astype(float)
+            if z_column in columns:
+                safe_std = pd.to_numeric(std, errors="coerce").replace(0.0, np.nan)
+                tail.loc[subset.index, z_column] = ((amount - mean) / safe_std).astype(float)
+            if ratio_column in columns:
+                positive = (amount > 0).astype(float)
+                ratio = positive.groupby([subset[key] for key in keys], sort=False).transform(
+                    lambda values, w=window: values.rolling(int(w), min_periods=1).mean()
+                )
+                tail.loc[subset.index, ratio_column] = pd.to_numeric(ratio, errors="coerce").astype(float)
+    if target_dates is None:
+        data.loc[index_of_full, tail.columns] = tail
+    else:
+        mask = data["trade_date"].isin(target_dates)
+        aligned = tail.reindex(data.index)
+        for column in tail.columns:
+            data.loc[mask, column] = aligned.loc[mask, column]
+    return data
 
 
 def _clean_panel_window(dataset_path):
@@ -2249,13 +2358,20 @@ class MarketDataService:
             if show_progress:
                 print(f"[MONEYFLOW] persisted api={api} new_rows={sum(len(x) for x in frames[api])} feature_parts={len(features[api])}", flush=True)
         if feature_parts:
-            all_features = pd.concat(feature_parts, ignore_index=True)
+            new_features = pd.concat(feature_parts, ignore_index=True)
+            all_features = new_features
             if feature_root.exists():
                 old_features = pd.read_parquet(feature_root)
-                all_features = pd.concat([old_features, all_features], ignore_index=True)
+                all_features = pd.concat([old_features, new_features], ignore_index=True)
                 dedup_keys = [column for column in ["stock_code", "trade_date", "source"] if column in all_features.columns]
                 if dedup_keys:
                     all_features = all_features.drop_duplicates(dedup_keys, keep="last")
+                # Rolling features were computed on the freshly fetched slice, so
+                # every appended date landed cold (net_Nd == daily amount, z ==
+                # NaN).  Recompute the tail from the merged history so the
+                # appended dates carry real flow features.
+                refreshed_dates = pd.to_datetime(new_features.get("trade_date"), errors="coerce").dropna().unique()
+                all_features = rebuild_moneyflow_rolling_tail(all_features, dates=refreshed_dates)
             all_features.to_parquet(feature_root, index=False)
         elif feature_root.exists():
             # Fully cached run: do not rebuild a multi-million-row rolling
@@ -7947,7 +8063,21 @@ class MarketDataService:
                 info = self.warehouse.read_stock_info(stock_codes=ordered, market="CN")
                 names = dict(zip(info["stock_code"].astype(str), info.get("name", pd.Series(dtype=str)).astype(str)))
             except Exception:
-                names = None
+                names = {}
+            if not names:
+                # Fail loudly instead of choosing between two silent disasters:
+                # without a name map the ST exclusion either passes every ST name
+                # (2026-09-22: three ST names ended up in the book) or, because
+                # missing names are dropped, wipes the whole candidate pool.
+                raise ValueError(
+                    "stock-info registry returned no names, so the ST exclusion cannot be evaluated; "
+                    "repair assets/data/meta/stock_info_registry (or the ClickHouse mirror) "
+                    "or set [selection.universe_filter] exclude_st = false"
+                )
+            # Historical runs previously failed open when the metadata lookup
+            # returned an empty/stale frame.  Drop unknown names and expose them
+            # in the audit instead of allowing possible ST securities through.
+            settings["drop_missing_name"] = True
         median_amount = None
         floor = settings.get("min_median_amount_20d")
         if floor is not None and float(floor) > 0:
@@ -7988,9 +8118,13 @@ class MarketDataService:
                     str(code): (None if pd.isna(flow_series.iloc[index]) else float(flow_series.iloc[index]))
                     for index, code in enumerate(features["stock_code"].astype(str))
                 }
+        flow_by_code = locals().get("flow_by_code")
+        flow_coverage = None
+        if isinstance(flow_by_code, dict) and flow_by_code:
+            flow_coverage = sum(1 for value in flow_by_code.values() if value is not None) / float(len(flow_by_code))
         dropped, audit = filter_selection_universe(
             ordered, names=names, median_amount=median_amount, volume_breakout=volume_breakout,
-            flow_z=locals().get("flow_by_code"), settings=settings,
+            flow_z=flow_by_code, flow_coverage=flow_coverage, settings=settings,
         )
         return set(dropped), audit
 
@@ -8027,7 +8161,8 @@ class MarketDataService:
             entry_delay=1,
         )
         labels = labels.loc[labels["trade_date"] == pd.Timestamp(session)].copy()
-        if bool(settings.get("second_tier_enabled", False)):
+        soft_gate = str(settings.get("mode", "eligibility") or "eligibility").strip().lower() == "score"
+        if bool(settings.get("second_tier_enabled", False)) or soft_gate:
             context, _ = self.read_clean_feature_panel(
                 start_date=pd.Timestamp(session).strftime("%Y-%m-%d"),
                 end_date=pd.Timestamp(session).strftime("%Y-%m-%d"),
@@ -8129,6 +8264,33 @@ class MarketDataService:
                     "detail": f"within rebalance stride ({elapsed}/{stride} business days); previous book kept",
                 }
 
+        # Query reference metadata before the large OHLCV affordability read.
+        # Some parquet backends invalidate their registry cursor after a bulk
+        # bar scan; doing this first avoids treating every name as missing.
+        early_universe_filter_summary = {"enabled": False}
+        early_filter_settings = dict(universe_filter or {})
+        if early_filter_settings.get("enabled") and not candidate_path:
+            early_codes = sorted({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)})
+            early_drop, early_universe_filter_summary = self._cn_universe_filter_drop(
+                as_of=as_of_date or selection_date, settings=early_filter_settings, codes=early_codes,
+            )
+            if early_drop:
+                frames = {
+                    name: frame[~frame["stock_code"].astype(str).isin(early_drop)].copy()
+                    for name, frame in frames.items()
+                }
+            early_remaining = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
+            early_universe_filter_summary = {
+                **early_universe_filter_summary,
+                "universe_before": len(early_codes),
+                "universe_after": early_remaining,
+                "pool_before": len(early_codes),
+                "pool_after": early_remaining,
+                "applied_before_top_n": True,
+            }
+            if not early_remaining:
+                raise ValueError("universe filter removed every scored name; relax [selection.universe_filter]")
+
         affordability_summary = None
         affordable_max_price = None
         affordability_config = dict(affordability or {})
@@ -8203,59 +8365,6 @@ class MarketDataService:
                 progress.set_postfix_str(
                     f"affordability max_price={max_price:.1f} kept={len(affordable)}/{before}"
                 )
-            # The startup gate defines the investable universe, so it must run
-            # before the Top-N cut: filtering after the cut can empty the pool
-            # (the ungated top ranks are exactly the names the gate excludes).
-            gate_settings = dict(startup_gate or {})
-            if gate_settings.get("enabled") and not candidate_path:
-                gate = self._cn_startup_gate_frame(as_of=as_of_date or selection_date, settings=gate_settings)
-                gate_codes = set(gate.loc[gate["startup_eligible"].fillna(False).astype(bool), "stock_code"].astype(str))
-                universe_before_gate = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
-                frames = {
-                    name: frame[frame["stock_code"].astype(str).isin(gate_codes)].copy()
-                    for name, frame in frames.items()
-                }
-                universe_after_gate = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
-                startup_gate_summary = {
-                    "enabled": True,
-                    "mode": gate["startup_gate_mode"].iloc[0] if not gate.empty else None,
-                    "session": gate["startup_gate_session"].iloc[0] if not gate.empty else None,
-                    "applied_before_top_n": True,
-                    "universe_before": universe_before_gate,
-                    "universe_after": universe_after_gate,
-                    "eligible_source": "strategy_labels",
-                }
-                # Second-tier bookkeeping runs after the summary exists, otherwise
-                # enabling the tier raises a NameError (which silently left pk
-                # consuming a stale preselection file).
-                if gate_settings.get("second_tier_enabled") and "selection_tier" in gate.columns:
-                    tier_cap = float(gate_settings.get("second_tier_max_weight", 0.05))
-                    second_tier_caps = {
-                        str(code): tier_cap
-                        for code in gate.loc[gate["selection_tier"].astype(str).eq("second"), "stock_code"].astype(str)
-                    }
-                    startup_gate_summary["second_tier_codes"] = sorted(second_tier_caps)
-                    startup_gate_summary["second_tier_max_weight"] = tier_cap
-                    startup_gate_summary["second_tier_count"] = len(second_tier_caps)
-                if not universe_after_gate:
-                    raise ValueError("startup gate removed every scored name; relax the caps or disable it")
-            universe_filter_settings = dict(universe_filter or {})
-            if universe_filter_settings.get("enabled") and not candidate_path:
-                scored_codes = sorted({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)})
-                dropped_codes, universe_filter_summary = self._cn_universe_filter_drop(
-                    as_of=as_of_date or selection_date, settings=universe_filter_settings, codes=scored_codes,
-                )
-                if dropped_codes:
-                    frames = {
-                        name: frame[~frame["stock_code"].astype(str).isin(dropped_codes)].copy()
-                        for name, frame in frames.items()
-                    }
-                remaining = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
-                universe_filter_summary = {**universe_filter_summary, "universe_before": len(scored_codes), "universe_after": remaining}
-                if not remaining:
-                    raise ValueError("universe filter removed every scored name; relax [selection.universe_filter]")
-            elif universe_filter_settings.get("enabled"):
-                universe_filter_summary = {"enabled": True, "applied_before_top_n": False}
         regime = "unknown"
         regime_version = None
         regime_trade_date = None
@@ -8310,7 +8419,78 @@ class MarketDataService:
         if requested_weights:
             applied_model_weights = requested_weights
         startup_gate_summary: dict = {"enabled": False}
-        universe_filter_summary: dict = {"enabled": False}
+        startup_gate_tilt: dict = {}
+        startup_gate_tilt_strength: float = 0.0
+        universe_filter_summary: dict = dict(early_universe_filter_summary or {"enabled": False})
+        # Apply investable-universe gates before the Top-N cut.  Keeping this
+        # block outside the affordability branch ensures ST/liquidity filters
+        # are honored even when affordability is disabled.
+        gate_settings = dict(startup_gate or {})
+        if gate_settings.get("enabled") and not candidate_path:
+            gate = self._cn_startup_gate_frame(as_of=as_of_date or selection_date, settings=gate_settings)
+            gate_codes = set(gate.loc[gate["startup_eligible"].fillna(False).astype(bool), "stock_code"].astype(str))
+            universe_before_gate = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
+            frames = {
+                name: frame[frame["stock_code"].astype(str).isin(gate_codes)].copy()
+                for name, frame in frames.items()
+            }
+            universe_after_gate = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
+            startup_gate_summary = {
+                "enabled": True,
+                "mode": gate["startup_gate_mode"].iloc[0] if not gate.empty else None,
+                "session": gate["startup_gate_session"].iloc[0] if not gate.empty else None,
+                "applied_before_top_n": True,
+                "universe_before": universe_before_gate,
+                "universe_after": universe_after_gate,
+                "eligible_source": "strategy_labels",
+            }
+            if str(startup_gate_summary.get("mode") or "").strip().lower() == "score" and "gate_score" in gate.columns:
+                # Soft gate: the rails above only remove extreme cases; the
+                # continuous tilt is applied to the model score by
+                # ``select_top_model_scores`` instead of deleting candidates.
+                tilt = dict(zip(gate["stock_code"].astype(str), pd.to_numeric(gate["gate_score"], errors="coerce")))
+                score_adjust = {code: float(value) for code, value in tilt.items() if value is not None and np.isfinite(value)}
+                tilt_strength = float(gate_settings.get("score_strength", 0.0) or 0.0)
+                startup_gate_tilt = score_adjust
+                startup_gate_tilt_strength = tilt_strength
+                values = np.asarray(list(score_adjust.values()), dtype=float)
+                startup_gate_summary.update({
+                    "score_strength": tilt_strength,
+                    "score_tilt_names": len(score_adjust),
+                    "score_tilt_mean": float(values.mean()) if values.size else None,
+                    "score_tilt_min": float(values.min()) if values.size else None,
+                    "score_tilt_max": float(values.max()) if values.size else None,
+                    "score_rails_dropped": int(universe_before_gate - universe_after_gate),
+                    "score_tilt_applied_before_top_n": bool(tilt_strength),
+                })
+            if gate_settings.get("second_tier_enabled") and "selection_tier" in gate.columns:
+                tier_cap = float(gate_settings.get("second_tier_max_weight", 0.05))
+                second_tier_caps = {
+                    str(code): tier_cap
+                    for code in gate.loc[gate["selection_tier"].astype(str).eq("second"), "stock_code"].astype(str)
+                }
+                startup_gate_summary["second_tier_codes"] = sorted(second_tier_caps)
+                startup_gate_summary["second_tier_max_weight"] = tier_cap
+                startup_gate_summary["second_tier_count"] = len(second_tier_caps)
+            if not universe_after_gate:
+                raise ValueError("startup gate removed every scored name; relax the caps or disable it")
+        universe_filter_settings = dict(universe_filter or {})
+        if universe_filter_settings.get("enabled") and not candidate_path and not universe_filter_summary.get("applied_before_top_n"):
+            scored_codes = sorted({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)})
+            dropped_codes, universe_filter_summary = self._cn_universe_filter_drop(
+                as_of=as_of_date or selection_date, settings=universe_filter_settings, codes=scored_codes,
+            )
+            if dropped_codes:
+                frames = {
+                    name: frame[~frame["stock_code"].astype(str).isin(dropped_codes)].copy()
+                    for name, frame in frames.items()
+                }
+            remaining = int(len({str(code) for frame in frames.values() for code in frame["stock_code"].dropna().astype(str)}))
+            universe_filter_summary = {**universe_filter_summary, "universe_before": len(scored_codes), "universe_after": remaining, "applied_before_top_n": True}
+            if not remaining:
+                raise ValueError("universe filter removed every scored name; relax [selection.universe_filter]")
+        elif universe_filter_settings.get("enabled") and not universe_filter_summary.get("applied_before_top_n"):
+            universe_filter_summary = {"enabled": True, "applied_before_top_n": False}
         ranked_all = None
         if candidate_path and Path(candidate_path).is_file():
             selected = pd.read_csv(candidate_path)
@@ -8329,9 +8509,12 @@ class MarketDataService:
                           "strategy_id": regime_strategy_id,
                           "regime_budget": json.dumps(regime_budget, ensure_ascii=False)},
                 as_of_date=as_of,
+                score_adjust=startup_gate_tilt or None,
+                score_adjust_strength=startup_gate_tilt_strength,
             )
         filter_settings = dict(universe_filter or {})
-        if filter_settings.get("enabled") and not selected.empty and "stock_code" in selected.columns:
+        if (filter_settings.get("enabled") and not candidate_path and not universe_filter_summary.get("applied_before_top_n")
+                and not selected.empty and "stock_code" in selected.columns):
             pool_codes = sorted({str(code) for code in selected["stock_code"].dropna().astype(str)})
             pool_drop, pool_audit = self._cn_universe_filter_drop(
                 as_of=as_of_date or selection_date, settings=filter_settings, codes=pool_codes,
@@ -8342,7 +8525,23 @@ class MarketDataService:
                     ranked_all = ranked_all[~ranked_all["stock_code"].astype(str).isin(pool_drop)].copy()
                 if selected.empty:
                     raise ValueError("universe filter removed every candidate; relax [selection.universe_filter]")
-            universe_filter_summary = {**pool_audit, "pool_before": len(pool_codes), "pool_after": int(len(selected))}
+            # Preserve the pre-Top-N audit (which records names removed before
+            # ranking) while adding the final pool counters.
+            merged_audit = dict(universe_filter_summary or {})
+            for key, value in pool_audit.items():
+                if key in {"st_dropped", "missing_name", "illiquid_dropped", "missing_amount",
+                           "volume_breakout_dropped", "volume_breakout_unconfirmed"}:
+                    prior = list(merged_audit.get(key, []) or [])
+                    merged_audit[key] = list(dict.fromkeys(prior + list(value or [])))
+                else:
+                    merged_audit[key] = value
+            universe_filter_summary = {
+                **merged_audit,
+                "pool_before": int(merged_audit.get("universe_before", len(pool_codes))),
+                "pool_after": int(len(selected)),
+            }
+        if filter_settings.get("enabled") and candidate_path and not universe_filter_summary.get("enabled"):
+            universe_filter_summary = {"enabled": True, "applied_before_top_n": False, "candidate_pool_frozen": True}
         startup_gate_summary = dict(startup_gate_summary or {"enabled": False})
         gate_settings = dict(startup_gate or {})
         if gate_settings.get("enabled") and not selected.empty:
@@ -8470,6 +8669,8 @@ class MarketDataService:
             ranked_all = select_top_model_scores(
                 frames, model=model, top_n=1_000_000_000, model_weights=applied_model_weights,
                 as_of_date=as_of,
+                score_adjust=startup_gate_tilt or None,
+                score_adjust_strength=startup_gate_tilt_strength,
             )
             selected, signal_summary = self._apply_price_setup_signals(
                 selected, ranked_all, signal_config=dict(signal_config), model=model,

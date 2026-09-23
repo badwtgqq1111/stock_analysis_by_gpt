@@ -11,6 +11,9 @@
 #      daily_bars → moneyflow → regime → features → clean_panel → model_scores
 #      → preselection → pk → exits → paper_account → paper_outcomes
 #      不再使用旧的一步式 --stage selection（它默认在配置里关闭）。
+#   4b. 每个阶段都带 --force-rebalance：selection.rebalance_stride_days（默认 5）本意是
+#      "再平衡节奏"，但它会在 stride 窗口内直接沿用上一版组合，导致新选出来的票几天不换。
+#      需要保留 stride 行为时用 DAILY_FORCE_REBALANCE=0 关闭。
 #   4. 每个阶段写独立日志，最后按阶段生成两阶段选股报告。
 set -uo pipefail
 
@@ -27,6 +30,8 @@ fi
 FORCE=0
 DRY_RUN=0
 SKIP_RETRAIN=0
+# 默认每日强制按当天选股结果换股（见头部 4b）；DAILY_FORCE_REBALANCE=0 可关掉。
+FORCE_REBALANCE="${DAILY_FORCE_REBALANCE:-1}"
 for arg in "$@"; do
   case "$arg" in
     --force) FORCE=1 ;;
@@ -144,6 +149,11 @@ $(tail -5 "$LOG_DIR/preflight.log")"
 fi
 
 log "start daily production trade_date=$TRADE_DATE force=$FORCE dry_run=$DRY_RUN skip_retrain=$SKIP_RETRAIN"
+PIPELINE_FLAGS=""
+if [ "$FORCE_REBALANCE" = "1" ]; then
+  PIPELINE_FLAGS="--force-rebalance"
+fi
+log "pipeline flags: ${PIPELINE_FLAGS:-none}"
 FAILED=0
 for entry in "${STAGES[@]}"; do
   stage="${entry%%:*}"
@@ -153,11 +163,11 @@ for entry in "${STAGES[@]}"; do
     continue
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "stage=$stage would run: uv run python scripts/run_cn_pipeline.py --stage $stage"
+    log "stage=$stage would run: uv run python scripts/run_cn_pipeline.py --stage $stage $PIPELINE_FLAGS"
     continue
   fi
   started=$(date +%s)
-  if uv run python scripts/run_cn_pipeline.py --stage "$stage" > "$LOG_DIR/$stage.log" 2>&1; then
+  if uv run python scripts/run_cn_pipeline.py --stage "$stage" $PIPELINE_FLAGS > "$LOG_DIR/$stage.log" 2>&1; then
     log "stage=$stage ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/$stage.log"
   else
     code=$?

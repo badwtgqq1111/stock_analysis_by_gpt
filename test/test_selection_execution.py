@@ -139,7 +139,11 @@ def test_universe_audit_is_surfaced_for_the_pipeline_report(tmp_path):
     service = MarketDataService.__new__(MarketDataService)
     service.warehouse = _StubWarehouse(
         _bars({"MID.SZ": 60.0, "BAD.SZ": 20.0}),
-        info=pd.DataFrame({"stock_code": ["BAD.SZ"], "name": ["*ST坏"], "market_cap": [1e9]}),
+        info=pd.DataFrame({
+            "stock_code": ["MID.SZ", "BAD.SZ"],
+            "name": ["正常股份", "*ST坏"],
+            "market_cap": [1e9, 1e9],
+        }),
     )
 
     result = service.select_persisted_model_scores(

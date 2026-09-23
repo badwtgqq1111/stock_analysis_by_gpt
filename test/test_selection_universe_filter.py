@@ -47,6 +47,17 @@ def test_filter_is_inert_when_disabled():
     assert dropped == [] and audit["enabled"] is False
 
 
+def test_missing_name_can_fail_closed_for_st_exclusion():
+    dropped, audit = filter_selection_universe(
+        ["KNOWN", "UNKNOWN"],
+        names={"KNOWN": "正常股份"},
+        settings={"enabled": True, "exclude_st": True, "drop_missing_name": True},
+    )
+    assert dropped == ["UNKNOWN"]
+    assert audit["missing_name"] == ["UNKNOWN"]
+    assert audit["st_dropped"] == ["UNKNOWN"]
+
+
 def _frame(scores, variances):
     return pd.DataFrame({
         "stock_code": [f"S{index:02d}" for index in range(len(scores))],
@@ -269,9 +280,21 @@ def test_production_config_carries_the_validated_selection_rules():
     assert universe["exclude_st"] is True
     assert universe["exclude_volume_breakout"] is True
     assert universe["volume_breakout_flow_z_min"] == 1.0
-    assert gate["enabled"] is True and gate["second_tier_enabled"] is True
+    # P1.21: default is the soft score gate (better median/win rate, never wipes
+    # the pool); the hard band gate stays one flag away for A/B.
+    assert gate["enabled"] is True and gate["mode"] == "score"
+    assert gate["score_strength"] == 0.2
+    assert gate["score_strength"] > 0
+    assert {"score_band_min_dist_from_120d_low", "score_decay_max_dist_from_120d_low"} <= set(gate)
+    assert gate["hard_max_dist_from_120d_low"] == 1.0
+    assert gate["hard_max_return_60d"] == 0.6
+    # the tier plumbing stays available for A/B runs but is off by default now
+    assert gate["second_tier_enabled"] is False
     assert gate["second_tier_max_dist_from_120d_low"] == 0.55
     assert gate["second_tier_max_weight"] == 0.05
+    # a broken money-flow feed must degrade, not blind-drop the volume names
+    assert universe["volume_breakout_missing_flow"] == "keep"
+    assert universe["volume_breakout_min_flow_coverage"] == 0.5
     assert constraints["weighting"] == "rank_power"
     assert constraints["flow_tilt_strength"] == 0.25
     assert risk["vol_target_mode"] == "cap"

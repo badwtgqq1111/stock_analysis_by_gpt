@@ -68,6 +68,74 @@ def _first_barrier_class(
     return classes, barrier_return, hold_days
 
 
+def startup_gate_score(labels: pd.DataFrame, settings: dict | None = None) -> pd.Series:
+    """Continuous ``0..1`` startup desirability for the ``mode = "score"`` gate.
+
+    The hard gate removes every name outside the half-year-low band, which on
+    2026-09-22 cut 50% of the scored universe and left only the names sitting
+    nearest their lows.  This score keeps the same information as a *tilt*:
+
+    * ``dist_from_120d_low``: ramps up into ``[band_min, band_max]`` (default
+      ``0.05``–``0.30``), stays at 1.0 inside the band and decays linearly to 0
+      at ``decay_max`` (default ``0.55``);
+    * ``dist_from_60d_high``: 0 when the name is at/above the 60-day high,
+      reaching 1.0 once it is ``span`` (default 15%) below it;
+    * ``volume_ratio``: prefers a shrinking-volume pullback (1.0 at ratio<=0.8,
+      0 at ratio>=1.2);
+    * ``flow_z``: flow confirmation, clipped to ``[0, 1]``; **missing flow is
+      neutral (0), never a deletion**, so a broken money-flow feed degrades the
+      tilt instead of emptying the pool.
+
+    The result is combined in :func:`apply_startup_gate` with the hard safety
+    rails that stay switched on in score mode.
+    """
+    settings = dict(settings or {})
+    if labels is None or labels.empty or "dist_from_120d_low" not in labels.columns:
+        return pd.Series(dtype=float, index=getattr(labels, "index", None))
+    band_lo = float(settings.get("score_band_min_dist_from_120d_low", settings.get("min_dist_from_120d_low", 0.05)))
+    band_hi = float(settings.get("score_band_max_dist_from_120d_low", settings.get("max_dist_from_120d_low", 0.30)))
+    decay_hi = float(settings.get("score_decay_max_dist_from_120d_low", 0.55))
+    high_floor = float(settings.get("score_high_distance_floor", settings.get("max_dist_from_60d_high", -0.05)))
+    high_span = max(1e-6, float(settings.get("score_high_distance_span", 0.15)))
+    vol_hi = float(settings.get("score_volume_ratio_max", 1.2))
+    vol_span = max(1e-6, float(settings.get("score_volume_ratio_span", 0.4)))
+    flow_ref = max(1e-6, float(settings.get("score_flow_z_reference", 1.0)))
+    weights = {
+        "dist": float(settings.get("score_weight_dist", 1.0)),
+        "high": float(settings.get("score_weight_high", 0.6)),
+        "volume": float(settings.get("score_weight_volume", 0.4)),
+        "flow": float(settings.get("score_weight_flow", 0.6)),
+    }
+
+    dist = pd.to_numeric(labels["dist_from_120d_low"], errors="coerce")
+    k_dist = pd.Series(0.0, index=labels.index)
+    k_dist = k_dist.mask(dist.le(band_lo), (dist / max(band_lo, 1e-6)).clip(0.0, 1.0))
+    k_dist = k_dist.mask(dist.gt(band_lo) & dist.le(band_hi), 1.0)
+    if decay_hi > band_hi:
+        slope = (decay_hi - dist) / (decay_hi - band_hi)
+        k_dist = k_dist.mask(dist.gt(band_hi) & dist.le(decay_hi), slope.clip(0.0, 1.0))
+
+    parts = [(k_dist.to_numpy(dtype=float), weights["dist"])]
+    if "dist_from_60d_high" in labels.columns:
+        high = pd.to_numeric(labels["dist_from_60d_high"], errors="coerce")
+        k_high = ((-high + high_floor) / high_span).clip(0.0, 1.0).fillna(0.0)
+        parts.append((k_high.to_numpy(dtype=float), weights["high"]))
+    if "volume_ratio" in labels.columns:
+        ratio = pd.to_numeric(labels["volume_ratio"], errors="coerce")
+        k_volume = ((vol_hi - ratio) / vol_span).clip(0.0, 1.0).fillna(0.0)
+        parts.append((k_volume.to_numpy(dtype=float), weights["volume"]))
+    if "flow_z" in labels.columns:
+        flow = pd.to_numeric(labels["flow_z"], errors="coerce")
+        k_flow = (flow / flow_ref).clip(0.0, 1.0).fillna(0.0)
+        parts.append((k_flow.to_numpy(dtype=float), weights["flow"]))
+
+    total_weight = sum(weight for _, weight in parts) or 1.0
+    stacked = np.zeros(len(labels), dtype=float)
+    for values, weight in parts:
+        stacked += np.nan_to_num(values, nan=0.0) * weight
+    return pd.Series(stacked / total_weight, index=labels.index).fillna(0.0).clip(0.0, 1.0)
+
+
 def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd.DataFrame:
     """Return ``(stock_code, startup_eligible)`` for a decision date's labels.
 
@@ -82,6 +150,14 @@ def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd
         ignore the built-in flag and apply only the explicit caps below, which
         lets a run keep, say, the low-distance rule without the high-distance
         rule.
+    ``score``
+        keep every name that clears the hard safety rails
+        (``hard_max_dist_from_120d_low`` / ``hard_max_return_60d``, both optional)
+        and publish a continuous ``gate_score`` from
+        :func:`startup_gate_score` instead of deleting the rest.  The selection
+        layer turns that score into a tilt on the model score, so a broken
+        money-flow feed or an unusual market cross-section cannot empty the
+        candidate pool the way the hard gate did on 2026-09-22.
 
     A ``thresholds`` (or ``both``) mode applies every cap that is not ``None``.
     """
@@ -89,9 +165,33 @@ def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd
     mode = str(settings.get("mode", "eligibility") or "eligibility").strip().lower()
     required = {"stock_code", "startup_price_eligible"}
     if labels is None or labels.empty or not {"stock_code"}.issubset(labels.columns):
-        return pd.DataFrame(columns=["stock_code", "startup_eligible"])
+        return pd.DataFrame(columns=["stock_code", "startup_eligible", "selection_tier", "gate_score"])
     eligible = pd.Series(True, index=labels.index)
     used: list[str] = []
+    gate_score = None
+    if mode == "score":
+        # Soft gate: only the optional hard rails remove a name.
+        rails: list[str] = []
+        for column, setting, direction in (
+            ("dist_from_120d_low", "hard_max_dist_from_120d_low", "le"),
+            ("return_60d", "hard_max_return_60d", "le"),
+        ):
+            cap = settings.get(setting)
+            if cap is None:
+                continue
+            if column not in labels.columns:
+                raise ValueError(f"startup gate rail needs a {column} column")
+            rails.append(f"{column}<={float(cap)}")
+            values = pd.to_numeric(labels[column], errors="coerce")
+            eligible &= values.le(float(cap)).fillna(True)
+        gate_score = startup_gate_score(labels, settings)
+        used = rails or ["score_only"]
+        return pd.DataFrame({
+            "stock_code": labels["stock_code"].astype(str),
+            "startup_eligible": eligible,
+            "selection_tier": "scored",
+            "gate_score": gate_score,
+        })
     if mode in {"eligibility", "both"}:
         if "startup_price_eligible" not in labels.columns:
             raise ValueError("startup gate mode 'eligibility' needs a startup_price_eligible column")
@@ -140,6 +240,9 @@ def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd
         "stock_code": labels["stock_code"].astype(str),
         "startup_eligible": eligible,
         "selection_tier": tier,
+        # Hard modes carry no tilt; the column is published so callers can read
+        # ``gate_score`` unconditionally when the mode is "score".
+        "gate_score": gate_score if gate_score is not None else np.nan,
     })
 
 

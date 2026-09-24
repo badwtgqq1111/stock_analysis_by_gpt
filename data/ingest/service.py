@@ -6543,6 +6543,13 @@ class MarketDataService:
                                 feature_config_hash=materialization["feature_config_hash"],
                                 trade_date=latest_date,
                             )
+                            if os.environ.get("QUANT_DEBUG_STAGES"):
+                                import sys as _sys
+                                print(
+                                    f"[STAGE-DEBUG] precheck date={latest_date} codes={len(date_codes)} "
+                                    f"counts={len(feature_counts)} min_features={minimum_feature_count}",
+                                    file=_sys.stderr, flush=True,
+                                )
                             for code, n_features in feature_counts.items():
                                 if (code, frequency) not in latest_dates:
                                     continue

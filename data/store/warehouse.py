@@ -133,7 +133,11 @@ class MarketDataWarehouse:
     def _feature_store_candidates(self):
         """返回 features 可用后端，ClickHouse 不可用时允许降级到 parquet。"""
         stores = []
-        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+        # Always try the primary table for this aggregate: the query is chunked
+        # (<=max_filter_values params per request) and cheap, and an earlier bulky
+        # query in the same process must not silently downgrade the answer to the
+        # lagging mirror — that downgrade is what froze 2026-09-23 at 09-22.
+        if self.clickhouse_store is not None:
             stores.append(self.clickhouse_store)
         stores.append(self.parquet_store)
         return stores
@@ -141,7 +145,12 @@ class MarketDataWarehouse:
     def _clean_store_candidates(self):
         """返回 clean 层数据可用后端，ClickHouse 优先，Parquet 兜底。"""
         stores = []
-        if self.clickhouse_store is not None and self._clickhouse_disabled_reason is None:
+        # Always try the primary table for this aggregate.  The query is chunked
+        # (<=max_filter_values params per request) and cheap, and a soft-disable
+        # set by some earlier bulky query in the same process must not silently
+        # downgrade the answer to the lagging mirror — that is exactly what froze
+        # 2026-09-23 at 09-22 and made the factor stage skip the whole session.
+        if self.clickhouse_store is not None:
             stores.append(self.clickhouse_store)
         stores.append(self.parquet_store)
         return stores
@@ -745,22 +754,78 @@ class MarketDataWarehouse:
         frequency="daily",
         adjust="qfq",
     ):
-        """Return OHLCV row counts and latest dates without loading all rows."""
-        return self.parquet_store.group_count_and_max(
-            dataset_name=self.OHLCV_DATASET,
-            group_column="stock_code",
-            count_column="trade_date",
-            max_column="trade_date",
-            layer="clean",
-            filters={
-                "stock_code": stock_codes,
-                "market": market,
-                "exchange": exchange,
-                "asset_type": asset_type,
-                "frequency": frequency,
-                "adjust": adjust,
-            },
-        )
+        """Return OHLCV row counts and latest dates without loading all rows.
+
+        Both stores are consulted and merged per stock: the Parquet mirror holds
+        the long history while the ClickHouse table can carry the newest session
+        before (and sometimes only) it reaches the mirror.  Row counts take the
+        larger value and the max date the newer one, so a lagging mirror can no
+        longer freeze the daily chain one session behind (observed 2026-09-23:
+        the mirror stopped at 09-22 while the bars table already held 09-23) and
+        a sparse ClickHouse window cannot understate the history either.
+        """
+        filters = {
+            "stock_code": stock_codes,
+            "market": market,
+            "exchange": exchange,
+            "asset_type": asset_type,
+            "frequency": frequency,
+            "adjust": adjust,
+        }
+        stores = []
+        # Always ask the primary table for this aggregate: the query is chunked
+        # (<=max_filter_values params per request) and cheap, and the soft-disable
+        # flag flip-flops during a run (a bulky query sets it, later calls then
+        # silently answer from the lagging mirror).  That is what made the factor
+        # stage treat 2026-09-22 as the newest session on 2026-09-23.
+        if self.clickhouse_store is not None:
+            stores.append(self.clickhouse_store)
+        stores.append(self.parquet_store)
+        merged_counts: dict = {}
+        merged_latest: dict = {}
+        answered = False
+        debug = bool(os.environ.get("QUANT_DEBUG_STORES"))
+        for store in stores:
+            try:
+                counts, latest = store.group_count_and_max(
+                    dataset_name=self.OHLCV_DATASET,
+                    group_column="stock_code",
+                    count_column="trade_date",
+                    max_column="trade_date",
+                    layer="clean",
+                    filters=filters,
+                )
+            except Exception as exc:
+                if store is self.clickhouse_store:
+                    self._clickhouse_disabled_reason = str(exc)
+                if os.environ.get("QUANT_DEBUG_STORES"):
+                    import sys as _sys
+                    print(f"[STORE-DEBUG] coverage store={type(store).__name__} failed: {type(exc).__name__}: {exc}",
+                          file=_sys.stderr, flush=True)
+                continue
+            if counts or latest:
+                answered = True
+            if debug:
+                import sys as _sys
+                sample = sorted(str(pd.Timestamp(v).date()) for v in list((latest or {}).values())[:2000])[-1:] if latest else None
+                print(f"[COV-DEBUG] store={type(store).__name__} codes={len(stock_codes or [])} "
+                      f"rows={len(latest or {})} newest_in_sample={sample}", file=_sys.stderr, flush=True)
+            for code, value in (counts or {}).items():
+                key = str(code)
+                try:
+                    merged_counts[key] = max(int(value), merged_counts.get(key, 0))
+                except (TypeError, ValueError):
+                    merged_counts.setdefault(key, 0)
+            for code, value in (latest or {}).items():
+                key = str(code)
+                try:
+                    timestamp = pd.Timestamp(value)
+                except (TypeError, ValueError):
+                    continue
+                current = merged_latest.get(key)
+                if current is None or timestamp > current:
+                    merged_latest[key] = timestamp
+        return (merged_counts, merged_latest) if answered else ({}, {})
 
     def read_valuation_snapshots(
         self,

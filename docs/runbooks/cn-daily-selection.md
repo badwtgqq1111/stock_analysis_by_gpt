@@ -98,6 +98,36 @@ cat output/results_cn/cn_ensemble_rebalance_state.json
 # trade_date 必须是今天；若停在旧日期，说明这次是 carried_forward（没带 --force-rebalance）
 ```
 
+### 2.3 覆盖度读取不能回退到滞后的 Parquet 镜像（2026-09-23 修复）
+
+`features` 阶段先做"特征覆盖预检"：拿每只股票**最新的 OHLCV 日期**去比对已有特征，已覆盖就跳过。
+这个最新日期来自 `MarketDataWarehouse.ohlcv_coverage_by_stock`，它原先**只读 Parquet 镜像**，
+而镜像比 ClickHouse 主表晚一个交易日（当日 18:00 镜像停在 09-22、主表已有 09-23）→ 预检认为
+"最新就是 09-22、特征齐全"→ 5,198 只全部跳过 → 面板/打分/选股全部停在前一交易日。
+这是"今天选出来还是昨天的票"的第二个根因（第一个是 §2.2 的 stride）。
+
+修复：
+1. `ohlcv_coverage_by_stock` 同时查询两个存储并按股票合并（行数取大、日期取新）；
+2. 该聚合**总是**尝试 ClickHouse（分片、参数 ≤500），不受 `_clickhouse_disabled_reason`
+   软禁用标志影响 —— 运行中一次批量查询失败会置位该标志，后续覆盖度查询就会静默退化到镜像；
+3. `ClickHouseStore.group_count_and_max` 补齐（原先只有 Parquet 实现），带 `IN` 分片。
+
+**自检**（必须显示今天/最近交易日）：
+
+```bash
+python3 - <<'EOF'
+import tomllib
+from data.ingest.service import MarketDataService
+svc = MarketDataService(base_dir="./assets/data")
+_, latest = svc.warehouse.ohlcv_coverage_by_stock(
+    stock_codes=["600007.SH"], market="CN", asset_type="equity", frequency="daily", adjust="qfq")
+print({k: str(v) for k, v in latest.items()})
+EOF
+```
+
+`features` 阶段正常应打印 `需计算 N 只`（N≈全市场，耗时可到 40-60 分钟）；若显示
+`可跳过 5198 只, 需计算 24 只` 而且面板/打分日期没变，就是覆盖度又退化到镜像了。
+
 ## 3. 完成校验清单
 
 ```bash

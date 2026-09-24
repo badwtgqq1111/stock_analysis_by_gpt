@@ -760,6 +760,88 @@ class ClickHouseStore:
                     return column, list(values)
         return None
 
+    def group_count_and_max(self, dataset_name, group_column, count_column, max_column,
+                            layer="clean", filters=None, range_filters=None):
+        """Row counts and max value per group, same contract as the Parquet store.
+
+        The factor stage uses this aggregate to decide whether a stock is already
+        materialized up to its newest bar.  Only the Parquet mirror implemented it,
+        and that mirror lags the ClickHouse table by one session, so on
+        2026-09-23 the stage believed 2026-09-22 was current and skipped the new
+        session entirely (panel → scores → selection all stayed a day behind).
+        """
+        if not self.dataset_exists(dataset_name, layer=layer):
+            return {}, {}
+        chunk = self._oversized_filter_values(filters)
+        if chunk is not None:
+            column, values = chunk
+            size = max(1, int(getattr(self, "max_filter_values", 500)))
+            counts: dict = {}
+            latest: dict = {}
+            for start in range(0, len(values), size):
+                part = dict(filters or {})
+                part[column] = values[start:start + size]
+                part_counts, part_latest = self.group_count_and_max(
+                    dataset_name, group_column, count_column, max_column,
+                    layer=layer, filters=part, range_filters=range_filters,
+                )
+                counts.update(part_counts)
+                latest.update(part_latest)
+            return counts, latest
+
+        table = self._table_name(dataset_name, layer)
+        client = self._connect()
+        try:
+            self._ensure_table(client, dataset_name, layer)
+        finally:
+            client.close()
+        params = {}
+        clauses = []
+        for i, (col, val) in enumerate((filters or {}).items()):
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple, set)):
+                vlist = [v for v in val if v is not None]
+                if not vlist:
+                    continue
+                placeholders = ", ".join(f"{{p{i}_{j}:String}}" for j in range(len(vlist)))
+                clauses.append(f"{col} IN ({placeholders})")
+                for j, v in enumerate(vlist):
+                    params[f"p{i}_{j}"] = str(v)
+            else:
+                clauses.append(f"{col} = {{p{i}:String}}")
+                params[f"p{i}"] = str(val)
+        for col, bounds in (range_filters or {}).items():
+            lower = bounds.get("gte")
+            if lower is not None:
+                clauses.append(f"{col} >= {{r_{col}_l:String}}")
+                params[f"r_{col}_l"] = str(lower)
+            upper = bounds.get("lte")
+            if upper is not None:
+                clauses.append(f"{col} <= {{r_{col}_u:String}}")
+                params[f"r_{col}_u"] = str(upper)
+        query = (
+            f"SELECT {group_column} AS k, count() AS n, max({max_column}) AS m "
+            f"FROM {table} FINAL"
+        )
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += f" GROUP BY {group_column}"
+        client = self._connect()
+        try:
+            rows = client.query(query, parameters=params).result_rows
+        finally:
+            client.close()
+        counts = {str(key): int(count) for key, count, _ in rows}
+        latest = {str(key): value for key, _, value in rows}
+        import os as _os
+        if _os.environ.get("QUANT_DEBUG_STORES"):
+            import sys as _sys
+            sample = sorted({str(value) for _, _, value in rows})[-3:]
+            print(f"[CH-DEBUG] group_count_and_max {table}: rows={len(rows)} max_dates_tail={sample} "
+                  f"where={' AND '.join(clauses)[:120]}", file=_sys.stderr, flush=True)
+        return counts, latest
+
     def scalar_query(self, dataset_name, expression, layer="clean", filters=None,
                      range_filters=None):
         if not self.dataset_exists(dataset_name, layer=layer):

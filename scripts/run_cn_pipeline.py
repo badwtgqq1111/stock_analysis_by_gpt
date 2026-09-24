@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import sys
+import uuid
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10; uv provides tomli in the project env.
@@ -108,6 +111,55 @@ def write_selection_config_snapshot(layer: dict, *, output_dir: str, stage: str,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return str(path)
+
+
+def archive_preselection_inputs(*, config: dict, output_dir: str, result: dict,
+                                config_snapshot: str, archive_root: Path | None = None) -> str:
+    """Keep exact score/model/candidate bytes for later same-input replays."""
+    score_date = result.get("score_date") or result.get("latest_trade_date")
+    if not score_date:
+        raise ValueError("preselection result has no score date to archive")
+    root = archive_root or ROOT / "output" / "selection_snapshots"
+    destination = root / str(score_date) / uuid.uuid4().hex
+    score_dir = Path(config["selection"].get("model_scores_dir", "output/model_scores"))
+    score_dir = score_dir if score_dir.is_absolute() else ROOT / score_dir
+    score_config = config["model_scores"]
+    selected_path = Path(result["path"])
+    selected_path = selected_path if selected_path.is_absolute() else ROOT / selected_path
+    inputs = {
+        "effective_config": Path(config_snapshot),
+        "preselected": selected_path,
+    }
+    for name in ("lightgbm", "transformer"):
+        inputs[f"{name}_scores"] = score_dir / f"cn_{name}_scores.csv"
+        for suffix in ("model_path", "manifest_path"):
+            key = f"{name}_{suffix}"
+            raw = score_config.get(key)
+            if raw:
+                path = Path(raw)
+                inputs[key] = path if path.is_absolute() else ROOT / path
+    state_path = Path(result.get("state_path") or selected_path.parent / "cn_ensemble_preselection_rebalance_state.json")
+    if state_path.is_file():
+        inputs["preselection_state"] = state_path
+    missing = [str(path) for path in inputs.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"preselection archive inputs missing: {missing}")
+    destination.mkdir(parents=True, exist_ok=False)
+    files = {}
+    for label, source in inputs.items():
+        target = destination / f"{label}{source.suffix}"
+        shutil.copy2(source, target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        if digest != hashlib.sha256(source.read_bytes()).hexdigest():
+            raise AssertionError(f"snapshot copy mismatch: {source}")
+        files[label] = {"source": str(source.resolve()), "snapshot": str(target), "sha256": digest}
+    manifest = {
+        "score_date": str(score_date), "candidate_origin_date": result.get("candidate_origin_date"),
+        "preselection_status": result.get("status"), "files": files,
+    }
+    manifest_path = destination / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(manifest_path)
 
 def run_stage(name: str, config: dict, service: MarketDataService, *, force_rebalance: bool = False,
               as_of_date: str | None = None, profile: str | None = None) -> dict:
@@ -578,7 +630,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             layer, output_dir=output_dir, stage="preselection", config_path=Path(config.get("_config_path", DEFAULT_CONFIG)),
             trade_date=as_of_date, profile=profile,
         )
-        return service.select_persisted_model_scores(
+        result = service.select_persisted_model_scores(
             model_scores_dir=layer.get("model_scores_dir", "output/model_scores"),
             output_dir=output_dir,
             model=layer.get("model", "ensemble"), top_n=int(layer.get("preselection_model_slots", p.get("preselection_model_slots", 4))),
@@ -592,6 +644,10 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             as_of_date=as_of_date, startup_gate=layer.get("startup_gate") or None,
             universe_filter=layer.get("universe_filter") or None,
         )
+        result["input_snapshot_path"] = archive_preselection_inputs(
+            config=config, output_dir=output_dir, result=result, config_snapshot=snapshot_path,
+        )
+        return result
     if name == "pk":
         layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)
         # risk-control settings travel with the sizing constraints
@@ -668,6 +724,13 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
     for item in report["stages"]:
         summary = item.get("summary") or {}
         detail = item.get("detail", "")
+        if summary.get("status") == "carried_forward":
+            detail = (f"候选沿用 {summary.get('candidate_origin_date') or summary.get('latest_trade_date')}；"
+                      f"当日分数 {summary.get('score_date')}；"
+                      f"stride={summary.get('rebalance_stride_days')}，"
+                      f"elapsed={summary.get('business_days_since_rebalance')}")
+        if summary.get("input_snapshot_path"):
+            detail = f"{detail} inputs={summary['input_snapshot_path']}".strip()
         if summary.get("failed_count"):
             detail = f"{detail} failed={summary['failed_count']}"
         if item.get("name") == "fundamental":
@@ -796,10 +859,10 @@ def main() -> int:
                 summary = run_stage(stage, config, service, force_rebalance=bool(args.force_rebalance),
                                     as_of_date=args.trade_date, profile=args.profile)
                 stage_status = "ok"
-                if stage == "moneyflow" and isinstance(summary, dict):
+                if stage in {"moneyflow", "preselection", "selection"} and isinstance(summary, dict):
                     # Preserve degraded data-quality state at the orchestration
-                    # layer; a completed function call is not the same as a
-                    # complete, model-safe dataset.
+                    # layer and preserve carry-forward as an explicit stage
+                    # status rather than quietly displaying "ok".
                     stage_status = str(summary.get("status") or "ok")
                 item = {"name": stage, "status": stage_status, "summary": summary}
                 if stage == "model_comparison":

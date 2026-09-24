@@ -502,7 +502,8 @@ class ParquetDataStore:
         for column in (date_column, "ingest_time"):
             for side in (existing, frame):
                 if side is not None and not side.empty and column in side.columns:
-                    side[column] = pd.to_datetime(side[column], errors="coerce").astype("datetime64[us]")
+                    values = pd.to_datetime(side[column], errors="coerce", utc=True)
+                    side[column] = values.dt.tz_convert(None).astype("datetime64[us]")
         combined = pd.concat([existing, frame], ignore_index=True) if not existing.empty else frame.copy()
         if sort_by:
             combined.sort_values(sort_by, inplace=True)

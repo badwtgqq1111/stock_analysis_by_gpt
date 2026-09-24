@@ -59,6 +59,8 @@ def main() -> int:
     selected = _load(selected_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
     trade_date = args.trade_date or str(preselected["trade_date"].iloc[0])[:10]
+    candidate_dates = pd.to_datetime(preselected["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d").dropna().unique()
+    candidate_origin_date = str(candidate_dates[0]) if len(candidate_dates) == 1 else None
     output_dir = Path(args.output_dir) if args.output_dir else source
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +70,8 @@ def main() -> int:
     risk = manifest.get("risk_control") or {}
 
     lines = [f"# 两阶段选股报告 · {trade_date}", "",
+             f"- 预选来源日：**{candidate_origin_date or '混合/未知'}**"
+             + ("（沿用候选，非当日重选）" if candidate_origin_date and candidate_origin_date != trade_date else ""), "",
              "## 阶段一：预选（模型 + 信号 sleeve）", "",
              f"- 候选池：**{len(preselected)}** 只",
              f"- 模型候选：{int((preselected['_channel'] == 'model').sum())} 只；"
@@ -129,6 +133,8 @@ def main() -> int:
     markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     payload = {
         "trade_date": trade_date,
+        "candidate_origin_date": candidate_origin_date,
+        "preselection_carried_forward": bool(candidate_origin_date and candidate_origin_date != trade_date),
         "preselected_count": int(len(preselected)),
         "book_count": int(len(book)),
         "gross": round(float(book["target_weight"].sum()), 6),

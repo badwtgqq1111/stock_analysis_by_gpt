@@ -8245,7 +8245,12 @@ class MarketDataService:
             selection_date = min(score_dates).normalize() if score_dates else None
         destination = Path(output_dir)
         selection_path = destination / (f"cn_{str(model).lower()}_preselected.csv" if preselection_only else f"cn_{str(model).lower()}_selected.csv")
-        state_path = destination / f"cn_{str(model).lower()}_rebalance_state.json"
+        # The preselection stride tracks when *candidates* were last refreshed.
+        # PK runs after preselection and writes the final book every day.  If
+        # both stages share this state file, PK advances the candidate clock
+        # and preselection can carry the same stale Top-N forward forever.
+        state_suffix = "preselection_rebalance_state" if preselection_only else "rebalance_state"
+        state_path = destination / f"cn_{str(model).lower()}_{state_suffix}.json"
         stride = max(1, int(rebalance_stride_days or 1))
         if (as_of is None and stride > 1 and not force_rebalance
                 and selection_date is not None and state_path.is_file() and selection_path.is_file()):
@@ -8264,7 +8269,9 @@ class MarketDataService:
                 return {
                     "status": "carried_forward", "model": str(model).lower(),
                     "latest_trade_date": last_date.strftime("%Y-%m-%d"),
+                    "candidate_origin_date": last_date.strftime("%Y-%m-%d"),
                     "score_date": selection_date.strftime("%Y-%m-%d"),
+                    "state_path": str(state_path),
                     "rebalance_stride_days": stride, "business_days_since_rebalance": elapsed,
                     "selected_count": int((previous.get("target_weight", pd.Series(dtype=float)) > 0).sum()),
                     "path": str(selection_path), "regime": regime if "regime" in dir() else "unknown",
@@ -9121,6 +9128,8 @@ class MarketDataService:
         return {
             "status": "completed", "model": str(model).lower(), "selected_count": actual_selected_count,
             "latest_trade_date": pd.to_datetime(selected["trade_date"].iloc[0]).strftime("%Y-%m-%d"),
+            "candidate_origin_date": pd.to_datetime(selected["trade_date"].iloc[0]).strftime("%Y-%m-%d"),
+            "state_path": str(state_path),
             "path": str(path), "regime": regime, "regime_version": regime_version,
             "regime_trade_date": regime_trade_date, "model_weights": model_weights or {},
             "regime_budget": regime_budget, "strategy_id": regime_strategy_id, "portfolio": portfolio_manifest,

@@ -5,6 +5,7 @@
 
 import threading
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -31,6 +32,42 @@ from data.store.database_manager import DatabaseManager
 
 _TENCENT_SESSION_LOCAL = threading.local()
 _AKSHARE_SINA_DAILY_LOCK = threading.Lock()
+
+
+def normalize_tencent_daily_volume(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return Tencent daily volume in shares, or reject an ambiguous positive bar.
+
+    AKShare's Tencent adapter can return either shares or 100-share lots for
+    different CN symbols.  Turnover amount is in yuan in both cases.  The
+    amount / (close * volume) ratio therefore clusters near 1 or 100; use a
+    deliberately wide but disjoint band to tolerate adjusted OHLC values.
+    Never multiply every Tencent row unconditionally.
+    """
+    if frame is None or frame.empty:
+        return frame
+    if "amount" not in frame.columns:
+        raise ValueError("Tencent daily volume unit requires amount")
+
+    result = frame.copy()
+    volume = pd.to_numeric(result["Volume"], errors="coerce")
+    amount = pd.to_numeric(result["amount"], errors="coerce")
+    close = pd.to_numeric(result["Close"], errors="coerce")
+    active = (volume > 0) | (amount > 0)
+    valid = active & (volume > 0) & (amount > 0) & (close > 0)
+    ratio = amount / (close * volume.replace(0, np.nan))
+    shares = valid & ratio.between(0.5, 2.0)
+    lots = valid & ratio.between(50.0, 200.0)
+    ambiguous = active & ~(shares | lots)
+    if ambiguous.any():
+        dates = ", ".join(str(value) for value in result.index[ambiguous][:5])
+        raise ValueError(f"Tencent daily volume unit ambiguous on {dates}")
+    result.loc[lots, "Volume"] = volume.loc[lots] * 100.0
+    result.attrs["volume_unit_conversion"] = {
+        "shares_rows": int(shares.sum()),
+        "lots_to_shares_rows": int(lots.sum()),
+        "zero_rows": int((~active).sum()),
+    }
+    return result
 
 
 def _tencent_direct_session():
@@ -167,7 +204,8 @@ class CNHistoryDataFetcher:
                 "turnover": "turnover",
             },
         )
-        return apply_date_filters(normalized_df, start_date, end_date, num_records)
+        filtered = apply_date_filters(normalized_df, start_date, end_date, num_records)
+        return normalize_tencent_daily_volume(filtered)
 
     def _fetch_akshare_sina_intraday_hist(self, period, start_date=None, end_date=None, num_records=None, adjust=None):
         if ak is None:

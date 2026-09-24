@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from factor_engine.ml.model_training import (
+    _build_sequences,
     _preprocess_transformer_panel,
     _prepare_labeled_panel,
     _purged_time_split,
@@ -315,6 +316,42 @@ def test_transformer_artifact_can_be_loaded_for_prediction(tmp_path):
     assert manifest["preprocessing"]["mask"] == "raw_feature_missing_mask"
     assert manifest["preprocessing"]["cross_section"]["mode"] == "qlib_robust"
     assert manifest["extra"]["split"]["embargo_days"] == 3
+
+
+def test_transformer_dense_labels_respect_sequence_budget(tmp_path):
+    dates = pd.bdate_range("2026-01-01", periods=60)
+    frame = pd.DataFrame([
+        {"trade_date": date, "stock_code": code,
+         "factor_clean": float(day + stock),
+         "factor_is_missing": False,
+         "forward_return_3d": float(((day + stock * 2) % 7) - 3) / 100}
+        for stock, code in enumerate(("000001.SZ", "000002.SZ", "600000.SH"))
+        for day, date in enumerate(dates)
+    ])
+    result = train_transformer_panel(
+        frame, ["factor_clean", "factor_is_missing"],
+        model_dir=tmp_path / "budgeted_transformer", label_column="forward_return_3d",
+        lookback=10, validation_days=10, epochs=1, batch_size=8,
+        max_samples=24, factor_set="demo", preserve_unlabeled=True,
+    )
+    artifact = result["artifact"]
+    assert artifact["train_rows"] > 0
+    assert artifact["validation_rows"] > 0
+    assert artifact["train_rows"] + artifact["validation_rows"] <= 24
+
+
+def test_required_transformer_endpoints_still_respect_budget():
+    dates = pd.bdate_range("2026-01-01", periods=30)
+    panel = pd.DataFrame([
+        {"trade_date": day, "stock_code": code, "factor": float(index), "label": float(index % 5)}
+        for code in ("A", "B") for index, day in enumerate(dates)
+    ])
+    scaler = {"center": {"factor": 0.0}, "scale": {"factor": 1.0}}
+    windows = _build_sequences(
+        panel, ["factor"], 5, scaler, max_samples=8, required_endpoint_dates=list(dates),
+    )
+    assert len(windows) == 8
+    assert {str(value[2])[:10] for value in windows} & {str(day)[:10] for day in dates[-5:]}
 
 
 def test_transformer_cross_section_preprocessing_preserves_raw_missing_mask():

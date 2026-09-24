@@ -140,6 +140,8 @@ def main() -> int:
     manifest_path = source / "cn_ensemble_portfolio_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
     trade_date = args.trade_date or str(preselected["trade_date"].iloc[0])[:10]
+    candidate_dates = pd.to_datetime(preselected["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d").dropna().unique()
+    candidate_origin_date = str(candidate_dates[0]) if len(candidate_dates) == 1 else None
     output_dir = Path(args.output_dir) if args.output_dir else source
 
     weights = dict(zip(selected["stock_code"].astype(str), pd.to_numeric(selected["target_weight"], errors="coerce").fillna(0.0)))
@@ -192,6 +194,8 @@ def main() -> int:
              f"候选池 {len(preselected)} 只 → PK 组合 {sum(1 for value in weights.values() if value > 0)} 只；"
              f"毛敞口 {sum(weights.values()):.2%}，事前波动 {risk.get('vol_after')}"
              f"（目标 {risk.get('target_volatility')}，协方差 {risk.get('covariance')}）", ""]
+    if candidate_origin_date and candidate_origin_date != trade_date:
+        lines += [f"预选来源日：{candidate_origin_date}（沿用候选，非 {trade_date} 当日重选）", ""]
     for row in rows:
         headline = f"**{row['stock_code']}** {row['name']}｜{row['industry']}"
         detail = (f"　路径：{row['reason']}｜模型分/排名：{row['model_score']} / {row['model_rank']}"
@@ -201,15 +205,19 @@ def main() -> int:
     markdown = "\n".join(lines)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / f"feishu_{trade_date}.md").write_text(markdown + "\n", encoding="utf-8")
-    (output_dir / f"feishu_{trade_date}.html").write_text(_html_table(trade_date, rows, risk), encoding="utf-8")
+    (output_dir / f"feishu_{trade_date}.html").write_text(
+        _html_table(trade_date, rows, risk, candidate_origin_date=candidate_origin_date), encoding="utf-8")
     (output_dir / f"feishu_{trade_date}.json").write_text(
-        json.dumps({"trade_date": trade_date, "rows": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps({"trade_date": trade_date, "candidate_origin_date": candidate_origin_date,
+                    "preselection_carried_forward": bool(candidate_origin_date and candidate_origin_date != trade_date),
+                    "rows": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(markdown)
     print(f"\nwritten: {output_dir / f'feishu_{trade_date}.md'}")
     return 0
 
 
-def _html_table(trade_date: str, rows: list[dict], risk: dict) -> str:
+def _html_table(trade_date: str, rows: list[dict], risk: dict,
+                candidate_origin_date: str | None = None) -> str:
     """邮件用 HTML：与运营表相同的六列（股票 / 名称行业 / 路径与原因 / 模型分排名 / RPS / PK 状态与风险）。"""
     header = "".join(
         f'<th style="border:1px solid #d0d7de;padding:6px 10px;background:#f6f8fa;text-align:left">{title}</th>'
@@ -228,12 +236,17 @@ def _html_table(trade_date: str, rows: list[dict], risk: dict) -> str:
         body.append("<tr>" + "".join(
             f'<td style="border:1px solid #d0d7de;padding:6px 10px;vertical-align:top">{cell}</td>'
             for cell in cells) + "</tr>")
+    origin_note = (
+        f"<p>预选来源日：{candidate_origin_date}（沿用候选，非当日重选）</p>"
+        if candidate_origin_date and candidate_origin_date != trade_date else ""
+    )
     return (
         "<html><body style=\"font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;font-size:13px\">"
         f"<h2>CN 选股 · {trade_date}</h2>"
         f"<p>组合 {sum(1 for row in rows if row['target_weight'] > 0)} 只；毛敞口 "
         f"{sum(row['target_weight'] for row in rows):.2%}；事前波动 {risk.get('vol_after')}"
         f"（目标 {risk.get('target_volatility')}，协方差 {risk.get('covariance')}）</p>"
+        f"{origin_note}"
         f'<table style="border-collapse:collapse;font-size:12px"><thead><tr>{header}</tr></thead>'
         f"<tbody>{''.join(body)}</tbody></table>"
         "<p style=\"color:#57606a\">RPS 为横截面分位（5/10/20/30/60 交易日）；PK 状态含权重、可买手数与风控处理。</p>"

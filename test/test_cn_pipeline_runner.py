@@ -36,6 +36,55 @@ def test_cn_pipeline_has_no_subprocess_command_builder() -> None:
     assert not hasattr(MODULE, "commands_for_stage")
 
 
+def test_preselection_input_archive_preserves_model_scores_and_origin(tmp_path) -> None:
+    scores = tmp_path / "scores"
+    scores.mkdir()
+    models = tmp_path / "models"
+    models.mkdir()
+    results = tmp_path / "results"
+    results.mkdir()
+    config_snapshot = results / "config.json"
+    config_snapshot.write_text('{"stride":5}')
+    preselected = results / "cn_ensemble_preselected.csv"
+    preselected.write_text("stock_code,trade_date\nOLD.SZ,2026-09-10\n")
+    state = results / "cn_ensemble_preselection_rebalance_state.json"
+    state.write_text('{"trade_date":"2026-09-10"}')
+    config = {"selection": {"model_scores_dir": str(scores)}, "model_scores": {}}
+    for name in ("lightgbm", "transformer"):
+        (scores / f"cn_{name}_scores.csv").write_text(f"{name} scores")
+        for suffix in ("model_path", "manifest_path"):
+            path = models / f"{name}_{suffix}.bin"
+            path.write_text(f"{name} {suffix}")
+            config["model_scores"][f"{name}_{suffix}"] = str(path)
+    manifest_path = Path(MODULE.archive_preselection_inputs(
+        config=config, output_dir=str(results),
+        result={"path": str(preselected), "state_path": str(state), "status": "carried_forward",
+                "score_date": "2026-09-11", "candidate_origin_date": "2026-09-10"},
+        config_snapshot=str(config_snapshot), archive_root=tmp_path / "archive",
+    ))
+    import json
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["score_date"] == "2026-09-11"
+    assert manifest["candidate_origin_date"] == "2026-09-10"
+    assert len(manifest["files"]) == 9
+    assert Path(manifest["files"]["lightgbm_model_path"]["snapshot"]).read_text() == "lightgbm model_path"
+    assert Path(manifest["files"]["preselected"]["snapshot"]).read_bytes() == preselected.read_bytes()
+
+
+def test_pipeline_report_marks_carry_forward_origin(tmp_path) -> None:
+    report = {"started_at": "2026-09-11T21:00:00", "result": "ok", "stages": [
+        {"name": "preselection", "status": "carried_forward", "summary": {
+            "status": "carried_forward", "candidate_origin_date": "2026-09-10",
+            "score_date": "2026-09-11", "rebalance_stride_days": 5,
+            "business_days_since_rebalance": 1,
+        }}]}
+    _, markdown = MODULE.write_report(report, tmp_path)
+    text = markdown.read_text()
+    assert "候选沿用 2026-09-10" in text
+    assert "当日分数 2026-09-11" in text
+    assert "| preselection | carried_forward |" in text
+
+
 def test_daily_and_intraday_commands_are_separate() -> None:
     config = MODULE.read_config(ROOT / "config" / "cn_pipeline.toml")
     assert config["daily_bars"]["frequencies"] == ["daily"]

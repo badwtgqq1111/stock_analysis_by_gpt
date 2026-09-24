@@ -409,12 +409,13 @@ def train_transformer_panel(
         prepared, features, lookback, scaler, missing_columns=missing_columns,
         max_samples=max_samples, show_progress=show_progress,
         progress_label="Transformer sequence windows",
-        # Preserve every labeled endpoint in both sides of the split.  Startup
-        # labels are sparse by design; sampling only evenly spaced windows can
-        # otherwise select validation endpoints while dropping all training
-        # endpoints, leaving an apparently non-empty but unusable fold.
+        # Split endpoints are prioritized inside each stock's bounded sample.
+        # They must never bypass max_samples (the old path expanded 36k to
+        # ~736k windows when preserve_unlabeled=True in production).
         required_endpoint_dates=train_date_keys | validation_date_keys,
     )
+    if len(sequences) > int(max_samples):
+        raise AssertionError(f"Transformer sequence budget exceeded: {len(sequences)} > {max_samples}")
     train_items = [item for item in sequences if _date_key(item[2]) in train_date_keys]
     valid_items = [item for item in sequences if _date_key(item[2]) in validation_date_keys]
     # A bounded sampler can still return only a few endpoint dates when the
@@ -1567,17 +1568,23 @@ def _build_sequences(
         inputs = np.concatenate([normalized, missing], axis=1)
         labels = group["label"].to_numpy(dtype=np.float32)
         dates = group["trade_date"].to_numpy()
-        endpoints = np.arange(int(lookback) - 1, len(group), dtype=int)
+        # Sample *labeled* endpoints.  Sampling all calendar dates first can
+        # spend the entire budget on NaN startup labels and leave no usable
+        # train/validation windows.
+        endpoints = np.flatnonzero(np.isfinite(labels))
+        endpoints = endpoints[endpoints >= int(lookback) - 1]
+        if required_dates:
+            preferred = np.asarray([index for index in endpoints if _date_key(dates[index]) in required_dates], dtype=int)
+            other = endpoints[~np.isin(endpoints, preferred)]
+            if len(preferred) >= sample_count:
+                endpoints = preferred
+            elif len(preferred):
+                remaining = sample_count - len(preferred)
+                if len(other) > remaining:
+                    other = other[np.linspace(0, len(other) - 1, num=remaining, dtype=int)]
+                endpoints = np.sort(np.concatenate([preferred, other]))
         if len(endpoints) > sample_count:
             endpoints = endpoints[np.linspace(0, len(endpoints) - 1, num=sample_count, dtype=int)]
-        if required_dates:
-            required = np.asarray(
-                [index for index in range(int(lookback) - 1, len(group))
-                 if _date_key(dates[index]) in required_dates and np.isfinite(labels[index])],
-                dtype=int,
-            )
-            if len(required):
-                endpoints = np.unique(np.concatenate([endpoints, required]))
         for index in endpoints:
             if not np.isfinite(labels[index]):
                 continue

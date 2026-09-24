@@ -132,6 +132,58 @@ def test_force_rebalance_bypasses_the_stride(tmp_path):
     assert result["selected_count"] == 1
 
 
+def test_pk_state_cannot_advance_preselection_candidate_clock(tmp_path):
+    scores = tmp_path / "scores"
+    _write_scores(scores, [("2026-09-11", "NEW.SZ", 0.9, 99.0)])
+    out = tmp_path / "out"
+    out.mkdir()
+    pd.DataFrame({"stock_code": ["OLD.SZ"], "target_weight": [0.5]}).to_csv(
+        out / "cn_ensemble_preselected.csv", index=False,
+    )
+    # PK may run every day, but its state must not make preselection think
+    # the candidate pool was refreshed on that day.
+    (out / "cn_ensemble_rebalance_state.json").write_text(json.dumps({
+        "trade_date": "2026-09-10", "rebalance_stride_days": 1,
+    }), encoding="utf-8")
+    service = MarketDataService.__new__(MarketDataService)
+    service.warehouse = _StubWarehouse(_bars({"NEW.SZ": 20.0}))
+    result = service.select_persisted_model_scores(
+        model_scores_dir=str(scores), output_dir=str(out), top_n=1,
+        portfolio_mode="topn", rebalance_stride_days=5,
+        preselection_only=True, show_progress=False,
+    )
+    assert result["status"] == "completed"
+    assert pd.read_csv(out / "cn_ensemble_preselected.csv")["stock_code"].tolist() == ["NEW.SZ"]
+    own_state = out / "cn_ensemble_preselection_rebalance_state.json"
+    assert own_state.is_file()
+    assert json.loads(own_state.read_text())["trade_date"] == "2026-09-11"
+    assert json.loads((out / "cn_ensemble_rebalance_state.json").read_text())["trade_date"] == "2026-09-10"
+
+
+def test_preselection_stride_uses_only_its_own_state(tmp_path):
+    scores = tmp_path / "scores"
+    _write_scores(scores, [("2026-09-11", "NEW.SZ", 0.9, 99.0)])
+    out = tmp_path / "out"
+    out.mkdir()
+    pd.DataFrame({"stock_code": ["OLD.SZ"], "target_weight": [0.5]}).to_csv(
+        out / "cn_ensemble_preselected.csv", index=False,
+    )
+    (out / "cn_ensemble_preselection_rebalance_state.json").write_text(json.dumps({
+        "trade_date": "2026-09-10", "rebalance_stride_days": 5,
+    }), encoding="utf-8")
+    service = MarketDataService.__new__(MarketDataService)
+    service.warehouse = _StubWarehouse(_bars({"NEW.SZ": 20.0}))
+    result = service.select_persisted_model_scores(
+        model_scores_dir=str(scores), output_dir=str(out), top_n=1,
+        portfolio_mode="topn", rebalance_stride_days=5,
+        preselection_only=True, show_progress=False,
+    )
+    assert result["status"] == "carried_forward"
+    assert result["candidate_origin_date"] == "2026-09-10"
+    assert result["score_date"] == "2026-09-11"
+    assert pd.read_csv(out / "cn_ensemble_preselected.csv")["stock_code"].tolist() == ["OLD.SZ"]
+
+
 def test_universe_audit_is_surfaced_for_the_pipeline_report(tmp_path):
     """The gate/filter audit must reach the report, not stay a local variable."""
     scores = tmp_path / "scores"

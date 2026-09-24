@@ -155,6 +155,16 @@ class MarketDataWarehouse:
         stores.append(self.parquet_store)
         return stores
 
+    def _ohlcv_store_candidates(self, frequency=None, market=None):
+        """Use Parquet alone for CN daily bars after the verified cutover marker."""
+        marker = self.layout.layer_path("meta") / "cn_daily_parquet_authoritative.json"
+        daily = frequency == "daily" or (
+            isinstance(frequency, (list, tuple, set)) and "daily" in frequency
+        )
+        if daily and market == "CN" and marker.is_file():
+            return [self.parquet_store]
+        return self._clean_store_candidates()
+
     def _ensure_writable(self):
         if self.read_only:
             raise RuntimeError(f"只读仓库不支持写入: {self.layout.base_path}")
@@ -317,8 +327,17 @@ class MarketDataWarehouse:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="clean"))}
 
         payload = frame[CLEAN_OHLCV_COLUMNS].copy()
+        if (self.layout.layer_path("meta") / "cn_daily_parquet_authoritative.json").is_file():
+            cn_daily = payload["market"].eq("CN") & payload["frequency"].eq("daily")
+            if cn_daily.any() and not cn_daily.all():
+                first = self.upsert_ohlcv(payload.loc[cn_daily], dataset_name=dataset_name)
+                second = self.upsert_ohlcv(payload.loc[~cn_daily], dataset_name=dataset_name)
+                return {"rows": first["rows"] + second["rows"], "dataset_path": first["dataset_path"]}
         last_error = None
-        for store in self._clean_store_candidates():
+        for store in self._ohlcv_store_candidates(
+            payload["frequency"].iloc[0] if payload["frequency"].nunique() == 1 else None,
+            payload["market"].iloc[0] if payload["market"].nunique() == 1 else None,
+        ):
             try:
                 target = store.upsert_frame(
                     dataset_name=dataset_name,
@@ -345,8 +364,17 @@ class MarketDataWarehouse:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="clean"))}
 
         payload = frame[CLEAN_OHLCV_COLUMNS].copy()
+        if (self.layout.layer_path("meta") / "cn_daily_parquet_authoritative.json").is_file():
+            cn_daily = payload["market"].eq("CN") & payload["frequency"].eq("daily")
+            if cn_daily.any() and not cn_daily.all():
+                first = self.append_ohlcv(payload.loc[cn_daily], dataset_name=dataset_name)
+                second = self.append_ohlcv(payload.loc[~cn_daily], dataset_name=dataset_name)
+                return {"rows": first["rows"] + second["rows"], "dataset_path": first["dataset_path"]}
         last_error = None
-        for store in self._clean_store_candidates():
+        for store in self._ohlcv_store_candidates(
+            payload["frequency"].iloc[0] if payload["frequency"].nunique() == 1 else None,
+            payload["market"].iloc[0] if payload["market"].nunique() == 1 else None,
+        ):
             try:
                 target = store.append_frame(
                     dataset_name=dataset_name,
@@ -778,7 +806,7 @@ class MarketDataWarehouse:
         # flag flip-flops during a run (a bulky query sets it, later calls then
         # silently answer from the lagging mirror).  That is what made the factor
         # stage treat 2026-09-22 as the newest session on 2026-09-23.
-        if self.clickhouse_store is not None:
+        if self.clickhouse_store is not None and self.clickhouse_store in self._ohlcv_store_candidates(frequency, market):
             stores.append(self.clickhouse_store)
         stores.append(self.parquet_store)
         merged_counts: dict = {}
@@ -1532,7 +1560,7 @@ class MarketDataWarehouse:
                 )
             )
         frames = []
-        for priority, store in enumerate(self._clean_store_candidates()):
+        for priority, store in enumerate(self._ohlcv_store_candidates(frequency, market)):
             try:
                 filters = dict(base_filters)
                 if store is self.parquet_store:
@@ -1656,7 +1684,7 @@ class MarketDataWarehouse:
             "adjust": adjust,
         }
         latest = None
-        for store in self._clean_store_candidates():
+        for store in self._ohlcv_store_candidates(frequency, market):
             try:
                 latest = store.scalar_query(
                     dataset_name=dataset_name,
@@ -1698,7 +1726,7 @@ class MarketDataWarehouse:
         }
         columns = ["stock_code", "market", "frequency", "adjust", "trade_date"]
         frames = []
-        for store in self._clean_store_candidates():
+        for store in self._ohlcv_store_candidates(frequencies, market):
             try:
                 frame = store.read_frame(
                     dataset_name=dataset_name,
@@ -1750,7 +1778,7 @@ class MarketDataWarehouse:
         }
         stats_store = None
         total_records = None
-        for store in self._clean_store_candidates():
+        for store in self._ohlcv_store_candidates(frequency, market):
             try:
                 total_records = store.scalar_query(
                     dataset_name=dataset_name,
@@ -1795,7 +1823,7 @@ class MarketDataWarehouse:
             "adjust": adjust,
         }
         values = []
-        for store in self._clean_store_candidates():
+        for store in self._ohlcv_store_candidates(frequency, market):
             try:
                 store_values = store.values_query(
                     dataset_name=dataset_name,
@@ -1821,7 +1849,7 @@ class MarketDataWarehouse:
             "adjust": adjust,
         }
         total = None
-        for store in self._clean_store_candidates():
+        for store in self._ohlcv_store_candidates(frequency, market):
             try:
                 total = store.scalar_query(
                     dataset_name=dataset_name,

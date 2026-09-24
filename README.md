@@ -217,7 +217,19 @@ finally:
     analyzer.close()
 ```
 
-如果本地设置了 `CLICKHOUSE_HOST`，A 股数据会和港股一样优先写 ClickHouse，不可用时回退 Parquet。只想检查本地 Parquet 时，可以临时清掉 ClickHouse 环境变量：
+默认情况下，本地设置 `CLICKHOUSE_HOST` 时，日线可以使用 ClickHouse 加速；CN 日线在 2026-09-24 完成 Parquet 切换后，`assets/data/meta/cn_daily_parquet_authoritative.json` 使 CN 日 K 的读写只走 Parquet。下面是对尚未迁入的日期执行切换时使用的模板，输出目录每次必须是新目录：
+
+```bash
+uv run python scripts/migrate_cn_daily_clickhouse_to_parquet.py \
+  --start-date 2026-09-23 --end-date 2026-09-23 \
+  --output-dir output/verification/cn_daily_parquet_cutover_dry_YYYYMMDD
+
+uv run python scripts/migrate_cn_daily_clickhouse_to_parquet.py \
+  --start-date 2026-09-23 --end-date 2026-09-23 --publish \
+  --output-dir output/verification/cn_daily_parquet_cutover_publish_YYYYMMDD
+```
+
+只想检查本地 Parquet 时，也可以临时清掉 ClickHouse 环境变量：
 
 ```bash
 env -u CLICKHOUSE_HOST -u CLICKHOUSE_PORT -u CLICKHOUSE_HTTP_PORT \

@@ -280,9 +280,16 @@ def test_production_config_carries_the_validated_selection_rules():
     assert universe["exclude_st"] is True
     assert universe["exclude_volume_breakout"] is True
     assert universe["volume_breakout_flow_z_min"] == 1.0
-    # P1.21: default is the soft score gate (better median/win rate, never wipes
-    # the pool); the hard band gate stays one flag away for A/B.
-    assert gate["enabled"] is True and gate["mode"] == "score"
+    # P1.21: 默认是"软门禁"（中位数/胜率更好，且不会清空候选池）；硬带门禁保留为 A/B 开关。
+    # 2026-09-29：软门禁由 score 升级为 orthogonalize——把四项状态暴露交给横截面**残差化**
+    # 而不是加成标量（13 个非重叠窗口实测：正交化 Top50 超额 +6.07%/t=3.17，软倾斜 +3.27%/t=0.89，
+    # 硬筛池 +0.12%/t=0.17）。score 仍可一键切回（并且是同一段代码路径）。
+    assert gate["enabled"] is True and gate["mode"] in {"score", "orthogonalize"}
+    if gate["mode"] == "orthogonalize":
+        assert gate["orthogonalize_exposures"], "orthogonalize 必须声明暴露列"
+        assert gate["orthogonalize_blend"] == 1.0
+    # 2026-09-29：可成交性护栏——停牌股没有当日 bar，选进来当天买不到。
+    assert universe["require_recent_bar_sessions"] == 1
     assert gate["score_strength"] == 0.2
     assert gate["score_strength"] > 0
     assert {"score_band_min_dist_from_120d_low", "score_decay_max_dist_from_120d_low"} <= set(gate)

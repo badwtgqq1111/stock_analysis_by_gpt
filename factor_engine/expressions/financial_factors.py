@@ -89,6 +89,26 @@ def _asof_context_series(index, context, key):
     return _asof_valuation_alignment(index, context, key)[0]
 
 
+def _coerce_datetime_resolution(values):
+    """Return tz-naive ``datetime64[ns]`` values on a single resolution.
+
+    pandas 3 keeps the resolution it received from each source: OHLCV frames
+    read from parquet arrive as ``datetime64[us]`` while sparse valuation
+    records converted from python objects/strings can be ``datetime64[s]``.
+    ``pd.merge_asof`` refuses to join mixed resolutions, which made every
+    per-stock factor computation raise in 2026-09 and silently produced zero
+    feature rows for the newest trading dates (the stage still reported ok).
+    """
+    converted = pd.to_datetime(values, errors="coerce")
+    if isinstance(converted, pd.DatetimeIndex):
+        if converted.tz is not None:
+            converted = converted.tz_convert("UTC").tz_localize(None)
+    elif isinstance(converted, pd.Series):
+        if getattr(converted.dtype, "tz", None) is not None:
+            converted = converted.dt.tz_convert("UTC").dt.tz_localize(None)
+    return converted.astype("datetime64[ns]")
+
+
 def _asof_valuation_alignment(index, context, key):
     """Align a field and expose the observation's age in trading sessions.
 
@@ -104,13 +124,13 @@ def _asof_valuation_alignment(index, context, key):
     records = pd.DataFrame(history)
     if "trade_date" not in records or key not in records:
         return _constant(index, np.nan), _constant(index, np.nan)
-    records["trade_date"] = pd.to_datetime(records["trade_date"], errors="coerce")
+    records["trade_date"] = _coerce_datetime_resolution(records["trade_date"])
     records[key] = pd.to_numeric(records[key], errors="coerce")
     records = records.dropna(subset=["trade_date", key]).sort_values("trade_date")
     records = records.drop_duplicates("trade_date", keep="last")
     if records.empty:
         return _constant(index, np.nan), _constant(index, np.nan)
-    target = pd.DataFrame({"_sample_date": pd.to_datetime(index, errors="coerce")})
+    target = pd.DataFrame({"_sample_date": _coerce_datetime_resolution(index)})
     target["_row_order"] = range(len(target))
     ordered = target.sort_values("_sample_date")
     aligned = pd.merge_asof(

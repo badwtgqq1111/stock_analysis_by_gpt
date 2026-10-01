@@ -202,6 +202,24 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
   fi
 fi
 
+# 因子 IC 显著性/有效性复核（§15 协议）：默认每周日跑一次，失败不影响当日生产结果。
+# 只做两件事：① 复跑准入协议并与上一版对比（因子_ic_delta.json）② 把结果写进日志供人工核对。
+if [ "$DRY_RUN" -eq 0 ] && [ "${RUN_IC_PROTOCOL:-auto}" != "0" ]; then
+  case "${RUN_IC_PROTOCOL:-auto}" in
+    1|always) run_protocol=1 ;;
+    auto) [ "$(date +%u)" = "7" ] && run_protocol=1 || run_protocol=0 ;;
+    *) run_protocol=0 ;;
+  esac
+  if [ "$run_protocol" = "1" ]; then
+    log "ic-protocol start（因子 IC 显著性与有效性复核）"
+    if PYTHONPATH=. uv run python scripts/factor_ic_protocol.py --days 756 >> "$LOG_DIR/ic_protocol.log" 2>&1; then
+      log "ic-protocol ok（准入清单与漂移记录见 output/research/factor_ic_protocol/）"
+    else
+      log "ic-protocol FAILED（见 $LOG_DIR/ic_protocol.log；不影响当日生产结果）"
+    fi
+  fi
+fi
+
 if [ "$FAILED" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   date '+%Y-%m-%dT%H:%M:%S%z' > "$MARKER"
   log "done: $TRADE_DATE 生产完成（当日后续触发会跳过；失败则下一次触发自动重试）"

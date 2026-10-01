@@ -105,6 +105,7 @@ from factor_engine.portfolio.paper_account import persist_paper_account, run_pap
 from factor_engine.ml.alternative_data import normalize_cn_alternative_evidence, write_alternative_data_report
 from factor_engine.ml.feature_profiles import resolve_feature_profile
 from factor_engine.ml.neutralization import neutralize_features
+from factor_engine.ml.input_guard import evaluate_input_guard
 from factor_engine.ml.strategy_labels import apply_startup_gate, build_cn_strategy_labels
 from factor_engine.ml.meta_labeling import (
     DEFAULT_META_FEATURES,
@@ -212,8 +213,70 @@ def _cn_incremental_start_date(base_start, latest_trade_date, frequency):
     return effective_start.strftime("%Y-%m-%d")
 
 
+def _strategy_state_eval(spec, frame, features, extras):
+    """按策略的 state 规则逐条判定（返回 {ok, missing, detail}）。
+
+    列取值优先级：recipe features(含 signal_* 前缀) > bars 派生(dist_*、volume_ratio_20d) > extras。
+    """
+    import pandas as _pd
+
+    closes = _pd.to_numeric(frame.get("close"), errors="coerce").dropna()
+    highs = _pd.to_numeric(frame.get("high"), errors="coerce").dropna()
+    lows = _pd.to_numeric(frame.get("low"), errors="coerce").dropna()
+    volumes = _pd.to_numeric(frame.get("volume"), errors="coerce").dropna()
+    values: dict = {}
+    if len(closes):
+        latest = float(closes.iloc[-1])
+        if len(lows) >= 60:
+            window_low = float(lows.tail(120).min())
+            if window_low > 0:
+                values["dist_from_120d_low"] = latest / window_low - 1.0
+        if len(highs) >= 30:
+            window_high = float(highs.tail(60).max())
+            if window_high > 0:
+                values["dist_from_60d_high"] = latest / window_high - 1.0
+        if len(volumes) >= 20:
+            mean_volume = float(volumes.tail(20).mean())
+            if mean_volume > 0:
+                values["volume_ratio_20d"] = float(volumes.iloc[-1]) / mean_volume
+    for key, value in (features or {}).items():
+        values[str(key)] = value
+        values[f"signal_{key}"] = value
+    values.update({"signal_extension": extras.get("extension"), "signal_runup_5d": extras.get("runup_5d")})
+    missing: list[str] = []
+    detail: dict = {}
+    ok = True
+    for rule in spec.get("rules") or []:
+        column = str(rule.get("column"))
+        value = values.get(column)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = float("nan")
+        if not np.isfinite(numeric):
+            missing.append(column)
+            detail[column] = None
+            continue
+        op = str(rule.get("op"))
+        if op == "gte":
+            passed = numeric >= float(rule["value"])
+        elif op == "lte":
+            passed = numeric <= float(rule["value"])
+        elif op == "gt":
+            passed = numeric > float(rule["value"])
+        elif op == "lt":
+            passed = numeric < float(rule["value"])
+        elif op == "between":
+            passed = float(rule["lo"]) <= numeric <= float(rule["hi"])
+        else:
+            passed = True
+        detail[column] = bool(passed)
+        ok &= bool(passed)
+    return {"ok": ok, "missing": missing, "detail": detail}
+
+
 def filter_selection_universe(codes, *, names=None, median_amount=None, volume_breakout=None, flow_z=None,
-                              flow_coverage=None, settings=None):
+                              flow_coverage=None, last_bar_lag_sessions=None, settings=None):
     """Return the codes an ST / liquidity filter removes, for one decision date.
 
     Split out of the service so the rule can be unit-tested without a warehouse:
@@ -230,7 +293,9 @@ def filter_selection_universe(codes, *, names=None, median_amount=None, volume_b
     settings = dict(settings or {})
     audit = {"enabled": bool(settings.get("enabled")), "st_dropped": [], "missing_name": [], "illiquid_dropped": [],
              "missing_amount": [], "volume_breakout_dropped": [], "volume_breakout_unconfirmed": [],
-             "volume_breakout_flow_coverage": None, "volume_breakout_missing_flow_kept": []}
+             "volume_breakout_flow_coverage": None, "volume_breakout_missing_flow_kept": [],
+             "no_recent_bar_dropped": [], "no_recent_bar_unknown": [],
+             "require_recent_bar_sessions": settings.get("require_recent_bar_sessions")}
     dropped: list[str] = []
     if not audit["enabled"]:
         return dropped, audit
@@ -259,6 +324,21 @@ def filter_selection_universe(codes, *, names=None, median_amount=None, volume_b
                 continue
             if float(value) < float(floor):
                 audit["illiquid_dropped"].append(code)
+    recent_bar_limit = settings.get("require_recent_bar_sessions")
+    if recent_bar_limit is not None:
+        # 可成交性护栏（2026-09-29）：停牌股没有当日 bar，选进来等于当天买不到
+        # （实测 9/28 名单里 000739.SZ / 300820.SZ 各占 20% 权重，9/29 均无成交）。
+        # lag 用"决策 session 与个股最近 bar 的交易日数差"衡量；None=未知（缺数据）按未知处理。
+        limit = int(recent_bar_limit)
+        for code in ordered:
+            if code in audit["st_dropped"] or code in audit["illiquid_dropped"]:
+                continue
+            lag = None if last_bar_lag_sessions is None else last_bar_lag_sessions.get(code)
+            if lag is None:
+                audit["no_recent_bar_unknown"].append(code)
+                continue
+            if int(lag) > limit:
+                audit["no_recent_bar_dropped"].append(code)
     if bool(settings.get("exclude_volume_breakout", False)) and volume_breakout:
         # P1.17 section 0.14: "放量上涨" (5-day up move on >1.5x volume) is the worst
         # forward-return bucket in this panel (20-day excess -0.63% all / -0.75%
@@ -303,12 +383,17 @@ def filter_selection_universe(codes, *, names=None, median_amount=None, volume_b
             if float(value) < float(confirm_min):
                 audit["volume_breakout_unconfirmed"].append(code)
                 audit["volume_breakout_dropped"].append(code)
-    dropped = list(dict.fromkeys([*audit["st_dropped"], *audit["illiquid_dropped"], *audit["volume_breakout_dropped"]]))
+    dropped = list(dict.fromkeys([
+        *audit["st_dropped"], *audit["illiquid_dropped"], *audit["volume_breakout_dropped"],
+        *audit["no_recent_bar_dropped"],
+    ]))
     audit.update({
         "dropped": len(dropped),
         "st_dropped_count": len(audit["st_dropped"]),
         "illiquid_dropped_count": len(audit["illiquid_dropped"]),
         "volume_breakout_dropped_count": len(audit["volume_breakout_dropped"]),
+        "no_recent_bar_dropped_count": len(audit["no_recent_bar_dropped"]),
+        "no_recent_bar_unknown_count": len(audit["no_recent_bar_unknown"]),
         "volume_breakout_ratio": settings.get("volume_breakout_ratio", 1.5) if settings.get("exclude_volume_breakout") else None,
         "min_median_amount_20d": None if floor is None else float(floor),
     })
@@ -914,9 +999,75 @@ def _sleeve_weight_bounds(signal_config: dict | None) -> dict:
     return bounds
 
 
+def apply_sleeve_block_cap(frame, *, cap, model_mask, cap_for, initial_capital, lot_size):
+    """把"卫星块（sleeve/override/候选）"的总权重压到 cap 以内，余额尽量转给模型块。
+
+    为什么要它（2026-10-01）：`budget.share` 与 sleeve 的 `max_weight` 只约束 forced 名称，
+    **非 forced 的 signal_candidate 权重由优化器给出**，所以一条声明 0.05 的腿实际能吃下 30% 的账面。
+    这里在权重定稿之后做一次块级封顶：
+      1) 卫星块权重按比例缩到 cap；
+      2) 释放的权重按比例补给模型块（受各自 cap 限制）；
+      3) 补不进去的部分留作现金（宁可少投，也不让预算声明失效）；
+      4) 缩放后买不起一手（lot）的卫星名直接清零并记账。
+    返回 (新 frame, 摘要)。
+    """
+    if frame is None or frame.empty or "target_weight" not in frame.columns:
+        return frame, {"applied": False, "reason": "empty"}
+    work = frame.copy()
+    weights = pd.to_numeric(work["target_weight"], errors="coerce").fillna(0.0).to_numpy(dtype=float, copy=True)
+    codes = work["stock_code"].astype(str).to_numpy(copy=True)
+    model_flags = model_mask.to_numpy(dtype=bool) if hasattr(model_mask, "to_numpy") else np.asarray(model_mask, dtype=bool)
+    sat = (~model_flags) & (weights > 0)
+    block_weight = float(weights[sat].sum())
+    summary = {"applied": False, "cap": None if cap is None else round(float(cap), 6),
+               "sleeve_weight_before": round(block_weight, 6), "sleeve_weight_after": round(block_weight, 6),
+               "redistributed_to_model": 0.0, "residual_cash": 0.0, "cleared_unfillable": []}
+    if cap is None or float(cap) <= 0:
+        summary["reason"] = "no cap configured"
+        return work, summary
+    if block_weight <= float(cap) + 1e-12:
+        summary["applied"] = True
+        summary["reason"] = "within cap"
+        return work, summary
+    scale = float(cap) / block_weight
+    weights[sat] = weights[sat] * scale
+    freed = block_weight - float(weights[sat].sum())
+    model_live = model_flags & (weights > 0)
+    if freed > 1e-12 and model_live.any():
+        caps = np.array([float(cap_for(code)) for code in codes], dtype=float)
+        headroom = np.maximum(caps - weights, 0.0)
+        headroom[~model_live] = 0.0
+        total_headroom = float(headroom.sum())
+        if total_headroom > 1e-12:
+            add = headroom * min(1.0, freed / total_headroom)
+            weights = weights + add
+            summary["redistributed_to_model"] = round(float(add.sum()), 6)
+    work["target_weight"] = weights
+    work["trade_weight"] = work["target_weight"] - pd.to_numeric(work.get("current_weight", 0.0), errors="coerce").fillna(0.0)
+    # 只有拿得到价格（last_close）时才能判断"一手是否买得起"；缺价格时**不能**据此清零，
+    # 否则会把整本账清空（2026-10-01 单测踩到）。
+    if "last_close" in work.columns and initial_capital:
+        work = _attach_lot_columns(work, capital=float(initial_capital), lot_size=int(lot_size))
+        unfillable = (work["target_weight"] > 0) & (~work["lot_fillable"].fillna(False))
+        if bool(unfillable.any()):
+            cleared = work.loc[unfillable, "stock_code"].astype(str).tolist()
+            work.loc[unfillable, "target_weight"] = 0.0
+            work.loc[unfillable, "trade_weight"] = -pd.to_numeric(work.loc[unfillable, "current_weight"], errors="coerce").fillna(0.0)
+            work.loc[unfillable, "constraint_status"] = "excluded_unfillable_lot_after_sleeve_cap"
+            summary["cleared_unfillable"] = cleared
+    summary["sleeve_weight_after"] = round(float(work.loc[~model_flags, "target_weight"].sum()), 6)
+    summary["residual_cash"] = round(max(0.0, freed - summary["redistributed_to_model"]), 6)
+    summary["applied"] = True
+    return work, summary
+
+
 def _attach_lot_columns(frame: pd.DataFrame, *, capital: float, lot_size: int) -> pd.DataFrame:
     """Record whether each target weight can actually be filled in whole lots."""
+    # 容错：缺 last_close 时旧实现会退化成标量，导致后面的 .to_numpy() 抛
+    # AttributeError（2026-10-01 单测触发）。这里显式构造一个同索引的 NaN 序列。
     closes = pd.to_numeric(frame.get("last_close"), errors="coerce")
+    if not isinstance(closes, pd.Series):
+        closes = pd.Series(np.nan, index=frame.index, dtype="float64")
     one_lot_value = closes * int(lot_size)
     target_value = pd.to_numeric(frame["target_weight"], errors="coerce") * float(capital)
     frame["one_lot_value"] = one_lot_value.round(2)
@@ -942,6 +1093,9 @@ def _repair_unfillable_targets(
     drop_unfillable_forced: bool = True,
     weight_caps=None,
     max_rounds: int | None = None,
+    sleeve_total_max: float | None = None,
+    min_holdings: int | None = None,
+    max_weight_concentrated: float | None = None,
 ):
     """Optimize, then drop names whose one lot does not fit their own target.
 
@@ -980,6 +1134,9 @@ def _repair_unfillable_targets(
 
     rounds = max(len(pool), 12) if max_rounds is None else max(int(max_rounds), 1)
     lifted_for_lots: list[str] = []
+    topped_up_for_min_holdings: list[str] = []
+    lot_summary_extra: dict = {}
+    pool_all = pool.copy()   # 原始候选池：被"整手修复"剔掉的名字在补下限时要用回来
 
     def _lift(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         """Raise unfillable positions to one-lot size, funded by the rest."""
@@ -1084,6 +1241,111 @@ def _repair_unfillable_targets(
                     optimized.loc[live, "target_weight"] = optimized.loc[live, "target_weight"] * scale
                     optimized["trade_weight"] = optimized["target_weight"] - optimized["current_weight"]
                     optimized = _attach_lot_columns(optimized, capital=initial_capital, lot_size=lot_size)
+    # ---- 下限与集中度（2026-10-01，用户口径：最少 2 只、最多 max_holdings）----
+    # 修复循环会"逐个丢票"直到所有仓位都买得起一手，极端情况下会塌成 1 只；
+    # 这里补一条硬下限，并要求少数持仓时把 gross 部署到位（集中度上限允许放大到 gross/N）。
+    if initial_capital and float(initial_capital) > 0:
+        live_mask = optimized["target_weight"] > 0
+        live_count = int(live_mask.sum())
+        want_min = int(min_holdings) if min_holdings else 0
+        if want_min > 1 and 0 < live_count < want_min:
+            closes = pd.to_numeric(optimized.get("last_close"), errors="coerce")
+            pool_all = pool_all.copy()
+            pool_all["_score"] = pd.to_numeric(pool_all.get("model_score"), errors="coerce").fillna(-np.inf)
+            order = pool_all.sort_values("_score", ascending=False)
+            for _, row in order.iterrows():
+                if int((optimized["target_weight"] > 0).sum()) >= want_min:
+                    break
+                code = str(row["stock_code"])
+                if code in set(optimized.loc[optimized["target_weight"] > 0, "stock_code"].astype(str)):
+                    continue
+                price = float(pd.to_numeric(row.get("last_close"), errors="coerce") or np.nan)
+                if not np.isfinite(price) or price <= 0:
+                    continue
+                need = price * int(lot_size) / float(initial_capital)
+                if need > _cap_for(code) + 1e-12:
+                    continue
+                donors = optimized["target_weight"] > 0
+                available = float(optimized.loc[donors, "target_weight"].sum())
+                if available < need:
+                    continue
+                # 从现有持仓按比例腾出一手的额度；腾完若不足一手则放弃这名补位
+                scaled = optimized.loc[donors, "target_weight"] * (1.0 - need / available)
+                one_lot_w = (pd.to_numeric(optimized.loc[donors, "last_close"], errors="coerce") * int(lot_size)
+                             / float(initial_capital))
+                if (scaled + 1e-12 < one_lot_w).any():
+                    continue
+                optimized.loc[donors, "target_weight"] = scaled
+                new_row = optimized.loc[optimized.index[0]].copy()
+                new_row["stock_code"] = code
+                new_row["target_weight"] = need
+                for column in ("last_close", "model_score", "rank"):
+                    if column in row.index and column in new_row.index:
+                        new_row[column] = row[column]
+                new_row["constraint_status"] = "eligible_topped_up_for_min_holdings"
+                optimized = pd.concat([optimized, pd.DataFrame([new_row])], ignore_index=True)
+                topped_up_for_min_holdings.append(code)
+        # 少数持仓时把 gross 用足：有效上限 = min(max_weight_concentrated, gross/N)
+        gross_cap = float(getattr(constraints, "gross_exposure", 0.0) or 0.0)
+        if not gross_cap and isinstance(constraints, dict):
+            gross_cap = float(constraints.get("gross_exposure") or 0.0)
+        live_mask = optimized["target_weight"] > 0
+        n_live = int(live_mask.sum())
+        concentrated_deploy = {"gross_cap": gross_cap, "n_live": n_live, "applied": False}
+        if gross_cap > 0 and n_live > 0:
+            effective_cap = default_cap
+            if max_weight_concentrated:
+                if n_live <= max(1, int(np.floor(gross_cap / max(default_cap, 1e-9)))):
+                    effective_cap = max(default_cap, min(float(max_weight_concentrated), gross_cap / n_live))
+            invested = float(optimized.loc[live_mask, "target_weight"].sum())
+            if invested > 0 and invested < gross_cap - 1e-9:
+                # 注意：不能用 min(_cap_for, effective_cap) —— regime 的单名上限（0.35）会把
+                # 集中度上限削掉，2 只的账永远到不了 gross。集中度上限是**显式覆盖**：
+                # cap_eff = max(regime 单名上限, min(max_weight_concentrated, gross/N))。
+                def _cap_with_concentration(code: str) -> float:
+                    base = _cap_for(code)
+                    if not max_weight_concentrated:
+                        return min(base, effective_cap)
+                    return max(base, min(float(max_weight_concentrated), gross_cap / max(n_live, 1)))
+
+                caps = optimized.loc[live_mask, "stock_code"].astype(str).map(_cap_with_concentration)
+                headroom_scale = float((caps / optimized.loc[live_mask, "target_weight"]).min())
+                scale = min(gross_cap / invested, max(headroom_scale, 1.0))
+                concentrated_deploy.update({"effective_cap": effective_cap, "invested": round(invested, 6),
+                                            "scale": round(float(scale), 6)})
+                if scale > 1.0 + 1e-12:
+                    optimized.loc[live_mask, "target_weight"] = optimized.loc[live_mask, "target_weight"] * scale
+                    # 按比例放大后往往还剩一点余量（个别名字先撞到 cap）→ 把余额贪心填给还有余量的名字，
+                    # 否则少数持仓的账会一直差几个点没投满（实测 2 只时 71.7% vs 目标 75%）。
+                    for _ in range(3):
+                        invested_now = float(optimized.loc[live_mask, "target_weight"].sum())
+                        residual = gross_cap - invested_now
+                        if residual <= 1e-12:
+                            break
+                        head = (caps - optimized.loc[live_mask, "target_weight"]).clip(lower=0.0)
+                        if float(head.sum()) <= 1e-12:
+                            break
+                        add = head / max(float(head.sum()), 1e-12) * min(residual, float(head.sum()))
+                        optimized.loc[live_mask, "target_weight"] = (
+                            optimized.loc[live_mask, "target_weight"] + add)
+                    optimized["trade_weight"] = optimized["target_weight"] - pd.to_numeric(
+                        optimized.get("current_weight", 0.0), errors="coerce").fillna(0.0)
+                    optimized = _attach_lot_columns(optimized, capital=float(initial_capital), lot_size=int(lot_size))
+                    concentrated_deploy["applied"] = True
+        lot_summary_extra["concentrated_deploy"] = concentrated_deploy
+
+    # 块级上限（2026-10-01）：卫星块（非 model 通道）总权重不得超过 sleeve_total_max。
+    # budget.share / sleeve max_weight 只约束 forced 名称，非 forced 候选的权重由优化器给出，
+    # 不封顶的话"声明 0.05 的腿"可以吃掉 30% 的账面。
+    if sleeve_total_max is not None and float(sleeve_total_max) > 0:
+        model_mask = (optimized.get("selection_channel", pd.Series("model", index=optimized.index))
+                      .astype(str).eq("model"))
+        optimized, sleeve_cap_summary = apply_sleeve_block_cap(
+            optimized, cap=float(sleeve_total_max), model_mask=model_mask, cap_for=_cap_for,
+            initial_capital=float(initial_capital), lot_size=int(lot_size),
+        )
+    else:
+        sleeve_cap_summary = {"applied": False, "reason": "no cap configured"}
     target_gross = float(optimized["target_weight"].sum())
     lot_summary = {
         "lot_size": int(lot_size),
@@ -1093,6 +1355,11 @@ def _repair_unfillable_targets(
         "dropped_forced_for_lots": dropped_forced_for_lots,
         "lifted_for_lots": lifted_for_lots,
         "target_gross": round(target_gross, 6),
+        "sleeve_block_cap": sleeve_cap_summary,
+        "min_holdings": None if not min_holdings else int(min_holdings),
+        "topped_up_for_min_holdings": topped_up_for_min_holdings,
+        "max_weight_concentrated": max_weight_concentrated,
+        **lot_summary_extra,
         "idle_gross": round(max(0.0, gross - target_gross), 6),
         "fillable": int(optimized["lot_fillable"].sum()),
         "unfillable": int((~optimized["lot_fillable"] & (optimized["target_weight"] > 0)).sum()),
@@ -6186,6 +6453,8 @@ class MarketDataService:
             order_by="trade_date, ingest_time",
         )
         if valuation is not None and not valuation.empty:
+            # 单只路径不做"批次级时效"判定（个别股票本来就稀疏），只做量纲护栏。
+            valuation = self._guard_valuation_freshness(valuation, asof_date=None, market=normalized_market)
             valuation = valuation.sort_values(["trade_date", "ingest_time"])
             payload["valuation_history"] = valuation.to_dict("records")
             row = valuation.iloc[-1].to_dict()
@@ -6205,6 +6474,53 @@ class MarketDataService:
                 if value is not None and not pd.isna(value):
                     payload[key] = value
         return payload
+
+    # 估值快照是 LightGBM gain 占比最高的一族输入（27.9%）。读取路径一旦静默退化到
+    # 残缺的 Parquet 镜像，写出的特征会整体变成一个月前的观测，而且因为 ingest_time
+    # 最新，会覆盖掉同日已经写好的正确值。2026-09-26 的对齐重算就是这样把 2026-09-24
+    # 的 valuation_market_cap_age_td 写成 33、valuation_market_cap_log 写成 24.33
+    # （镜像单位"元"），覆盖了当天 10:42 已经写好的 age=1 / 5.96（主表单位"亿元"）。
+    # 这里把"静默降级"改成"报错"，宁可中止这一批特征写入，也不让一个月前的估值进模型。
+    VALUATION_MAX_SOURCE_LAG_DAYS = 21
+    VALUATION_UNIT_SUSPECT_MEDIAN = 1.0e6
+    VALUATION_UNIT_SCALE_COLUMNS = ("market_cap", "circulating_market_cap", "free_float_market_cap")
+
+    def _guard_valuation_freshness(self, valuation: pd.DataFrame, *, asof_date=None, market="CN"):
+        """校验估值读取结果的时效与量纲；不通过就抛错（不返回残缺镜像）。"""
+        frame = valuation
+        if frame is None or frame.empty:
+            return frame
+        if asof_date is not None:
+            newest = pd.to_datetime(frame.get("trade_date"), errors="coerce").max()
+            if pd.notna(newest):
+                lag_days = int((pd.Timestamp(asof_date).normalize() - pd.Timestamp(newest).normalize()).days)
+                limit = int(os.environ.get("CN_VALUATION_MAX_LAG_DAYS", self.VALUATION_MAX_SOURCE_LAG_DAYS))
+                if lag_days > limit:
+                    sources = ""
+                    if "source" in frame.columns:
+                        sources = ", ".join(f"{k}={v}" for k, v in frame["source"].value_counts().head(3).items())
+                    raise RuntimeError(
+                        "valuation snapshot read is stale: 最新观测 "
+                        f"{pd.Timestamp(newest).date()} 比请求日期 {pd.Timestamp(asof_date).date()} 落后 {lag_days} 天"
+                        f"（上限 {limit} 天，来源 {sources or 'unknown'}）。"
+                        "这通常表示主表读取失败后退回了冻结的 Parquet 镜像；"
+                        "继续写入会把一个月前的估值特征覆盖到最新交易日。"
+                        "若确认数据源本身停更，可显式设置 CN_VALUATION_MAX_LAG_DAYS 放宽。"
+                    )
+        if str(market).upper() == "CN" and os.environ.get("CN_VALUATION_UNIT_GUARD", "1") not in {"0", "off", "false"}:
+            scaled: list[str] = []
+            for column in self.VALUATION_UNIT_SCALE_COLUMNS:
+                if column not in frame.columns:
+                    continue
+                values = pd.to_numeric(frame[column], errors="coerce")
+                median = float(values.abs().median()) if values.notna().any() else float("nan")
+                if np.isfinite(median) and median > self.VALUATION_UNIT_SUSPECT_MEDIAN:
+                    frame = frame.copy()
+                    frame[column] = values / 1.0e8
+                    scaled.append(f"{column}(median={median:.3g})")
+            if scaled:
+                _print_cn_failure_summary("valuation_unit", [{"column": item} for item in scaled])
+        return frame
 
     def _build_factor_context_extra_map(self, stock_codes, market="HK", asof_date=None, start_date=None):
         """Build local persisted factor context for a stock universe in one pass."""
@@ -6237,6 +6553,7 @@ class MarketDataService:
             order_by="market, stock_code, trade_date, ingest_time",
         )
         if valuation is not None and not valuation.empty:
+            valuation = self._guard_valuation_freshness(valuation, asof_date=asof_date, market=normalized_market)
             valuation = valuation.sort_values(["stock_code", "trade_date", "ingest_time"])
             for code, history in valuation.groupby("stock_code", sort=False):
                 payload = payloads.setdefault(code, {})
@@ -6387,8 +6704,14 @@ class MarketDataService:
         show_progress=True,
         source="factor_engine",
         config=None,
+        force_recompute=False,
     ):
-        """批量生成并落库指定因子集，默认按缺失增量补齐。"""
+        """批量生成并落库指定因子集，默认按缺失增量补齐。
+
+        ``force_recompute=True`` 跳过“已有覆盖则跳过”的预检，强制重算整个窗口。
+        用于修复/对齐场景：同一交易日的历史值可能来自预热不同的批次，而预检只看
+        特征计数、看不出“长窗口特征因为预热不足而算错”。
+        """
         normalized_market = (market or "HK").upper()
         normalized_adjust = normalize_adjust(adjust)
         normalized_codes = [
@@ -6490,7 +6813,7 @@ class MarketDataService:
         coverage_prechecked_codes: set[str] = set()
         if show_progress:
             print("[INFO] 正在批量检查已有特征覆盖...", flush=True)
-        if expected_feature_count > 0:
+        if expected_feature_count > 0 and not force_recompute:
             try:
                 _, latest_dates_by_stock = self.warehouse.ohlcv_coverage_by_stock(
                     stock_codes=normalized_codes,
@@ -6760,7 +7083,8 @@ class MarketDataService:
                 latest = pd.to_datetime(ohlcv["trade_date"], errors="coerce").dropna().max()
                 if pd.isna(latest):
                     return {"stock_code": stock_code, "status": "missing_ohlcv", "payload": None}
-                if (stock_code not in coverage_prechecked_codes
+                if (not force_recompute
+                        and stock_code not in coverage_prechecked_codes
                         and _has_complete_coverage(
                             _read_existing_features(stock_code, latest), latest)):
                     return {"stock_code": stock_code, "status": "skipped", "payload": None}
@@ -6925,6 +7249,7 @@ class MarketDataService:
             n_rps = self.warehouse.compute_rps_features(
                 factor_set=factor_set,
                 progress_callback=progress_callback,
+                market=normalized_market,
             )
             total_rows_written += n_rps
             if show_progress:
@@ -7926,6 +8251,11 @@ class MarketDataService:
         cnn_device="auto",
         output_dir="output/model_scores",
         min_cross_section_coverage=0.95,
+        input_guard="enforce",
+        input_guard_min_gain_coverage=0.5,
+        input_guard_min_columns=0.9,
+        input_guard_sessions=30,
+        input_guard_max_excluded_share=0.05,
         show_progress=False,
     ):
         """Score persisted models in isolated workers and persist their latest scores."""
@@ -7962,6 +8292,49 @@ class MarketDataService:
             )
         progress = tqdm(total=sum(bool(path and manifest) for path, manifest in ((lightgbm_model_path, lightgbm_manifest_path), (transformer_model_path, transformer_manifest_path), (cnn_model_path, cnn_manifest_path))), desc="model scores", unit="model", file=sys.stderr) if show_progress else None
         worker_path = Path(__file__).resolve().parents[2] / "scripts" / "score_cn_model.py"
+
+        # 打分前体检（R2 覆盖率 + R11 单位合理性）：覆盖率不达标直接中止，
+        # 单位可疑的股票从当日截面剔除，避免“静默劣化”再次发生。
+        guard_report = None
+        excluded_codes: list[str] = []
+        guard_mode = str(input_guard or "enforce").strip().lower()
+        if guard_mode != "off":
+            guard_report = self._evaluate_scoring_input_guard(
+                market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
+                cleaning_version=cleaning_version, latest_date=latest_date,
+                lightgbm_manifest_path=lightgbm_manifest_path,
+                transformer_manifest_path=transformer_manifest_path,
+                min_gain_coverage=float(input_guard_min_gain_coverage),
+                min_columns=float(input_guard_min_columns),
+                sessions=int(input_guard_sessions),
+            )
+            excluded_codes = list(guard_report.get("excluded_codes") or [])
+            if show_progress or not guard_report["coverage_ok"] or excluded_codes:
+                coverage = guard_report["coverage"]
+                print(
+                    "[MODEL_SCORES] input guard: "
+                    f"gain_weighted_coverage={coverage.get('gain_weighted_coverage')} "
+                    f"columns_covered={coverage.get('columns_covered')} "
+                    f"used_columns_all_missing={coverage.get('used_columns_all_missing')} "
+                    f"coverage_ok={guard_report['coverage_ok']} "
+                    f"unit_anomalies={len(guard_report.get('unit_anomalies') or [])} "
+                    f"excluded={len(excluded_codes)}",
+                    flush=True,
+                )
+            if not guard_report["coverage_ok"] and guard_mode == "enforce":
+                raise ValueError(
+                    "model_scores input guard blocked scoring: the latest cross-section is missing "
+                    f"model inputs ({json.dumps(guard_report['coverage'], ensure_ascii=False)}). "
+                    "Rebuild features/clean_panel, or set [model_scores].input_guard = \"warn\" to override."
+                )
+            if excluded_codes and guard_mode == "enforce":
+                share = len(excluded_codes) / max(1, int(score_date_quality.get("selected_stock_count") or 1))
+                if share > float(input_guard_max_excluded_share):
+                    raise ValueError(
+                        f"model_scores input guard blocked scoring: {len(excluded_codes)} code(s) "
+                        f"({share:.1%}) fail the price/volume unit check; investigate before trading "
+                        f"(sample={excluded_codes[:10]})"
+                    )
 
         def _score_in_worker(name, model_path, manifest_path, device):
             manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
@@ -8003,6 +8376,24 @@ class MarketDataService:
             progress.close()
         if not results:
             raise ValueError("at least one persisted model path and manifest path is required")
+
+        if guard_report is not None:
+            if excluded_codes:
+                dropped: dict[str, int] = {}
+                for name, info in results.items():
+                    score_path = Path(info["path"])
+                    frame = pd.read_csv(score_path)
+                    before = len(frame)
+                    frame = frame[~frame["stock_code"].astype(str).isin(set(excluded_codes))].reset_index(drop=True)
+                    frame.to_csv(score_path, index=False)
+                    dropped[name] = before - len(frame)
+                    info["rows"] = int(len(frame))
+                guard_report["excluded_rows_dropped"] = dropped
+            guard_report["mode"] = guard_mode
+            guard_path = output / f"cn_input_guard_{pd.Timestamp(latest_date).date()}.json"
+            guard_path.write_text(json.dumps(guard_report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            results["input_guard"] = {"path": str(guard_path), "coverage_ok": guard_report["coverage_ok"],
+                                      "excluded_codes": excluded_codes}
         return {
             "status": "completed",
             "latest_trade_date": latest_date.strftime("%Y-%m-%d"),
@@ -8010,6 +8401,67 @@ class MarketDataService:
             "results": results,
         }
 
+
+    def _evaluate_scoring_input_guard(
+        self,
+        *,
+        market,
+        factor_set,
+        frequency,
+        adjust,
+        cleaning_version,
+        latest_date,
+        lightgbm_manifest_path=None,
+        transformer_manifest_path=None,
+        min_gain_coverage=0.5,
+        min_columns=0.9,
+        sessions=30,
+    ):
+        """打分前体检：模型输入覆盖率 + 价格/成交量单位合理性。"""
+        manifest_path = lightgbm_manifest_path or transformer_manifest_path
+        model_columns: list[str] = []
+        gain = None
+        if manifest_path and Path(manifest_path).is_file():
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            model_columns = [str(column) for column in (manifest.get("feature_columns") or [])]
+            model_path = Path(manifest_path).with_name("model.txt")
+            if model_path.is_file():
+                try:
+                    import lightgbm as lgb
+
+                    booster = lgb.Booster(model_file=str(model_path))
+                    gain = pd.Series(booster.feature_importance("gain"), index=booster.feature_name())
+                except Exception:
+                    gain = None
+        panel, _ = self.read_clean_feature_panel(
+            market=market, factor_set=factor_set, frequency=frequency, adjust=adjust,
+            start_date=pd.Timestamp(latest_date).strftime("%Y-%m-%d"),
+            end_date=pd.Timestamp(latest_date).strftime("%Y-%m-%d"),
+            cleaning_version=cleaning_version,
+        )
+        if not panel.empty:
+            panel = panel[pd.to_datetime(panel["trade_date"]).dt.normalize() == pd.Timestamp(latest_date).normalize()]
+        if not model_columns:
+            model_columns = [column for column in panel.columns if column.endswith(("_clean", "_is_missing"))]
+        sessions = max(1, int(sessions or 1))
+        window_start = pd.Timestamp(latest_date).normalize() - pd.Timedelta(days=sessions * 2 + 20)
+        ohlcv = self.warehouse.read_ohlcv(
+            market=str(market).upper(), asset_type="equity", frequency=frequency, adjust=adjust,
+            start_date=window_start.strftime("%Y-%m-%d"),
+            end_date=pd.Timestamp(latest_date).strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date", "close", "volume", "amount"],
+        )
+        equity_codes = None
+        if str(market).upper() == "CN" and ohlcv is not None and not ohlcv.empty:
+            equity_codes, _ = filter_cn_equity_codes(sorted(set(ohlcv["stock_code"].astype(str))))
+        report = evaluate_input_guard(
+            panel, model_columns, gain, ohlcv,
+            min_gain_coverage=float(min_gain_coverage), min_columns=float(min_columns),
+            sessions=sessions, codes=equity_codes,
+        )
+        report["trade_date"] = str(pd.Timestamp(latest_date).date())
+        report["model_manifest"] = str(manifest_path) if manifest_path else None
+        return report
 
     def _market_reference_stats(self, selection_date, *, lookback_days: int = 110):
         """Market-wide speculation state and volatility percentiles.
@@ -8129,11 +8581,112 @@ class MarketDataService:
         flow_coverage = None
         if isinstance(flow_by_code, dict) and flow_by_code:
             flow_coverage = sum(1 for value in flow_by_code.values() if value is not None) / float(len(flow_by_code))
+        last_bar_lag = None
+        if settings.get("require_recent_bar_sessions") is not None:
+            day = pd.Timestamp(as_of).normalize() if as_of is not None and not pd.isna(pd.Timestamp(as_of)) else pd.Timestamp(datetime.now().date()).normalize()
+            window = int(settings.get("recent_bar_window_days", 30) or 30)
+            recent = self.warehouse.read_ohlcv(
+                market="CN", asset_type="equity", frequency="daily", adjust="qfq", stock_code=ordered,
+                start_date=(day - pd.Timedelta(days=window)).strftime("%Y-%m-%d"),
+                end_date=day.strftime("%Y-%m-%d"),
+                columns=["stock_code", "trade_date"],
+            )
+            last_bar_lag = {}
+            if recent is not None and not recent.empty:
+                recent = recent.copy()
+                recent["trade_date"] = pd.to_datetime(recent["trade_date"], errors="coerce")
+                recent = recent.dropna(subset=["trade_date"])
+                sessions = sorted({pd.Timestamp(value).normalize() for value in recent["trade_date"].unique()})
+                # 决策 session = 不晚于 as_of 的最近一个交易日
+                eligible = [value for value in sessions if value <= day]
+                decision_session = eligible[-1] if eligible else None
+                last_by_code = recent.groupby(recent["stock_code"].astype(str))["trade_date"].max()
+                if decision_session is not None:
+                    session_index = {value: index for index, value in enumerate(sessions)}
+                    decision_index = session_index.get(decision_session)
+                    for code, value in last_by_code.items():
+                        value_ts = pd.Timestamp(value).normalize()
+                        index = session_index.get(value_ts)
+                        if decision_index is None or index is None:
+                            continue
+                        last_bar_lag[str(code)] = int(decision_index - index)
         dropped, audit = filter_selection_universe(
             ordered, names=names, median_amount=median_amount, volume_breakout=volume_breakout,
-            flow_z=flow_by_code, flow_coverage=flow_coverage, settings=settings,
+            flow_z=flow_by_code, flow_coverage=flow_coverage, last_bar_lag_sessions=last_bar_lag,
+            settings=settings,
         )
         return set(dropped), audit
+
+    def check_daily_bar_coverage(self, *, as_of=None, lookback_sessions=10, min_ratio=0.98):
+        """当日 bar 覆盖率体检：与最近 N 个交易日的"可交易标的数"中位数比较。
+
+        2026-09-29 实测：第一次同步只覆盖 3,559/5,221（68%），补抓 3 次才到 4,943（95%）。
+        覆盖率不足时若继续算因子/打分，会像 9/28 的资金流那样**静默污染信号**，
+        所以这一步要能中止链路，而不是写出一份基于残缺截面的打分。
+        """
+        day = pd.Timestamp(as_of).normalize() if as_of is not None and not pd.isna(pd.Timestamp(as_of)) else pd.Timestamp(datetime.now().date()).normalize()
+        window = max(int(lookback_sessions) * 3, 20)
+        bars = self.warehouse.read_ohlcv(
+            market="CN", asset_type="equity", frequency="daily", adjust="qfq",
+            start_date=(day - pd.Timedelta(days=window)).strftime("%Y-%m-%d"),
+            end_date=day.strftime("%Y-%m-%d"),
+            columns=["stock_code", "trade_date"],
+        )
+        if bars is None or bars.empty:
+            return {"ok": False, "reason": "no bars returned", "session": None, "bars": 0, "baseline": 0, "ratio": 0.0}
+        bars = bars.copy()
+        bars["trade_date"] = pd.to_datetime(bars["trade_date"], errors="coerce")
+        bars = bars.dropna(subset=["trade_date"])
+        per_session = bars.groupby(bars["trade_date"].dt.normalize())["stock_code"].nunique().sort_index()
+        per_session = per_session[per_session.index <= day]
+        if per_session.empty:
+            return {"ok": False, "reason": "no session at or before as_of", "session": None, "bars": 0, "baseline": 0, "ratio": 0.0}
+        session = per_session.index[-1]
+        current = int(per_session.iloc[-1])
+        baseline_series = per_session.iloc[-(int(lookback_sessions) + 1):-1]
+        baseline = float(baseline_series.median()) if len(baseline_series) else float(current)
+        ratio = (current / baseline) if baseline > 0 else 0.0
+        # 缺失清单要落盘（2026-09-29 教训）：只报一个比例无法区分"停牌"与"同步故障"。
+        # 前者分散在各板块且补抓无效；后者成批缺失（如首次 68%）。把缺失样本与板块分布写进
+        # output/data_quality/bar_coverage_<session>.json，供日更后核对与告警。
+        session_codes = set(bars.loc[bars["trade_date"].dt.normalize() == session, "stock_code"].astype(str))
+        previous_sessions = [value for value in per_session.index if value < session]
+        reference: set[str] = set()
+        if previous_sessions:
+            reference_date = previous_sessions[-1]
+            reference = set(bars.loc[bars["trade_date"].dt.normalize() == reference_date, "stock_code"].astype(str))
+        missing = sorted(reference - session_codes)
+        board_counts: dict[str, int] = {}
+        for code in missing:
+            prefix = code[:3]
+            if prefix in {"600", "601", "603", "605"}:
+                board = "SH主板"
+            elif prefix.startswith("688"):
+                board = "科创板"
+            elif prefix in {"000", "001", "002", "003"}:
+                board = "SZ主板/中小"
+            elif prefix in {"300", "301"}:
+                board = "创业板"
+            elif prefix.startswith(("4", "8", "92")):
+                board = "北交所"
+            else:
+                board = "其它"
+            board_counts[board] = board_counts.get(board, 0) + 1
+        report = {"ok": bool(ratio >= float(min_ratio)), "reason": None if ratio >= float(min_ratio) else "coverage below threshold",
+                  "session": str(pd.Timestamp(session).date()), "bars": current, "baseline": int(baseline),
+                  "ratio": round(float(ratio), 4), "min_ratio": float(min_ratio),
+                  "sessions_checked": int(len(per_session)),
+                  "missing_count": len(missing), "missing_sample": missing[:20],
+                  "missing_by_board": board_counts,
+                  "reference_session": str(pd.Timestamp(reference_date).date()) if previous_sessions else None}
+        try:
+            quality_dir = Path("output/data_quality")
+            quality_dir.mkdir(parents=True, exist_ok=True)
+            (quality_dir / f"bar_coverage_{report['session']}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        return report
 
     def _cn_startup_gate_frame(self, *, as_of, settings):
         """Compute the startup-eligibility gate for one decision date.
@@ -8168,7 +8721,8 @@ class MarketDataService:
             entry_delay=1,
         )
         labels = labels.loc[labels["trade_date"] == pd.Timestamp(session)].copy()
-        soft_gate = str(settings.get("mode", "eligibility") or "eligibility").strip().lower() == "score"
+        gate_mode = str(settings.get("mode", "eligibility") or "eligibility").strip().lower()
+        soft_gate = gate_mode in {"score", "orthogonalize"}
         if bool(settings.get("second_tier_enabled", False)) or soft_gate:
             context, _ = self.read_clean_feature_panel(
                 start_date=pd.Timestamp(session).strftime("%Y-%m-%d"),
@@ -8185,6 +8739,14 @@ class MarketDataService:
         gate, mode = _startup_gate_columns(labels, settings)
         gate["startup_gate_mode"] = mode
         gate["startup_gate_session"] = str(pd.Timestamp(session).date())
+        if str(mode).strip().lower() == "orthogonalize":
+            # 正交化需要暴露列本身：默认 [dist_from_120d_low, flow_z]（实测最小暴露集最优），
+            # 另外把 dist_from_60d_high / volume_ratio 一并带回用于审计与后续扩展。
+            exposures = [c for c in ["dist_from_120d_low", "dist_from_60d_high", "flow_z", "volume_ratio"]
+                         if c in labels.columns]
+            extra = labels[["stock_code", *exposures]].drop_duplicates("stock_code") if exposures else None
+            if extra is not None:
+                gate = gate.merge(extra, on="stock_code", how="left")
         return gate
 
     def select_persisted_model_scores(
@@ -8314,7 +8876,40 @@ class MarketDataService:
             budget_ratio = float(affordability_config.get("budget_ratio", 0.15) or 0.15)
             tolerance = float(affordability_config.get("tolerance", 1.0) or 1.0)
             requested_price = affordability_config.get("max_price")
-            if isinstance(requested_price, str) and requested_price.strip().lower() == "auto":
+            requested_mode = (
+                str(requested_price).strip().lower()
+                if isinstance(requested_price, str)
+                else str(affordability_config.get("max_price_mode") or "").strip().lower()
+            )
+            if requested_mode in {"weight_cap", "auto_weight_cap"}:
+                # 一手市值上限绑定"单只权重上限"，而不是"等权槽位预算"。
+                # 槽位预算法（equity*gross/slots/lot_size）会因为"一个等权槽位买不起
+                # 一手"把 30~150 元区间的大盘股整段剔除（2026-09-24 实测 5208 只里剔掉
+                # 434 只），但组合层本来就会把买不起一手的票上调到"一手"成交，只要
+                # 一手市值不超过单只权重上限。放开价格上限必须换成这个口径，否则
+                # 只是把"小盘限制"换成一个更隐蔽的等权槽位限制。
+                weight_cap = float(affordability_config.get("price_weight_cap", 0.20) or 0.20)
+                constraint_cap = float((portfolio_constraints or {}).get("max_weight") or 0.0)
+                regime_cap = 0.0
+                regime_path = Path("output/regime/cn_market_regime.csv")
+                if regime_path.is_file():
+                    try:
+                        regime_frame = pd.read_csv(regime_path)
+                        if as_of is not None:
+                            regime_frame = regime_frame[
+                                pd.to_datetime(regime_frame["trade_date"]).dt.normalize() <= as_of
+                            ]
+                        if not regime_frame.empty and "max_weight_budget" in regime_frame.columns:
+                            budget = regime_frame.sort_values("trade_date").iloc[-1]["max_weight_budget"]
+                            if pd.notna(budget):
+                                regime_cap = float(budget)
+                    except (ValueError, OSError, KeyError):
+                        pass
+                caps = [value for value in (weight_cap, constraint_cap, regime_cap) if value and value > 0]
+                effective_cap = min(caps) if caps else weight_cap
+                max_price = equity * effective_cap * tolerance / max(lot_size, 1)
+                affordability_summary_note = f"weight_cap({effective_cap:.2f})"
+            elif isinstance(requested_price, str) and requested_price.strip().lower() == "auto":
                 # One position slot must be able to buy a whole lot: the binding
                 # budget is the regime gross exposure split across the slots.
                 gross = float((portfolio_constraints or {}).get("gross_exposure") or 0.0) or 1.0
@@ -8458,6 +9053,74 @@ class MarketDataService:
                 "universe_after": universe_after_gate,
                 "eligible_source": "strategy_labels",
             }
+            if str(startup_gate_summary.get("mode") or "").strip().lower() == "orthogonalize" and not gate.empty:
+                # 最优方案（2026-09-28 定案）：把模型分对启动状态暴露做**横截面秩空间回归取残差**，
+                # 再用残差分位排序。tilt 定义成 pct(resid)-pct(model)，配合消费端
+                # model_score += 100*strength*(tilt-mean(tilt)) 与 strength=1，
+                # 最终分恰好等于 100*pct(resid)：中性化的是"风格暴露"，不是删候选（保留全池宽度）。
+                orthogonalize = dict(gate_settings)
+                requested_exposures = list(orthogonalize.get("orthogonalize_exposures")
+                                           or ["dist_from_120d_low", "flow_z"])
+                # 暴露列必须有实际覆盖：某些交易日资金流尚未同步（flow_z 全空），
+                # 若把空列一起 dropna 会导致"正交化静默不生效"（实测 2026-09-28）。
+                # 这里按覆盖率过滤（默认要求 >=50% 非空），并保留覆盖最好的那一列。
+                min_cov = float(orthogonalize.get("orthogonalize_min_coverage", 0.5) or 0.5)
+                exposure_cov = {}
+                for column in requested_exposures:
+                    if column not in gate.columns:
+                        continue
+                    coverage = float(pd.to_numeric(gate[column], errors="coerce").notna().mean())
+                    if coverage >= min_cov:
+                        exposure_cov[column] = coverage
+                exposures = sorted(exposure_cov, key=lambda c: -exposure_cov[c])
+                blend = float(orthogonalize.get("orthogonalize_blend", 1.0) or 0.0)
+                score_frames = [
+                    frame[["stock_code", "model_score"]]
+                    for frame in frames.values() if "model_score" in frame.columns and not frame.empty
+                ]
+                orth_audit = {"exposures": exposures, "blend": blend, "names": 0,
+                              "coverage": {k: round(v, 3) for k, v in exposure_cov.items()},
+                              "requested": requested_exposures,
+                              "skipped_low_coverage": [c for c in requested_exposures if c not in exposure_cov]}
+                if not exposures:
+                    startup_gate_summary.update({
+                        "orthogonalize": orth_audit,
+                        "orthogonalize_skipped": "no exposure column with sufficient coverage",
+                    })
+                if exposures and score_frames:
+                    scores = pd.concat(score_frames, ignore_index=True).drop_duplicates("stock_code")
+                    merged_orth = (gate[["stock_code", *exposures]].drop_duplicates("stock_code")
+                                   .merge(scores, on="stock_code", how="inner"))
+                    merged_orth = merged_orth.dropna(subset=[*exposures, "model_score"])
+                    if len(merged_orth) >= 50:
+                        raw_pct = merged_orth["model_score"].rank(pct=True)
+                        design = [np.ones(len(merged_orth))]
+                        design += [merged_orth[c].rank(pct=True).to_numpy(dtype=float) for c in exposures]
+                        matrix = np.column_stack(design)
+                        target = raw_pct.to_numpy(dtype=float)
+                        beta, *_ = np.linalg.lstsq(matrix, target, rcond=None)
+                        residual = target - matrix @ beta
+                        resid_pct = pd.Series(residual, index=merged_orth.index).rank(pct=True)
+                        fitted = target - residual
+                        ss_tot = float(((target - target.mean()) ** 2).sum())
+                        ss_res = float((residual ** 2).sum())
+                        tilt_map = {}
+                        for code, resid_rank, raw_rank in zip(merged_orth["stock_code"].astype(str), resid_pct, raw_pct):
+                            tilt_map[code] = float(blend * (resid_rank - raw_rank))
+                        startup_gate_tilt = tilt_map
+                        startup_gate_tilt_strength = 1.0
+                        orth_audit.update({
+                            "names": len(tilt_map),
+                            "betas": {c: round(float(b), 4) for c, b in zip(exposures, beta[1:])},
+                            "r2": round(1.0 - ss_res / ss_tot, 4) if ss_tot > 0 else None,
+                            "raw_pct_mean": round(float(target.mean()), 4),
+                        })
+                startup_gate_summary.update({
+                    "orthogonalize": orth_audit,
+                    "score_tilt_names": int(orth_audit.get("names") or 0),
+                    "score_tilt_applied_before_top_n": bool(orth_audit.get("names")),
+                    "score_rails_dropped": int(universe_before_gate - universe_after_gate),
+                })
             if str(startup_gate_summary.get("mode") or "").strip().lower() == "score" and "gate_score" in gate.columns:
                 # Soft gate: the rails above only remove extreme cases; the
                 # continuous tilt is applied to the model score by
@@ -9072,6 +9735,11 @@ class MarketDataService:
                     selected = selected.merge(
                         tilt_ctx[["stock_code", flow_column_name]], on="stock_code", how="left",
                     )
+            _explicit_sleeve_cap = float((portfolio_constraints or {}).get("sleeve_total_max") or 0.0)
+            _model_min_share = float((portfolio_constraints or {}).get("model_min_share", 0.0) or 0.0)
+            _gross_for_cap = float(getattr(cfg, "gross_exposure", 0.0) or 0.0)
+            _sleeve_total_max = (_explicit_sleeve_cap if _explicit_sleeve_cap > 0
+                                 else max(0.0, _gross_for_cap * (1.0 - _model_min_share)) if _gross_for_cap > 0 else None)
             selected, portfolio_manifest, lot_summary = _repair_unfillable_targets(
                 optimize_long_only, selected.copy(), constraints=cfg,
                 initial_capital=float(initial_capital), lot_size=lot_size,
@@ -9079,6 +9747,9 @@ class MarketDataService:
                 forced_max_weight=forced_max_weight,
                 require_fillable_lot=require_fillable_lot,
                 drop_unfillable_forced=drop_unfillable_forced,
+                sleeve_total_max=_sleeve_total_max,
+                min_holdings=(portfolio_constraints or {}).get("min_holdings"),
+                max_weight_concentrated=(portfolio_constraints or {}).get("max_weight_concentrated"),
             )
             lot_summary["dropped_unaffordable"] = dropped_unaffordable
             portfolio_manifest["covariance_input"] = covariance_used
@@ -9101,6 +9772,11 @@ class MarketDataService:
         destination = Path(output_dir)
         destination.mkdir(parents=True, exist_ok=True)
         path = selection_path
+        # schema 容错（2026-10-01）：没有信号腿贡献时 selected 里可能缺 selection_channel /
+        # selection_sleeve 列，下游按列名读取会 KeyError。这里补齐默认值再落盘。
+        for column, default in (("selection_channel", "model"), ("selection_sleeve", "")):
+            if column not in selected.columns:
+                selected[column] = default
         selected.to_csv(path, index=False)
         try:
             state_path.write_text(json.dumps({
@@ -9400,6 +10076,8 @@ class MarketDataService:
             "risk_rejected": [],
             "errors": [],
         }
+        strategy_state_specs = dict(signal_config.get("_strategy_state") or {})
+        state_audit: dict = {}
         recipes = [str(name) for name in (signal_config.get("recipes") or []) if str(name).strip()]
         if not recipes or model_candidates is None or model_candidates.empty:
             summary["enabled"] = False
@@ -9556,6 +10234,24 @@ class MarketDataService:
                 upper = features.get("donchian_upper")
                 extension = (latest_close / float(upper) - 1.0) if (upper and np.isfinite(upper) and latest_close > 0) else np.nan
                 runup_5d = float(latest_close / closes.iloc[-6] - 1.0) if len(closes) >= 6 and closes.iloc[-6] else np.nan
+                # 策略自身 state（P1_22 §23.4 第②步后半）：每条腿只用**自己**的入场状态，
+                # 不再被全局启动门禁（模型腿口径）扣分。列可从 bars / recipe features 直接算出；
+                # 列缺失时 fail-open 并记账（避免一次缺列把整条腿清空）。
+                state_spec = strategy_state_specs.get(name) if strategy_state_specs else None
+                if state_spec:
+                    check = _strategy_state_eval(
+                        state_spec, eval_frame, features,
+                        {"latest_close": latest_close, "extension": extension, "runup_5d": runup_5d},
+                    )
+                    entry = state_audit.setdefault(state_spec.get("strategy_id", name),
+                                                  {"checked": 0, "rejected": 0, "missing_columns": []})
+                    entry["checked"] += 1
+                    for column in check.get("missing", []):
+                        if column not in entry["missing_columns"]:
+                            entry["missing_columns"].append(column)
+                    if not check["ok"]:
+                        entry["rejected"] += 1
+                        continue
                 hit_rows.append({
                     "stock_code": str(code), "signal_recipe": name, "signal_type": str(result.signal_type),
                     "signal_score": float(result.score), "signal_ensemble_score": ensemble,
@@ -9810,6 +10506,9 @@ class MarketDataService:
                 "forced": bottom_momentum_forces["stock_code"].astype(str).tolist(),
             },
         }
+        if state_audit:
+            # 每条腿的自身 state 命中情况（rejected = 因不满足该策略入场状态而未进候选）
+            summary["strategy_state"] = state_audit
         if not forced_codes and not recommended_codes:
             return model_candidates, summary
 
@@ -9988,6 +10687,43 @@ class MarketDataService:
         md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return {"csv": str(csv_path), "json": str(json_path), "markdown": str(md_path)}
 
+    def _apply_feature_admission(self, features, admission):
+        """按因子 IC 准入清单裁剪入模列（对应 `[model_features].admission_mode`）。
+
+        准入清单由 `scripts/factor_ic_protocol.py` 生成：|IC|>=0.02、|ICIR|>=0.30、BH-FDR 显著、
+        前后半段同号、且是相关簇代表。实测同一验证窗口：准入 94 列模型秩 IC +0.149，
+        全集 1,294 列 -0.022 —— 冗余特征会把可用信号做没。
+        mode: off（默认，保持现状）| apply（裁剪）| warn（只记录不裁剪）。
+        """
+        audit = {"mode": "off", "file": None, "before": len(features), "after": len(features)}
+        if not admission:
+            self._last_feature_admission = audit
+            return features, audit
+        mode = str((admission or {}).get("mode") or "off").strip().lower()
+        path = (admission or {}).get("path")
+        audit["mode"] = mode
+        if mode in {"", "off", "none"} or not path:
+            self._last_feature_admission = audit
+            return features, audit
+        file_path = Path(str(path))
+        if not file_path.is_file():
+            raise FileNotFoundError(f"feature admission file not found: {file_path}")
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+        wanted = list(dict.fromkeys([*(payload.get("admitted_A") or []), *(payload.get("admitted_B") or [])]))
+        if not wanted:
+            raise ValueError(f"feature admission file {file_path} lists no admitted columns")
+        selected = [column for column in features if column in set(wanted)]
+        audit.update({"file": str(file_path), "listed": len(wanted), "after": len(selected)})
+        if not selected:
+            raise ValueError("feature admission removed every column; check the admission file namespace")
+        if mode == "warn":
+            audit["after"] = len(features)
+            print(f"[ADMISSION][WARN] 清单 {len(wanted)} 列、命中 {len(selected)} 列，warn 模式不裁剪", flush=True)
+            self._last_feature_admission = audit
+            return features, audit
+        self._last_feature_admission = audit
+        return selected, audit
+
     def train_lightgbm_clean_panel(
         self,
         *,
@@ -10019,6 +10755,7 @@ class MarketDataService:
         min_trees=100,
         eval_metric="daily_ic",
         end_date=None,
+        feature_admission=None,
         show_progress=False,
     ):
         if show_progress:
@@ -10033,6 +10770,12 @@ class MarketDataService:
             show_progress=show_progress,
         )
         target_dir = model_dir or Path("output/models") / str(market).lower() / "lightgbm" / factor_set
+        features, admission_audit = self._apply_feature_admission(features, feature_admission)
+        if admission_audit.get("mode") not in {None, "off"} and show_progress:
+            print(f"[LIGHTGBM] feature admission mode={admission_audit['mode']} "
+                  f"{admission_audit.get('before')} → {admission_audit.get('after')} 列"
+                  f"（来源 {admission_audit.get('file')}）", flush=True)
+        self._last_feature_admission = admission_audit
         return train_lightgbm_panel(
             panel, features, model_dir=target_dir, label_column=label_column,
             validation_days=validation_days, cleaning_version=cleaning_version,

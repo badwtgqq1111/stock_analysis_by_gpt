@@ -1,5 +1,6 @@
 [pipeline]
 market = "CN"
+
 start_date = "2014-01-01"
 end_date = ""
 adjust = "qfq"
@@ -30,6 +31,22 @@ min_training_stocks = 50
 # Fundamental and alternative fields are optional inputs. Their coverage is reported,
 # not used to discard otherwise valid price/volume samples.
 min_fundamental_coverage = 0.80
+
+
+# 数据健康硬门（2026-09-29 新增）：当日 bar 覆盖率 = 当日有 bar 的股票数 / 最近 10 个交易日的中位数。
+# 9/29 实测第一次同步只有 68%，补抓 3 次到 95%——这种残缺如果继续算因子/打分，
+# 会像 9/28 的资金流那样静默污染信号。enforce=不达标中止，warn=只告警。
+[pipeline.data_health]
+enabled = true
+mode = "enforce"          # enforce | warn | off
+# 阈值依据（2026-09-29 实测）：9/29 缺 267/5210 = 5.1%，且**分散在所有板块**
+# （002:79 / 600:49 / 300:48 / 000:25 / 688:18 …），补抓两轮未改善 → 属于"停牌 + 源滞后"，
+# 不是同步故障。同步故障的形态是 68%（第一次同步 3559/5221）这种**成批缺失**。
+# 另外：真正防"不可成交还去选"的是 [selection.universe_filter].require_recent_bar_sessions（停牌直接剔除），
+# 覆盖率门只负责拦住成批缺失。因此阈值落 0.95。
+min_bar_coverage = 0.95
+lookback_sessions = 10
+stages = ["features", "clean_panel", "lightgbm", "model_scores", "preselection", "pk"]
 
 [factor_config.valuation_hk]
 # Baidu valuations are sparse observations. Keep the as-of value, and give
@@ -178,6 +195,14 @@ feature_batch_size = 50
 # their masks; all-missing and constant inputs never enter model artifacts.
 min_feature_coverage = 0.05
 drop_constant_features = true
+# 因子 IC 准入（2026-09-27 起）：清单由 scripts/factor_ic_protocol.py 生成，规则 = |IC|>=0.02 且
+# |ICIR|>=0.30 且 BH-FDR(q=0.05) 显著 且 前后半段同号 且 是 |rho|>=0.9 相关簇的代表。
+#   off   用全部 1,366 列（现状）        apply 只喂准入列        warn 只记录不裁剪
+# 实测（2026-06-04~08-27 同切分验证窗口，准入期只用 2025-03~2026-05）：
+#   准入 94 列 → 日频秩 IC +0.1486 / t=+19.4 / 60 天零负值 ； 全集 1,294 列 → -0.0218
+# 注意：清单必须与面板列同名（*_clean 等）；换 factor_set 或改特征命名要重跑协议再更新清单。
+admission_mode = "apply"
+admission_file = "output/research/factor_ic_protocol/factor_ic_admitted.json"
 
 [regime]
 days = 756
@@ -292,6 +317,17 @@ cleaning_version = "p0.2.v1"
 # Do not select from a partially materialized latest date. The scorer falls
 # back to the newest date that covers at least this share of the universe.
 min_cross_section_coverage = 0.95
+# 打分前输入体检（R2 覆盖率 + R11 单位合理性）：
+#   enforce  覆盖率不达标直接中止；单位可疑的股票从当日截面剔除（占比超阈值也中止）
+#   warn     只记录，不阻断
+#   off      关闭
+# gain 加权覆盖率 = 用 LightGBM gain 给“被使用列”的当日覆盖率加权，能量化静默劣化
+# （2026-09-23 实测 0.107，属于必须中止的状态）。
+input_guard = "enforce"
+input_guard_min_gain_coverage = 0.5
+input_guard_min_columns = 0.9
+input_guard_sessions = 30
+input_guard_max_excluded_share = 0.05
 output_dir = "output/model_scores"
 lightgbm_model_path = "output/models/cn/lightgbm/alpha_zoo_hk/model.txt"
 lightgbm_manifest_path = "output/models/cn/lightgbm/alpha_zoo_hk/model_manifest.json"
@@ -301,6 +337,104 @@ transformer_device = "auto"
 cnn_model_path = ""
 cnn_manifest_path = ""
 cnn_device = "auto"
+
+# ============================================================================
+# 策略注册表（2026-09-29 新增）：策略 = (信号, 状态/资格, 仓位, 退出, 预算, 证据)
+#
+# 为什么：模型腿与突破腿对"入场状态"的偏好是相反的——模型腿要"贴近 120 日低点 + 缩量"，
+# 突破腿要"刚突破 + 放量"。把两种策略塞进一个全局标量门禁（startup_gate 的 4 项加权和）
+# 必然互相抵消（实测 k_high 的 IC 是 −0.371，方向就是反的）。
+# 门禁因此降级为"每个策略自己的 state 段"，组合层只做策略间预算分配与执行约束。
+#
+# 本段目前**只用于归因与治理**（factor_engine/strategies.py 读取、归因报告按 strategy_id
+# 归组），尚未改变选股行为；接线顺序见 docs/todo/P1_22 §23.4。
+# 新增策略 = 加一个 [strategies.<id>] 段 + 一个信号函数（factor_engine/signals/），
+# 不需要改门禁/组合层代码。
+# ============================================================================
+
+[strategies.model_alpha]
+kind = "model"
+status = "active"
+# 2026-09-30 修正声明：实测模型分 Top-20 里只有 10% 落在"贴近低点"带内（全市场 39% 落在带内），
+# dist_from_120d_low 中位 ≈0.6 —— 这个模型的头部是**强势/动量**票，不是低吸票。
+# 因此如实声明为"全截面 alpha，不做位置约束"，位置/资金流只作为**正交化剥离**的暴露
+# （正交化实测优于软倾斜：Top50 +6.07%/t=3.17 vs +3.27%/t=0.89）。
+label = "模型腿：全截面 alpha（无位置约束；dist/flow 只做正交化剥离）"
+signal = { source = "lightgbm", score = "orthogonalized_residual", features = "admitted_90", orthogonalize_exposures = ["dist_from_120d_low", "flow_z"] }
+# 不再声明入场状态（曾经的 dist∈[0.05,0.30]+缩量+flow 与模型实际行为相反，属于错声明）
+sizing = { slots = 4, min_weight = 0.0, max_weight = 0.35 }
+exit = { stop_loss_atr_multiple = 2.5, stop_loss_min_pct = 0.04, stop_loss_max_pct = 0.10, take_profit_ret20 = 0.15 }
+budget = { share = 0.90, note = "2026-10-01 起 0.75→0.90：sleeve 层在可交易口径下无正 edge（见 P1.22 §32/§33）" }
+evidence = { valid_rank_ic = 0.1414, head_state_conformance = "Top-20 仅 10% 落在低吸带内（2026-09-29 实测）", updated = "2026-09-30" }
+
+[strategies.dip_low_position]
+kind = "signal"
+status = "research"   # 只在研究态：跑通 A/B（模型分在低吸子集内排序 vs 全截面）再决定是否上生产
+label = "低吸腿（研究态）：贴近自身低位 + 缩量 + 资金流确认，再按模型分排序"
+signal = { recipe = "model_dip", rank = "model_score", note = "候选 = 满足 state 的子集；排序用模型分" }
+sizing = { slots = 1, min_weight = 0.06, max_weight = 0.15 }
+exit = { expected_holding_days = 20 }
+budget = { share = 0.0, note = "研究态不占预算；转 active 时从 model_alpha 划出 share" }
+evidence = { status = "A/B 已完成：不达标，保持 research", abl_k12 = "B 先低吸过滤再排序 +0.76%/t=0.63 vs A 全截面 +3.15%/t=1.48（13 非重叠窗口）", subset_note = "低吸子集平均 729 只（占全截面 14%），子集内随机 −0.51%/20 日 → 该状态本身无 alpha", conclusion = "dist/flow 是风险暴露而非 alpha；模型头部是强势票（§28.4）。除非换标签/换信号，否则不转 active", updated = "2026-09-30" }
+[strategies.dip_low_position.state]
+dist_from_120d_low = { op = "between", lo = 0.05, hi = 0.30, note = "启动带" }
+volume_ratio_20d = { op = "lte", value = 1.2, note = "缩量" }
+flow_z = { op = "gte", value = 0.0, note = "资金流不为负" }
+
+[strategies.donchian_breakout]
+kind = "signal"
+status = "off"
+label = "突破腿：箱体/通道突破 + 放量确认"
+signal = { recipe = "donchian_pullback", setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback"], rank = "volume_ratio_20" }
+sizing = { slots = 2, min_weight = 0.06, max_weight = 0.20 }
+exit = { expected_holding_days = 5, stop_atr = 1.5 }
+budget = { sleeve_section = "", share = 0.10 }
+evidence = { demoted_20261001 = "均值基准 5d −0.29%/t=−6.4（近两年 t=−2.6）→ 转 off",  event_study_5d = 0.0042, note = "突破类追高即失效：超上沿 >5% 后 5 日超额 −0.50%（t=−2.15）", updated = "2026-09-16" }
+[strategies.donchian_breakout.state]
+# 这些列都能从信号腿可见的 bars / recipe features 直接算出（service._cn_signal_candidates）
+dist_from_60d_high = { op = "gte", value = -0.05, note = "贴近/突破 60 日高点（与模型腿相反）" }
+volume_ratio_20d = { op = "gte", value = 1.3, note = "放量确认（与模型腿相反）" }
+signal_extension = { op = "lte", value = 0.05, note = "尾随保护：超通道上沿 >5% 不追" }
+signal_runup_5d = { op = "lte", value = 0.20, note = "尾随保护：5 日涨幅 >20% 不追" }
+
+[strategies.limit_momentum]
+kind = "signal"
+status = "off"
+label = "涨停动量腿（独立小预算 + 硬止损）"
+signal = { recipe = "limit_momentum", rank = "volume_ratio_20" }
+sizing = { slots = 1, min_weight = 0.04, max_weight = 0.10 }
+exit = { stop_pct = 0.05, expected_holding_days = 5 }
+budget = { sleeve_section = "momentum_sleeve", share = 0.05 }
+evidence = { demoted_20261001 = "均值基准 5d −1.35%/t=−8.1；复刻仓库定义后仍 −1.01%/t=−16.8（中位基准 −0.14%/t=−2.3）→ 转 off",  event_study_5d = 0.0068, note = "涨停次日 +1.30%/+0.68%，10 日衰减到 0", updated = "2026-09-16" }
+[strategies.limit_momentum.state]
+# 市场状态由 signals.momentum_sleeve.require_market_trend_up 控制；state 只放"个股级、可从 bars 算出"的条件。
+
+[strategies.value_reversal]
+kind = "signal"
+status = "active"
+label = "价值反转腿（长期回撤后的修复）"
+signal = { recipe = "value_reversal", rank = "score" }
+sizing = { slots = 1, min_weight = 0.08, max_weight = 0.15 }
+exit = { expected_holding_days = 20 }
+budget = { sleeve_section = "reversal_sleeve", share = 0.05 }
+evidence = { event_study_5d = 0.0100, note = "2024-2026 5 日超额 +1.00%", updated = "2026-09-16" }
+[strategies.value_reversal.state]
+dist_from_120d_low = { op = "gte", value = 0.10, note = "长期回撤后已离开极低位" }
+volume_ratio_20d = { op = "gte", value = 1.20, note = "放量修复" }
+
+[strategies.bottom_momentum]
+kind = "signal"
+status = "off"
+label = "半年低点右侧确认 + 短期动量"
+signal = { recipe = "bottom_momentum", rank = "signal_score" }
+sizing = { slots = 1, min_weight = 0.05, max_weight = 0.10 }
+exit = { expected_holding_days = 10, stop_atr = 1.5 }
+budget = { sleeve_section = "bottom_momentum_sleeve", share = 0.05 }
+evidence = { demoted_20261001 = "均值基准 10d −0.41%/t=−11.9（近两年 t=−3.7）→ 转 off",  event_study_5d = 0.0052, note = "上行 +0.80%（t=17.1）/ 下行 +0.04%（t=0.58）", updated = "2026-09-16" }
+[strategies.bottom_momentum.state]
+signal_rebound_atr = { op = "gte", value = 1.0, note = "右侧确认幅度（ATR 倍数）" }
+signal_relative20 = { op = "gte", value = 0.0, note = "相对强度不为负" }
+signal_volume_ratio_20 = { op = "gte", value = 1.10, note = "放量（recipe 输出 volume_ratio_20）" }
 
 [selection]
 model_scores_dir = "output/model_scores"
@@ -315,7 +449,10 @@ initial_capital = 45000.0
 # 20 个 walk-forward OOS 日期（2026-03..08，20 日前瞻标签）的权重扫描：
 #   lgbm 权重 0.0/0.3/0.5/0.7/0.85/1.0 → 平均 rank IC 0.071/0.092/0.103/0.108/0.106/0.102
 #   Top-20 超额 4.3%/10.6%/11.4%/12.7%/11.6%/10.2%；0.70/0.30 为 IC 与 Top-20 的双优区。
-ensemble_weights = { lightgbm = 0.50, transformer = 0.50 }
+# 2026-09-29：transformer 权重归零。重训后的 transformer（491 列）valid rank IC = -0.00145（≈0），
+# 0.5/0.5 等于把 lightgbm 的 +0.1414 稀释一半；实测 9/28 名单里 transformer 把模型自己的 rank-1
+# （300820.SZ）挤出名单。等 transformer 在 §15/§20 口径下重新拿到正 IC 再恢复权重。
+ensemble_weights = { lightgbm = 1.00, transformer = 0.00 }
 # 再平衡节奏：>1 时，距上次再平衡不足 N 个交易日就沿用上一版组合（每日仍跑 exits）。
 # 2026-09-23：改为 1 —— 之前 5 天节奏 + 自动化没带 --force-rebalance，导致新选出的票
 # 几天都不换（cn_ensemble_rebalance_state.json 里 trade_date 停在旧日期）。
@@ -341,8 +478,23 @@ enabled = true
 #   score 0.10  -0.65% / +0.69% / 56%   |  score 0.05  -1.45% / +0.50% / 54%
 #   thresholds  -4.59% / -1.91% / 42%   |  不过门禁    -4.47% / -2.21% / 41%
 # 两者均值差 2.4pp 但都不显著；score 的中位数与胜率更好、且不会因链路异常清空池子。
-# 2026-09-23 起默认切到 score（用户判断 + 中位数/胜率证据），eligibility 保留为 A/B 对照。
-mode = "score"
+# 2026-09-28 起默认切到 orthogonalize（最优方案，13 个非重叠样本外窗口实测）：
+#   orthogonalize  把模型分对启动状态暴露做横截面**秩空间回归取残差**，用残差分位排序
+#                  （只中性化风格暴露，不删候选 → 保留全池宽度）
+#   score          旧口径：四项分当加分项叠加（实测 +3.27%/t=0.89）
+#   eligibility/thresholds  硬门禁（会大幅砍池）
+# 实测（同一 13 窗口、样本外 alpha、扣 25bps）：
+#   orthogonalize  Top50 +6.07% / t=3.17 / 胜率 100% / vs 随机 t=2.22
+#   只用模型分      Top50 +1.92% / t=1.17
+#   硬筛池后排序    Top50 +0.12% / t=0.17（入池数 5,141 → 1,156）
+#   软倾斜(score)   Top20 +3.27% / t=0.89
+# 暴露集越小越好：多加 dist60high/volratio（+5.87%/t=2.18）或行业（同）都变差，
+# 把状态项加回分数（C2_state +3.12%/t=0.93）也变差 → 只保留两个暴露。
+mode = "orthogonalize"
+# 正交化的暴露列（必须存在于门禁帧；默认 dist 与资金流两项最优）
+orthogonalize_exposures = ["dist_from_120d_low", "flow_z"]
+# 1.0 = 完全用残差分位；0.5 = 与原分各半（保守档，用于观察期）
+orthogonalize_blend = 1.0
 score_strength = 0.20                       # 仅 score 模式使用：model_score += 100*strength*(tilt - mean(tilt))
 score_band_min_dist_from_120d_low = 0.05    # 启动带下沿：尚未启动不加分
 score_band_max_dist_from_120d_low = 0.30    # 启动带上沿：带内满分
@@ -379,6 +531,12 @@ enabled = true
 exclude_st = true
 min_median_amount_20d = 10000000.0
 liquidity_window_days = 40
+# 可成交性（2026-09-29 新增）：停牌股没有当日 bar，选进来等于当天买不到
+# （实测 9/28 名单里 000739.SZ / 300820.SZ 各占 20% 权重，9/29 均无成交，两个槽位空转）。
+# lag = 决策 session 与个股最近 bar 的交易日数差；缺数据（未知）不剔除但记审计，
+# 由 [pipeline.data_health] 的覆盖率硬门兜底，避免同步残缺时把池子清空。
+require_recent_bar_sessions = 1
+recent_bar_window_days = 30
 # P1.17 §0.18/§0.19：剔除"放量上涨"，但资金流确认（z5>=1）的保留；缺数据按剔除处理
 exclude_volume_breakout = true
 volume_breakout_ratio = 1.5
@@ -394,6 +552,17 @@ equity = 43137.82
 lot_size = 100
 budget_ratio = 0.15
 tolerance = 1.0
+# 价格上限口径（2026-09-26 用户要求：不要把选股限制在小盘股里）。
+#   budget_ratio 旧口径 = equity*budget_ratio/lot_size（43137.82*0.15/100 = 64.70 元）
+#   weight_cap   新口径 = equity*min(price_weight_cap, 组合 max_weight, regime max_weight_budget)/lot_size
+# 旧口径把"一个等权持仓槽位买不起一手"的股票整段剔除（2026-09-24 实测：5208 只里
+# 剔掉 434 只，30~64 元以上的票全部进不了候选池），但"股价高"并不等于"位置高"：
+# 门禁/打分用的 dist_from_120d_low、dist_from_60d_high 都是相对个股自身历史的位置，
+# 大盘股同样有它自己的低位。4.3 万账户下"一手市值 = 单只权重"才是真正的可执行约束，
+# 组合层已支持把买不起一手的票上调到一手（_lift），所以上限改由权重反推：
+#   45000*0.20/100 = 90 元（一手 9000 元 = 20% 仓位，仍低于 35% 单只上限）
+max_price_mode = "weight_cap"
+price_weight_cap = 0.20
 
 # 两套账户形态（--profile rich|small）。max_price = "auto" 表示按
 # equity * gross_exposure / max_holdings / lot_size 推导单只价格上限，
@@ -411,7 +580,7 @@ sleeve_slots_max = 2
 initial_capital = 45000.0
 max_holdings = 6
 model_slots = 8
-max_price = "auto"
+max_price = "weight_cap"
 sleeve_slots_max = 1
 
 # Price-setup signal layer.  When enabled, the Donchian channel recipe and the
@@ -421,6 +590,12 @@ sleeve_slots_max = 1
 # weight.  Set enabled = false to reproduce the pure model Top-N behavior.
 [selection.signals]
 enabled = true
+# 第③步（2026-09-29 起默认开启）：sleeve 的 slots/min_weight/max_weight 由 [strategies.*] 派生。
+# 迁移前已验证"保值"：注册表派生值与下方硬编码逐字段一致（diffs = {}，见
+# output/research/gate_ab_pipeline 与 test_registry_budgets_match_production_sleeve_config），
+# 并且 model_min_share 由模型腿的 budget.share（0.75）派生。
+# 回到硬编码：把这里改回 false（下方 forced_* / *_sleeve 的值仍然保留）。
+budget_from_registry = true
 recipes = ["donchian_pullback", "range_breakout", "limit_momentum", "value_reversal", "bottom_momentum"]
 allowed_setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback", "limit_momentum", "value_reversal", "bottom_momentum"]
 min_score = 60.0
@@ -542,6 +717,13 @@ stop_atr = 1.5
 gross_exposure = 0.95
 max_weight = 0.60
 max_holdings = 6
+# 持仓数区间（2026-10-01 用户口径）：最少 2 只、最多 max_holdings(=6)。
+# 组合层在"一手=最小仓位"约束下会自然收敛到能买得起的只数；这里给硬下限，
+# 避免修复循环把账塌到 1 只（少于 2 只时按模型分从被剔名字里补回，并记录 topped_up_for_min_holdings）。
+min_holdings = 2
+# 少数持仓时的集中度上限：当 0.35 的单名上限让 gross 用不满（例如只剩 2 只时 2×35%=70%<75%），
+# 允许单名权重放大到 min(max_weight_concentrated, gross/持仓数)。
+max_weight_concentrated = 0.45
 # 权重与模型分数挂钩（原来 inverse_volatility 完全忽略排名，导致排名 8 的票权重高于排名 2）。
 # score_inverse_vol = 归一化分数^alpha_power × 1/sqrt(特质方差)；alpha_weight_floor 保证
 # 入选最末一名也有基础权重，避免"选中但零仓"。
@@ -568,6 +750,10 @@ cost_penalty = 0.10
 require_fillable_lot = true
 lot_size = 100
 drop_unfillable_forced = true
+# 卫星块（sleeve/override/候选）总权重上限（2026-10-01 新增）：
+#   未设置时按 gross*(1-model_min_share) 推导（当前 0.75*0.10 = 0.075）。
+#   设置即覆盖；用于把"预算声明"变成优化器之后的硬约束（budget.share 管不住非 forced 候选的权重）。
+# sleeve_total_max = 0.10
 # 模型块保留份额：sleeve 下限合计不得超过 gross*(1-model_min_share)。
 # 依据 20 个 OOS 日期（2026-03-13..07-31，每周一）的 20 日前瞻收益：
 #   模型 Top-8 超额 +9.23%（t=3.68），Top-10 +9.26%（t=3.67），Top-50 +9.23%（t=4.34）

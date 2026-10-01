@@ -1,0 +1,795 @@
+[pipeline]
+market = "CN"
+start_date = "2014-01-01"
+end_date = ""
+adjust = "qfq"
+days = 365
+factor_set = "alpha_zoo_hk"
+top_n = 10
+# 预选阶段模型候选数：4 -> 8。2026-09-15 的 4 只模型 Top-4 全被 sleeve 下限挤出，
+# 扩大候选池让 PK 在"可成交 + 预算可行"的前提下有更多模型侧选择（见
+# output/verification/preselect_review_20260916/ 与 event_study_20260916/）。
+preselection_model_slots = 8
+max_workers_sync = 12
+max_workers_stock_info = 8
+max_workers_valuation = 12
+max_workers_financial = 4
+# BaoStock financial-statement requests are serialized by the provider and
+# are not needed for the historical market-cap/PE/PB panel. Enable only for a
+# separate statement-data refresh.
+financial_metrics_enabled = false
+financial_lookback_quarters = 1
+valuation_history_source = "baidu"
+valuation_history_period = "全部"
+max_workers_factors = 8
+export_csv = "output/results_cn"
+preselection_path = "output/results_cn/cn_ensemble_preselected.csv"
+quality_report_dir = "output/data_quality"
+min_ohlcv_rows = 120
+min_training_stocks = 50
+# Fundamental and alternative fields are optional inputs. Their coverage is reported,
+# not used to discard otherwise valid price/volume samples.
+min_fundamental_coverage = 0.80
+
+[factor_config.valuation_hk]
+# Baidu valuations are sparse observations. Keep the as-of value, and give
+# models an explicit stale marker after this many completed trading sessions.
+stale_after_trading_days = 20
+
+[stages]
+daily_bars = true
+moneyflow = true
+intraday_bars = false
+fundamental = true
+alternative = false
+features = true
+regime = true
+clean_panel = true
+lightgbm = true
+transformer = true
+cnn = false
+model_scores = true
+# 最终选股由 preselection → pk 两阶段完成；保留 selection 命令仅用于
+# 临时对照或人工显式调用，默认全流程不运行它。
+selection = false
+preselection = true
+pk = true
+exits = true
+paper_outcomes = false
+paper_account = false
+graph_temporal = false
+model_comparison = false
+oos_predictions = false
+strategy_labels = false
+
+[daily_bars]
+# Tencent is primary; fallbacks are BaoStock and Eastmoney.  The default chain
+# intentionally excludes Sina because its V8 decoder is unsafe under bulk
+# macOS concurrency.
+data_source = "tencent"
+frequencies = ["daily"]
+skip_existing = true
+complete_data = false
+
+[moneyflow]
+# 每日资金流与日 K 使用同一交易日窗口；历史回补按年度分段，避免中继日期范围限制。
+enabled = true
+start_date = ""
+end_date = ""
+lookback_days = 756
+batch_years = 1
+max_workers = 16
+fetch_top_list = true
+fetch_top_inst = true
+fetch_mode = "trade_date"
+fetch_standard = true
+fetch_dc = true
+fetch_ths = true
+# 官方 Token 优先；官方接口失败时回退到“智能体数据中心免费版”兼容接口。
+# daily_basic/cyq_perf/cyq_chips 是三把锁的增强源。cyq_chips 采用股票级
+# 分页、断点续跑，初次历史回补耗时较长但后续每日仅补新窗口。
+fetch_daily_basic = true
+fetch_cyq_perf = true
+# cyq_chips 是可选的全量价格档位历史，改由 --stage cyq_chips 分批回补；
+# 不阻塞每日 moneyflow 同步和模型更新。
+fetch_cyq_chips = false
+fetch_hm_detail = true
+cyq_chips_stock_limit = 0
+# cyq_chips 的官方、Base Relay、ProMax Relay 会分片并行。workers 是每个
+# 来源的并发数；每个来源保有独立的一分钟请求预算与 429 Retry-After 退避。
+cyq_chips_max_workers = 8
+cyq_chips_read_timeout = 20
+# Tushare 10,000 积分档为 200/min；ProMax IP 档为 200/min，均保留余量。
+cyq_chips_requests_per_minute = 195
+cyq_chips_base_requests_per_minute = 180
+cyq_chips_promax_requests_per_minute = 180
+official_first = true
+capital_features_mode = "source_bundle_with_official_fallback"
+require_daily_bar_match = true
+min_match_ratio = 0.98
+raw_dir = "assets/data/raw/moneyflow_snapshots"
+feature_path = "assets/data/derived/cn_moneyflow_features.parquet"
+
+[intraday_bars]
+# Enable only when minute-level features or execution research needs these bars.
+# The window is independent from daily bars to avoid requesting minute data since 2014.
+lookback_days = 1095
+# Tencent retains a rolling recent window. Use 5min as the base frequency.
+frequencies = ["5min", "15min", "30min", "60min"]
+data_source = "tencent"
+adjust = "raw"
+max_workers = 16
+derive_intraday_from_1min = false
+derive_intraday_from_base = true
+intraday_base_frequency = "5min"
+min_daily_rows_for_intraday = 120
+skip_existing = true
+complete_data = false
+
+[alternative]
+# Import a locally collected CN search/news/announcement export. Required
+# columns: stock_code plus published_at or available_at; optional sentiment_score.
+input_path = ""
+source = "manual_import"
+output_dir = "output/alternative_data"
+
+[industry]
+# 当前生产主源使用 BaoStock 的证监会行业分类，接口已覆盖全市场且可稳定
+# 调用。验证过的申万 2021 中继源可设为 sw2021_relay（需要
+# CN_INDUSTRY_RELAY_BASE_KEY 或 TUSHARE_RELAY_KEY）；它写入独立 sw2021 快照，
+# 只有完整同步通过覆盖率门禁后才更新注册表，不能混用两种 taxonomy。
+taxonomy = "csrc_baostock"
+min_coverage = 0.95
+
+[relay_data]
+# 仅在已配置 CN_INDUSTRY_RELAY_BASE_KEY 或 TUSHARE_RELAY_KEY 时开启。daily_basic
+# 会覆盖同日估值快照的估值/股本字段；默认关闭，先用小股票池验证覆盖率与口径。
+enabled = false
+start_date = ""
+end_date = ""
+# Independent raw adj_factor audit snapshot; this does not overwrite OHLCV.
+adjustment_factors_enabled = false
+
+[strategy_labels]
+days = 756
+output_dir = "output/strategy_labels"
+entry_delay = 1
+path_horizon = 60
+startup_low_window = 120
+startup_min_rise = 0.05
+startup_max_rise = 0.30
+startup_max_return_60d = 0.35
+startup_max_high_distance = -0.05
+take_profit = 0.20
+stop_loss = 0.10
+
+[clean_panel]
+# 与 config/cn_pipeline_p1_17_startup.toml 保持一致：干净面板是共享数据集，
+# 若这里用更小的窗口重建，会把 13 折 OOS 基准所依赖的历史删掉（service 会告警但不会阻止）。
+days = 560
+cleaning_version = "p0.2.v1"
+# Stock-aware row-group indexing makes larger batches efficient while keeping
+# the wide pivot bounded. The source parquet is indexed once per clean-panel run.
+feature_batch_size = 50
+
+[model_features]
+# Reject a source feature and its missing-value mask when the value is present
+# on fewer than this share of a training fold. Sparse but usable features retain
+# their masks; all-missing and constant inputs never enter model artifacts.
+min_feature_coverage = 0.05
+drop_constant_features = true
+# 因子 IC 准入（2026-09-27 起）：清单由 scripts/factor_ic_protocol.py 生成，规则 = |IC|>=0.02 且
+# |ICIR|>=0.30 且 BH-FDR(q=0.05) 显著 且 前后半段同号 且 是 |rho|>=0.9 相关簇的代表。
+#   off   用全部 1,366 列（现状）        apply 只喂准入列        warn 只记录不裁剪
+# 实测（2026-06-04~08-27 同切分验证窗口，准入期只用 2025-03~2026-05）：
+#   准入 94 列 → 日频秩 IC +0.1486 / t=+19.4 / 60 天零负值 ； 全集 1,294 列 → -0.0218
+# 注意：清单必须与面板列同名（*_clean 等）；换 factor_set 或改特征命名要重跑协议再更新清单。
+admission_mode = "apply"
+admission_file = "output/research/factor_ic_protocol/factor_ic_admitted.json"
+
+[regime]
+days = 756
+min_stocks = 20
+trend_window = 60
+breadth_window = 20
+volatility_window = 20
+hysteresis_days = 3
+version = "regime.v1"
+output_dir = "output/regime"
+
+[lightgbm]
+days = 365
+label_horizon = 20
+label_mode = "forward_return" # path_score_20d enables the new startup path target
+startup_only = false
+validation_days = 60
+embargo_days = 20
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/lightgbm/alpha_zoo_hk"
+# Leave empty for a fresh scheduled retrain; set a compatible model.txt for warm-start.
+warm_start_path = ""
+# The label is a within-date cross-sectional rank, so plain L2 has a floor equal
+# to the label variance (~1/12). On this weak-signal problem, early stopping on
+# L2 trims the booster to a handful of trees (measured: 3), which collapses the
+# score range and breaks the cross-sectional ranking the selection stage reads.
+# Default: stop on the mean per-date IC, with a hard floor on kept trees.
+n_estimators = 500
+learning_rate = 0.05
+num_leaves = 64
+max_depth = 8
+min_child_samples = 30
+reg_lambda = 10.0
+# Early stopping is disabled because LightGBM trims the saved booster to the best
+# iteration: with a flat metric it silently kept only 3 of 500 trees, which is
+# what collapsed the score range.  Raise this only if the IC curve peaks late.
+early_stopping_rounds = 0
+min_trees = 100
+eval_metric = "daily_ic" # daily_ic | l2 | none
+
+[transformer]
+days = 365
+label_horizon = 20
+label_mode = "forward_return" # path_score_20d enables the new startup path target
+startup_only = false
+validation_days = 60
+embargo_days = 20
+lookback = 60
+# 12k 序列 × 10 epoch 的预算下，同配置重复训练的 09-15 rank IC 在 0.164~0.349 之间跳动
+# （sd≈0.093，见 output/verification/retrain_20260916/transformer_probe_baseline-config.csv），
+# 说明"变压器变差"主要是样本/初始化噪声而非特征变多。这里把预算提到 36k 序列 × 20 epoch，
+# 并把特征对上限从 128 提到 256（不删任何特征，让新特征也能进入交互项）。
+epochs = 20
+batch_size = 256
+max_samples = 36000
+max_feature_pairs = 256
+protected_features = [
+  "flow_second_wave_flag",
+  "flow_second_wave_source_count",
+  "flow_second_wave_max_z5",
+  "flow_second_wave_seed_age",
+  "flow_second_wave_pullback_pct",
+  "flow_second_wave_price_recovery_1d",
+]
+# 多随机种子 + 按"验证集 rank IC"选 checkpoint（Huber 只在 IC 并列时做次级判据）。
+# 同配置重复训练的 09-15 rank IC 标准差约 0.093，单次训练不可复现；
+# 种子内选最优 epoch、再在若干种子间取最优，可同时降方差、提均值。
+seeds = [0, 1, 2]
+checkpoint_metric = "ic"
+# 推理时对多个种子的权重取"预测平均"（invalid 的是权重平均，预测平均才有效）。
+# 每种子验证 IC 之间差约 0.05、单日打分离散约 0.09，平均比择优更稳。
+seed_ensemble = "average"
+learning_rate = 0.001
+d_model = 64
+nhead = 4
+num_layers = 2
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/transformer/alpha_zoo_hk"
+device = "auto" # CUDA -> Apple MPS -> CPU
+# Set both values to a prior compatible checkpoint for incremental fine-tuning.
+warm_start_path = ""
+warm_start_manifest_path = ""
+
+[cnn]
+days = 365
+label_horizon = 20
+validation_days = 60
+embargo_days = 20
+lookback = 60
+epochs = 10
+batch_size = 256
+max_samples = 12000
+max_feature_pairs = 128
+protected_features = [
+  "flow_second_wave_flag",
+  "flow_second_wave_source_count",
+  "flow_second_wave_max_z5",
+  "flow_second_wave_seed_age",
+  "flow_second_wave_pullback_pct",
+  "flow_second_wave_price_recovery_1d",
+]
+channels = 64
+kernel_size = 3
+num_layers = 3
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/cnn/alpha_zoo_hk"
+device = "auto"
+
+[model_scores]
+days = 365
+cleaning_version = "p0.2.v1"
+# Do not select from a partially materialized latest date. The scorer falls
+# back to the newest date that covers at least this share of the universe.
+min_cross_section_coverage = 0.95
+# 打分前输入体检（R2 覆盖率 + R11 单位合理性）：
+#   enforce  覆盖率不达标直接中止；单位可疑的股票从当日截面剔除（占比超阈值也中止）
+#   warn     只记录，不阻断
+#   off      关闭
+# gain 加权覆盖率 = 用 LightGBM gain 给“被使用列”的当日覆盖率加权，能量化静默劣化
+# （2026-09-23 实测 0.107，属于必须中止的状态）。
+input_guard = "enforce"
+input_guard_min_gain_coverage = 0.5
+input_guard_min_columns = 0.9
+input_guard_sessions = 30
+input_guard_max_excluded_share = 0.05
+output_dir = "output/model_scores"
+lightgbm_model_path = "output/models/cn/lightgbm/alpha_zoo_hk/model.txt"
+lightgbm_manifest_path = "output/models/cn/lightgbm/alpha_zoo_hk/model_manifest.json"
+transformer_model_path = "output/models/cn/transformer/alpha_zoo_hk/model.pt"
+transformer_manifest_path = "output/models/cn/transformer/alpha_zoo_hk/model_manifest.json"
+transformer_device = "auto"
+cnn_model_path = ""
+cnn_manifest_path = ""
+cnn_device = "auto"
+
+[selection]
+model_scores_dir = "output/model_scores"
+output_dir = "output/results_cn"
+model = "ensemble" # lightgbm, transformer, or ensemble
+top_n = 10
+portfolio_mode = "mean_variance_cost_aware" # topn or mean_variance_cost_aware
+initial_capital = 45000.0
+# Optional override of the ensemble weights.  Leave empty to use the weights the
+# regime file publishes (`model_weight_*`); set explicit weights when the regime
+# split is known to bury a model that ranks a name well.
+# 20 个 walk-forward OOS 日期（2026-03..08，20 日前瞻标签）的权重扫描：
+#   lgbm 权重 0.0/0.3/0.5/0.7/0.85/1.0 → 平均 rank IC 0.071/0.092/0.103/0.108/0.106/0.102
+#   Top-20 超额 4.3%/10.6%/11.4%/12.7%/11.6%/10.2%；0.70/0.30 为 IC 与 Top-20 的双优区。
+ensemble_weights = { lightgbm = 1.00, transformer = 0.00 }
+# 再平衡节奏：>1 时，距上次再平衡不足 N 个交易日就沿用上一版组合（每日仍跑 exits）。
+# 2026-09-23：改为 1 —— 之前 5 天节奏 + 自动化没带 --force-rebalance，导致新选出的票
+# 几天都不换（cn_ensemble_rebalance_state.json 里 trade_date 停在旧日期）。
+# 想恢复"每 5 个交易日才换一次"，把这里改回 5，并确认不想每日换股时脚本用
+# DAILY_FORCE_REBALANCE=0 运行（否则 --force-rebalance 会覆盖 stride）。
+rebalance_stride_days = 1
+
+# 可执行性约束：A 股按手交易，价格太高的小账户根本买不起一手。
+# 候选需满足 price * lot_size <= equity * budget_ratio（budget_ratio ≈ gross/持仓数）。
+# 启动资格门（P1.17 §0.8/§0.9）：在生产选股层把"已经涨上去"的候选挡在外面。
+# 本轮对照：取消距 120 日低点涨幅 <= 30% 限制，保留显式的 60 日涨幅及距 60 日高点阈值。
+# thresholds 模式只执行下面写明的上限；不设置 max_dist_from_120d_low 即不应用该项。
+[selection.startup_gate]
+enabled = true
+# 门禁形态（P1.21）：
+#   eligibility  现行硬门禁（离 120 日低点落在 5%~30% 带内 + 60 日涨幅<=35% + 距 60 日高点<=-5%）
+#   score        连续打分制：不硬剔，只把同一信息变成对模型分的倾斜（硬护栏见下）
+#   thresholds   只按下面写明的上限裁剪；both 两者都要求
+# 59 个 OOS 决策日（2026-06-01~08-21，T+1 开盘买入、持有 20 个交易日的等权 6 只组合，
+# 相对可投池均值的超额）实测：
+#   eligibility 均值 +2.11% / 中位 +1.06% / 胜率 54%   （t=+1.02，不显著；优势集中在 6 月）
+#   score 0.20  -0.31% / +0.58% / 56%   |  score 0.15  -0.51% / +0.74% / 58%
+#   score 0.10  -0.65% / +0.69% / 56%   |  score 0.05  -1.45% / +0.50% / 54%
+#   thresholds  -4.59% / -1.91% / 42%   |  不过门禁    -4.47% / -2.21% / 41%
+# 两者均值差 2.4pp 但都不显著；score 的中位数与胜率更好、且不会因链路异常清空池子。
+# 2026-09-28 起默认切到 orthogonalize（最优方案，13 个非重叠样本外窗口实测）：
+#   orthogonalize  把模型分对启动状态暴露做横截面**秩空间回归取残差**，用残差分位排序
+#                  （只中性化风格暴露，不删候选 → 保留全池宽度）
+#   score          旧口径：四项分当加分项叠加（实测 +3.27%/t=0.89）
+#   eligibility/thresholds  硬门禁（会大幅砍池）
+# 实测（同一 13 窗口、样本外 alpha、扣 25bps）：
+#   orthogonalize  Top50 +6.07% / t=3.17 / 胜率 100% / vs 随机 t=2.22
+#   只用模型分      Top50 +1.92% / t=1.17
+#   硬筛池后排序    Top50 +0.12% / t=0.17（入池数 5,141 → 1,156）
+#   软倾斜(score)   Top20 +3.27% / t=0.89
+# 暴露集越小越好：多加 dist60high/volratio（+5.87%/t=2.18）或行业（同）都变差，
+# 把状态项加回分数（C2_state +3.12%/t=0.93）也变差 → 只保留两个暴露。
+mode = "orthogonalize"
+# 正交化的暴露列（必须存在于门禁帧；默认 dist 与资金流两项最优）
+orthogonalize_exposures = ["dist_from_120d_low", "flow_z"]
+# 1.0 = 完全用残差分位；0.5 = 与原分各半（保守档，用于观察期）
+orthogonalize_blend = 1.0
+score_strength = 0.20                       # 仅 score 模式使用：model_score += 100*strength*(tilt - mean(tilt))
+score_band_min_dist_from_120d_low = 0.05    # 启动带下沿：尚未启动不加分
+score_band_max_dist_from_120d_low = 0.30    # 启动带上沿：带内满分
+score_decay_max_dist_from_120d_low = 0.55   # 中段线性衰减到 0
+score_high_distance_floor = -0.05           # 距 60 日高点 -5% 起加分
+score_high_distance_span = 0.15             # 距高点 -20% 及以下满分
+score_volume_ratio_max = 1.2                # 放量不加分
+score_volume_ratio_span = 0.4               # 缩量到 0.8 倍及以下满分
+score_flow_z_reference = 1.0                # 资金流 z>=1 满分；缺数据记 0（中性，不剔除）
+score_weight_dist = 1.0
+score_weight_high = 0.6
+score_weight_volume = 0.4
+score_weight_flow = 0.6
+# 硬护栏：只拦极端离群（离 120 日低点 >100% 或 60 日涨幅 >60%）
+hard_max_dist_from_120d_low = 1.0
+hard_max_return_60d = 0.60
+# 兼容保留：eligibility/thresholds 模式与第二梯队仍可用（默认关，打分制已含其信息）
+second_tier_enabled = false
+second_tier_min_dist_from_120d_low = 0.30
+second_tier_max_dist_from_120d_low = 0.55
+second_tier_volume_ratio_max = 1.0
+second_tier_requires_flow = true
+second_tier_flow_z_min = 0.0
+second_tier_max_weight = 0.05
+lookback_days = 400
+max_return_60d = 0.35
+max_dist_from_60d_high = -0.05
+
+# 选股层 universe 过滤（P1.17 §0.12）：
+#   exclude_st              名称含 ST / *ST / 退 的标的不进候选（本次实测两只 ST 合计 -1.28 万）
+#   min_median_amount_20d   近 20 个交易日成交额中位数下限（元）；过滤疑似停牌/极端缩量的标
+[selection.universe_filter]
+enabled = true
+exclude_st = true
+min_median_amount_20d = 10000000.0
+liquidity_window_days = 40
+# P1.17 §0.18/§0.19：剔除"放量上涨"，但资金流确认（z5>=1）的保留；缺数据按剔除处理
+exclude_volume_breakout = true
+volume_breakout_ratio = 1.5
+volume_breakout_flow_z_min = 1.0
+volume_breakout_missing_flow = "keep"
+# 资金流覆盖不足时该规则整体降级为"保留"：2026-09-21/22 资金流特征整块失效时，
+# 旧的 "drop" 语义把 661 只（12.7%）放量上涨票全部盲剔，候选池直接空掉。
+volume_breakout_min_flow_coverage = 0.5
+
+[selection.affordability]
+enabled = true
+equity = 43137.82
+lot_size = 100
+budget_ratio = 0.15
+tolerance = 1.0
+# 价格上限口径（2026-09-26 用户要求：不要把选股限制在小盘股里）。
+#   budget_ratio 旧口径 = equity*budget_ratio/lot_size（43137.82*0.15/100 = 64.70 元）
+#   weight_cap   新口径 = equity*min(price_weight_cap, 组合 max_weight, regime max_weight_budget)/lot_size
+# 旧口径把"一个等权持仓槽位买不起一手"的股票整段剔除（2026-09-24 实测：5208 只里
+# 剔掉 434 只，30~64 元以上的票全部进不了候选池），但"股价高"并不等于"位置高"：
+# 门禁/打分用的 dist_from_120d_low、dist_from_60d_high 都是相对个股自身历史的位置，
+# 大盘股同样有它自己的低位。4.3 万账户下"一手市值 = 单只权重"才是真正的可执行约束，
+# 组合层已支持把买不起一手的票上调到一手（_lift），所以上限改由权重反推：
+#   45000*0.20/100 = 90 元（一手 9000 元 = 20% 仓位，仍低于 35% 单只上限）
+max_price_mode = "weight_cap"
+price_weight_cap = 0.20
+
+# 两套账户形态（--profile rich|small）。max_price = "auto" 表示按
+# equity * gross_exposure / max_holdings / lot_size 推导单只价格上限，
+# 即"每个持仓槽位的预算刚好买得起一手"：
+#   rich : 300000 * 0.35 / 6 / 100 = 175 元
+#   small:  45000 * 0.35 / 6 / 100 = 26.25 元
+[selection.profiles.rich]
+initial_capital = 300000.0
+max_holdings = 6
+model_slots = 8
+max_price = "auto"
+sleeve_slots_max = 2
+
+[selection.profiles.small]
+initial_capital = 45000.0
+max_holdings = 6
+model_slots = 8
+max_price = "weight_cap"
+sleeve_slots_max = 1
+
+# Price-setup signal layer.  When enabled, the Donchian channel recipe and the
+# range breakout recipe are evaluated on the model shortlist for the selection
+# date (bars up to that date only), and the strongest volume-confirmed hits are
+# merged into the candidate pool as `signal_override` names with a minimum
+# weight.  Set enabled = false to reproduce the pure model Top-N behavior.
+[selection.signals]
+enabled = true
+recipes = ["donchian_pullback", "range_breakout", "limit_momentum", "value_reversal", "bottom_momentum"]
+allowed_setup_types = ["donchian_breakout", "donchian_pullback", "range_breakout", "box_pullback", "limit_momentum", "value_reversal", "bottom_momentum"]
+min_score = 60.0
+# Require the cross-sectional model to agree before forcing a signal name.  85
+# was calibrated against the collapsed LightGBM (3 kept trees); with the fixed
+# model a 75th-percentile floor keeps the agreement filter meaningful without
+# discarding volume-confirmed breakouts.
+min_model_score = 75.0
+scan_top_k = 5000
+max_overrides = 2
+recommendations_per_type = 2
+# 下限与 sleeve 的 2024-2026 实测 5 日超额成比例（value_reversal +1.00% / donchian +0.42% /
+# bottom_momentum +0.52% / limit_momentum +0.23%），避免用同一档 0.08 给所有 sleeve 定价。
+forced_min_weight = 0.06
+# The setup sleeve may not exceed this weight per name; momentum has its own,
+# smaller budget below.
+forced_max_weight = 0.20
+override_rank = "volume_ratio_20" # 放量强度：Donchian 突破的成交量确认
+lookback_sessions = 120
+# 事件研究（2024-06..2026-09，2024-01 起做窗口预热）显示突破类入场"追高即失效"：
+# close 超出通道上沿 >5% 后 5 日超额 -0.50%（t=-2.15），5 日累计涨幅 >20% 后 -0.32%。
+# 两个上限把这两类入场挡在候选层之外，避免用突破的名义买入已经走完的行情。
+max_breakout_extension = 0.05
+max_runup_5d = 0.20
+# setup sleeve 同样受市场投机状态约束（略宽，因其信号本身已要求放量确认）
+max_market_turnover_z = 1.8
+
+# Event study (2024-01..2026-09, 3.42M stock-days, market-neutral): the 20-day
+# channel breakout is ~flat to negative (+0.00% / -0.56% at +1/+5 days) while a
+# limit-up day carries +1.30% / +0.68% and decays to zero by +10 days.  The
+# momentum sleeve therefore trades only that event, in a separate, small budget.
+[selection.signals.momentum_sleeve]
+enabled = true
+setup_types = ["limit_momentum"]
+slots = 1
+min_weight = 0.04
+max_weight = 0.10
+min_model_score = 0.0 # 模型在动量的事件上无证据优势，改用独立预算与止损控制风险
+rank = "volume_ratio_20"
+# 涨停动量只在市场上行的状态里有效：事件研究里 market_trend_20d>0 时 5 日超额 +0.30%
+# （t=3.0），趋势为负时 +0.11%（t=0.86）不显著。硬止损 5% 把期望从 +0.23% 提到 +0.89%。
+require_market_trend_up = true
+# 市场级投机状态过高时不再接受新的 sleeve 入场（与 PK 的市场降杠杆同源）
+max_market_turnover_z = 1.5
+# 入场延后一个交易日：shock 研究（同日 93,218 个事件）显示涨停事件
+# T+1 开盘进场 +0.01%、等一天 T+2 开盘进场 +0.35%，即"事件日次日再买"。
+entry_delay_days = 1
+
+# 长期回撤后的修复 sleeve：不要求模型横截面同意，使用独立小仓位与
+# 均线/量能确认，覆盖类似老板电器的价值修复候选。
+[selection.signals.reversal_sleeve]
+enabled = true
+max_market_turnover_z = 2.0
+setup_types = ["value_reversal"]
+slots = 1
+min_weight = 0.08
+max_weight = 0.15
+min_model_score = 0.0
+rank = "score"
+
+# 半年低点右侧确认 + 短期动量。行业超额收益在每日扫描中计算；其权重
+# 与涨停动量 sleeve 一样保持较小，先经纸面组合验证后再调整。
+[selection.signals.bottom_momentum_sleeve]
+enabled = true
+max_market_turnover_z = 1.5
+setup_types = ["bottom_momentum"]
+slots = 1
+min_weight = 0.05
+max_weight = 0.10
+min_model_score = 0.0
+rank = "signal_score"
+# 半年低点右侧动量同样依赖市场状态：上行 +0.80%（t=17.1），下行 +0.04%（t=0.58）。
+require_market_trend_up = true
+
+[selection.signals.risk_filters]
+exclude_st = true
+min_market_cap = 5000000000.0
+min_median_amount_20d = 50000000.0
+
+[selection.signals.recipe_params.donchian_pullback]
+window = 20
+breakout_min_pct = 0.005
+tol_break = 0.015
+tol_low = 0.03
+tol_high = 0.05
+max_sessions_since_breakout = 5
+volume_dryup_ratio = 0.70
+volume_expansion_min = 1.30
+channel_width_max = 0.35
+min_median_amount_20d = 10000000.0
+min_score = 60.0
+
+[selection.signals.recipe_params.limit_momentum]
+min_gain = 0.095
+channel_window = 20
+min_median_amount_20d = 50000000.0
+require_breakout = false
+stop_pct = 0.05
+expected_holding_days = 5
+min_score = 60.0
+
+[selection.signals.recipe_params.value_reversal]
+min_return_120 = -0.10
+min_return_252 = -0.08
+min_reclaim_days = 1
+min_score = 60.0
+volume_ratio_min = 1.20
+
+[selection.signals.recipe_params.bottom_momentum]
+lookback = 126
+min_rebound_atr = 1.0
+min_relative20 = 0.0
+min_volume_ratio = 1.10
+min_score = 55.0
+expected_holding_days = 10
+stop_atr = 1.5
+
+[selection.portfolio_constraints]
+gross_exposure = 0.95
+max_weight = 0.60
+max_holdings = 6
+# 权重与模型分数挂钩（原来 inverse_volatility 完全忽略排名，导致排名 8 的票权重高于排名 2）。
+# score_inverse_vol = 归一化分数^alpha_power × 1/sqrt(特质方差)；alpha_weight_floor 保证
+# 入选最末一名也有基础权重，避免"选中但零仓"。
+weighting = "rank_power"
+alpha_power = 2.0        # 分数平方：排名越高权重越大
+alpha_weight_floor = 0.25
+vol_exponent = 0.25      # 波动只做轻微调整，让排名主导
+# 信号覆盖（override）的保底权重必须由分数支撑：floor × 归一化分数，并设硬上限。
+forced_floor_score_scaling = true
+forced_floor_max_weight = 0.05
+# 资金流 tilt（确认/降权，不设硬门禁）
+flow_tilt_strength = 0.25
+flow_column = "moneyflow_net_z_5d_clean"
+max_industry_weight = 0.30
+max_turnover = 0.50
+max_participation = 0.05
+risk_aversion = 2.0
+turnover_penalty = 0.10
+cost_penalty = 0.10
+# 可执行性约束：目标权重必须买得起整手（last_close * lot_size <= weight * capital）。
+# require_fillable_lot = false 时允许保留理论仓位（不推荐，账户下不了单）；
+# drop_unfillable_forced 控制策略强制信号买不起一手时是否一并剔除，
+# 剔除结果记录在 lot_summary.dropped_forced_for_lots。
+require_fillable_lot = true
+lot_size = 100
+drop_unfillable_forced = true
+# 模型块保留份额：sleeve 下限合计不得超过 gross*(1-model_min_share)。
+# 依据 20 个 OOS 日期（2026-03-13..07-31，每周一）的 20 日前瞻收益：
+#   模型 Top-8 超额 +9.23%（t=3.68），Top-10 +9.26%（t=3.67），Top-50 +9.23%（t=4.34）
+#   信号 sleeve 的 5 日超额只有 +0.2%~+1.0%（见 event_study_20260916）
+# 即模型块承担的是主要期望，sleeve 是卫星；槽位与预算是稀缺资源，故给模型留 60%。
+# 2026-09-15 的 0.37 > 0.35 曾让模型侧权重全部归零。
+# 20 日期多日回测（output/verification/preselect_optimization_20260916/backtest_summary_20d.csv）
+# 显示 20 日口径下模型占比越高越好：min_share 1.0/0.8 的超额 +3.2%~+3.6%（t≈2.6-2.8），
+# 0.6 只有 +2.6%，0.0（纯 sleeve）只有 +2.0%；而 5 日口径下 sleeve 才略有贡献
+# （0.3 档 +1.5% 优于 0.8 档 +0.8%）。模型训练标签是 20 日，sleeve 的设计持有期是 5 日，
+# 因此按"主仓 20 日 + 卫星 5 日"分配：模型留 80%，sleeve 合计不超过 20%。
+model_min_share = 0.80
+
+# 风控层（PK 阶段执行）：波动率目标 + 单名风险贡献上限 + 资格门槛。
+# 依据 2.8M stock-day（2024-06..2026-08）的横截面检验：
+#   vol_cc_20 五分位 → 20 日超额 低波 +1.63% / 中波 +2.3% / 高波 +1.64%（两端都差，胜率 53%→46%）
+#   vol_downside_20 五分位 → +1.97% / +2.31% / +2.26% / +1.82% / +1.78%（高下行波动更差）
+#   vol_max_drawdown_60 五分位 → +2.62% → +1.58%（回撤越深越差）
+#   payoff_reward_risk_20（上沿空间/下沿空间）五分位 → +2.03% → +2.14%（盈亏比越高越好，弱但同向）
+# 实测教训（09-15 → 09-16 回放）：把"全市场横截面"的资格门槛（深回撤/低盈亏比）
+# 套到"模型 Top-N 内部"会双重过滤——rich 组合从 6/6 上涨掉到 2/5，因为模型头部
+# 恰好是 60 日回撤较深的强势股。所以默认只保留"仓位数学"（波动目标 + 单名风险占比），
+# 三个资格门槛默认关闭，需要时再显式打开并单独回测。
+[selection.risk_control]
+target_volatility = 0.18
+# 协方差模型：factor = 统计因子（PCA，K 个因子 + 特质风险），适合持仓数相对窗口偏多时；
+# shrinkage = 样本协方差向对角收缩。两者都做正定性兜底。
+covariance_model = "factor"
+factor_count = 3
+# 行业块收缩：把统计因子的相关矩阵按"同行业相关性 = 行业内部平均相关"做块收缩。
+# 代码已就位且能取到行业（见 data/store/warehouse.py 的 require_values 修复 + 镜像刷新），
+# 但在 2026-09-16 的实测中 blend 0.0/0.35/1.0 对组合波动与权重**没有可观测影响**，
+# 因此默认关闭（0.0）：在拿到"开启后风险估计确有变化"的证据之前不启用未验证的行为。
+industry_block_blend = 0.0
+# 波动目标模式：cap = 只在天花板之上降杠杆；budget = 同时把没用掉的风险预算部署出去
+# （以 max_gross_exposure 与 max_weight 为硬上限）。因子协方差下 09-16 组合波动约 13.7%，
+# 距离 18% 还有约 24% 的额度。
+vol_target_mode = "cap"
+max_gross_exposure = 0.65
+# 风险平价目标：把优化权重按比例向"等风险贡献"混合（0=纯 alpha，1=纯风险平价）。
+risk_parity_blend = 0.35      # 组合年化波动上限：超了就整体降杠杆、留现金（不加杠杆）
+max_name_risk_share = 0.35    # 单名占组合方差上限，超过就压权重并再分配
+# max_downside_vol = 1.20     # 资格门槛（默认关闭，见上方说明）
+# min_reward_risk = 0.10
+# min_drawdown_60 = -0.45
+# 软风控系数：不剔除名字，只按比例减仓（释放的权重分给更"平静"的名字）。
+# 依据见 output/verification/turnover_20260917/README.md：
+#   换手率 Z >2 → 20 日超额 +1.22%（胜率 43%）vs 正常区 +2.10%
+#   换手率波动 >0.7 → +1.47%（胜率 44%）vs 0.2-0.3 档 +2.25%
+[selection.risk_control.risk_scalers.tr_zscore_20]
+threshold = 1.5
+slope = 0.25
+floor = 0.5
+[selection.risk_control.risk_scalers.tr_volatility_20]
+threshold = 0.55
+slope = 1.0
+floor = 0.6
+# 换手率长期分位 >80%（情绪拥挤）同样减仓；分位低位不加分（缩量已在选股偏好里体现）
+[selection.risk_control.risk_scalers.tr_percentile_252]
+threshold = 0.80
+slope = 1.5
+floor = 0.6
+# 波动率横截面分位：两端都差（低波 +1.63% / 中波 +2.3% / 高波 +1.64%），
+# 因此高分位减仓、极低分位也轻微减仓。
+[selection.risk_control.risk_scalers.vol_cs_percentile]
+threshold = 0.80
+slope = 1.0
+floor = 0.6
+[selection.risk_control.risk_scalers.vol_cs_percentile_low]
+column = "vol_cs_percentile"
+direction = "below"
+threshold = 0.15
+slope = 1.0
+floor = 0.7
+# 组合层：当池内换手率 Z 中位数（市场投机状态代理）过高时整体降杠杆
+[selection.risk_control.market_deleverage]
+column = "market_tr_z"
+threshold = 0.8
+slope = 0.25
+floor = 0.6
+
+
+
+# regime 联动：按当日 regime 收紧/放宽风险预算的敞口上限（静态值与 regime 预算仍为硬上限）
+[selection.risk_control.max_gross_exposure_by_regime]
+bull = 0.85
+sideways = 0.70
+bear = 0.60
+
+[exits]
+# 持仓卖出规则：风险型（ST/流动性/停牌/模型排名下限）+ 兑现型（贴上沿/20日大涨减仓）
+# + 结构型（单只权重上限）。收益型止损默认关闭，见 factor_engine/portfolio/exits.py 的依据说明。
+holdings_path = "config/holdings_cn.csv"
+days = 260
+# 账户现金余额：持仓权重按「总资产 = 持仓 + 现金」计算（风险上限的正确分母）。
+cash = 5913.82
+output_dir = "output/results_cn"
+
+[exits.rules]
+exclude_st = true
+min_median_amount_20d = 50000000.0
+max_suspend_sessions = 5
+min_model_percentile = 30.0
+take_profit_pos = 0.80
+take_profit_ret20 = 0.15
+take_profit_reduce_ratio = 0.34
+max_weight = 0.35
+lot_size = 100 # A 股按手交易；减仓数量向下取整到整手
+stop_loss_pct = 0.0 # 固定百分比止损：样本期无效，保持关闭
+# ATR 缩放止损（P1.17 §0.19）：k×ATR14，夹取 [4%, 10%]；15 周 A/B 以 19% 触发率把 5 日 std 压 28%
+stop_loss_atr_multiple = 2.5
+stop_loss_min_pct = 0.04
+stop_loss_max_pct = 0.10
+
+[paper_outcomes]
+selection_path = "output/results_cn/cn_ensemble_selected.csv"
+days = 756
+horizons = [1, 5, 20, 60]
+cost_bps = 10.0
+# Optional CSV with trade_date, close (or date, price). If empty, reports use
+# the explicitly named cross-sectional market proxy.
+benchmark_path = ""
+output_dir = "output/paper_trading"
+
+[paper_account]
+selection_path = "output/results_cn/cn_ensemble_selected.csv"
+days = 756
+account_id = "cn_default"
+strategy_version = "cn-ensemble.v1"
+initial_capital = 45000.0
+commission_bps = 5.0
+slippage_bps = 5.0
+lot_size = 100
+output_dir = "output/paper_trading/account"
+
+[graph_temporal]
+days = 365
+lookback = 20
+epochs = 5
+cleaning_version = "p0.2.v1"
+model_dir = "output/models/cn/graph_temporal/alpha_zoo_hk"
+
+[model_comparison]
+prediction_paths = { lightgbm = "output/oos_predictions/cn_lightgbm_oos_predictions.csv", transformer = "output/oos_predictions/cn_transformer_oos_predictions.csv" }
+output_dir = "output/evaluations"
+prefix = "cn_model_comparison"
+target_col = "forward_return_20d"
+n_splits = 5
+min_train_days = 120
+purge_days = 20
+embargo_days = 0
+
+[oos_predictions]
+# This stage retrains strictly on each expanding fold. LightGBM and Transformer
+# are the default comparable baselines; add CNN only after its OOS value is needed.
+models = ["transformer", "lightgbm"]
+# "lightgbm",
+days = 756
+label_horizon = 20
+label_mode = "forward_return"
+startup_only = false
+cleaning_version = "p0.2.v1"
+output_dir = "output/oos_predictions"
+n_splits = 5
+min_train_days = 120
+purge_days = 20
+embargo_days = 0
+transformer_lookback = 60
+transformer_epochs = 5
+# Use every fifth OOS decision date for a weekly-rebalanced deep-model study.
+# Set to 1 for daily OOS predictions when runtime permits.
+prediction_stride = 5
+transformer_batch_size = 256
+transformer_max_samples = 12000
+transformer_max_feature_pairs = 128
+transformer_device = "auto"
+# Required only when models contains graph_temporal. The CSV must have
+# stock_code, industry_l1 and available_at; current industry labels are invalid
+# for historical graph OOS evaluation.
+industry_mapping_path = ""

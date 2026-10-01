@@ -81,6 +81,96 @@ def with_profile(layer: dict, profile: dict | None) -> dict:
     return layer
 
 
+def with_strategy_registry(layer: dict, config: dict) -> dict:
+    """把 [strategies.*] 的声明接到选股层（P1_22 §23.4 第②③步）。
+
+    第②步：门禁正交化的暴露集从**模型腿策略的 state/显式声明**派生（不再是门禁里的硬编码列表）。
+    第③步：`signals.budget_from_registry = true` 时，用注册表的 sizing 覆盖 sleeve 的
+            slots/min_weight/max_weight，并按模型腿预算设置 model_min_share；同时打印与硬编码的差异。
+    """
+    try:
+        from factor_engine.strategies import (apply_strategy_status, compare_sleeve_budgets,
+                                              derive_sleeve_budgets, load_strategies, model_state_exposures,
+                                              total_budget)
+    except Exception:
+        return layer
+    specs = load_strategies(config)
+    if not specs:
+        return layer
+    layer = dict(layer)
+
+    gate = dict(layer.get("startup_gate") or {})
+    if str(gate.get("mode", "")).strip().lower() == "orthogonalize":
+        exposures = model_state_exposures(specs)
+        if exposures:
+            declared = list(gate.get("orthogonalize_exposures") or [])
+            gate["orthogonalize_exposures"] = exposures
+            if declared and declared != exposures:
+                print(f"[strategies] 门禁暴露集被注册表覆盖: {declared} -> {exposures}", flush=True)
+            elif not declared:
+                print(f"[strategies] 门禁暴露集来自注册表: {exposures}", flush=True)
+    layer["startup_gate"] = gate
+
+    signals = dict(layer.get("signals") or {})
+    # 让 status 生效：非 active 的策略必须从 recipes / allowed_setup_types / sleeve 里摘掉，
+    # 否则它仍会被扫描并作为 sleeve 候选进组合（2026-10-01 三条负 edge 腿转 off 时发现）。
+    signals, status_audit = apply_strategy_status(signals, specs)
+    if status_audit.get("dropped_recipes") or status_audit.get("disabled"):
+        print(f"[strategies] status 生效：停用 {status_audit['disabled']} | "
+              f"摘掉 recipe {status_audit['dropped_recipes']} | setup_types {status_audit['dropped_setup_types']}", flush=True)
+    comparison = compare_sleeve_budgets(specs, signals)
+    if not signals.get("budget_from_registry"):
+        if not comparison["consistent"]:
+            print(f"[strategies][warn] 注册表与 sleeve 硬编码不一致（budget_from_registry=false，暂不生效）: "
+                  f"{comparison['diffs']}", flush=True)
+    else:
+        derived = derive_sleeve_budgets(specs)
+        for spec in specs.values():
+            if spec.status != "active" or spec.kind != "signal":
+                continue
+            recipe = str(spec.signal.get("recipe") or spec.strategy_id)
+            want = derived.get(recipe)
+            if not want:
+                continue
+            section = str((spec.budget or {}).get("sleeve_section") or "")
+            target = section or None
+            block = dict(signals.get(target) or {}) if target else dict(signals)
+            # budget.share 必须真的约束住该腿的**总权重**：单名上限 = share / slots。
+            # 否则声明 0.05 的腿仍可能靠 max_weight=0.15 吃掉 30% 的账面（2026-10-01 实测）。
+            share = float(want.get("budget_share") or 0.0)
+            slots = max(int(want["slots"]), 1)
+            bounded = min(float(want["max_weight"]), share / slots) if share > 0 else float(want["max_weight"])
+            block.update({"slots": slots, "min_weight": min(float(want["min_weight"]), bounded),
+                          "max_weight": round(bounded, 6)})
+            if target:
+                signals[target] = block
+            else:
+                signals.update(block)
+        constraints = dict(layer.get("portfolio_constraints") or {})
+        model_share = next((float((spec.budget or {}).get("share") or 0.0)
+                            for spec in specs.values() if spec.kind == "model" and spec.status == "active"), 0.0)
+        if model_share > 0:
+            constraints["model_min_share"] = model_share
+        layer["portfolio_constraints"] = constraints
+        budget_report = {"total": total_budget(specs), "model_min_share": constraints.get("model_min_share")}
+        print(f"[strategies] budget_from_registry=true：{budget_report} | 与硬编码差异 {comparison['diffs']}", flush=True)
+    # 第②步（后半）：把每条信号腿**自己的入场状态**注入 signals，供 sleeve 筛选时执行。
+    # 这样模型腿（贴近低点+缩量）与突破腿（贴高点+放量）各用各的口径，不再互相扣分。
+    signals["_strategy_state"] = {
+        str(spec.signal.get("recipe") or spec.strategy_id): {
+            "strategy_id": spec.strategy_id,
+            "rules": [{"column": rule.column, "op": rule.op, "value": rule.value, "lo": rule.lo, "hi": rule.hi}
+                      for rule in spec.state],
+        }
+        for spec in specs.values() if spec.kind == "signal" and spec.status == "active" and spec.state
+    }
+    signals["_registry_budget_report"] = {"consistent": comparison["consistent"], "diffs": comparison["diffs"],
+                                          "total_budget": total_budget(specs),
+                                          "state_rules": {k: len(v["rules"]) for k, v in signals["_strategy_state"].items()}}
+    layer["signals"] = signals
+    return layer
+
+
 def replay_dir(layer: dict, export_default: str, as_of_date, profile: str | None) -> str:
     """Route replay outputs away from the production files."""
     output_dir = layer.get("output_dir", export_default)
@@ -520,6 +610,9 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             embargo_days=(60 if str(layer.get("label_mode", "forward_return")).startswith("path") and not int(layer.get("embargo_days", 0) or 0) else int(layer.get("embargo_days", layer.get("label_horizon", 20)))),
             min_feature_coverage=float(feature_quality.get("min_feature_coverage", 0.05)),
             drop_constant_features=bool(feature_quality.get("drop_constant_features", True)),
+            # 因子 IC 准入清单（scripts/factor_ic_protocol.py 产出）；admission_mode=off 时保持现状
+            feature_admission={"mode": str(feature_quality.get("admission_mode", "off")),
+                               "path": feature_quality.get("admission_file")},
             n_estimators=int(layer.get("n_estimators", 500)),
             learning_rate=float(layer.get("learning_rate", 0.05)),
             num_leaves=int(layer.get("num_leaves", 64)),
@@ -594,10 +687,16 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             cnn_device=layer.get("cnn_device", "auto"),
             output_dir=layer.get("output_dir", "output/model_scores"),
             min_cross_section_coverage=float(layer.get("min_cross_section_coverage", 0.95)),
+            input_guard=layer.get("input_guard", "enforce"),
+            input_guard_min_gain_coverage=float(layer.get("input_guard_min_gain_coverage", 0.5)),
+            input_guard_min_columns=float(layer.get("input_guard_min_columns", 0.9)),
+            input_guard_sessions=int(layer.get("input_guard_sessions", 30)),
+            input_guard_max_excluded_share=float(layer.get("input_guard_max_excluded_share", 0.05)),
             show_progress=True,
         )
     if name == "selection":
         layer = with_profile(config[name], profiles.get(profile) if profile else None)
+        layer = with_strategy_registry(layer, config)
         output_dir = layer.get("output_dir", p["export_csv"])
         if as_of_date:
             output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
@@ -623,6 +722,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         )
     if name == "preselection":
         layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)
+        layer = with_strategy_registry(layer, config)
         output_dir = layer.get("output_dir", p["export_csv"])
         if as_of_date:
             output_dir = replay_dir(layer, p["export_csv"], as_of_date, profile)
@@ -650,6 +750,7 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         return result
     if name == "pk":
         layer = with_profile(config.get("selection", {}), profiles.get(profile) if profile else None)
+        layer = with_strategy_registry(layer, config)
         # risk-control settings travel with the sizing constraints
         if layer.get("risk_control"):
             constraints = dict(layer.get("portfolio_constraints") or {})
@@ -665,6 +766,36 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         preselected_path = layer.get("preselection_path", "output/results_cn/cn_ensemble_preselected.csv")
         if as_of_date:
             preselected_path = f"{output_dir}/cn_ensemble_preselected.csv"
+        # 第①步（2026-09-29）：pk 必须读"同一决策日"的预选文件。此前 replay 预选文件缺失时会
+        # 静默退化成对当前打分截面重新扫描，得到与 preselection 不一致的名单
+        # （实测 9/28 单跑 pk 得到 301297/688786）。现在：日期一致的产线文件可回退并告警，否则显式报错。
+        candidate_file = Path(preselected_path)
+        if as_of_date and not candidate_file.is_file():
+            fallback = Path(layer.get("preselection_path", "output/results_cn/cn_ensemble_preselected.csv"))
+            same_date = False
+            if fallback.is_file():
+                try:
+                    import pandas as pd  # 本模块未在顶层导入 pandas（各函数内局部导入）
+
+                    head = pd.read_csv(fallback, usecols=["trade_date"], nrows=20)
+                    # read_csv 把日期读成字符串，直接 .dt 会抛异常并被吞掉 → 误判"日期不匹配"
+                    # （2026-10-01 实测：pk --trade-date 被自己的护栏挡住）。显式 to_datetime。
+                    head_dates = pd.to_datetime(head.get("trade_date"), errors="coerce").dropna()
+                    same_date = bool(len(head_dates)) and str(head_dates.iloc[0].normalize().date()) == str(pd.Timestamp(as_of_date).date())
+                except Exception as exc:
+                    # 不允许静默：把异常打出来，否则"日期不匹配"这种误判无从查起。
+                    print(f"[pk][warn] 回退判定异常（按不匹配处理）: {type(exc).__name__}: {exc}", flush=True)
+                    same_date = False
+            if same_date:
+                print(f"[pk] 警告：replay 预选文件缺失，回退到产线预选文件（trade_date 一致）: {fallback}", flush=True)
+                preselected_path = str(fallback)
+            else:
+                raise SystemExit(
+                    f"pk 需要同一决策日（{as_of_date}）的预选文件，但 {candidate_file} 不存在，"
+                    f"产线预选文件 {fallback} 的 trade_date 也不匹配。\n"
+                    f"请先跑：PYTHONPATH=. .venv/bin/python scripts/run_cn_pipeline.py "
+                    f"--stage preselection --trade-date {as_of_date} --force-rebalance"
+                )
         # Re-run the same optimizer on the preselection pool.  Signal floors
         # and max-holdings constraints are applied only at this final PK step.
         return service.select_persisted_model_scores(
@@ -768,6 +899,13 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
 
 
 def main() -> int:
+    # 非交互式调度（launchd/cron）不会读 ~/.bashrc：先把 config/scheduler_env.sh 里
+    # 缺失的 ClickHouse / Tushare / 代理凭据补进环境，避免数据层静默退化成 Parquet 镜像。
+    from data.store.scheduler_env import load_scheduler_env
+
+    filled_env = load_scheduler_env()
+    if filled_env:
+        print(f"[env] 已从 scheduler_env.sh 补齐 {len(filled_env)} 个变量: {sorted(filled_env)[:6]}…", flush=True)
     parser = argparse.ArgumentParser(description="Run CN data, feature, model, OOS evaluation and selection stages.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="TOML pipeline configuration")
     parser.add_argument("--stage", choices=["all", "daily_bars", "moneyflow", "cyq_chips", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
@@ -798,6 +936,7 @@ def main() -> int:
               f"score_strength={gate_layer.get('score_strength')}", flush=True)
     started = datetime.now().isoformat(timespec="seconds")
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
+    data_health = dict((config.get("pipeline") or {}).get("data_health") or {})
     stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
@@ -807,6 +946,26 @@ def main() -> int:
         data_source=pipeline_config.get("data_source", "akshare"),
     )
     try:
+        if data_health.get("enabled") and str(data_health.get("mode", "enforce")).lower() != "off":
+            watched = {str(name) for name in (data_health.get("stages") or [])}
+            hits = [stage for stage in stages if stage in watched]
+            if hits:
+                # 覆盖率体检只跑一次（同一决策日），不达标就按 mode 决定中止还是告警。
+                from data.ingest.service import MarketDataService as _MDS
+
+                report = _MDS(base_dir=str(ROOT / "assets/data")).check_daily_bar_coverage(
+                    as_of=args.trade_date, lookback_sessions=int(data_health.get("lookback_sessions", 10) or 10),
+                    min_ratio=float(data_health.get("min_bar_coverage", 0.98) or 0.98),
+                )
+                print(f"[data_health] bar 覆盖率 {report['session']}: {report['bars']}/{report['baseline']} = "
+                      f"{report.get('ratio')}（阈值 {report.get('min_ratio')}）ok={report['ok']}", flush=True)
+                if not report["ok"] and str(data_health.get("mode", "enforce")).lower() == "enforce":
+                    raise SystemExit(
+                        f"数据健康门未通过：{report['session']} 只有 {report['bars']} 只 bar（基线 {report['baseline']}，"
+                        f"覆盖率 {report.get('ratio')} < {report.get('min_ratio')}）。先补齐日线再跑 {hits}；"
+                        "临时的 warn 模式：把 [pipeline.data_health].mode 改成 'warn'。"
+                    )
+
         for stage in stages:
             # A stage explicitly selected on the command line is an operator
             # request and must run even when it is disabled in the default all-stage profile.

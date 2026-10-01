@@ -1,12 +1,49 @@
 # Runbook：每日股价同步 → 用当前策略选出今日股票
 
-> 适用：本机 macOS（launchd）或手工执行。策略侧当前默认 `[selection.startup_gate] mode = "score"`
-> （打分制，见 `docs/todo/P1_21_startup_gate_robustness.md`），`rebalance_stride_days = 1`。
+> 适用：本机 macOS（launchd）或手工执行。策略侧口径（2026-10-01 现状，详见
+> `docs/todo/P1_22_cn_volume_style_oos_shap_plan.md` §33–§37）：
+> - `[selection.startup_gate] mode = "orthogonalize"`（把 dist/flow 暴露做横截面残差化，不是加分项）；
+> - `ensemble_weights = { lightgbm = 1.00, transformer = 0.00 }`（transformer 重训后 valid IC≈0，权重归零）；
+> - 持仓区间 **`min_holdings = 2` ~ `max_holdings = 6`**，少数持仓时允许单名放大到 `max_weight_concentrated`；
+> - 卫星 sleeve 只留 `value_reversal`（观察仓），`donchian_breakout` / `limit_momentum` / `bottom_momentum`
+>   在可交易口径下无正 edge，已转 `status = "off"`；
+> - `rebalance_stride_days = 1`。
 
-## 0. 一键（自动化入口，已带 --force-rebalance）
+## 0. 一键决策链路（推荐的手工入口）
 
 ```bash
 cd /Users/ccs/code/quant/stock_analysis_by_gpt
+bash scripts/run_cn_daily_decision.sh                        # 全链路：数据 → 选股（7 阶段）
+bash scripts/run_cn_daily_decision.sh --dry-run              # 只做数据体检 + 打印计划（不动数据）
+bash scripts/run_cn_daily_decision.sh --from features        # 从某阶段续跑（前序已完成时）
+bash scripts/run_cn_daily_decision.sh --only preselection,pk # 只重跑选股（换门禁/改参数时）
+bash scripts/run_cn_daily_decision.sh --trade-date 2026-10-09  # 指定决策日（回放口径）
+bash scripts/run_cn_daily_decision.sh --config config/cn_pipeline_x.toml
+```
+
+阶段顺序：`daily_bars → moneyflow → features → clean_panel → model_scores → preselection → pk`
+（`preselection` / `pk` 自动带 `--force-rebalance`）。2026-10-01 实测约 **67 分钟**：
+daily_bars 739s / moneyflow 441s / features 844s / clean_panel 1829s / model_scores 35s /
+preselection 65s / pk 35s。
+
+**它会做什么**：
+1. **前置体检**：先跑 `check_daily_bar_coverage()`（阈值取 `[pipeline.data_health].min_bar_coverage`，当前 0.95），
+   打印 `ratio / 缺失数 / 缺失板块分布`；`--dry-run` 时也能看，避免白等一小时才发现数据没到。
+2. **每阶段独立日志** + `chain.log`（含 exit code 与耗时）；失败即停、打印日志尾部并给出续跑命令。
+3. **跑完出一页 `SUMMARY.md`**：决策日、名单（代码/权重/通道/模型分/排名/收盘/手数）、
+   模型块 vs 卫星块权重，以及 `sleeve_block_cap` / `strategy_state` / `input_guard` 三段审计 JSON。
+
+产物：`output/verification/decision_<YYYYMMDD>/{chain.log,<stage>.log,SUMMARY.md}`。
+
+> ⚠️ 与 `run_daily_production.sh` 的差别：本脚本到 `pk` 为止（**决策链路**）；
+> 生产脚本还会跑 `regime → exits → paper_account → paper_outcomes` 并按需推送通知。
+
+## 0b. 一键（自动化入口，已带 --force-rebalance）
+
+```bash
+cd /Users/ccs/code/quant/stock_analysis_by_gpt
+bash scripts/quant_agents_ctl.sh status      # 查看 4 个 launchd 任务是否在跑
+bash scripts/quant_agents_ctl.sh on|off      # 恢复/停用每日自动化（优化期间建议 off）
 DAILY_NOTIFY=0 bash scripts/run_daily_production.sh --force        # 想发飞书/企微就把 DAILY_NOTIFY 去掉
 ```
 
@@ -47,8 +84,8 @@ uv run python scripts/render_two_stage_report.py --trade-date "$(date +%Y-%m-%d)
 ```bash
 uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance
 uv run python scripts/run_cn_pipeline.py --stage pk --force-rebalance
-# A/B：命令行临时换门禁形态（不用改配置）
-#   --gate-mode eligibility | score | thresholds | both   --gate-strength 0.15
+# A/B：命令行临时换门禁形态（不用改配置；默认已是 orthogonalize）
+#   --gate-mode eligibility | score | orthogonalize | thresholds | both
 uv run python scripts/run_cn_pipeline.py --stage preselection --force-rebalance --gate-mode eligibility
 ```
 
@@ -145,6 +182,14 @@ PY
 
 - 面板/打分日期：`python3 -c "import pandas as pd;print(pd.read_csv('output/model_scores/cn_lightgbm_scores.csv').trade_date.max())"`
   应等于今天（否则是数据没同步到，或 scoring 回退到上一个完整横截面）。
+- **数据覆盖率与缺失清单**：`cat output/data_quality/bar_coverage_$(date +%F).json`
+  （`ratio` 应 ≥ 0.95；缺失**分散在各板块**多为停牌/源滞后，**集中在单一板块**要当同步故障处理）。
+- **卫星块是否越权**：读最新流水线报告的 `sleeve_block_cap`
+  —— `sleeve_weight_after` 不得超过 `cap`（当前 0.075 = gross × (1 − model_min_share)）。
+- **持仓数与 gross**：`min_holdings(=2) ≤ 持仓数 ≤ max_holdings(=6)`（2~6 都属于正常）；
+  少数持仓时看 `concentrated_deploy.applied` 是否为 `true`（决定 gross 有没有用满）。
+- **打分输入体检**：读 `output/model_scores/cn_input_guard_<date>.json`
+  —— `coverage.gain_weighted_coverage ≥ 0.5`、`valuation_ok` 应为 true（否则估值快照滞后）。
 - 资金流覆盖率（打分制依赖它做加分，不依赖它做剔除）：
   `python3 -c "import pandas as pd;d=pd.read_parquet('assets/data/derived/cn_moneyflow_features.parquet',columns=['trade_date','moneyflow_net_z_5d']);print(d.groupby(d.trade_date.dt.date)['moneyflow_net_z_5d'].apply(lambda s: s.notna().mean()).tail(3))"`
 
@@ -157,3 +202,7 @@ PY
 | book 连续多天不变 | 少了 `--force-rebalance` 或 `rebalance_stride_days > 1` | 见 §2 |
 | 打分日期不是今天 | 数据未同步（daily_bars/features/clean_panel 未跑或失败） | 按 §1 顺序补跑，先看 `<stage>.log` 末尾 |
 | `features`/`clean_panel` 跑到一半失败 | 上游 provider 限流或代理中断 | 直接重跑该阶段（幂等、skip_existing）；必要时 `HTTPS_PROXY` 检查 |
+| 链路在 `features`/`clean_panel` 前就中止，提示"数据健康门未通过" | 当日 bar 覆盖率 < 0.95（成批缺失） | 先补同步（`--stage daily_bars` 多跑两轮）；确认属源滞后可临时把 `[pipeline.data_health].mode = "warn"` |
+| `pk 需要同一决策日（YYYY-MM-DD）的预选文件` | 只跑了 pk 没跑 preselection（护栏防止"静默换池"） | 先 `--stage preselection --trade-date <日期> --force-rebalance` |
+| 持仓只剩 1 只 | 修复循环把账塌到下限以下且补位失败（候选价格都买不起一手） | 看 `lot_summary.topped_up_for_min_holdings`；必要时放宽 `max_price` 或提高 `max_weight_concentrated` |
+| 持仓 2 只但 gross 只有 ~67% | 2 × regime 单名上限(0.35) = 70%，投不满 gross | 已修：`max_weight_concentrated`（集中度上限覆盖 regime 上限）会把 gross 收到 75%；看 `concentrated_deploy.applied` |

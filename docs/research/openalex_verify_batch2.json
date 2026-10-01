@@ -1,0 +1,294 @@
+{
+  "Foundations of technical analysis computational algorithms statistical inference empirical implementation": [
+    {
+      "title": "Foundations of Technical Analysis: Computational Algorithms, Statistical Inference, and Empirical Implementation",
+      "year": 2000,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "Andrew W. Lo",
+        "Harry Mamaysky",
+        "Jiang Wang"
+      ],
+      "cites": 744,
+      "doi": "https://doi.org/10.1111/0022-1082.00265"
+    },
+    {
+      "title": "Foundations of Technical Analysis: Computational Algorithms, Statistical Inference, and Empirical Implementation",
+      "year": 2000,
+      "venue": "National Bureau of Economic Research",
+      "authors": [
+        "Andrew W. Lo",
+        "Harry Mamaysky",
+        "Jiang Wang"
+      ],
+      "cites": 261,
+      "doi": "https://doi.org/10.3386/w7613"
+    },
+    {
+      "title": "Foundations of Technical Analysis: Computational Algorithms, Statistical Inference, and Empirical Implementation",
+      "year": 2001,
+      "venue": "CFA Digest",
+      "authors": [
+        "Joseph D.V. Vu"
+      ],
+      "cites": 22,
+      "doi": "https://doi.org/10.2469/dig.v31.n1.811"
+    }
+  ],
+  "Fads martingales and market efficiency Lehmann": [],
+  "Momentum returns and information uncertainty Chinese stocks Cheema Nartea": [],
+  "Empirical asset pricing via machine learning": [
+    {
+      "title": "Empirical Asset Pricing via Machine Learning",
+      "year": 2020,
+      "venue": "Review of Financial Studies",
+      "authors": [
+        "Shihao Gu",
+        "Bryan P. Kelly",
+        "Dacheng Xiu"
+      ],
+      "cites": 2514,
+      "doi": "https://doi.org/10.1093/rfs/hhaa009"
+    },
+    {
+      "title": "Empirical Asset Pricing via Machine Learning",
+      "year": 2018,
+      "venue": "National Bureau of Economic Research",
+      "authors": [
+        "Shihao Gu",
+        "Bryan P. Kelly",
+        "Dacheng Xiu"
+      ],
+      "cites": 402,
+      "doi": "https://doi.org/10.3386/w25398"
+    },
+    {
+      "title": "Empirical Asset Pricing via Machine Learning",
+      "year": 2018,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Shihao Gu",
+        "Bryan T. Kelly",
+        "Dacheng Xiu"
+      ],
+      "cites": 58,
+      "doi": "https://doi.org/10.2139/ssrn.3281018"
+    }
+  ],
+  "Market intraday momentum": [
+    {
+      "title": "Market intraday momentum",
+      "year": 2018,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Lei Gao",
+        "Yufeng Han",
+        "Sophia Zhengzi Li",
+        "Guofu Zhou"
+      ],
+      "cites": 226,
+      "doi": "https://doi.org/10.1016/j.jfineco.2018.05.009"
+    },
+    {
+      "title": "Hedging demand and market intraday momentum",
+      "year": 2021,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Guido Baltussen",
+        "Zhi Da",
+        "Sten Lammers",
+        "Martin P.E. Martens"
+      ],
+      "cites": 98,
+      "doi": "https://doi.org/10.1016/j.jfineco.2021.04.029"
+    },
+    {
+      "title": "Market Intraday Momentum",
+      "year": 2014,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Lei Gao",
+        "Yufeng Han",
+        "Sophia Zhengzi Li",
+        "Guofu Zhou"
+      ],
+      "cites": 13,
+      "doi": "https://doi.org/10.2139/ssrn.2440866"
+    }
+  ],
+  "Trend following Chinese futures market": [
+    {
+      "title": "Do trend following strategies work in Chinese futures markets?",
+      "year": 2017,
+      "venue": "Journal of Futures Markets",
+      "authors": [
+        "Bin Li",
+        "Di Zhang",
+        "Yang Zhou"
+      ],
+      "cites": 28,
+      "doi": "https://doi.org/10.1002/fut.21856"
+    },
+    {
+      "title": "Applying Trend Following Strategy in Chinese Commodity Futures Market: The Case of the Moving Average Converge Divergence Indicator",
+      "year": 2023,
+      "venue": "Applied economics and policy studies",
+      "authors": [
+        "Nan Jiang",
+        "Shumeng Shi"
+      ],
+      "cites": 1,
+      "doi": "https://doi.org/10.1007/978-981-99-6441-3_132"
+    },
+    {
+      "title": "Has Machine Learning Defeated Trend Following Strategies in the Chinese Futures Market",
+      "year": 2024,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Luoming Liang"
+      ],
+      "cites": 0,
+      "doi": "https://doi.org/10.2139/ssrn.4802493"
+    }
+  ],
+  "support and resistance levels technical analysis profitability": [],
+  "Price momentum and trading volume": [
+    {
+      "title": "Price Momentum and Trading Volume",
+      "year": 2000,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "Charles M.C. Lee",
+        "Bhaskaran Swaminathan"
+      ],
+      "cites": 1561,
+      "doi": "https://doi.org/10.1111/0022-1082.00280"
+    },
+    {
+      "title": "Price Momentum and Trading Volume",
+      "year": 1998,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Charles M.C. Lee",
+        "Bhaskaran Swaminathan"
+      ],
+      "cites": 232,
+      "doi": "https://doi.org/10.2139/ssrn.92589"
+    },
+    {
+      "title": "Price Momentum and Trading Volume",
+      "year": 2001,
+      "venue": "CFA Digest",
+      "authors": [
+        "John P. Rathnam"
+      ],
+      "cites": 56,
+      "doi": "https://doi.org/10.2469/dig.v31.n2.858"
+    }
+  ],
+  "The 52-week high momentum and trading volume": [
+    {
+      "title": "Trading Volume, Price Momentum, and the 52-Week High Price Momentum Strategy in the Saudi Stock Market",
+      "year": 2008,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Abdullah Alsubaie",
+        "Mohammad Najand"
+      ],
+      "cites": 10,
+      "doi": "https://doi.org/10.2139/ssrn.1087391"
+    }
+  ],
+  "Technical trading rules in emerging markets China": [
+    {
+      "title": "Information Diffusion, Transaction Costs, and the Performance of Technical Trading Rules in the Emerging Stock Markets of China",
+      "year": 2004,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Steven Shuye Wang",
+        "Wei Li"
+      ],
+      "cites": 3,
+      "doi": "https://doi.org/10.2139/ssrn.487783"
+    }
+  ],
+  "Anchoring effect 52-week high": [
+    {
+      "title": "Fundamental strength and the 52-week high anchoring effect",
+      "year": 2023,
+      "venue": "Review of Quantitative Finance and Accounting",
+      "authors": [
+        "Zhaobo Zhu",
+        "Licheng Sun",
+        "Min Chen"
+      ],
+      "cites": 6,
+      "doi": "https://doi.org/10.1007/s11156-023-01138-3"
+    },
+    {
+      "title": "Fundamental Strength and the 52-Week High Anchoring Effect",
+      "year": 2019,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Zhaobo Zhu",
+        "Licheng Sun",
+        "Min Chen"
+      ],
+      "cites": 0,
+      "doi": "https://doi.org/10.2139/ssrn.3421545"
+    },
+    {
+      "title": "The Anchoring Effect of 52-Week High on SEO Pricing",
+      "year": 2025,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Yifei Chen",
+        "Shenghao Gao",
+        "Siyang Tian",
+        "Qi Zhang"
+      ],
+      "cites": 0,
+      "doi": "https://doi.org/10.2139/ssrn.5210159"
+    }
+  ],
+  "Do short-term reversal strategies work in China": [],
+  "Time series momentum China": [
+    {
+      "title": "Can investor sentiment be a momentum time-series predictor? Evidence from China",
+      "year": 2017,
+      "venue": "Journal of Empirical Finance",
+      "authors": [
+        "Xing Han",
+        "Youwei Li"
+      ],
+      "cites": 174,
+      "doi": "https://doi.org/10.1016/j.jempfin.2017.04.001"
+    },
+    {
+      "title": "Intraday time‐series momentum: Evidence from China",
+      "year": 2019,
+      "venue": "Journal of Futures Markets",
+      "authors": [
+        "Muzhao Jin",
+        "Fearghal Joseph Kearney",
+        "Youwei Li",
+        "Yung Chiang Yang"
+      ],
+      "cites": 44,
+      "doi": "https://doi.org/10.1002/fut.22084"
+    },
+    {
+      "title": "Time series momentum and contrarian effects in the Chinese stock market",
+      "year": 2017,
+      "venue": "Physica A Statistical Mechanics and its Applications",
+      "authors": [
+        "Huai-Long Shi",
+        "Wei‐Xing Zhou"
+      ],
+      "cites": 34,
+      "doi": "https://doi.org/10.1016/j.physa.2017.04.139"
+    }
+  ],
+  "volume price breakout confirmation intraday": [],
+  "Trading strategies stop loss take profit optimal barriers": []
+}

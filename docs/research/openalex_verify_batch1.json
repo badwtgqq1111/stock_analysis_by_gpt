@@ -1,0 +1,531 @@
+{
+  "Simple technical trading rules and the stochastic properties of stock returns": [
+    {
+      "title": "Simple Technical Trading Rules and the Stochastic Properties of Stock Returns",
+      "year": 1992,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "William Brock",
+        "Josef Lakonishok",
+        "Blake D. LeBaron"
+      ],
+      "cites": 2276,
+      "doi": "https://doi.org/10.1111/j.1540-6261.1992.tb04681.x"
+    },
+    {
+      "title": "Simple Technical Trading Rules and the Stochastic Properties of Stock Returns",
+      "year": 1992,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "William Brock",
+        "Josef Lakonishok",
+        "Blake D. LeBaron"
+      ],
+      "cites": 441,
+      "doi": "https://doi.org/10.2307/2328994"
+    }
+  ],
+  "Foundations of technical analysis: computational algorithms, statistical inference, and empirical implementation": [],
+  "The 52-week high and momentum investing": [
+    {
+      "title": "The 52‐Week High and Momentum Investing",
+      "year": 2004,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "Thomas J. George",
+        "Chuan-Yang Hwang"
+      ],
+      "cites": 858,
+      "doi": "https://doi.org/10.1111/j.1540-6261.2004.00695.x"
+    },
+    {
+      "title": "The 52-Week High and Momentum Investing",
+      "year": 2008,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Chuan-Yang Hwang",
+        "Thomas J. George"
+      ],
+      "cites": 98,
+      "doi": null
+    },
+    {
+      "title": "The 52-week high and momentum investing in international stock indexes",
+      "year": 2007,
+      "venue": "The Quarterly Review of Economics and Finance",
+      "authors": [
+        "Ding Du"
+      ],
+      "cites": 49,
+      "doi": "https://doi.org/10.1016/j.qref.2007.02.001"
+    }
+  ],
+  "Time series momentum": [
+    {
+      "title": "Time series momentum",
+      "year": 2011,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Tobias J. Moskowitz",
+        "Yao Hua Ooi",
+        "Lasse Heje Pedersen"
+      ],
+      "cites": 1458,
+      "doi": "https://doi.org/10.1016/j.jfineco.2011.11.003"
+    },
+    {
+      "title": "Time Series Momentum",
+      "year": 2011,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Tobias J. Moskowitz",
+        "Yao Hua Ooi",
+        "Lasse Heje Pedersen"
+      ],
+      "cites": 162,
+      "doi": "https://doi.org/10.2139/ssrn.2089463"
+    },
+    {
+      "title": "Time series momentum: Is it there?",
+      "year": 2019,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Dashan Huang",
+        "Jiangyuan Li",
+        "Liyao Wang",
+        "Guofu Zhou"
+      ],
+      "cites": 128,
+      "doi": "https://doi.org/10.1016/j.jfineco.2019.08.004"
+    }
+  ],
+  "Momentum crashes": [
+    {
+      "title": "Momentum crashes",
+      "year": 2016,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Kent Daniel",
+        "Tobias J. Moskowitz"
+      ],
+      "cites": 938,
+      "doi": "https://doi.org/10.1016/j.jfineco.2015.12.002"
+    },
+    {
+      "title": "Momentum Crashes",
+      "year": 2014,
+      "venue": "National Bureau of Economic Research",
+      "authors": [
+        "Kent Daniel",
+        "Tobias J. Moskowitz"
+      ],
+      "cites": 57,
+      "doi": "https://doi.org/10.3386/w20439"
+    },
+    {
+      "title": "Momentum Crashes",
+      "year": 2013,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Kent Daniel",
+        "Tobias J. Moskowitz"
+      ],
+      "cites": 29,
+      "doi": "https://doi.org/10.2139/ssrn.2371227"
+    }
+  ],
+  "High-volume return premium": [
+    {
+      "title": "The High‐Volume Return Premium",
+      "year": 2001,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "Simon Gervais",
+        "Ron Kaniel",
+        "Dan H. Mingelgrin"
+      ],
+      "cites": 907,
+      "doi": "https://doi.org/10.1111/0022-1082.00349"
+    },
+    {
+      "title": "The High Volume Return Premium",
+      "year": 2001,
+      "venue": "RePEc: Research Papers in Economics",
+      "authors": [
+        "Simon Gervais",
+        "Ron Kaniel",
+        "Dan H. Mingelgrin"
+      ],
+      "cites": 110,
+      "doi": null
+    },
+    {
+      "title": "The high volume return premium: Cross-country evidence",
+      "year": 2011,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Ron Kaniel",
+        "Arzu Ozoguz",
+        "Laura T. Starks"
+      ],
+      "cites": 104,
+      "doi": "https://doi.org/10.1016/j.jfineco.2011.08.012"
+    }
+  ],
+  "Fads, martingales, and market efficiency": [],
+  "Evidence of predictable behavior of security returns": [
+    {
+      "title": "Evidence of Predictable Behavior of Security Returns",
+      "year": 1990,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "Narasimhan Jegadeesh"
+      ],
+      "cites": 2791,
+      "doi": "https://doi.org/10.1111/j.1540-6261.1990.tb05110.x"
+    },
+    {
+      "title": "Evidence of Predictable Behavior of Security Returns",
+      "year": 1990,
+      "venue": "The Journal of Finance",
+      "authors": [
+        "Narasimhan Jegadeesh"
+      ],
+      "cites": 378,
+      "doi": "https://doi.org/10.2307/2328797"
+    },
+    {
+      "title": "Evidence of predictable behavior of security returns in Jakarta Stock Exchange :: Do the momentum strategies work?",
+      "year": 2003,
+      "venue": null,
+      "authors": [
+        "I Nyoman Suarjaya",
+        "Indra Wijaya Kusuma"
+      ],
+      "cites": 0,
+      "doi": null
+    }
+  ],
+  "Evaporating liquidity": [
+    {
+      "title": "Evaporating Liquidity",
+      "year": 2012,
+      "venue": "Review of Financial Studies",
+      "authors": [
+        "Stefan Nagel"
+      ],
+      "cites": 566,
+      "doi": "https://doi.org/10.1093/rfs/hhs066"
+    },
+    {
+      "title": "Evaporating Liquidity",
+      "year": 2010,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Stefan Nagel"
+      ],
+      "cites": 52,
+      "doi": "https://doi.org/10.2139/ssrn.1573164"
+    },
+    {
+      "title": "Evaporating Liquidity",
+      "year": 2011,
+      "venue": "National Bureau of Economic Research",
+      "authors": [
+        "Stefan Nagel"
+      ],
+      "cites": 16,
+      "doi": "https://doi.org/10.3386/w17653"
+    }
+  ],
+  "A closer look at short-term return reversal": [
+    {
+      "title": "A Closer Look at the Short-Term Return Reversal",
+      "year": 2013,
+      "venue": "Management Science",
+      "authors": [
+        "Zhi Da",
+        "Qianqiu Liu",
+        "Ernst Schaumburg"
+      ],
+      "cites": 234,
+      "doi": "https://doi.org/10.1287/mnsc.2013.1766"
+    }
+  ],
+  "When do stop-loss rules stop losses": [
+    {
+      "title": "When do stop-loss rules stop losses?",
+      "year": 2013,
+      "venue": "Journal of Financial Markets",
+      "authors": [
+        "Kathryn M. Kaminski",
+        "Andrew W. Lo"
+      ],
+      "cites": 69,
+      "doi": "https://doi.org/10.1016/j.finmar.2013.07.001"
+    },
+    {
+      "title": "When Do Stop-Loss Rules Stop Losses?",
+      "year": 2007,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Kathryn M. Kaminski",
+        "Andrew W. Lo"
+      ],
+      "cites": 19,
+      "doi": "https://doi.org/10.2139/ssrn.968338"
+    },
+    {
+      "title": "When Do Stop-Loss Rules Stop Losses?",
+      "year": 2010,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Kathryn M. Kaminski",
+        "Andrew W. Lo"
+      ],
+      "cites": 2,
+      "doi": "https://doi.org/10.2139/ssrn.972612"
+    }
+  ],
+  "A century of evidence on trend-following investing": [
+    {
+      "title": "A Century of Evidence on Trend-Following Investing",
+      "year": 2017,
+      "venue": "The Journal of Portfolio Management",
+      "authors": [
+        "Brian Hurst",
+        "Yao Hua Ooi",
+        "Lasse Heje Pedersen"
+      ],
+      "cites": 183,
+      "doi": "https://doi.org/10.3905/jpm.2017.44.1.015"
+    },
+    {
+      "title": "A Century of Evidence on Trend-Following Investing",
+      "year": 2017,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Brian Hurst",
+        "Yao Hua Ooi",
+        "Lasse Heje Pedersen"
+      ],
+      "cites": 49,
+      "doi": "https://doi.org/10.2139/ssrn.2993026"
+    },
+    {
+      "title": "A Century of Evidence on Trend-Following Investing: Executive Summary",
+      "year": 2012,
+      "venue": null,
+      "authors": [
+        "Brian Hurst",
+        "Yao Hua Ooi",
+        "Lasse Heje Pedersen"
+      ],
+      "cites": 0,
+      "doi": null
+    }
+  ],
+  "Demystifying time-series momentum strategies": [
+    {
+      "title": "Demystifying Time‐Series Momentum Strategies: Volatility Estimators, Trading Rules and Pairwise Correlations",
+      "year": 2020,
+      "venue": null,
+      "authors": [
+        "Nick Baltas",
+        "Robert L. Kosowski"
+      ],
+      "cites": 47,
+      "doi": "https://doi.org/10.1002/9781119599364.ch3"
+    }
+  ],
+  "A new anomaly: the cross-sectional profitability of technical analysis": [
+    {
+      "title": "A New Anomaly: The Cross-Sectional Profitability of Technical Analysis",
+      "year": 2013,
+      "venue": "Journal of Financial and Quantitative Analysis",
+      "authors": [
+        "Yufeng Han",
+        "Ke Yang",
+        "Guofu Zhou"
+      ],
+      "cites": 226,
+      "doi": "https://doi.org/10.1017/s0022109013000586"
+    },
+    {
+      "title": "A New Anomaly: The Cross-Sectional Profitability of Technical Analysis",
+      "year": 2011,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Yufeng Han",
+        "Ke Yang",
+        "Guofu Zhou"
+      ],
+      "cites": 26,
+      "doi": "https://doi.org/10.2139/ssrn.1656460"
+    },
+    {
+      "title": "A New Anomaly: The Cross-Sectional Profitability of Technical Analysis",
+      "year": 2014,
+      "venue": "CFA Digest",
+      "authors": [
+        "Butt Man-Kit"
+      ],
+      "cites": 8,
+      "doi": "https://doi.org/10.2469/dig.v44.n8.17"
+    }
+  ],
+  "Size and value in China": [
+    {
+      "title": "Size and value in China",
+      "year": 2019,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Jianan Liu",
+        "Robert F. Stambaugh",
+        "Yu Yuan"
+      ],
+      "cites": 878,
+      "doi": "https://doi.org/10.1016/j.jfineco.2019.03.008"
+    },
+    {
+      "title": "Size and Value in China",
+      "year": 2018,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Jianan Liu",
+        "Robert F. Stambaugh",
+        "Yu Yuan"
+      ],
+      "cites": 5,
+      "doi": "https://doi.org/10.2139/ssrn.3108175"
+    },
+    {
+      "title": "Fama–French in China: Size and Value Factors in Chinese Stock Returns",
+      "year": 2018,
+      "venue": "International Review of Finance",
+      "authors": [
+        "Grace Xing Hu",
+        "Can Chen",
+        "Yuan Shao",
+        "Jiang Wang"
+      ],
+      "cites": 119,
+      "doi": "https://doi.org/10.1111/irfi.12177"
+    }
+  ],
+  "Momentum returns and information uncertainty in Chinese stocks": [],
+  "Technical analysis: an asset allocation perspective on the use of moving averages": [
+    {
+      "title": "Technical analysis: An asset allocation perspective on the use of moving averages☆",
+      "year": 2009,
+      "venue": "Journal of Financial Economics",
+      "authors": [
+        "Yingzi Zhu",
+        "Guofu Zhou"
+      ],
+      "cites": 300,
+      "doi": "https://doi.org/10.1016/j.jfineco.2008.07.002"
+    }
+  ],
+  "The probability of backtest overfitting": [
+    {
+      "title": "The probability of backtest overfitting",
+      "year": 2016,
+      "venue": "The Journal of Computational Finance",
+      "authors": [
+        "David H. Bailey",
+        "Jonathan Michael Borwein",
+        "Marcos López de Prado",
+        "Qiji Jim Zhu"
+      ],
+      "cites": 57,
+      "doi": "https://doi.org/10.21314/jcf.2016.322"
+    },
+    {
+      "title": "The Probability of Backtest Overfitting",
+      "year": 2013,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "David H. Bailey",
+        "Jonathan Michael Borwein",
+        "Marcos López de Prado",
+        "Qiji Jim Zhu"
+      ],
+      "cites": 26,
+      "doi": "https://doi.org/10.2139/ssrn.2326253"
+    },
+    {
+      "title": "Mathematical Appendices to: 'The Probability of Backtest Overfitting'",
+      "year": 2015,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "David H. Bailey",
+        "Jonathan Michael Borwein",
+        "Marcos López de Prado",
+        "Qiji Jim Zhu"
+      ],
+      "cites": 7,
+      "doi": "https://doi.org/10.2139/ssrn.2568435"
+    }
+  ],
+  "Advances in financial machine learning": [
+    {
+      "title": "Advances in Financial Machine Learning",
+      "year": 2018,
+      "venue": null,
+      "authors": [
+        "Marcos López de Prado"
+      ],
+      "cites": 360,
+      "doi": null
+    },
+    {
+      "title": "Advances in Financial Machine Learning",
+      "year": 2020,
+      "venue": "Quantitative Finance",
+      "authors": [
+        "Peter Schwendner"
+      ],
+      "cites": 21,
+      "doi": "https://doi.org/10.1080/14697688.2019.1703030"
+    },
+    {
+      "title": "Advances in Financial Machine Learning: Lecture 7/10",
+      "year": 2018,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Marcos López de Prado"
+      ],
+      "cites": 13,
+      "doi": "https://doi.org/10.2139/ssrn.3266136"
+    }
+  ],
+  "Do stop-loss rules add value": [
+    {
+      "title": "Do Stop-loss Rules Add Value in International Equity Market Allocation?",
+      "year": 2020,
+      "venue": "SSRN Electronic Journal",
+      "authors": [
+        "Bochuan Dai",
+        "Ben R. Marshall",
+        "Nhut H. Nguyen",
+        "Nuttawat Visaltanachoti"
+      ],
+      "cites": 0,
+      "doi": "https://doi.org/10.2139/ssrn.3657303"
+    },
+    {
+      "title": "Do stop-loss rules add value in international equity market allocation?",
+      "year": 2021,
+      "venue": "Applied Economics",
+      "authors": [
+        "Bochuan Dai",
+        "Ben R. Marshall",
+        "Nhut H. Nguyen",
+        "Nuttawat Visaltanachoti"
+      ],
+      "cites": 0,
+      "doi": "https://doi.org/10.1080/00036846.2021.1980201"
+    }
+  ]
+}

@@ -163,13 +163,16 @@ def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd
     """
     settings = dict(settings or {})
     mode = str(settings.get("mode", "eligibility") or "eligibility").strip().lower()
+    # `orthogonalize`（2026-09-28 起为默认）：与 score 一样只留硬护栏、不删候选，
+    # 但不再把四个分项当"加分项"叠加，而是把它们的暴露交给选股层做横截面正交化
+    # （实测：正交化 +6.07%/t=3.17，软倾斜只有 +3.27%/t=0.89，硬筛池 +0.12%/t=0.17）。
     required = {"stock_code", "startup_price_eligible"}
     if labels is None or labels.empty or not {"stock_code"}.issubset(labels.columns):
         return pd.DataFrame(columns=["stock_code", "startup_eligible", "selection_tier", "gate_score"])
     eligible = pd.Series(True, index=labels.index)
     used: list[str] = []
     gate_score = None
-    if mode == "score":
+    if mode in {"score", "orthogonalize"}:
         # Soft gate: only the optional hard rails remove a name.
         rails: list[str] = []
         for column, setting, direction in (
@@ -189,7 +192,7 @@ def apply_startup_gate(labels: pd.DataFrame, settings: dict | None = None) -> pd
         return pd.DataFrame({
             "stock_code": labels["stock_code"].astype(str),
             "startup_eligible": eligible,
-            "selection_tier": "scored",
+            "selection_tier": "orthogonalized" if mode == "orthogonalize" else "scored",
             "gate_score": gate_score,
         })
     if mode in {"eligibility", "both"}:
@@ -325,7 +328,14 @@ def build_cn_strategy_labels(
 
     path_horizon = max(1, int(path_horizon))
     entry_delay = max(1, int(entry_delay))
-    frame["entry_price"] = group["open"].shift(-entry_delay)
+    # 价格护栏（2026-10-01）：存储里存在 open/close = 0 的行（2024 年就有），
+    # 直接做除法会产生 ±inf 并污染当日横截面基准（实测把整年的 20 日超额算成 -inf）。
+    # 非正价格一律置 NaN，让下游按缺失处理。
+    def _positive(series):
+        values = pd.to_numeric(series, errors="coerce")
+        return values.where(values > 0)
+
+    frame["entry_price"] = _positive(group["open"].shift(-entry_delay))
     for horizon in (20, 40, 60):
         frame[f"label_mfe_{horizon}d"] = np.nan
         frame[f"label_mae_{horizon}d"] = np.nan
@@ -372,12 +382,11 @@ def build_cn_strategy_labels(
     # so the column is directly comparable with the triple-barrier outcome.
     horizons = sorted({int(horizon) for horizon in (exec_horizons or ()) if int(horizon) > 0})
     benchmark_mode = str(excess_benchmark or "none").strip().lower()
-    entry_series = pd.to_numeric(frame["entry_price"], errors="coerce")
-    entry_series = entry_series.where(entry_series > 0)
+    entry_series = _positive(frame["entry_price"])
     exec_columns: list[str] = []
     excess_columns: list[str] = []
     for horizon in horizons:
-        exit_close = group["close"].shift(-(entry_delay + horizon))
+        exit_close = _positive(group["close"].shift(-(entry_delay + horizon)))
         exec_column = f"forward_exec_return_{horizon}d"
         frame[exec_column] = exit_close / entry_series - 1.0
         exec_columns.append(exec_column)

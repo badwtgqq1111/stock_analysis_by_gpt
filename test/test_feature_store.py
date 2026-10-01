@@ -5,6 +5,7 @@
 
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -48,6 +49,9 @@ def test_feature_store_roundtrip():
             "volatility_10": [0.21, 0.19],
         }
     )
+    # ClickHouse 后端是跨 layout 共享的库表，沿用固定 feature_set 会让每次运行的 4 行
+    # 累加到下一次读取里（历史上这条用例因此随运行次数“漂移”失败）。用一次性集合名隔离。
+    feature_set = f"alpha_demo_{uuid.uuid4().hex[:8]}"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         service = MarketDataService(base_dir=tmp_dir)
@@ -56,7 +60,7 @@ def test_feature_store_roundtrip():
                 raw_frame,
                 stock_code="00700",
                 market="HK",
-                feature_set="alpha_demo",
+                feature_set=feature_set,
                 source="unit_test",
             )
             assert write_result["rows"] == 4
@@ -64,7 +68,7 @@ def test_feature_store_roundtrip():
             loaded = service.get_feature_frame(
                 stock_code="00700",
                 market="HK",
-                feature_set="alpha_demo",
+                feature_set=feature_set,
             )
             assert len(loaded) == 4
             assert set(loaded["feature_name"].unique()) == {"momentum_5", "volatility_10"}
@@ -72,7 +76,7 @@ def test_feature_store_roundtrip():
             momentum_only = service.get_feature_frame(
                 stock_code="00700",
                 market="HK",
-                feature_set="alpha_demo",
+                feature_set=feature_set,
                 feature_name="momentum_5",
             )
             assert len(momentum_only) == 2

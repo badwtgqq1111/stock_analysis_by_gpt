@@ -184,27 +184,34 @@ class ParquetDataStore:
 
         indexed_row_groups = {value: {} for value in requested_values}
         for value, candidates in indexed_candidates.items():
-            latest_ingest = latest_ingest_by_value.get(value)
             for path, row_group_index, ingest_key in candidates:
-                # Feature materialization is append-only. A rerun writes a
-                # complete replacement for the same stock, so older row
-                # groups are superseded by the latest ingest snapshot.
-                if latest_ingest is not None and ingest_key != latest_ingest:
-                    continue
+                # 读全：**不能**只保留“最新 ingest”的行组。
+                #
+                # 这里曾经假设“同一次 ingest 会完整重写该股票的全部特征”，于是把该股票
+                # 非最新的行组全部丢掉。但生产里存在**部分写**的批次：
+                #   - RPS 步骤只写 RPS_*（每股 2~3 行）；
+                #   - 修复/对齐重算只写最近 N 天；
+                #   - 成交量修复快照只写单个交易日；
+                # 一旦这些批次的时间戳最新，`latest_ingest` 就等于它们的时间戳，
+                # 该股票的**全部历史行组被一起丢掉**——2026-09-24 面板因此对 3,473/5,208
+                # 只股票只保留了 RPS/部分列（GTJA116 只有 1,735 只有值）。
+                #
+                # 正确做法：读入所有命中 (股票, 日期范围) 的行组，由消费端
+                # （`build_feature_panel`）按 (stock_code, trade_date, feature_name)
+                # 依 ingest_time 取最新值去重。压实（compact_feature_layer.py）之后
+                # 每个键只剩一行，读放大会自然消失。
                 indexed_row_groups[value].setdefault(path, []).append(row_group_index)
 
         normalized_batch_size = max(1, int(batch_size))
         for start in range(0, len(requested_values), normalized_batch_size):
             values = requested_values[start:start + normalized_batch_size]
-            # A fallback row group has no exact stock statistic. It may only
-            # contribute data for an instrument absent from all indexed parts;
-            # otherwise it is an older append-only materialization superseded
-            # by the newest indexed ingest above. Reading it for every batch
-            # repeatedly loaded tens of millions of stale feature rows.
-            missing_index_values = [value for value in values if not indexed_row_groups[value]]
+            # 没有股票统计信息的行组（外部工具写入/统计被裁掉）同样要参与：
+            # 同一只股票可能既有“带统计”的行组，也有“无统计”的行组，后者同样可能
+            # 持有该股票某些交易日的值。以前只在“该股票完全没有带统计行组”时才读它们，
+            # 会漏数据；重复由消费端去重，压实后行组统计也会补齐。
             row_groups_by_path = (
                 {path: list(indices) for path, indices in fallback_row_groups.items()}
-                if missing_index_values else {}
+                if fallback_row_groups else {}
             )
             for value in values:
                 for path, indices in indexed_row_groups[value].items():

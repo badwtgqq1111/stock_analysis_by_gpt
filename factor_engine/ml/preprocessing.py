@@ -47,8 +47,17 @@ def preprocess_features_by_date(
         return merged, {"mode": mode, "feature_count": len(feature_columns), "stages_applied": []}
 
     working = merged.copy()
+    # The per-date transform is applied with a groupby, and pandas returns the
+    # concatenated groups sorted by trade_date.  That silently reordered rows
+    # (and reset the index), so any caller that joined the preprocessed frame
+    # back to the original frame *by position* produced garbage: 2026-09-26 的
+    # IC 诊断里，同一个模型对同一个验证窗口既算出 +0.10 又算出 −0.003，就是
+    # 这个错位造成的。这里显式恢复输入顺序与输入索引。
+    input_index = working.index
+    working["_preprocess_row_order"] = np.arange(len(working), dtype=np.int64)
     feature_columns = [col for col in feature_columns if col in working.columns]
     if not feature_columns:
+        working = working.drop(columns=["_preprocess_row_order"])
         return working, {"mode": mode, "feature_count": 0, "stages_applied": []}
     stages_applied = []
     nan_counts_before: dict[str, int] = {}
@@ -119,7 +128,10 @@ def preprocess_features_by_date(
             transformed["trade_date"] = trade_date
         transformed_groups.append(transformed)
     if transformed_groups:
-        working = pd.concat(transformed_groups, axis=0, sort=False).reset_index(drop=True)
+        working = pd.concat(transformed_groups, axis=0, sort=False)
+        working = working.sort_values("_preprocess_row_order", kind="stable")
+        working = working.drop(columns=["_preprocess_row_order"])
+        working.index = input_index
     stages_applied.append("per_date_winsorize_robust_zscore_clip_fill")
 
     nan_after = working[feature_columns].isna().sum()

@@ -86,6 +86,13 @@ class MarketDataWarehouse:
         self.parquet_store = ParquetDataStore(layout)
         self._clickhouse_disabled_reason = None
 
+        # launchd/cron 是非交互式进程，不会读 ~/.bashrc；先把 config/scheduler_env.sh
+        # 里缺失的凭据补进来（已存在的不覆盖）。否则下面的 CLICKHOUSE_HOST 判断会失败，
+        # 整个仓库静默退化成 "只有 Parquet 镜像"。
+        from data.store.scheduler_env import load_scheduler_env
+
+        self.scheduler_env_filled = sorted(load_scheduler_env().keys())
+
         if clickhouse_store is not None:
             self.clickhouse_store = clickhouse_store
         elif os.environ.get("CLICKHOUSE_HOST"):
@@ -107,7 +114,18 @@ class MarketDataWarehouse:
                     layout=layout,
                 )
         else:
+            # 主表地址缺失时旧实现静默只用 Parquet 镜像：估值快照镜像冻结在 2026-08-10，
+            # 且市值单位是"元"（主表是"亿元"），写出的特征会整体退回一个月前。
+            # 2026-09-26 的 launchd 任务全部缺 CLICKHOUSE_HOST，当日特征重算因此把
+            # valuation_market_cap_age_td 从 1 覆盖成 33。缺地址必须显式喊出来。
             self.clickhouse_store = None
+            self._clickhouse_disabled_reason = "CLICKHOUSE_HOST 未设置：主表不可用，仅能读 Parquet 镜像"
+            print(
+                "[WARN] CLICKHOUSE_HOST 未设置，MarketDataWarehouse 只能用 Parquet 镜像；"
+                "估值/流动性快照镜像可能严重滞后（市值单位也与主表不同）。"
+                "launchd 任务需要在 EnvironmentVariables 里带上 CLICKHOUSE_HOST/USER/PASSWORD/DATABASE。",
+                flush=True,
+            )
 
         self.stock_info_dataset = "stock_info_registry"
 
@@ -130,8 +148,17 @@ class MarketDataWarehouse:
             return self.clickhouse_store
         return self.parquet_store
 
-    def _feature_store_candidates(self):
-        """返回 features 可用后端，ClickHouse 不可用时允许降级到 parquet。"""
+    def _feature_store_candidates(self, market=None):
+        """返回 features 可用后端，ClickHouse 不可用时允许降级到 parquet。
+
+        CN 特征在 `cn_features_parquet_authoritative.json` 标记存在时**只走 Parquet**：
+        特征生成经 warehouse 写入、而 clean panel 只读 `parquet_store`，两者口径不一致
+        会让最新交易日的特征整列缺失（2026-09-23 实测 599/683 列为空）。
+        """
+        if str(market or "").upper() == "CN" and (
+            self.layout.layer_path("meta") / "cn_features_parquet_authoritative.json"
+        ).is_file():
+            return [self.parquet_store]
         stores = []
         # Always try the primary table for this aggregate: the query is chunked
         # (<=max_filter_values params per request) and cheap, and an earlier bulky
@@ -455,8 +482,9 @@ class MarketDataWarehouse:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="feature"))}
 
         payload = frame[FEATURE_COLUMNS].copy()
+        feature_market = payload["market"].iloc[0] if payload["market"].nunique() == 1 else None
         last_error = None
-        for store in self._feature_store_candidates():
+        for store in self._feature_store_candidates(market=feature_market):
             try:
                 target = store.upsert_frame(
                     dataset_name=dataset_name,
@@ -585,8 +613,9 @@ class MarketDataWarehouse:
             return {"rows": 0, "dataset_path": str(self.layout.dataset_path(dataset_name, layer="feature"))}
 
         payload = frame[FEATURE_COLUMNS].copy()
+        feature_market = payload["market"].iloc[0] if payload["market"].nunique() == 1 else None
         last_error = None
-        for store in self._feature_store_candidates():
+        for store in self._feature_store_candidates(market=feature_market):
             try:
                 target = store.append_frame(
                     dataset_name=dataset_name,
@@ -644,7 +673,7 @@ class MarketDataWarehouse:
                 "lte": end_date,
             }
         frame = pd.DataFrame()
-        for store in self._feature_store_candidates():
+        for store in self._feature_store_candidates(market=market):
             try:
                 frame = store.read_frame(
                     dataset_name=dataset_name,
@@ -865,31 +894,68 @@ class MarketDataWarehouse:
         order_by=None,
         dataset_name=VALUATION_SNAPSHOT_DATASET,
     ):
-        """Read persisted valuation/liquidity snapshots."""
+        """Read persisted valuation/liquidity snapshots.
+
+        ClickHouse 是本数据集的主表（CN 全量约 1,278 万行，市值单位“亿元”）；Parquet 只是一个
+        覆盖很差的镜像（约 13%，且市值单位是“元”）。本进程里若先做过大批量查询把 ClickHouse
+        soft-disable，旧实现会静默退回镜像，让同一天的估值特征从“最新观测”变成“一个月前的观测”
+        （2026-09 事故：age_td 0 → 32、market_cap_log 6.15 → 24.17），同一交易日两次算出的特征因此不同。
+
+        这里显式重试主表，并把镜像作为**补充**并入（按 (股票, 交易日) 去重、主表优先），
+        避免任何一次读取退化成“只有镜像”。
+        """
         filters = {"market": market}
         if stock_codes:
             filters["stock_code"] = list(dict.fromkeys(stock_codes))
         range_filters = {}
         if start_date or end_date:
             range_filters["trade_date"] = {"gte": start_date, "lte": end_date}
-        frame = pd.DataFrame()
-        for store in self._meta_store_candidates():
+        requested_columns = columns or VALUATION_SNAPSHOT_FIELDS
+        frames: list[tuple[object, pd.DataFrame]] = []
+
+        def _candidates():
+            stores = []
+            # 主表优先，且不受 soft-disable 影响：估值快照是模型最重要的输入族，
+            # 静默降级到残缺镜像的代价远高于一次重试。
+            if self.clickhouse_store is not None:
+                stores.append(self.clickhouse_store)
+            stores.append(self.parquet_store)
+            return stores
+
+        for store in _candidates():
             try:
                 frame = store.read_frame(
                     dataset_name=dataset_name,
                     layer="meta",
                     filters=filters,
-                    columns=columns or VALUATION_SNAPSHOT_FIELDS,
+                    columns=requested_columns,
                     order_by=order_by or "market, stock_code, trade_date",
                     range_filters=range_filters,
                 )
             except Exception as exc:
                 if store is self.clickhouse_store:
                     self._clickhouse_disabled_reason = str(exc)
-                frame = pd.DataFrame(columns=columns or VALUATION_SNAPSHOT_FIELDS)
+                frame = pd.DataFrame(columns=requested_columns)
             if frame is not None and not frame.empty:
-                break
-        return frame if frame is not None else pd.DataFrame(columns=columns or VALUATION_SNAPSHOT_FIELDS)
+                frames.append((store, frame))
+
+        if not frames:
+            return pd.DataFrame(columns=requested_columns)
+        primary_store, primary = frames[0]
+        if len(frames) == 1:
+            return primary
+        if not {"stock_code", "trade_date"}.issubset(primary.columns):
+            return primary
+        merged = primary.copy()
+        for store, extra in frames[1:]:
+            if not {"stock_code", "trade_date"}.issubset(extra.columns):
+                continue
+            keys = ["market", "stock_code", "trade_date"] if "market" in primary.columns and "market" in extra.columns else ["stock_code", "trade_date"]
+            missing = extra.merge(primary[keys].drop_duplicates(), on=keys, how="left", indicator=True)
+            missing = missing[missing["_merge"] == "left_only"].drop(columns=["_merge"])
+            if not missing.empty:
+                merged = pd.concat([merged, missing], ignore_index=True)
+        return merged
 
     def read_financial_statement_metrics(
         self,
@@ -1867,9 +1933,11 @@ class MarketDataWarehouse:
 
     def compute_rps_features(self, factor_set="qlib_alpha158",
                              windows=(5, 10, 20, 30, 60),
-                             progress_callback=None):
+                             progress_callback=None,
+                             market=None):
         """基于已有 ROC 因子计算横截面 RPS 排名并写入 feature 层。"""
-        return self._feature_store.compute_rps_features(
+        store = self._feature_store_candidates(market=market)[0]
+        return store.compute_rps_features(
             factor_set=factor_set, windows=windows, progress_callback=progress_callback,
         )
 

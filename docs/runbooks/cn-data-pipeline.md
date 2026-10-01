@@ -111,6 +111,31 @@ uv run python scripts/run_cn_pipeline.py --stage all
 每个基本面刷新阶段的失败结果会输出失败数量、错误类型汇总和最多 3 个示例代码；
 完整失败明细保存在流水线 JSON 报告的 `failed` 字段中。
 
+## 增量一键链路与数据健康门（2026-10-01）
+
+日常"补数据 → 出决策"用一条命令，细节见 `docs/runbooks/cn-daily-selection.md` §0：
+
+```bash
+bash scripts/run_cn_daily_decision.sh --dry-run    # 先看数据体检（不动数据）
+bash scripts/run_cn_daily_decision.sh              # daily_bars → moneyflow → features → clean_panel
+                                                   # → model_scores → preselection → pk
+```
+
+**数据健康门**（`[pipeline.data_health]`，默认 `mode="enforce"`、`min_bar_coverage=0.95`）：
+
+- 判据：当日有 bar 的股票数 / 最近 10 个交易日的中位数（不是"和昨天比"，避免把停牌日误判成故障）；
+- 不达标时**中止**受控阶段（`features/clean_panel/lightgbm/model_scores/preselection/pk`），
+  而不是基于残缺截面算出打分；
+- 每次体检落盘 `output/data_quality/bar_coverage_<session>.json`，含
+  `missing_count / missing_sample / missing_by_board / reference_session` —— 用于**区分"停牌/源滞后"与"同步故障"**：
+  - 缺失**分散在所有板块**且补抓多轮无改善 ⇒ 源滞后或停牌（2026-09-29 实测：缺 267 只，次日补齐到 ratio=1.0004）；
+  - 缺失**集中在单一板块或突然成批** ⇒ 同步故障（2026-09-29 首轮只有 68% 即属此类，必须拦住）。
+- 真正防"不可成交还去选"的是 `[selection.universe_filter].require_recent_bar_sessions`（停牌直接剔除），
+  覆盖率门只负责拦成批缺失。
+
+**launchd 环境**：调度进程不读 `~/.bashrc`，数据层凭据由 `data/store/scheduler_env.py`
+自动从 `config/scheduler_env.sh` 补齐（缺失的键才填，已存在的不覆盖）。
+
 ## 运行编排
 
 不要把所有阶段作为每日任务。`--stage all` 是首次构建或完整重建的便利入口；默认配置中

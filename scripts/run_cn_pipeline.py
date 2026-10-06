@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import uuid
 try:
@@ -439,6 +440,109 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             hysteresis_days=int(layer.get("hysteresis_days", 3)), version=str(layer.get("version", "regime.v1")),
             output_dir=layer.get("output_dir", "output/regime"),
         )
+    if name == "xiaomkt_rotation":
+        # 小市值轮动策略（知乎「鳄鱼鱼」2022-10 版）：回测 + 最新一期 5 只目标持仓。
+        # 研究阶段：只读 clean 日线 parquet 与 valuation_snapshot；唯一写入是上市日历缓存
+        # assets/data/meta/cn_stock_basic.parquet（存在即复用）与 output/ 下的回测产物。
+        # 默认在 all 流程里关闭（[stages].xiaomkt_rotation = false），显式 --stage 才跑。
+        from backtest_engine.xiaomkt_rotation import run_xiaomkt_rotation_stage
+
+        layer = config.get("xiaomkt_rotation", {})
+        return run_xiaomkt_rotation_stage(layer, p, ROOT / "assets/data")
+    # ------------------------------------------------------------------
+    # P1.24 sleeve 链路（2026-10-06 接入）：四条家族腿 → 组合验收 → 预算分配
+    # 四个阶段都是**研究/回测阶段**，默认不参与 all 流程；显式 --stage 才跑。
+    # ------------------------------------------------------------------
+    if name == "sleeve_features":
+        layer = config.get("sleeve_features", {})
+        out = {"steps": []}
+        if bool(layer.get("build_valuation_long", True)):
+            out["steps"].append(_run_research_script("build_valuation_features_long.py", [
+                "--start", str(layer.get("start_year", 2014)), "--end", str(layer.get("end_year", 2026))]))
+        if bool(layer.get("build_sleeve_panel", True)):
+            out["steps"].append(_run_research_script("build_sleeve_features_long.py", [
+                "--start", str(layer.get("start", "2015-01-01")), "--end", str(layer.get("end", "2026-09-30"))]))
+        out["status"] = "completed" if all(s["exit_code"] == 0 for s in out["steps"]) else "failed"
+        return out
+    if name == "sleeve_diagnostics":
+        layer = config.get("sleeve_diagnostics", {})
+        out = {"steps": []}
+        out["steps"].append(_run_research_script("sleeve_diagnostics.py", []))
+        out["steps"].append(_run_research_script("sleeve_candidate_diagnostics.py", [
+            "--start", str(layer.get("candidate_start", "2024-10-01")), "--freq", "M"]))
+        out["steps"].append(_run_research_script("sleeve_metric_attribution.py", [
+            "--start", str(layer.get("attribution_start", "2025-09-01"))]))
+        out["status"] = "completed" if all(s["exit_code"] == 0 for s in out["steps"]) else "failed"
+        return out
+    if name == "sleeve_train":
+        layer = config.get("sleeve_train", {})
+        feature_table = str(layer.get("feature_table", "assets/data/meta/cn_sleeve_features_long.parquet"))
+        plan = {
+            "model_valuation": (int(layer.get("valuation_horizon", 20)),
+                                str(layer.get("valuation_features", "pe_ind_pct,pb_ind_pct,pe_pb_combo"))),
+            "model_quality": (int(layer.get("quality_horizon", 60)),
+                              str(layer.get("quality_features",
+                                            "roe_ind_pct,roa_ind_pct,grossprofit_margin_ind_pct,"
+                                            "netprofit_margin_ind_pct,debt_to_assets_ind_pct,netprofit_yoy,or_yoy"))),
+            "model_momentum": (int(layer.get("momentum_horizon", 20)),
+                               str(layer.get("momentum_features",
+                                             "ret_120,ret_250,mom_12m_skip_1m,rps_20,rps_60,pos_52w,ma20_dev,ma60_dev"))),
+            "model_reversal": (int(layer.get("reversal_horizon", 10)),
+                               str(layer.get("reversal_features", "rev_1m,rev_5d,mdd_60,vol_20"))),
+        }
+        out = {"steps": [], "sleeves": list(plan)}
+        for sleeve, (horizon, features) in plan.items():
+            out["steps"].append(_run_research_script("train_sleeve_model.py", [
+                "--sleeve", sleeve, "--start", str(layer.get("start", "2015-01-01")),
+                "--end", str(layer.get("end", "2026-09-30")), "--horizon", str(horizon),
+                "--folds", str(layer.get("folds", 5)), "--external-features", feature_table,
+                "--feature-cols", features]))
+        out["status"] = "completed" if all(s["exit_code"] == 0 for s in out["steps"]) else "failed"
+        return out
+    if name == "sleeve_combine":
+        layer = config.get("sleeve_combine", {})
+        runs = []
+        for sleeve, horizon in (("valuation", layer.get("valuation_horizon", 20)),
+                                ("quality", layer.get("quality_horizon", 60)),
+                                ("momentum", layer.get("momentum_horizon", 20)),
+                                ("reversal", layer.get("reversal_horizon", 10))):
+            latest = sorted((ROOT / "output/research").glob(f"sleeve_train_model_{sleeve}_*"))
+            if latest:
+                runs.append(str(latest[-1] / "oos_predictions.parquet"))
+        if len(runs) < 2:
+            return {"status": "failed", "detail": "sleeve_train 的 OOS 预测不足 2 条腿，先跑 --stage sleeve_train"}
+        out = _run_research_script("sleeve_combine_test.py", [
+            "--runs", *runs, "--labels", "valuation,quality,momentum,reversal",
+            "--rebalance-every", str(layer.get("rebalance_every", 20)),
+            "--horizon", str(layer.get("horizon", 20)),
+            "--top-k", str(layer.get("top_k", "20,100"))])
+        out["status"] = "completed" if out["exit_code"] == 0 else "failed"
+        return out
+    if name == "sleeve_targets":
+        # P1.24 生产层：家族腿 -> 可交易目标权重（只产出文件，不改现有选股链路）
+        from factor_engine.sleeve_targets import run_sleeve_targets_stage
+
+        layer = dict(config.get("sleeve_targets", {}))
+        allocator = dict((config.get("selection", {}) or {}).get("sleeve_allocator") or {})
+        layer.setdefault("output_breadth", allocator.get("output_breadth", 100))
+        layer.setdefault("budget_file", allocator.get("budget_file", "output/research/sleeve_budgets.json"))
+        layer.setdefault("enabled", allocator.get("enabled", False))
+        if not bool(layer.get("enabled")):
+            print("[sleeve_targets] 提示：[selection.sleeve_allocator].enabled = false，仅产出文件供审阅，不进入选股链路",
+                  flush=True)
+        return run_sleeve_targets_stage(layer, p, ROOT / "assets/data")
+    if name == "sleeve_budgets":
+        from factor_engine.sleeve_design import compute_budgets
+
+        layer = config.get("sleeve_budgets", {})
+        combine_dirs = sorted((ROOT / "output/research").glob("sleeve_combine_*"))
+        corr = str(combine_dirs[-1] / "prediction_correlation.csv") if combine_dirs else ""
+        metrics = str(combine_dirs[-1] / "combine_metrics.csv") if combine_dirs else ""
+        out_path = str(layer.get("output", "output/research/sleeve_budgets.json"))
+        code = compute_budgets(str(ROOT / "output/research/sleeve_trials.csv"), corr, str(ROOT / out_path),
+                               net_excess_path=metrics)
+        return {"status": "completed" if code == 0 else "failed", "budget_file": out_path,
+                "corr": corr or None, "net_excess": metrics or None}
     if name == "exits":
         layer = config.get(name, {})
         return service.plan_cn_exit_rules(
@@ -764,6 +868,27 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             trade_date=as_of_date, profile=profile,
         )
         preselected_path = layer.get("preselection_path", "output/results_cn/cn_ensemble_preselected.csv")
+        # 候选源切换（2026-10-06）：sleeve = 多 sleeve 共识组合文件；默认 model 保持原状
+        source = str(layer.get("preselection_source", "model")).strip().lower()
+        if source == "sleeve" and not as_of_date:
+            sleeve_path = Path(layer.get("sleeve_preselection_path", "output/results_cn/sleeve_preselected.csv"))
+            if not sleeve_path.is_file():
+                raise SystemExit(
+                    f"[pk] preselection_source=sleeve，但 {sleeve_path} 不存在。"
+                    "先跑：uv run python scripts/run_cn_pipeline.py --stage sleeve_targets"
+                )
+            preselected_path = str(sleeve_path)
+            # 关键：sleeve 源下，这些票就是**主组合**而不是卫星块。否则 pk 会把它们当卫星，
+            # 受 sleeve_total_max = gross_exposure×(1-model_min_share) = 0.95×0.10 = 9.5% 的块上限挤压，
+            # 每只预算降到不足 900 元 → 买不起整手被 cleared（2026-10-06 实测 5 只里 3 只被清零）。
+            constraints = dict(layer.get("portfolio_constraints") or {})
+            constraints["model_min_share"] = 0.0
+            constraints["sleeve_total_max"] = float(constraints.get("sleeve_total_max") or 0.95)
+            layer["portfolio_constraints"] = constraints
+            print(f"[pk] 候选源 = sleeve（多 sleeve 共识组合）: {preselected_path}", flush=True)
+            print(f"[pk] sleeve 为主组合：model_min_share→0、sleeve_total_max→{constraints['sleeve_total_max']}", flush=True)
+        elif source == "sleeve":
+            preselected_path = f"{output_dir}/cn_ensemble_preselected.csv"
         if as_of_date:
             preselected_path = f"{output_dir}/cn_ensemble_preselected.csv"
         # 第①步（2026-09-29）：pk 必须读"同一决策日"的预选文件。此前 replay 预选文件缺失时会
@@ -845,6 +970,19 @@ def should_run_stage(stage: str, requested_stage: str, config: dict) -> bool:
     return requested_stage != "all" or bool(config.get("stages", {}).get(stage, True))
 
 
+def _run_research_script(script: str, args: list[str], *, timeout: int = 7200) -> dict:
+    """跑研究阶段的脚本（子进程），返回退出码与输出尾部，便于写进流水线报告。"""
+    command = [sys.executable, str(ROOT / "scripts" / script), *args]
+    print(f"[{script}] 执行：{' '.join(command)}", flush=True)
+    completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+    tail = (completed.stdout or "").strip().splitlines()[-25:]
+    if completed.returncode != 0:
+        tail += (completed.stderr or "").strip().splitlines()[-10:]
+    for line in tail:
+        print(f"[{script}] {line}", flush=True)
+    return {"script": script, "args": args, "exit_code": completed.returncode, "output_tail": tail}
+
+
 def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -908,7 +1046,7 @@ def main() -> int:
         print(f"[env] 已从 scheduler_env.sh 补齐 {len(filled_env)} 个变量: {sorted(filled_env)[:6]}…", flush=True)
     parser = argparse.ArgumentParser(description="Run CN data, feature, model, OOS evaluation and selection stages.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="TOML pipeline configuration")
-    parser.add_argument("--stage", choices=["all", "daily_bars", "moneyflow", "cyq_chips", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
+    parser.add_argument("--stage", choices=["all", "daily_bars", "moneyflow", "cyq_chips", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_diagnostics", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
     parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
     parser.add_argument("--trade-date", default=None,
@@ -937,7 +1075,7 @@ def main() -> int:
     started = datetime.now().isoformat(timespec="seconds")
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
     data_health = dict((config.get("pipeline") or {}).get("data_health") or {})
-    stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
+    stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
     pipeline_config = config["pipeline"]

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# 全 A 股分时同步器（macOS）。设计要点：
+#   1) BaoStock 单线程且会限流 —— 每个会话限时（--session-seconds），超时自行退出后续跑；
+#   2) 逐股检查点 —— 已落盘的标的直接跳过，中断/关机都不丢进度；
+#   3) 清单按优先级排序 —— 策略真正交易过的标的排在最前，先补最需要的；
+#   4) launchd 托管 + caffeinate —— 不依赖终端会话，防止机器休眠中断。
+#
+# 用法（前台调试）:
+#   bash scripts/sync_cn_intraday_full.sh
+# 用法（后台常驻，推荐）:
+#   launchctl remove com.quant.intraday-sync 2>/dev/null
+#   launchctl submit -l com.quant.intraday-sync -- /usr/bin/caffeinate -is /bin/bash \
+#       /Users/ccs/code/quant/stock_analysis_by_gpt/scripts/sync_cn_intraday_full.sh
+# 监控:
+#   tail -f /tmp/intraday_sync_all.log
+#   cat /tmp/intraday_sync_progress.json
+#   uv run python scripts/backfill_cn_intraday_baostock.py --status \
+#       --codes-file /tmp/all_a_5min_codes.txt --progress-file /tmp/intraday_sync_progress.json
+set -uo pipefail
+export PATH="/Users/ccs/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+REPO=/Users/ccs/code/quant/stock_analysis_by_gpt
+UV=/Users/ccs/.local/bin/uv
+FREQ="${FREQ:-5}"
+START="${START:-2025-10-01}"
+SLEEP="${SLEEP:-0.5}"
+SESSION_SECONDS="${SESSION_SECONDS:-600}"
+MAX_FAILURES="${MAX_FAILURES:-8}"
+CODES="${CODES:-/tmp/all_a_5min_codes.txt}"
+LOG="${LOG:-/tmp/intraday_sync_all.log}"
+PROGRESS="${PROGRESS:-/tmp/intraday_sync_progress.json}"
+
+cd "$REPO" || exit 1
+[ -f "$CODES" ] || { echo "缺少代码清单 $CODES" >> "$LOG"; exit 2; }
+TOTAL=$(grep -c . "$CODES")
+
+echo "=== 同步开始 $(date '+%F %T') 目标 $TOTAL 只（freq=${FREQ}min, start=$START）===" >> "$LOG"
+for i in $(seq 1 4000); do
+  DONE=$(ls "assets/data/raw/intraday_baostock/frequency=${FREQ}min"/*.parquet 2>/dev/null | wc -l | tr -d ' ')
+  echo "--- 会话 $i $(date '+%T') 已完成 $DONE/$TOTAL ---" >> "$LOG"
+  if [ "$DONE" -ge "$TOTAL" ]; then echo "全部完成 $(date '+%F %T')" >> "$LOG"; break; fi
+  "$UV" run python scripts/backfill_cn_intraday_baostock.py \
+      --codes-file "$CODES" --keep-order --freq "$FREQ" --start "$START" \
+      --sleep "$SLEEP" --per-code-timeout 45 --session-seconds "$SESSION_SECONDS" \
+      --max-failures "$MAX_FAILURES" --adaptive-sleep --progress-file "$PROGRESS" >> "$LOG" 2>&1
+  sleep 15
+done
+echo "=== 同步结束 $(date '+%F %T') ===" >> "$LOG"

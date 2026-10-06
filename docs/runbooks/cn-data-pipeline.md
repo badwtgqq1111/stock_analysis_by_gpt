@@ -46,6 +46,13 @@ uv run python scripts/run_cn_pipeline.py --config config/cn_pipeline.research.to
 | 预选 | `preselection` | 模型取 `pipeline.preselection_model_slots` 只（当前 8），并按每种信号类型各取 2 只，形成候选池 | 是 |
 | PK 持仓 | `pk` | 对预选池执行风险、成本、流动性和持仓数优化，生成最终组合 | 是 |
 | 卖出评估 | `exits` | 对持仓清单逐日评估风控/兑现/结构规则，产出退出计划（含 ATR 缩放止损） | 否（只读） |
+| 小市值轮动 | `xiaomkt_rotation` | 独立策略腿：每周二调仓的小市值 top-5 等权组合，输出全样本回测指标与最新一期目标持仓 | 否（只读；唯一写入是上市日历缓存 `assets/data/meta/cn_stock_basic.parquet`） |
+| Sleeve：特征面板 | `sleeve_features` | 构建 sleeve 长样本特征面板（估值行业分位 + PIT 财务 + 技术/反转，**含退市股**） | 否（写 `assets/data/meta/cn_*_features_long.parquet`） |
+| Sleeve：诊断 | `sleeve_diagnostics` | Phase 0 只读诊断：组合层归因、候选域共线性、夏普/卡玛 sleeve 归因 | 否（只读） |
+| Sleeve：训练 | `sleeve_train` | 四条家族腿（估值/质量/动量/反转）逐条训练 + 域内 IC/NW t 验收 | 否（写 `output/research/sleeve_train_*`） |
+| Sleeve：组合验收 | `sleeve_combine` | 多腿分位等权/秩平均组合，输出组合 IC、净超额、相关性矩阵 | 否（只读） |
+| Sleeve：预算 | `sleeve_budgets` | 资格门 + 等风险 + ICIR 倾斜 + 重叠惩罚 → `sleeve_budgets.json` | 否（只读） |
+| Sleeve：目标权重 | `sleeve_targets` | 家族腿打分 → 宽度 100 → 乘预算 → 合并（单票 ≤5%）→ 落盘目标权重 + pk 兼容文件 | 否（写 `output/results_cn/sleeve_targets/`） |
 | 兼容选股 | `selection` | 旧版一步式 Top-N 选股入口；研究新流程应使用 `preselection`→`pk` | 是 |
 
 日 K 与分时是独立阶段。日 K 默认启用，因为因子和 LightGBM 依赖它；分时默认关闭，只有需要微结构特征、TCA 或执行模型时才打开：
@@ -60,6 +67,9 @@ lookback_days = 1095
 frequencies = ["1min", "5min", "15min", "30min", "60min"]
 min_daily_rows_for_intraday = 120
 ```
+
+分时数据源选型与实测见 [cn-intraday-sources.md](cn-intraday-sources.md)：腾讯 mkline 单次上限 320 根（5min 只有约 7 个交易日），
+若要整年 5min，用 `scripts/backfill_cn_intraday_baostock.py`（BaoStock 单线程 + 检查点，实测 7~30 s/股）。
 
 分时的 `lookback_days` 独立于日 K 的 `pipeline.start_date`；默认 `1095`，即最近三年。
 若设置了 `pipeline.end_date`，分时窗口以该日期向前计算，便于历史研究复现。
@@ -79,6 +89,13 @@ uv run python scripts/run_cn_pipeline.py --stage cnn
 uv run python scripts/run_cn_pipeline.py --stage model_scores
 uv run python scripts/run_cn_pipeline.py --stage preselection
 uv run python scripts/run_cn_pipeline.py --stage pk
+uv run python scripts/run_cn_pipeline.py --stage xiaomkt_rotation
+uv run python scripts/run_cn_pipeline.py --stage sleeve_features
+uv run python scripts/run_cn_pipeline.py --stage sleeve_train
+uv run python scripts/run_cn_pipeline.py --stage sleeve_combine
+uv run python scripts/run_cn_pipeline.py --stage sleeve_budgets
+uv run python scripts/run_cn_pipeline.py --stage sleeve_targets
+uv run python scripts/run_cn_pipeline.py --stage sleeve_diagnostics
 ```
 
 重选与 `rebalance` 参数：
@@ -136,7 +153,177 @@ bash scripts/run_cn_daily_decision.sh              # daily_bars → moneyflow �
 **launchd 环境**：调度进程不读 `~/.bashrc`，数据层凭据由 `data/store/scheduler_env.py`
 自动从 `config/scheduler_env.sh` 补齐（缺失的键才填，已存在的不覆盖）。
 
+### 小市值轮动策略（`xiaomkt_rotation`）
+
+独立于 LightGBM/Transformer 选股链路的策略腿：每周二调仓、等权持有市值最小的 5 只主板股票，
+风控为 7% 个股止损、股票池等权急跌清仓、魔咒月空仓。实现见
+`backtest_engine/xiaomkt_rotation.py`，配置见 `[xiaomkt_rotation]`。
+
+```bash
+# 全样本回测 + 最新一期目标持仓（约 30 秒）
+uv run python scripts/run_cn_pipeline.py --stage xiaomkt_rotation
+
+# 中小综指代理股票池（深市 002/003）对照
+uv run python scripts/run_cn_pipeline.py --stage xiaomkt_rotation   # 改 [xiaomkt_rotation].universe = "sme"
+
+# 退市股数据回补（幸存者偏差修复的前置数据，增量约 2 分钟）
+uv run python scripts/refresh_cn_delisted_daily.py
+```
+
+阶段默认在 `[stages]` 中为 `false`，不进入每日 `all` 流程；显式 `--stage xiaomkt_rotation`
+仍会执行。产物写到 `output/results_cn/xiaomkt_rotation/`：
+
+| 文件 | 内容 |
+|---|---|
+| `metrics.json` | 生效配置、年化、最大回撤、周胜率、Sharpe、分年收益、数据来源与偏差清单 |
+| `equity.parquet` | 逐日净值、现金、持仓只数 |
+| `trades.csv` | 逐笔买卖（日期、代码、方向、价格、手数、原因：rebalance / stop_loss / market_filter） |
+| `latest_signal.csv` | 最近决策日的 5 只目标持仓（代码、估算市值、收盘价） |
+
+规则口径与防未来函数约定：
+
+- **T-1 信息集**：T 日调仓只用 T-1 收盘为止的市值、价格与涨跌停状态；成交价用 T 日**开盘价**（日线近似 10:00）。
+- **可成交性**：涨停开盘不买、跌停开盘不卖、停牌（无 bar）不成交。
+- **市值口径**：优先读 ClickHouse `valuation_snapshot_meta`；快照稀疏处按「最近快照 × 价格比例」还原，最多前向填充 20 天。
+- **上市日历**：优先 `assets/data/meta/cn_stock_basic.parquet`（不存在时用 Tushare 中继刷新并落盘，中继不可用时退化为"面板首根 bar"并在报告里标注）。
+- **退市股并入**（`include_delisted = true`）：读 `assets/data/meta/cn_delisted_daily.parquet`（由 `scripts/refresh_cn_delisted_daily.py` 从 Tushare 中继回补：`daily` + `adj-factor` 转 qfq、`daily-basic` 的 `total_mv` 转亿元作历史市值）。持仓股在 `delist_exit_grace` 个交易日内没有新 bar 即按最后收盘价 × `(1 - delist_haircut)` 清算，`reason=delisted`。
+- **ST 判定**（`st_filter_mode`）：默认 `band` —— ST/*ST 涨跌幅被限制在 ±5%，用「20 日 / 120 日窗口内最大单日涨跌幅 ≤5.2%」识别 5% 板（比数触板日稳健）；`touch` 为旧的触板占比口径，仅留作对照。持仓中途命中 ST 判定时，下一个调仓日无条件卖出（`reason=st_onset`）。
+
+复现结论（本地数据 2015-01-05 ~ 2026-09-30，10 万本金，含双边成本）：
+
+- **六口径对照**（细节见 `artifacts/xiaomkt_rotation_bias_fix/bias_fix_comparison.md`）：
+
+  | 口径 | 年化 | 最大回撤 | 终值 |
+  |---|---|---|---|
+  | 无退市股（偏差未修复） | 40.69% | -27.42% | 549 万 |
+  | 并入退市股 + 旧 ST 触板代理 | 27.70% | -41.78% | 176 万 |
+  | **并入退市股 + ST 5% 板识别（当前默认）** | **11.29%** | **-71.83%** | **35 万** |
+  | 默认 + 退市清算折价 20% / 30% / 50% | -7.48% / -17.21% / -38.32% | -91.85% / -97.67% / -99.91% | 4.0 万 / 1.1 万 / 345 元 |
+
+- 结论一：**幸存者偏差是一阶问题**——把 209 只退市股补回选股池，年化从 40.69% 掉到 11.29%，最大回撤从 -27% 恶化到 -72%。
+- 结论二：**尾部风险不由文章的风控规则控制**——跌停板上卖不掉的持仓，7% 止损/大盘防线/魔咒月全部失效；退市清算价再折价 20% 就把年化打到 -7.5%。
+- 研究工件 `artifacts/xiaomkt_rotation_20261001/`（未修复偏差的严格版 35.52% / -37.32%）与 `artifacts/xiaomkt_rotation_bias_fix/`（修复过程）配套阅读。
+- 文章宣称的 103.32% 年化不可复现：只有在「调仓日当天收盘价选股并成交 + 零成本 + 不做次新股/ST 过滤 + 不做可成交性判断」的天真口径下才出现（同区间 96.87%）。文章宣称的 23.89% 回撤在**未修复偏差**的样本上可复现（-23.03%），修复后不再成立。
+- 该策略与训练链路**没有耦合**：不读 clean panel 因子、不写任何数据层、不参与 `preselection`/`pk`。要把它做成组合里的一个 sleeve，需要先在 `[strategies.*]` 注册并通过门禁。
+
+已知偏差（阶段 summary 的 `data_warnings` 会原样带出，引用数字时必须一起引用）：
+
+1. 退市股只在 `include_delisted = true` 且 `assets/data/meta/cn_delisted_daily.parquet` 存在时并入（当前 209 只 / 39.2 万行；中继清单 290 只，80 只早于 2014 年退市无数据）；对更早年份与老三板段仍无覆盖。
+2. 无 PIT 指数成分，股票池用沪深主板或深市 002/003 代理。
+3. ST 仍是用价格行为反推（5% 板识别，日均约 257 只），不是交易所公告口径；真实 ST 名单需 `namechange` 数据（中继当前不支持）。
+4. 市值来自稀疏估值快照的重建，且只有日线，10:00 成交用开盘价近似。
+5. 退市清算价按最后收盘价（可调 `delist_haircut`），老三板回收率未标定。
+
+未完成事项、验收标准与复现命令见 [xiaomkt-rotation-todo.md](xiaomkt-rotation-todo.md)（真实 ST 历史、退市回收率标定、流动性约束、sleeve 注册等）；
+外部文献与研报索引（DOI 已逐条核对）见 [xiaomkt-rotation-literature.md](xiaomkt-rotation-literature.md)。
+
+#### 参数网格与优化（2026-10-01）
+
+```bash
+uv run python scripts/grid_xiaomkt_rotation.py --preset full     # 21 个配置，含两个子样本切分
+uv run python scripts/grid_xiaomkt_rotation.py --preset isolate  # 在基座上逐项隔离每个改动
+uv run python scripts/run_cn_pipeline.py --config config/cn_pipeline_xmkt_optimized.toml --stage xiaomkt_rotation
+```
+
+网格结果（2015-01-05 ~ 2026-09-30，10 万本金，切分点 2021-01-01；完整表在 `output/research/xiaomkt_grid_*/grid.md`）：
+
+| 口径 | 年化 | 最大回撤 | 2015-2020 | 2021-2026 |
+|---|---|---|---|---|
+| 朴素复现（文章规则 + 退市股并入，当前默认） | 11.44% | -71.15% | +31.70% / -22.69% | -6.29% / -71.15% |
+| ST 快窗 5 日 + 低价/低流动性剔除 | 16.41% | -50.72% | +23.55% / -50.72% | +9.44% / -48.50% |
+| + 止损 7% → 5% | 21.72% | -47.08% | +27.92% | +15.64% |
+| + 取消「昨日涨停不卖」+ 取消大盘防线 | 29.37% | -45.26% | +32.63% | +26.13% |
+| **+ 最低价 2 元 / 20 日均额 1000 万 / 高价股 30 元上限（推荐）** | **33.61%** | **-47.84%** | **+42.66% / -19.66%** | **+24.82% / -47.84%** |
+
+实测**无效或负贡献**的改动（记录以免重复尝试）：股票池均线择时（20/60/120 日：12.5% / 3.5% / 2.0%，均显著劣于不做择时）、常备 20% 现金（14.1%）、关掉魔咒月（6.9%）、止损放宽到 10%（14.3%）、持有 10 只（14.4%）。
+
+**必须同时说明的限制**：① 这些参数是在同一段历史上选出来的，子样本一致性只能缓解、不能消除过拟合；② 优化后最大回撤仍有 **-47.8%**（2021 年后段 -47.8%），退市/一字板尾部没有被解决，只是被"5% 止损 + 低价低流动剔除"削掉一部分；③ 未计入冲击成本上升（微盘股 1000 万成交额档位的实际滑点可能高于万 3）。
+
+#### walk-forward 与容量上限（2026-10-01，决定"能不能用"的两个检验）
+
+```bash
+uv run python scripts/walkforward_xiaomkt_rotation.py --top-k 5 --impact
+# 输出：output/research/xiaomkt_walkforward_<ts>/{summary.md,summary.json,folds.csv,configs.csv,impact.csv}
+```
+
+**1) 参数选择的样本外价值 ≈ 0。** 216 个配置，每折用训练期 Top-5 参数、看测试期表现：
+
+| 训练期 | 测试期 | Top5 训练年化 | **Top5 测试年化** | 全网格测试中位数 | 默认配置测试年化 | 训练/测试秩相关 |
+|---|---|---|---|---|---|---|
+| 2015-2016 | 2017-2018 | 131.95% | **+0.85%** | +2.24% | -4.27% | -0.33 |
+| 2015-2018 | 2019-2020 | 57.77% | **+4.97%** | +11.63% | +14.05% | +0.01 |
+| 2015-2020 | 2021-2022 | 43.05% | **+65.54%** | +55.50% | +5.20% | +0.07 |
+| 2015-2022 | 2023-2024 | 48.82% | **+26.48%** | +17.89% | -14.72% | +0.68 |
+| 2015-2024 | 2025-2026 | 44.59% | **-11.07%** | -6.99% | -7.42% | -0.28 |
+
+均值：选参 **+17.35%** vs 全网格中位数 **+16.05%** vs 文章原始规则（默认配置）**-1.43%**。
+
+加入容量约束（`--max-participation 0.01`）后同口径重跑：选参 **+13.70%** vs 全网格中位数 **+13.76%** vs 默认配置 **+1.84%** —— 水平下移约 3.5pp，但**结论不变**（选参 ≈ 中位数），且默认配置的样本外均值反而从 -1.43% 改善到 +1.84%。
+结论：**在该分布内挑参数没有意义（秩相关 5 折中 3 折为负）；真正有价值的是"规则结构改动"本身**
+（低价/低流动剔除、5% 止损、取消涨停不卖、取消大盘防线），它把整条分布整体右移。
+引用"33.61%"时必须同时给出这个表格。
+
+**2) 容量上限：这条腿只在很小的资金规模上成立。** 平方根冲击律（impact = coef × 日波动 × √(委托额/20日均额)）：
+
+| 资金 | coef=0（理想） | coef=1（中性） | coef=2（保守） |
+|---|---|---|---|
+| 10 万 | 33.61% | **24.28%** | 18.03% |
+| 100 万 | 33.95% | **12.61%** | 2.75% |
+| 500 万 | 33.98% | **1.08%** | -9.10% |
+| 1000 万 | 33.98% | **-3.96%** | -13.85% |
+
+即：即便已经用"20 日均额 ≥1000 万"筛过票，中性冲击假设下 **100 万以内还能做，500 万起冲击成本吃掉全部收益**。
+
+补充（2026-10-01 用 5min 分时标定，见 [cn-intraday-sources.md](cn-intraday-sources.md) §6）：
+真实订单的首根 5min 参与率中位 5.79%、日参与率 0.58%；给引擎加 **单笔 ≤1%×ADV20** 的容量约束后，
+年化 24.28%→**24.58%**、回撤 -51.5%→**-47.1%**（该约束与上面的冲击模型独立得出同一量级的容量上限 ≈100~250 万）。
+这与文章"机构资金量大、给小资金留着信息差"的说法方向一致，但给出了具体量级。
+
 ## 运行编排
+
+### Sleeve 链路（P1.24，2026-10-06 接入）
+
+五个研究阶段串成一条链，**默认全部关闭**（`[stages].sleeve_* = false`），显式 `--stage` 才跑。
+参数在 `[sleeve_features]` / `[sleeve_train]` / `[sleeve_combine]` / `[sleeve_budgets]` / `[sleeve_diagnostics]`。
+
+```bash
+# 按依赖顺序（特征 → 训练 → 组合 → 预算；诊断可随时跑）
+uv run python scripts/run_cn_pipeline.py --stage sleeve_features     # 长面板（含 209 只退市股），约 1.5 分钟
+uv run python scripts/run_cn_pipeline.py --stage sleeve_train        # 四条家族腿训练，约 4 分钟
+uv run python scripts/run_cn_pipeline.py --stage sleeve_combine      # 组合口径验收，约 1 分钟
+uv run python scripts/run_cn_pipeline.py --stage sleeve_budgets      # 预算分配，秒级
+uv run python scripts/run_cn_pipeline.py --stage sleeve_diagnostics  # Phase 0 诊断（归因/共线性/夏普卡玛）
+```
+
+**目标权重产出（`sleeve_targets`，2026-10-06 新增）**：读落盘模型给最新截面打分 →
+**多腿共识分**（每腿横截面分位，按预算加权平均）→ 取候选 `candidate_pool`（默认 10）→
+行业分散（同行业至多 1 只）→ 最终 `holdings`（默认 5）只等权 20% → 落盘两个文件：
+
+| 文件 | 用途 |
+|---|---|
+| `output/results_cn/sleeve_targets/sleeve_targets_<date>.csv` | 组合目标权重（`stock_code, target_weight, sleeves, n_sleeves`），供审阅与归因 |
+| `output/results_cn/sleeve_preselected.csv` | **pk 兼容格式**：把 `[selection].preselection_path` 指向它，现有 `pk` 阶段即可直接消费 |
+
+实测（as_of 2026-09-30）：预算 valuation 0.232 / quality 0.390 / momentum 0.378 / reversal 0.000（资格门剔除）；
+候选 10 只 → **最终 5 只等权 20%**（000989.SZ / 603323.SH / 002818.SZ / 002841.SZ / 002154.SZ，分属 5 个行业）；
+把 `preselection_path` 指向 `sleeve_preselected.csv` 后跑 `--stage pk` → `status ok`（候选被 pk 正常消费）。
+
+> **口径说明**：设计文档里的"宽度 100"是**统计口径**（用于估计信号 IC/超额），不是持仓口径。
+> 账户容量只有 100~250 万（见 `artifacts/xiaomkt_impact_calibration/`），实际就是"选 10 只、买 5 只"。
+> 长样本实测：多腿共识 top-5 净超额 **+0.72~0.81%**（20 日）、NW t ≈ 1.9~2.1（过门槛）；
+> 宽度从 3 加到 20 只把净超额从 +0.72% 提到 +1.23%，**窄宽度的代价不致命**。
+
+> 注意：`pk` 的 `output_dir` 是共享的，用临时配置测试会覆写 `cn_ensemble_selected.csv`；
+> 测试后需用默认配置重跑一次 `--stage pk` 还原生产产物（本次已还原）。
+
+实测（2026-10-06 首次全链路跑通）：四条腿 pooled OOS 与脚本单独运行**逐位一致**
+（valuation IC 0.0338 / NW t 4.92；quality 0.1478 / 8.49；momentum 0.1304 / 15.37；reversal 0.1082 / 17.03）；
+组合口径 `combo_equal top-100` 净超额 **+1.245%**、NW t **+4.83**；
+预算输出 quality 0.390 / momentum 0.378 / valuation 0.232 / **reversal 0.000**（净超额为负被资格门剔除）。
+
+产物与验收标准见 `docs/todo/P1_24b_sleeve_design_spec.md` §7/§8。注意：`[selection.sleeve_allocator]`
+仍为 `enabled = false` —— 分配器**尚未接入选股链路**（家族腿目前只产出 OOS 预测，不产出可交易目标权重），
+这是下一阶段唯一的工作项。
 
 不要把所有阶段作为每日任务。`--stage all` 是首次构建或完整重建的便利入口；默认配置中
 LightGBM 和 Transformer 均启用，因此它会重训模型。日常生产应按下面的命令矩阵显式运行阶段，
@@ -149,7 +336,7 @@ LightGBM 和 Transformer 均启用，因此它会重训模型。日常生产应�
 | 基本面刷新 | `fundamental` | 按数据源披露节奏，建议每周；财报季可每日 | 新财报、估值或行业信息需要刷新 | 股票快照、PIT 财务和估值数据 |
 | 定期重训 | `lightgbm`、`transformer`，随后 `model_scores`、`preselection`、`pk`、`exits` | 每 20 个交易日或每月 | 训练窗口滚动到期；模型/特征/标签参数变化 | 新模型、新选股结果和新的退出计划 |
 | 严格研究评估 | `oos_predictions`、`model_comparison` | 每月/每季；模型提升和晋升前 | 模型、标签、特征或训练配置变化 | 按折 OOS 预测和模型对比报告 |
-| 可选研究 | `cnn`、`graph_temporal`、`intraday_bars`、`alternative`、`strategy_labels` | 按研究计划 | 对应数据和实验假设就绪 | 可选模型或研究数据集 |
+| 可选研究 | `cnn`、`graph_temporal`、`intraday_bars`、`alternative`、`strategy_labels`、`xiaomkt_rotation` | 按研究计划 | 对应数据和实验假设就绪；小市值腿在每个调仓周复查一次即可 | 可选模型、研究数据集、小市值腿回测与目标持仓 |
 
 从仓库根目录执行。首次准备或需要完整刷新时，建议按阶段运行，便于失败重试和查看报告：
 
@@ -175,7 +362,7 @@ uv run python scripts/run_cn_pipeline.py --stage pk
 uv run python scripts/run_cn_pipeline.py
 ```
 
-默认配置不会执行分时、CNN、另类数据、策略标签、纸面账户、OOS 和模型比较。显式指定 `--stage` 时，即使该阶段在 `[stages]` 中为 `false` 也会执行（另类数据没有 `input_path` 时会报告 `skipped`）。
+默认配置不会执行分时、CNN、另类数据、策略标签、纸面账户、OOS、模型比较、小市值轮动腿和 sleeve 链路（`sleeve_features` / `sleeve_diagnostics` / `sleeve_train` / `sleeve_combine` / `sleeve_budgets`）。显式指定 `--stage` 时，即使该阶段在 `[stages]` 中为 `false` 也会执行（另类数据没有 `input_path` 时会报告 `skipped`）。
 
 ### 每日生产
 

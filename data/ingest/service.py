@@ -9777,6 +9777,13 @@ class MarketDataService:
         for column, default in (("selection_channel", "model"), ("selection_sleeve", "")):
             if column not in selected.columns:
                 selected[column] = default
+        # 模型腿必须带 sleeve 标签（P1.24 Phase 0 实测：404 条 selected 里 304 条为空，全来自 channel=model）。
+        # 2026-10-06 修正：上一次补丁打在信号合并路径上，preselection 走的是本路径（select_persisted_model_scores），
+        # 所以落盘文件仍为空；这里在**落盘点**统一补齐，保证任何写出路径都带标签。
+        if "selection_channel" in selected.columns:
+            model_rows = (selected["selection_sleeve"].fillna("").astype(str).str.strip() == "") & \
+                         (selected["selection_channel"].fillna("") == "model")
+            selected.loc[model_rows, "selection_sleeve"] = "model_alpha"
         selected.to_csv(path, index=False)
         try:
             state_path.write_text(json.dumps({
@@ -10554,6 +10561,10 @@ class MarketDataService:
         override_mask = union["stock_code"].isin(set(forced_codes))
         union.loc[override_mask, "selection_channel"] = "signal_override"
         union["selection_sleeve"] = union["stock_code"].map(sleeve_map).fillna("")
+        # 模型腿也必须带 sleeve 标签（P1.24 Phase 0 实测：404 条 selected 里有 304 条 selection_sleeve 为空，
+        # 全部来自 channel=model 的行；缺标签会让 sleeve 归因/分配器建立在残缺字段上）。
+        model_mask = (union["selection_sleeve"].fillna("") == "") & (union["selection_channel"] == "model")
+        union.loc[model_mask, "selection_sleeve"] = "model_alpha"
         union = union.sort_values(
             ["selection_channel", "model_score"], ascending=[True, False],
         ).reset_index(drop=True)

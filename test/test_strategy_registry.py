@@ -103,10 +103,11 @@ def test_registry_budgets_match_production_sleeve_config(specs):
     derived = derive_sleeve_budgets(specs)
     comparison = compare_sleeve_budgets(specs, cfg["selection"]["signals"])
     assert comparison["consistent"], comparison["diffs"]
-    # 2026-10-01 起 donchian/limit/bottom 三条负 edge 腿转 off → 派生集合里只剩 active 的 value_reversal
-    assert set(derived) == {"value_reversal"}, derived.keys()
-    assert derived["value_reversal"]["min_weight"] == 0.08
-    assert derived["value_reversal"]["max_weight"] == 0.15
+    # 2026-10-06：P1.24 W5 判决把 value_reversal 也转为 off（W2：真实持仓 20 日 −6.08% vs 随机 +0.07%；
+    # 归因 −59.2%/夏普 −1.46/占回撤 5.98pp；模型化重做 NW t 1.33 不过门槛）。
+    # 因此当前**没有任何 active 的 signal 腿**：派生集合为空，硬编码 sleeve 段全部停用，
+    # 硬编码值仍保留在配置里供 budget_from_registry=false 回退。
+    assert set(derived) == set(), derived.keys()
     assert cfg["selection"]["signals"]["forced_min_weight"] == 0.06  # 硬编码仍在（供 budget_from_registry=false 回退）
 
 
@@ -236,12 +237,13 @@ def test_apply_strategy_status_removes_off_legs_and_keeps_exclusive_ownership():
     assert off_recipes.isdisjoint(set(signals["recipes"])), signals["recipes"][:8]
     # off 腿的 setup_types 必须从顶层 setup 腿摘掉
     assert not (set(signals["allowed_setup_types"]) & {"donchian_breakout", "limit_momentum", "bottom_momentum"})
-    # 有自己 sleeve 段的 active 腿（value_reversal）也必须从顶层 setup_types 里摘掉（一 recipe 一腿）
+    # 2026-10-06：value_reversal 转为 off 后不再走"独占 setup_type"路径，而是走停用路径
     assert "value_reversal" not in signals["allowed_setup_types"]
-    assert "value_reversal" in audit["exclusive_ownership_removed"]
+    assert audit["exclusive_ownership_removed"] == [], audit["exclusive_ownership_removed"]
     # 研究态/停用腿的 sleeve 段被关掉
     assert signals["momentum_sleeve"]["enabled"] is False
     assert signals["bottom_momentum_sleeve"]["enabled"] is False
+    assert signals["reversal_sleeve"]["enabled"] is False
 
 
 def test_sleeve_max_weight_bounded_by_budget_share():
@@ -256,8 +258,16 @@ def test_sleeve_max_weight_bounded_by_budget_share():
              "signals": {**cfg["selection"]["signals"], "budget_from_registry": True},
              "portfolio_constraints": {}}
     out = module.with_strategy_registry(layer, cfg)
-    reversal = out["signals"]["reversal_sleeve"]
-    assert reversal["max_weight"] <= 0.05 + 1e-9, reversal
+    # 2026-10-06：value_reversal 已 off → reversal_sleeve 停用，预算约束不适用（不应拿它的硬编码值当不变量）。
+    # 不变量只在 **active** 的腿上有约束力；对 active 腿循环断言 max_weight <= share / slots。
+    for sid, spec in load_strategies(cfg).items():
+        if spec.kind != "signal" or spec.status != "active":
+            continue
+        share = float((spec.budget or {}).get("share") or 0.0)
+        slots = max(int((spec.sizing or {}).get("slots") or 1), 1)
+        max_weight = float((spec.sizing or {}).get("max_weight") or 0.0)
+        assert max_weight <= share / slots + 1e-9, (sid, share, slots, max_weight)
+    assert out["signals"]["reversal_sleeve"]["enabled"] is False
     assert out["portfolio_constraints"]["model_min_share"] == 0.90
 
 

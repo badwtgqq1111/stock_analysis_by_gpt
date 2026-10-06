@@ -78,6 +78,17 @@ graph_temporal = false
 model_comparison = false
 oos_predictions = false
 strategy_labels = false
+# 小市值轮动策略（知乎「鳄鱼鱼」2022-10 版）回测 + 最新一期目标持仓。
+# 只读阶段，不写数据层；默认不参与每日 all 流程（约 40 秒），需要时显式：
+#   uv run python scripts/run_cn_pipeline.py --stage xiaomkt_rotation
+xiaomkt_rotation = false
+# P1.24 sleeve 链路（研究/回测阶段，默认关闭；显式 --stage 才跑）
+sleeve_features = false
+sleeve_diagnostics = false
+sleeve_train = false
+sleeve_combine = false
+sleeve_budgets = false
+sleeve_targets = false
 
 [daily_bars]
 # Tencent is primary; fallbacks are BaoStock and Eastmoney.  The default chain
@@ -213,6 +224,95 @@ volatility_window = 20
 hysteresis_days = 3
 version = "regime.v1"
 output_dir = "output/regime"
+
+# 小市值轮动策略：每周二调仓的小市值 top-5 等权组合。
+# 规则与偏差说明见 docs/runbooks/cn-data-pipeline.md 与
+# artifacts/xiaomkt_rotation_20261001/REPORT.md（本地复现：2014-2024 年化 44.41%、
+# 回撤 -23.03%；文章宣称 103.32% 只在"同日收盘成交 + 零成本 + 无次新过滤"的天真口径下成立）。
+# ---------------------------------------------------------------------------
+# P1.24 sleeve 链路参数（2026-10-06 接入流水线）
+# 顺序：sleeve_features → sleeve_train → sleeve_combine → sleeve_budgets → sleeve_diagnostics
+[sleeve_features]
+build_valuation_long = true     # 估值长面板（2014 起，ClickHouse valuation_snapshot_meta）
+build_sleeve_panel = true       # 统一特征面板（含 209 只退市股）
+start_year = 2014
+end_year = 2026
+start = "2015-01-01"
+end = "2026-09-30"
+
+[sleeve_train]
+feature_table = "assets/data/meta/cn_sleeve_features_long.parquet"
+start = "2015-01-01"
+end = "2026-09-30"
+folds = 5
+valuation_horizon = 20
+quality_horizon = 60
+momentum_horizon = 20
+reversal_horizon = 10
+
+[sleeve_combine]
+rebalance_every = 20
+horizon = 20
+top_k = "20,100"
+
+[sleeve_budgets]
+output = "output/research/sleeve_budgets.json"
+
+[sleeve_targets]
+output_dir = "output/results_cn/sleeve_targets"
+# 账户现实约束（2026-10-06 按用户口径修订）：候选最多 10 只、最终买入最多 5 只、等权 20%。
+# 注意：§8.4 的"宽度 100"是**统计口径**（用于估计信号的 IC/超额），不是持仓口径；
+# 窄账户必须用**多腿共识排名**（rank 平均）来挑 5 只 —— 实测组合 top-5 净超额 +0.81%、NW t 1.90。
+candidate_pool = 10
+holdings = 5
+max_per_industry = 1          # 同一行业至多 1 只（窄组合的分散主要来自行业，不是来自宽度）
+industry_col = "industry_l2"   # registry 的 industry_l1 是分类标准名，真正的行业在 l2
+# 账户规模（元）：>0 时只挑"买得起整手"的票并输出整手数，避免被 pk 的可负担性约束清零。
+# 取生产账户口径 [selection].initial_capital；账户变大时同步调整。
+equity = 45000
+lot_size = 100
+cash_buffer = 0.05
+sleeves = ["model_valuation", "model_quality", "model_momentum", "model_reversal"]
+
+[sleeve_diagnostics]
+candidate_start = "2024-10-01"
+attribution_start = "2025-09-01"
+
+[xiaomkt_rotation]
+start_date = "2015-01-05"
+end_date = ""
+initial_cash = 100000
+top_n = 5                  # 等权持有只数
+candidate_pool = 50        # 市值升序备选池
+universe = "main"          # main = 沪深主板；sme = 深市 002+003（中小综指代理）
+cadence = "weekly"         # weekly = 每周二；daily = 每日
+max_price = 80             # 高价股过滤（元）
+min_listing_days = 365     # 次新股过滤：上市不满 1 年排除
+exclude_st = true          # ST 过滤；判定口径见 st_filter_mode
+st_filter_mode = "band"    # band = 5% 涨跌停板识别（推荐）；touch = 旧触板计数；both = 并集
+st_exit = true             # 持仓中途被 ST 判定命中 -> 下一个调仓日卖出
+st_fast_window = 20        # 快速窗长度（交易日）：越小越早发现"刚被 ST"
+min_price = 0              # 剔除低价股（元）：1.5 可挡面值退市段
+min_amount = 0             # 20 日均成交额下限（元）
+use_limitup_hold = true    # 昨日涨停不卖
+use_stop_loss = true       # 个股硬止损
+stop_loss = 0.07
+use_market_filter = true   # 股票池等权急跌清仓
+market_filter = 0.05
+market_filter_lookback = 5
+use_magic_months = true    # 1/5-2/5、4/5-4/30 不买入
+commission = 0.00025
+stamp_duty = 0.001
+slippage = 0.0003
+min_commission = 5
+cap_ffill_limit = 20       # 市值快照最多前向填充天数
+# 幸存者偏差修复：并入 scripts/refresh_cn_delisted_daily.py 产出的退市股日线 +
+# 历史市值（daily_basic 的 total_mv）。退市/长期停牌持仓按 delist_haircut 折价清算。
+include_delisted = true
+delisted_panel = "meta/cn_delisted_daily.parquet"
+delist_haircut = 0.0      # 0 = 退市/长停按最后收盘价清算；可设 0.3/0.5 做压力测试
+delist_exit_grace = 20
+output_dir = "output/results_cn/xiaomkt_rotation"
 
 [lightgbm]
 days = 365
@@ -352,6 +452,45 @@ cnn_device = "auto"
 # 不需要改门禁/组合层代码。
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# P1.24 家族模型腿（2026-10-06 训练完成，证据见 docs/todo/P1_24b_sleeve_design_spec.md §8.5/§8.6）
+# 全部为研究态（share=0），不进 active 预算；晋级需通过 §7 门槛并由 sleeve_allocator 给预算。
+[strategies.model_valuation]
+kind = "model"
+status = "research"
+label = "估值腿：pe/pb 行业分位（长样本 2015-2026）"
+signal = { source = "lightgbm", features = "pe_ind_pct,pb_ind_pct,pe_pb_combo", label_horizon = 20 }
+sizing = { slots = 100, min_weight = 0.0, max_weight = 0.05 }
+budget = { share = 0.0, note = "由 [selection.sleeve_allocator] 动态分配" }
+evidence = { pooled_ic = 0.0338, icir = 0.326, nw_t = 4.92, top5_excess = -0.0039, folds_positive = "5/5", net_excess_top100_20d = 0.01075, updated = "2026-10-06" }
+
+[strategies.model_quality]
+kind = "model"
+status = "research"
+label = "质量腿：PIT 财务行业分位（长样本 2015-2026，60 日标签）"
+signal = { source = "lightgbm", features = "roe_ind_pct,roa_ind_pct,grossprofit_margin_ind_pct,netprofit_margin_ind_pct,debt_to_assets_ind_pct,netprofit_yoy,or_yoy", label_horizon = 60 }
+sizing = { slots = 100, min_weight = 0.0, max_weight = 0.05 }
+budget = { share = 0.0, note = "四条腿中净超额最高且换手最低（12~14%）" }
+evidence = { pooled_ic = 0.1478, icir = 1.070, nw_t = 8.49, top5_excess = 0.0836, folds_positive = "5/5", net_excess_top20_20d = 0.02738, turnover = 0.142, corr_with_others = "0.004~0.042", updated = "2026-10-06" }
+
+[strategies.model_momentum]
+kind = "model"
+status = "research"
+label = "动量腿：中期动量 + 位置 + 均线偏离（长样本 2015-2026）"
+signal = { source = "lightgbm", features = "ret_120,ret_250,mom_12m_skip_1m,rps_20,rps_60,pos_52w,ma20_dev,ma60_dev", label_horizon = 20 }
+sizing = { slots = 100, min_weight = 0.0, max_weight = 0.05 }
+budget = { share = 0.0, note = "与估值腿相关 0.570，按重叠惩罚合计预算收紧" }
+evidence = { pooled_ic = 0.1304, icir = 1.026, nw_t = 15.37, top5_excess = 0.0105, folds_positive = "5/5", net_excess_top100_20d = 0.00704, corr_with_valuation = 0.570, updated = "2026-10-06" }
+
+[strategies.model_reversal]
+kind = "model"
+status = "off"
+label = "反转腿：短期反转 + 回撤 + 波动（长样本 2015-2026，10 日标签）"
+signal = { source = "lightgbm", features = "rev_1m,rev_5d,mdd_60,vol_20", label_horizon = 10 }
+sizing = { slots = 100, min_weight = 0.0, max_weight = 0.05 }
+budget = { share = 0.0 }
+evidence = { pooled_ic = 0.1082, icir = 0.842, nw_t = 17.03, top5_excess = 0.0019, folds_positive = "5/5", net_excess_top100_20d = -0.00077, note = "IC 为正但扣成本后净超额为负 → 转 off（W5/W8 判决）", updated = "2026-10-06" }
+
 [strategies.model_alpha]
 kind = "model"
 status = "active"
@@ -375,7 +514,7 @@ signal = { recipe = "model_dip", rank = "model_score", note = "候选 = 满足 s
 sizing = { slots = 1, min_weight = 0.06, max_weight = 0.15 }
 exit = { expected_holding_days = 20 }
 budget = { share = 0.0, note = "研究态不占预算；转 active 时从 model_alpha 划出 share" }
-evidence = { status = "A/B 已完成：不达标，保持 research", abl_k12 = "B 先低吸过滤再排序 +0.76%/t=0.63 vs A 全截面 +3.15%/t=1.48（13 非重叠窗口）", subset_note = "低吸子集平均 729 只（占全截面 14%），子集内随机 −0.51%/20 日 → 该状态本身无 alpha", conclusion = "dist/flow 是风险暴露而非 alpha；模型头部是强势票（§28.4）。除非换标签/换信号，否则不转 active", updated = "2026-09-30" }
+evidence = { status = "A/B 已完成：不达标，保持 research", w2_20261006 = "候选域 590 只/日；与 bottom_momentum 重叠 23 只/日、与 value_reversal 0 只 → 归入反转家族待合并", abl_k12 = "B 先低吸过滤再排序 +0.76%/t=0.63 vs A 全截面 +3.15%/t=1.48（13 非重叠窗口）", subset_note = "低吸子集平均 729 只（占全截面 14%），子集内随机 −0.51%/20 日 → 该状态本身无 alpha", conclusion = "dist/flow 是风险暴露而非 alpha；模型头部是强势票（§28.4）。除非换标签/换信号，否则不转 active", updated = "2026-09-30" }
 [strategies.dip_low_position.state]
 dist_from_120d_low = { op = "between", lo = 0.05, hi = 0.30, note = "启动带" }
 volume_ratio_20d = { op = "lte", value = 1.2, note = "缩量" }
@@ -411,13 +550,13 @@ evidence = { demoted_20261001 = "均值基准 5d −1.35%/t=−8.1；复刻仓�
 
 [strategies.value_reversal]
 kind = "signal"
-status = "active"
-label = "价值反转腿（长期回撤后的修复）"
+status = "off"        # 2026-10-06 降级：P1.24 W2 判决其 20 日真实持仓 −6.08% vs 随机 top-5 +0.07%；
+label = "价值反转腿（长期回撤后的修复）—— 2026-10-06 起 off"
 signal = { recipe = "value_reversal", rank = "score" }
 sizing = { slots = 1, min_weight = 0.08, max_weight = 0.15 }
 exit = { expected_holding_days = 20 }
 budget = { sleeve_section = "reversal_sleeve", share = 0.05 }
-evidence = { event_study_5d = 0.0100, note = "2024-2026 5 日超额 +1.00%", updated = "2026-09-16" }
+evidence = { event_study_5d = 0.0100, note = "2024-2026 5 日超额 +1.00%", updated = "2026-10-06", demoted_20261006 = "W2 域内随机基线：真实持仓 20 日 −6.08% vs 随机 top-5 +0.07%（超出域内等权 −6.18pp）；归因：自身 −59.2%、夏普 −1.46、占组合最大回撤 5.98pp；模型化重做（域内 10 日标签）NW t +1.33 < 1.5、top-5 超额 −0.98%、IC 为正仅 3/5 折 → 转 off；合并计划见 P1.24b（三合一为 reversal 家族）" }
 [strategies.value_reversal.state]
 dist_from_120d_low = { op = "gte", value = 0.10, note = "长期回撤后已离开极低位" }
 volume_ratio_20d = { op = "gte", value = 1.20, note = "放量修复" }
@@ -430,14 +569,36 @@ signal = { recipe = "bottom_momentum", rank = "signal_score" }
 sizing = { slots = 1, min_weight = 0.05, max_weight = 0.10 }
 exit = { expected_holding_days = 10, stop_atr = 1.5 }
 budget = { sleeve_section = "bottom_momentum_sleeve", share = 0.05 }
-evidence = { demoted_20261001 = "均值基准 10d −0.41%/t=−11.9（近两年 t=−3.7）→ 转 off",  event_study_5d = 0.0052, note = "上行 +0.80%（t=17.1）/ 下行 +0.04%（t=0.58）", updated = "2026-09-16" }
+evidence = { demoted_20261001 = "均值基准 10d −0.41%/t=−11.9（近两年 t=−3.7）→ 转 off", demoted_20261006 = "W2：真实持仓 20 日 −4.65% vs 随机 top-5 +1.56%（超出域内等权 −6.14pp）；与 value_reversal 候选域 Jaccard 0.6188 → 属同一反转家族，待三合一", event_study_5d = 0.0052, note = "上行 +0.80%（t=17.1）/ 下行 +0.04%（t=0.58）", updated = "2026-10-06" }
 [strategies.bottom_momentum.state]
 signal_rebound_atr = { op = "gte", value = 1.0, note = "右侧确认幅度（ATR 倍数）" }
 signal_relative20 = { op = "gte", value = 0.0, note = "相对强度不为负" }
 signal_volume_ratio_20 = { op = "gte", value = 1.10, note = "放量（recipe 输出 volume_ratio_20）" }
 
+# ---------------------------------------------------------------------------
+# P1.24b §5：sleeve 预算分配器（等风险 + ICIR 倾斜 + 资格门 + 候选域重叠惩罚）
+# 默认 enabled = false（走 [strategies.*].budget.share 静态口径），切换后由
+# `python -m factor_engine.sleeve_design --budgets ...` 产出的 sleeve_budgets.json 决定预算。
+[selection.sleeve_allocator]
+enabled = false
+mode = "icir_erc"              # static | erc | icir_erc
+budget_file = "output/research/sleeve_budgets.json"
+min_icir = 0.30                # 资格门：ICIR 下限
+min_net_excess = 0.0           # 资格门：实测净超额下限（扣成本后必须为正）
+icir_halflife = 12             # ICIR 半衰期（期）
+icir_shrink = 0.30             # 向横截面均值收缩（James–Stein）
+overlap_threshold = 0.50       # 相关性/Jaccard 超过该值即触发重叠惩罚
+overlap_pair_cap = 0.50        # 触发后两腿合计权重上限
+max_sleeve_weight = 0.40
+min_sleeve_weight = 0.0
+output_breadth = 100           # sleeve 输出宽度（§8.4：top-5 已被证伪，默认 100）
+
 [selection]
 model_scores_dir = "output/model_scores"
+# 候选源（2026-10-06 新增）：model = 现有模型腿预选；sleeve = 多 sleeve 共识组合（sleeve_targets 产出）。
+# 默认 model（不改变现有生产）；切到 sleeve 前先用 sleeve_targets 生成文件，并在独立 output_dir 下试跑。
+preselection_source = "model"
+sleeve_preselection_path = "output/results_cn/sleeve_preselected.csv"
 output_dir = "output/results_cn"
 model = "ensemble" # lightgbm, transformer, or ensemble
 top_n = 10

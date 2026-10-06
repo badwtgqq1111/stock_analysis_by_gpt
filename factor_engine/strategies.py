@@ -169,6 +169,12 @@ def strategy_for_pick(selection_channel: str | None, recipe: str | None, sleeve:
         if candidate and candidate in specs:
             return candidate
     if channel in {"model", ""}:
+        # 2026-10-06：注册表里现在有多条 kind="model" 的腿（估值/质量/动量/反转），
+        # 生产票只能归到 **active** 的模型腿；research/off 的腿不得认领生产选股
+        # （否则归因会把 model_alpha 的票算到某个未上线的家族腿上）。
+        for name, spec in specs.items():
+            if spec.kind == "model" and spec.status == "active":
+                return name
         for name, spec in specs.items():
             if spec.kind == "model":
                 return name

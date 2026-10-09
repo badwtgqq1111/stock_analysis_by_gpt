@@ -924,5 +924,51 @@ bun run dev
 |---|---|---|
 | 选股结果 | `/` | LightGBM TopN、评分、SHAP 特征解释 |
 | 因子 IC 分析 | `/factor-ic` | IC/RankIC 时序和因子汇总 |
-| K 线图表 | `/kline` | K 线、均线、成交量、信号标记 |
-| 组合回测 | `/portfolio` | 净值、回撤、收益指标、当前持仓 |
+| K 线图表 | `/kline` | K 线、均线、成交量、信号标记；**点任意一根 K 线看当日分时** |
+| 选股日历 | `/calendar` | 逐日选股台账、来源对照、T+N 前瞻收益 |
+| 选股归因 | `/attribution` | 逐股 SHAP + 启动门禁 tilt 拆分 |
+| 因子挖掘 | `/factor-mining` | LLM 因子挖掘会话与产物 |
+| 数据流水线 | `/pipeline` | 各阶段产物、最近运行、单阶段重跑 |
+| 自动化进度 | `/automation` | 每日生产任务的实时日志 |
+| 回测绩效 | `/performance` | 净值、回撤、月度收益、交易明细（`/portfolio` 已重定向到此） |
+| 模拟盘 | `/paper` | 前向模拟账户持仓与成交 |
+| **涨跌/资金排行** | `/rankings` | 每日 / 每周（近 5 日）全市场涨跌幅与资金流排行 |
+| **连板统计** | `/limitup` | 一板 / 两板 / 三板 / 四板+ 每日家数、最高板、晋级率 |
+| **分时行情** | `/intraday` | 当日 1 / 5 分钟分时 + 均价线，盘中自动刷新 |
+
+### 行情页面（2026-10-09 新增）
+
+后端 `backend/api/{rankings,limitup,intraday}.py`，数据层 `backend/services/{market_board_service,live_quotes}.py`，
+测试 `test/test_market_board_views.py`。**本地优先、网络仅增强**：断网时三个页面仍能出数（用本地 parquet），
+只有"当日盘中"那部分依赖东财/腾讯接口。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/rankings/overview` | 最新交易日、可用日期、口径清单、交易时段 |
+| `GET /api/rankings/change?period=daily\|weekly&direction=up\|down` | 涨跌排行（前复权日线） |
+| `GET /api/rankings/moneyflow?period=daily\|weekly&source=moneyflow\|moneyflow_dc\|moneyflow_ths` | 资金流排行（面板原始单位万元 → 对外亿元） |
+| `GET /api/limitup/ladder?lookback=30` | 逐日各板家数、最高板、昨日→今日晋级率 |
+| `GET /api/limitup/detail?date=&live=auto\|1\|0` | 当日连板明细（并入东财封板资金 / 首封时间 / 炸板次数） |
+| `GET /api/limitup/live` | 盘中实时涨停池梯队 |
+| `GET /api/intraday/{code}?period=1\|5&mode=auto\|live\|store&date=` | 分时序列 + 均价线 + 前收（K 线页点日期走这里） |
+| `GET /api/intraday/coverage/{code}` | 该票分时可用的日期（本地归档区间 / 实时源覆盖的几天） |
+| `GET /api/intraday/quotes?codes=a,b,c` | 批量最新快照（分时页顶部快捷条） |
+
+口径与已知边界（都实测过，详见各模块 docstring）：
+
+1. **涨跌幅是前复权口径**，除权除息日与交易所不复权涨幅有零点几个百分点的差（与仓库其它模块同口径）。
+2. **资金流三口径定义不同**（tushare 净流入额 / 东财主力净额 / 同花顺净额），页面不混排、不跨口径比名次；
+   面板是按收盘后入库的，当日数据要等晚上流水线跑完。
+3. **资金流面板一行一个 (日期, 股票, source)**，取数必须按 `source` 过滤，否则同一只票会被算 3 次。
+4. **连板判定**：板块上限 10% / 20% / 30% + 按价格浮动的舍入容差（涨停价四舍五入到分，3 元的票涨停只有 9.90%）。
+   与东财涨停池逐只对账（2026-10-08）：本地 44 只 vs 东财 43 只，重合 42 只；多出的 2 只是东财池不收录的 ST 涨停，
+   漏的 1 只是本地日线里没有的北交所新股（明细页会把它从东财补进来）。ST 用 PIT 名称区间表标记，但不改变上限。
+5. **实时源有两条**：腾讯（`web.ifzq.gtimg.cn`，实测最稳）与东财（`push2his`，本机代理会间歇性 ProxyError）；
+   分时页 `mode=auto` 依次降级 → 本地 5 分钟归档，返回体里的 `source`/`source_label` 会写明这次到底用了哪条。
+6. 本地 5 分钟分时由 `scripts/sync_cn_intraday_full.py --refresh` 收盘后增量补齐（实测覆盖约一年：
+   2025-10-09 ~ 2026-09-30），只取文件里最后一天（不截断会把一整年的 5 分钟线当"当日分时"）。
+7. **本地归档必须按日对齐到日线刻度**（K 线页点日期看分时就是这条路径）：两边的前复权基准不同，
+   同一交易日整段差一个常数因子（实测 2025-10-27 差 2.18%）。对齐后分时的
+   开/高/低/收 与当天那根 K 线逐项对上（11.17/11.24/11.07/11.15 vs 11.17/11.24/11.08/11.15）。
+   均价还要再折一次：baostock 的 `amount`/`volume` 是**不复权**金额与股数，直接用会画出一条
+   高出当日最高价 5% 的假均价线。

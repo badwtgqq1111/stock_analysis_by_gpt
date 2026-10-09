@@ -22,6 +22,9 @@ from backend.api.paper import router as paper_router
 from backend.api.exports import router as exports_router
 from backend.api.attribution import router as attribution_router
 from backend.api.forward import router as forward_router
+from backend.api.rankings import router as rankings_router
+from backend.api.limitup import router as limitup_router
+from backend.api.intraday import router as intraday_router
 
 app = FastAPI(title="Quant Analysis API", version="2.0")
 
@@ -47,6 +50,9 @@ app.include_router(paper_router)
 app.include_router(exports_router)
 app.include_router(attribution_router)
 app.include_router(forward_router)
+app.include_router(rankings_router)
+app.include_router(limitup_router)
+app.include_router(intraday_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

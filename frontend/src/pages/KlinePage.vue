@@ -31,29 +31,82 @@
         <KlineChart
           :data="data" :is-loading="isLoading" :error="error"
           :show-signals="overlays.includes('signals')" :height="600"
+          :selected-date="pickedDate"
           @price-range="onPriceRange"
+          @pick="onPickDate"
         />
         <ChipDistribution
           v-if="overlays.includes('chips') && data.chips"
           :chips="data.chips" :height="600" :price-range="priceRange"
         />
       </div>
+      <p class="hint tiny click-hint">
+        💡 点任意一根 K 线 = 看这一天的分时（本地 5 分钟归档 <b>{{ coverageText }}</b>；更近的交易日走实时源）。
+        当前选中：<b class="link" @click="focusSelected">{{ pickedDate || '—' }}</b>
+      </p>
     </div>
     <div v-else-if="!selectedCode" class="empty-state">请选择股票代码</div>
     <div v-else-if="isLoading" class="empty-state">加载中...</div>
     <div v-else class="empty-state">暂无行情数据</div>
+
+    <!-- 分时面板：K 线页点选的交易日 -->
+    <div class="panel intraday-panel" v-if="selectedCode && (pickedDate || intraday || intradayError)">
+      <h6>
+        当日分时
+        <b class="link" @click="focusSelected">{{ pickedDate }}</b>
+        <span class="tag" :class="intradayTagClass" v-if="intraday">{{ intraday.source_label }}</span>
+        <span class="dim tiny" v-if="intraday">
+          前收 {{ fmt(intraday.prev_close) }} · {{ intraday.points.length }} 个点 ·
+          {{ intraday.points[0]?.clock }} → {{ intraday.points[intraday.points.length - 1]?.clock }}
+        </span>
+        <button class="btn-ghost btn-sm close-btn" @click="clearIntraday">收起</button>
+      </h6>
+
+      <StateBlock v-if="loadingIntraday" state="loading" title="加载该日分时…" />
+      <StateBlock v-else-if="intradayError" state="error" title="该交易日没有分时数据" :detail="intradayError" />
+      <template v-else-if="intraday">
+        <div class="stat-grid">
+          <StatTile label="收盘/最新" :value="fmt(intraday.latest.price)"
+                    :tone="tone(intraday.latest.change_pct)"
+                    :sub="`前收 ${fmt(intraday.prev_close)}`" />
+          <StatTile label="涨跌幅" :value="pct(intraday.latest.change_pct)"
+                    :tone="tone(intraday.latest.change_pct)"
+                    :sub="`涨跌 ${fmt(intraday.latest.change)}`" />
+          <StatTile label="均价" :value="fmt(intraday.latest.avg)" tone="gold" sub="累计额 ÷ 累计量" />
+          <StatTile label="最高/最低" :value="`${fmt(intraday.latest.high)} / ${fmt(intraday.latest.low)}`"
+                    :sub="`开盘 ${fmt(intraday.latest.open)}`" />
+          <StatTile label="成交额" :value="money(intraday.latest.amount_yuan)"
+                    :sub="intraday.latest.amount_yuan === null ? '该源不提供' : '元 → 亿/万'" />
+          <StatTile label="成交量" :value="shares(intraday.latest.volume_shares)"
+                    :sub="`${intraday.period} 分钟`" />
+        </div>
+        <IntradayChart :points="intraday.points" :prev-close="intraday.prev_close" :height="300" />
+        <p class="hint tiny" v-if="!intraday.live.available && intraday.live.reason">
+          实时源不可用，用的是本地归档：<span class="dim">{{ intraday.live.reason }}</span>
+        </p>
+        <p class="hint tiny" v-if="intraday.latest.amount_yuan === null">
+          该源不给成交额（腾讯 5 分钟 K 接口限制）→ 成交额与均价线留空。
+        </p>
+      </template>
+    </div>
+
     <SignalStats :stats="data?.signal_stats ?? null" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ControlPanel from '@/components/ControlPanel.vue'
 import KlineChart from '@/components/KlineChart.vue'
 import ChipDistribution from '@/components/ChipDistribution.vue'
 import SignalStats from '@/components/SignalStats.vue'
+import StatTile from '@/components/ui/StatTile.vue'
+import StateBlock from '@/components/ui/StateBlock.vue'
+import IntradayChart from '@/components/IntradayChart.vue'
 import { useKlineData } from '@/composables/useKlineData'
+import { getIntraday, getIntradayCoverage } from '@/api/client'
+import type { IntradayCoverage, IntradayResponse } from '@/types/api'
 
 const route = useRoute()
 const { data, isLoading, error, stockCode, days, showSignals, showChips } = useKlineData()
@@ -61,6 +114,12 @@ const selectedCode = ref<string | null>(null)
 const daysModel = ref(365)
 const overlays = ref<string[]>(['signals', 'chips'])
 const priceRange = ref<[number, number]>([0, 100])
+
+const pickedDate = ref('')
+const intraday = ref<IntradayResponse | null>(null)
+const intradayError = ref('')
+const loadingIntraday = ref(false)
+const coverage = ref<IntradayCoverage | null>(null)
 
 watch(selectedCode, v => { stockCode.value = v })
 watch(daysModel, v => { days.value = v })
@@ -77,6 +136,101 @@ function flagClass(flag: string) {
   return 'flag-info'
 }
 
+// ── 分时：点 K 线 → 拉当天分时 ────────────────────────────────────────────────
+const coverageText = computed(() => {
+  const store = coverage.value?.store
+  if (!store?.available) return '缺失（跑 sync_cn_intraday_full.py 补）'
+  return `${store.first_date} ~ ${store.last_date}`
+})
+const intradayTagClass = computed(() => (intraday.value?.source === 'store' ? '' : 'ok'))
+
+/** 这一天到底有没有分时（本地归档 ∪ 实时源覆盖）。没有就直接说明，不发注定 404 的请求。 */
+function hasData(date: string) {
+  if (!date) return false
+  const local = coverage.value?.store_dates || []
+  const live = coverage.value?.live?.dates || []
+  return local.includes(date) || live.includes(date)
+}
+
+async function onPickDate(date: string) {
+  if (!date || date === pickedDate.value) return
+  pickedDate.value = date
+  await loadIntraday(date)
+}
+
+async function loadIntraday(date: string) {
+  intraday.value = null
+  intradayError.value = ''
+  if (!hasData(date)) {
+    const store = coverage.value?.store
+    const live = coverage.value?.live
+    intradayError.value =
+      `${date} 没有分时数据。`
+      + (store?.available ? `本地归档覆盖 ${store.first_date} ~ ${store.last_date}（共 ${store.n_dates} 个交易日）；` : '本地归档缺失；')
+      + (live?.available ? `实时源只覆盖 ${live.dates[0]} ~ ${live.dates[live.dates.length - 1]}。` : '实时源当前不可用。')
+    return
+  }
+  loadingIntraday.value = true
+  try {
+    intraday.value = await getIntraday(selectedCode.value || '', '1', 'auto', date)
+  } catch (e) {
+    intradayError.value = String(e)
+  } finally {
+    loadingIntraday.value = false
+  }
+}
+
+function clearIntraday() {
+  pickedDate.value = ''
+  intraday.value = null
+  intradayError.value = ''
+}
+
+/** K 线区间里还没有选中日期时，默认看最近一个交易日 */
+watch(() => data.value, (d) => {
+  if (d && d.data.length && !pickedDate.value) {
+    const last = d.data[d.data.length - 1].time
+    pickedDate.value = last
+    void loadIntraday(last)
+  }
+})
+
+/** 换票：清掉旧分时，重新取一次覆盖范围 */
+watch(selectedCode, async (code) => {
+  clearIntraday()
+  coverage.value = null
+  if (!code) return
+  try {
+    coverage.value = await getIntradayCoverage(code)
+    // 上一次选的日期可能在新票的覆盖范围外 → 默认回到最新交易日
+    const last = data.value?.data?.[data.value.data.length - 1]?.time
+    if (last) { pickedDate.value = last; void loadIntraday(last) }
+  } catch { /* 覆盖范围拿不到时，点击仍会退回后端 404 文案 */ }
+})
+
+function focusSelected() {
+  const el = document.querySelector('.intraday-panel')
+  el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+const fmt = (v: number | null | undefined, nd = 2) =>
+  v === null || v === undefined ? '—' : Number(v).toFixed(nd)
+const pct = (v: number | null | undefined) =>
+  v === null || v === undefined ? '—' : `${Number(v) >= 0 ? '+' : ''}${(Number(v) * 100).toFixed(2)}%`
+const tone = (v: number | null | undefined) => (v === null || v === undefined ? '' : Number(v) >= 0 ? 'up' : 'down')
+function money(yuan: number | null | undefined) {
+  if (yuan === null || yuan === undefined) return '—'
+  if (yuan >= 1e8) return (yuan / 1e8).toFixed(2) + ' 亿'
+  if (yuan >= 1e4) return (yuan / 1e4).toFixed(0) + ' 万'
+  return yuan.toFixed(0)
+}
+function shares(n: number | null | undefined) {
+  if (!n) return '—'
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + ' 亿股'
+  if (n >= 1e4) return (n / 1e4).toFixed(0) + ' 万股'
+  return n + ' 股'
+}
+
 // 支持从别处跳转：/#/kline?code=301230.SZ
 onMounted(() => {
   const code = String(route.query.code || '')
@@ -85,3 +239,9 @@ onMounted(() => {
 watch(() => route.query.code, v => { if (v) selectedCode.value = String(v) })
 </script>
 
+<style scoped>
+.click-hint { margin-top: var(--sp-2); }
+.intraday-panel h6 { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.close-btn { margin-left: auto; }
+.intraday-panel .stat-grid { margin-bottom: var(--sp-3); }
+</style>

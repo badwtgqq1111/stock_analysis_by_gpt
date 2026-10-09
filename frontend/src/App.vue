@@ -80,6 +80,15 @@ const navGroups = [
       { to: '/paper', label: '模拟盘' },
     ],
   },
+  // 行情：每天盯盘要看的三个入口（谁在涨跌/谁在吸金 → 连板情绪 → 个股分时）
+  {
+    label: '行情',
+    links: [
+      { to: '/rankings', label: '涨跌/资金排行' },
+      { to: '/limitup', label: '连板统计' },
+      { to: '/intraday', label: '分时行情' },
+    ],
+  },
 ]
 
 const health = ref<HealthResponse | null>(null)

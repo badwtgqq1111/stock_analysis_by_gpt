@@ -14,6 +14,10 @@ const routes = [
   { path: '/performance', name: 'performance', component: () => import('@/pages/Performance.vue') },
   { path: '/paper', name: 'paper', component: () => import('@/pages/PaperTrading.vue') },
   { path: '/attribution', name: 'attribution', component: () => import('@/pages/Attribution.vue') },
+  // 行情（2026-10-09 新增）：每日/周 涨跌与资金流排行、连板梯队、当日分时实时
+  { path: '/rankings', name: 'rankings', component: () => import('@/pages/Rankings.vue') },
+  { path: '/limitup', name: 'limitup', component: () => import('@/pages/LimitUp.vue') },
+  { path: '/intraday', name: 'intraday', component: () => import('@/pages/Intraday.vue') },
 ]
 
 export default createRouter({

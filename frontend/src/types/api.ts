@@ -84,7 +84,8 @@ export interface ChartMarker {
   time: import('lightweight-charts').Time
   position: 'aboveBar' | 'belowBar'
   color: string
-  shape: 'arrowUp' | 'arrowDown'
+  /** 'circle' 用于"被选中的交易日"标记（K 线页点开看分时的那一天） */
+  shape: 'arrowUp' | 'arrowDown' | 'circle' | 'square'
   text: string
   size?: number
 }
@@ -453,4 +454,230 @@ export interface AttributionDetail {
   markdown: string
   winners_vs_losers: string
   family_columns: string[]
+}
+
+// ─── 行情榜单（每日/周 涨跌 + 资金流）───
+export interface RankingsOverview {
+  latest_trade_date: string | null
+  trade_dates: string[]
+  moneyflow_dates: string[]
+  moneyflow_sources: { key: string; label: string }[]
+  boards: string[]
+  periods: { key: string; label: string }[]
+  session: SessionPhase
+  notes: string[]
+}
+
+export interface SessionPhase {
+  phase: 'auction' | 'am' | 'lunch' | 'pm' | 'closed'
+  live: boolean
+  is_trading_day_guess: boolean
+  now: string
+}
+
+export interface RankingRow {
+  rank: number
+  stock_code: string
+  name: string
+  industry: string
+  market: string
+  value: number | null
+  unit: string
+  value_label: string
+  /** 涨跌榜：区间涨跌幅（小数） */
+  period_ret?: number
+  /** 资金流榜：当日 / 区间净额（万元，面板原始单位） */
+  net_amount_wan?: number
+  net_amount_yi?: number | null
+  net_5d_yi?: number | null
+  net_10d_yi?: number | null
+  net_20d_yi?: number | null
+  net_pct?: number | null
+  close: number | null
+  pct_chg: number | null
+  amount: number | null
+  boards: number
+  is_limit_up: boolean
+  is_limit_down?: boolean
+  is_st?: boolean
+}
+
+export interface RankingsChangeResponse {
+  period: string
+  direction: string
+  limit: number
+  date: string | null
+  base_date: string | null
+  span: number | null
+  stats: Record<string, any>
+  rows: RankingRow[]
+  notes: string[]
+}
+
+export interface RankingsMoneyflowResponse {
+  available: boolean
+  period: string
+  direction: string
+  limit: number
+  source: string
+  source_label: string
+  date: string
+  dates: string[]
+  stats: Record<string, any>
+  rows: RankingRow[]
+  live: { requested: boolean; available: boolean; reason: string | null; rows: Record<string, any>[] }
+  notes: string[]
+  hint?: string
+}
+
+// ─── 连板记录统计 ───
+export interface LimitUpBucket { key: string; label: string }
+
+export interface LimitUpPromotion { prev: number; next: number; rate: number | null }
+
+export interface LimitUpLadderDay {
+  date: string
+  counts: Record<string, number>
+  total: number
+  max_boards: number
+  promotion: Record<string, LimitUpPromotion>
+}
+
+export interface LimitUpLadder {
+  buckets: LimitUpBucket[]
+  dates: string[]
+  series: LimitUpLadderDay[]
+  latest: LimitUpLadderDay | null
+  lookback: number
+  source: string
+  notes: string[]
+}
+
+export interface LimitUpRow {
+  rank?: number
+  stock_code: string
+  name: string
+  market?: string
+  industry?: string
+  boards: number
+  boards_live?: number | null
+  bucket: string
+  close: number | null
+  pct_chg: number | null
+  amount: number | null
+  st_pit?: boolean
+  source?: string
+  seal_amount?: number | null
+  first_seal?: string | null
+  last_seal?: string | null
+  open_times?: number | null
+  stat?: string | null
+}
+
+export interface LimitUpDetail {
+  available: boolean
+  date: string
+  dates: string[]
+  counts: Record<string, number>
+  counts_label: Record<string, number>
+  total: number
+  max_boards: number
+  rows: LimitUpRow[]
+  live: { requested: boolean; available: boolean; reason: string | null }
+  session: SessionPhase
+  notes: string[]
+  hint?: string
+}
+
+export interface LimitUpLive {
+  date: string
+  session: SessionPhase
+  available: boolean
+  reason: string | null
+  rows: LimitUpRow[]
+  counts: Record<string, number>
+  counts_label: Record<string, number>
+  total: number
+  max_boards: number
+}
+
+// ─── 分时行情 ───
+export interface IntradayPoint {
+  time: string
+  clock: string
+  price: number | null
+  avg: number | null
+  open: number | null
+  high: number | null
+  low: number | null
+  volume_shares: number
+  amount_yuan: number | null
+}
+
+export interface IntradayLatest {
+  price: number | null
+  change: number | null
+  change_pct: number | null
+  avg: number | null
+  high: number | null
+  low: number | null
+  open: number | null
+  volume_shares: number
+  amount_yuan: number | null
+  points: number
+  time: string
+}
+
+export interface IntradayResponse {
+  code: string
+  name: string
+  period: string
+  requested_period: string
+  mode: string
+  source: 'tx_minute' | 'em' | 'tx_kline' | 'store'
+  source_label: string
+  date: string
+  prev_close: number | null
+  latest: IntradayLatest
+  points: IntradayPoint[]
+  session: SessionPhase
+  live: { available: boolean; reason: string | null }
+  store: {
+    available: boolean
+    path: string | null
+    first_date?: string | null
+    last_date?: string | null
+    n_dates?: number
+    has_date?: boolean
+  }
+  notes: string[]
+}
+
+/** 分时可用范围（K 线页点某一天之前先问一次：这天到底有没有分时） */
+export interface IntradayCoverage {
+  code: string
+  today: string
+  store: { available: boolean; first_date: string | null; last_date: string | null; n_dates: number }
+  store_dates: string[]
+  live: { available: boolean; dates: string[]; reason: string | null }
+  session: SessionPhase
+  notes: string[]
+}
+
+export interface IntradayQuote {
+  stock_code: string
+  name?: string
+  available: boolean
+  source?: string
+  price?: number | null
+  prev_close?: number | null
+  change?: number | null
+  change_pct?: number | null
+  high?: number | null
+  low?: number | null
+  open?: number | null
+  amount_yuan?: number | null
+  volume_shares?: number | null
+  time?: string
+  reason?: string | null
 }

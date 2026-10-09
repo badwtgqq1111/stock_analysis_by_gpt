@@ -3,6 +3,8 @@ import type {
   AttributionDetail, AttributionIndex, ThsExportList, PaperStatus, PerformanceDetail, PerformanceSummary, StockListResponse, OhlcvResponse, SelectionResponse, ShapResponse,
   FactorICResponse, PortfolioResponse, ImportanceResponse, AutomationStatus,
   ForwardValidation, ForwardSeries,
+  RankingsOverview, RankingsChangeResponse, RankingsMoneyflowResponse,
+  LimitUpLadder, LimitUpDetail, LimitUpLive, IntradayResponse, IntradayQuote, IntradayCoverage, SessionPhase,
 } from '@/types/api'
 
 /** 统一的接口错误：页面只认 `err.message` 与 `err.status`，不用各自解析 axios 的结构。 */
@@ -360,4 +362,100 @@ export async function getAttributionDetail(date: string): Promise<AttributionDet
   const resp = await fetch(`/api/attribution/${encodeURIComponent(date)}`)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return (await resp.json()) as AttributionDetail
+}
+
+// ─── 行情榜单（每日/周 涨跌 + 资金流）───
+export async function getRankingsOverview(): Promise<RankingsOverview> {
+  const resp = await fetch('/api/rankings/overview')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as RankingsOverview
+}
+
+export interface ChangeParams {
+  period: 'daily' | 'weekly'
+  direction: 'up' | 'down'
+  limit: number
+  board?: string
+  exclude_st?: boolean
+  min_amount?: number
+}
+
+export async function getChangeRanking(params: ChangeParams): Promise<RankingsChangeResponse> {
+  const query = new URLSearchParams({
+    period: params.period, direction: params.direction, limit: String(params.limit),
+    board: params.board ?? '', exclude_st: String(params.exclude_st ?? false),
+    min_amount: String(params.min_amount ?? 0),
+  })
+  const resp = await fetch(`/api/rankings/change?${query}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as RankingsChangeResponse
+}
+
+export interface MoneyflowParams {
+  period: 'daily' | 'weekly'
+  direction: 'in' | 'out'
+  limit: number
+  source: string
+  date?: string
+  board?: string
+  exclude_st?: boolean
+  live?: boolean
+}
+
+export async function getMoneyflowRanking(params: MoneyflowParams): Promise<RankingsMoneyflowResponse> {
+  const query = new URLSearchParams({
+    period: params.period, direction: params.direction, limit: String(params.limit),
+    source: params.source, date: params.date ?? '', board: params.board ?? '',
+    exclude_st: String(params.exclude_st ?? false), live: params.live ? '1' : '0',
+  })
+  const resp = await fetch(`/api/rankings/moneyflow?${query}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as RankingsMoneyflowResponse
+}
+
+// ─── 连板记录统计 ───
+export async function getLimitUpLadder(lookback: number): Promise<LimitUpLadder> {
+  const resp = await fetch(`/api/limitup/ladder?lookback=${lookback}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as LimitUpLadder
+}
+
+export async function getLimitUpDetail(date: string, live = true): Promise<LimitUpDetail> {
+  const query = new URLSearchParams({ date, limit: '300', live: live ? 'auto' : '0' })
+  const resp = await fetch(`/api/limitup/detail?${query}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as LimitUpDetail
+}
+
+export async function getLimitUpLive(): Promise<LimitUpLive> {
+  const resp = await fetch('/api/limitup/live')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as LimitUpLive
+}
+
+// ─── 分时行情（实时）───
+export async function getIntraday(
+  code: string, period: '1' | '5' = '1', mode: 'auto' | 'live' | 'store' = 'auto', date = '',
+): Promise<IntradayResponse> {
+  const query = new URLSearchParams({ period, mode, date })
+  const resp = await fetch(`/api/intraday/${encodeURIComponent(code)}?${query}`)
+  if (!resp.ok) {
+    let detail: any = null
+    try { detail = (await resp.json()).detail } catch { /* 非 JSON 错误体 */ }
+    throw new Error(detail?.message ? `${detail.message}${detail.live_error ? `（${detail.live_error}）` : ''}` : `HTTP ${resp.status}`)
+  }
+  return (await resp.json()) as IntradayResponse
+}
+
+export async function getIntradayCoverage(code: string): Promise<IntradayCoverage> {
+  const resp = await fetch(`/api/intraday/coverage/${encodeURIComponent(code)}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as IntradayCoverage
+}
+
+export async function getIntradayQuotes(codes: string[]): Promise<{ quotes: IntradayQuote[]; session: SessionPhase }> {
+  if (!codes.length) return { quotes: [], session: { phase: 'closed', live: false, is_trading_day_guess: false, now: '' } }
+  const resp = await fetch(`/api/intraday/quotes?codes=${encodeURIComponent(codes.join(','))}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as { quotes: IntradayQuote[]; session: SessionPhase }
 }

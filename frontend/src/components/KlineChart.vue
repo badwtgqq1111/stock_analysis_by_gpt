@@ -31,9 +31,11 @@ const props = defineProps<{
   error: string | null
   showSignals: boolean
   height: number
+  /** 被选中的交易日（K 线页点开后在该日打点标记，用来对应下方的分时图） */
+  selectedDate?: string | null
 }>()
 
-const emit = defineEmits<{ priceRange: [range: [number, number]] }>()
+const emit = defineEmits<{ priceRange: [range: [number, number]]; pick: [date: string] }>()
 
 const containerRef = ref<HTMLElement | null>(null)
 let chart: IChartApi | null = null
@@ -53,6 +55,7 @@ const COLORS = {
   border: 'rgba(197, 203, 206, 0.3)', up: '#ef476f', down: '#00d4aa',
   ma5: '#ffd166', ma10: '#ff9f1c', ma20: '#06d6a0', ma60: '#118ab2',
   crosshair: 'rgba(255, 209, 102, 0.85)', crosshairHz: 'rgba(255, 209, 102, 0.50)',
+  sel: '#ffd166',
 }
 
 const tooltip = reactive({
@@ -150,6 +153,11 @@ function initChart() {
     if (containerRef.value) showTooltip(param, containerRef.value)
   })
 
+  // 点 K 线 → 把该交易日的"YYYY-MM-DD"抛给页面，页面据此拉当天分时
+  chart.subscribeClick((param) => {
+    if (param.time) emit('pick', String(param.time))
+  })
+
   chart.timeScale().subscribeVisibleTimeRangeChange(() => { updatePriceRange() })
 }
 
@@ -198,6 +206,9 @@ function setData(resp: OhlcvResponse) {
       if (d.buy_signal) markers.push({ time, position: 'belowBar', color: COLORS.up, shape: 'arrowUp', text: '买入', size: 2 })
       if (d.sell_signal) markers.push({ time, position: 'aboveBar', color: COLORS.down, shape: 'arrowDown', text: '卖出', size: 2 })
     }
+    if (props.selectedDate && d.time === props.selectedDate) {
+      markers.push({ time, position: 'aboveBar', color: COLORS.sel, shape: 'circle', text: '分时', size: 1 })
+    }
   }
 
   candleSeries.setData(candles)
@@ -228,6 +239,8 @@ watch(() => props.data, (newData) => {
 })
 watch(() => props.height, (h) => { chart?.applyOptions({ height: h }) })
 watch(() => props.showSignals, () => { if (props.data) setData(props.data) })
+// 选中日变化 → 重画一次标记（数据量在几千根级别，重建成本可忽略）
+watch(() => props.selectedDate, () => { if (props.data) setData(props.data) })
 </script>
 
 <style scoped>

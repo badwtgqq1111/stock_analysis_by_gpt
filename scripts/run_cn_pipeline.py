@@ -543,6 +543,27 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
                                net_excess_path=metrics)
         return {"status": "completed" if code == 0 else "failed", "budget_file": out_path,
                 "corr": corr or None, "net_excess": metrics or None}
+    if name == "arm_selection":
+        # 研究手臂（base_v1 / llm_new）选"最后一天"的候选与持仓，写到 output/results_cn/arm_latest_selection.csv
+        # 与 preselection→pk 的生产名单分开存放，便于对照（口径见 P1_25 §20）
+        layer = config.get("arm_selection", {})
+        args = ["--arm", str(layer.get("arm", "base_v1")),
+                "--candidates", str(layer.get("candidates", 10)),
+                "--holdings", str(layer.get("holdings", 5)),
+                "--capital", str(layer.get("capital", 45000))]
+        if layer.get("panel"):
+            args += ["--panel", str(layer["panel"])]
+        if layer.get("as_of"):
+            args += ["--as-of", str(layer["as_of"])]
+        if layer.get("st_mode"):
+            args += ["--st-mode", str(layer["st_mode"])]
+        if layer.get("st_anchor"):
+            args += ["--st-anchor", str(layer["st_anchor"])]
+        if layer.get("robust_months"):
+            args += ["--robust-months", str(layer["robust_months"])]
+        out = {"steps": [_run_research_script("select_latest_via_arm.py", args)]}
+        out["status"] = "completed" if out["steps"][0]["exit_code"] == 0 else "failed"
+        return out
     if name == "exits":
         layer = config.get(name, {})
         return service.plan_cn_exit_rules(
@@ -582,11 +603,16 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             candidate = Path(replay) / "cn_ensemble_selected.csv"
             if candidate.is_file():
                 selection_path = str(candidate)
+        # 成本/整手等不在这里兜底：None 表示"用 config/execution_assumptions_cn.json 的统一假设"，
+        # 免得 TOML 里的一个默认值和共享假设文件悄悄漂移（2026-10-09 统一）。
         return service.run_cn_paper_account(
             selection_path=selection_path, days=int(layer.get("days", 756)),
             account_id=layer.get("account_id", "cn_default"), strategy_version=layer.get("strategy_version", "v1"),
-            initial_capital=float(layer.get("initial_capital", 1_000_000.0)), commission_bps=float(layer.get("commission_bps", 5.0)),
-            slippage_bps=float(layer.get("slippage_bps", 5.0)), lot_size=int(layer.get("lot_size", 100)), output_dir=layer.get("output_dir", "output/paper_trading"),
+            initial_capital=float(layer.get("initial_capital", 1_000_000.0)),
+            commission_bps=layer.get("commission_bps"), slippage_bps=layer.get("slippage_bps"),
+            lot_size=layer.get("lot_size"),
+            assumptions=layer.get("assumptions"), enforce_frictions=bool(layer.get("enforce_frictions", True)),
+            output_dir=layer.get("output_dir", "output/paper_trading"),
         )
     if name == "graph_temporal":
         layer = config[name]
@@ -1046,7 +1072,8 @@ def main() -> int:
         print(f"[env] 已从 scheduler_env.sh 补齐 {len(filled_env)} 个变量: {sorted(filled_env)[:6]}…", flush=True)
     parser = argparse.ArgumentParser(description="Run CN data, feature, model, OOS evaluation and selection stages.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="TOML pipeline configuration")
-    parser.add_argument("--stage", choices=["all", "daily_bars", "moneyflow", "cyq_chips", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_diagnostics", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"], default="all")
+    parser.add_argument("--stage", choices=["all", "daily_bars", "moneyflow", "cyq_chips", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_diagnostics", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison",
+                          "arm_selection"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
     parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
     parser.add_argument("--trade-date", default=None,
@@ -1075,7 +1102,8 @@ def main() -> int:
     started = datetime.now().isoformat(timespec="seconds")
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
     data_health = dict((config.get("pipeline") or {}).get("data_health") or {})
-    stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison"] if args.stage == "all" else [args.stage]
+    stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison",
+                   "arm_selection"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
     pipeline_config = config["pipeline"]

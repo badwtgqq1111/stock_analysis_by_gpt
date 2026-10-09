@@ -224,11 +224,18 @@ class KlineService:
             }
 
         df = _enrich_dataframe(df)
-        if with_signals:
+        # A 股：本仓库没有 CN 的模型信号文件，_compute_lgbm_signals 会退化成"均线+放量"启发式规则。
+        # 那种规则不是模型输出，展示出来会被误读成"模型买入信号"，所以 CN 一律不出信号。
+        from backend.services.data_service import CN_CODE
+        is_cn = bool(CN_CODE.fullmatch(str(code).strip().upper()))
+        if with_signals and not is_cn:
             df = _compute_lgbm_signals(df, code)
+        elif is_cn:
+            df["buy_signal"] = False
+            df["sell_signal"] = False
 
         signal_stats = None
-        if with_signals:
+        if with_signals and not is_cn:
             buy_points = df[df["buy_signal"] == True]  # noqa: E712
             sell_points = df[df["sell_signal"] == True]  # noqa: E712
             signal_stats = _build_signal_stats(df, buy_points, sell_points)
@@ -236,6 +243,11 @@ class KlineService:
         chips = None
         if with_chips:
             chips = _compute_chip_distribution(df)
+
+        from factor_engine.trend_stage import classify_frame
+        from backend.services.data_service import cn_stock_profile
+        stage = classify_frame(df)
+        profile = cn_stock_profile(code)
 
         from backend.services.data_service import get_stock_name
         name = get_stock_name(code) or ""
@@ -251,6 +263,8 @@ class KlineService:
             "data": _df_to_ohlcv_list(df),
             "signal_stats": signal_stats,
             "chips": chips,
+            "stage": stage,
+            "profile": profile,
             "latest": {
                 "close": round(latest_close, 3),
                 "change_pct": round(latest_chg, 2),

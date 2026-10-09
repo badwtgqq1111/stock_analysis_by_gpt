@@ -7319,7 +7319,12 @@ class MarketDataService:
         outcomes = evaluate_selection_outcomes(selections, bars, horizons=horizons, cost_bps=cost_bps, benchmark=benchmark)
         return write_outcome_report(outcomes, output_dir=output_dir)
 
-    def run_cn_paper_account(self, *, selection_path, days=756, account_id="cn_default", strategy_version="v1", initial_capital=1_000_000.0, commission_bps=5.0, slippage_bps=5.0, lot_size=100, output_dir="output/paper_trading"):
+    def run_cn_paper_account(self, *, selection_path, days=756, account_id="cn_default", strategy_version="v1", initial_capital=1_000_000.0, commission_bps=None, slippage_bps=None, lot_size=None, assumptions=None, enforce_frictions=True, output_dir="output/paper_trading"):
+        """模拟盘（唯一的前向口径）。
+
+        ``commission_bps`` / ``slippage_bps`` / ``lot_size`` 传 None 表示"用统一执行假设"
+        （config/execution_assumptions_cn.json，与 L3 回放共用）；显式传值才覆盖。
+        """
         selections = pd.read_csv(selection_path)
         end_ts = pd.to_datetime(datetime.now().date()).normalize()
         start_ts = end_ts - pd.Timedelta(days=int(days))
@@ -7332,6 +7337,7 @@ class MarketDataService:
             selections, bars, account_id=account_id, strategy_version=strategy_version,
             initial_capital=initial_capital, commission_bps=commission_bps,
             slippage_bps=slippage_bps, lot_size=lot_size,
+            assumptions=assumptions, enforce_frictions=enforce_frictions,
         )
         return {**persist_paper_account(result, output_dir=output_dir), "warehouse": self.warehouse.upsert_paper_account_frames(result)}
 

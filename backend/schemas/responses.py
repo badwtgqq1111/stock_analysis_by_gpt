@@ -52,6 +52,24 @@ class OhlcvLatest(BaseModel):
     total_bars: int
 
 
+class StockProfile(BaseModel):
+    code: str
+    name: str = ""
+    board: str = ""
+    industry: str = ""
+    list_date: str | None = None
+    list_status: str = ""
+    listed_days: int | None = None
+    flags: list[str] = []
+
+
+class TrendStage(BaseModel):
+    stage: str
+    label: str
+    evidence: str
+    metrics: dict
+
+
 class OhlcvResponse(BaseModel):
     code: str
     name: str
@@ -59,6 +77,8 @@ class OhlcvResponse(BaseModel):
     signal_stats: SignalStats | None = None
     chips: ChipData | None = None
     latest: OhlcvLatest
+    stage: TrendStage | None = None
+    profile: StockProfile | None = None
 
 
 # ─── Selection ───
@@ -83,6 +103,9 @@ class SelectionResponse(BaseModel):
     rows: list[dict]
     columns: list[SelectionColumn]
     empty: bool = False
+    # ── 多数据源（2026-10-08）──
+    source: dict | None = None          # {key,label,note,files,trade_date,row_count,supports_shap}
+    available: list[dict] = []          # 各源可用性与文件指纹，供页面展示与切换
 
 
 class ShapFeature(BaseModel):

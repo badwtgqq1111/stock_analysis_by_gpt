@@ -1,37 +1,525 @@
+/* ===========================================================================
+   设计系统 —— 单一来源（single source of truth）
+   ---------------------------------------------------------------------------
+   为什么收在这里：2026-10-08 前端盘点时，`.page` / `.page-title` / `.data-table`
+   在 6~7 个页面里各写了一遍、`.empty-state` 4 遍、柱状图样式 3 遍。
+   页面只写"这个页面特有的布局"，其余全部复用下面的 token 与组件类。
+
+   约定：
+     - 令牌（--x）只在这里定义，页面里不允许写死颜色/圆角/间距。
+     - 组件类（.card/.data-table/.btn/...）是**全局**的，页面不要再 scoped 覆写。
+     - 页面里只用 .page / .page-title 做骨架，其余交给 <ui/*> 组件。
+   =========================================================================== */
+
 :root {
+  /* 底色与层次 */
   --bg-primary: #060606;
   --bg-card: #11161d;
+  --bg-elevated: #161b23;
   --bg-input: #1a1d24;
+  --bg-table-head: #1a1a2e;
+
+  /* 文本 */
   --text-primary: #e0e0e0;
   --text-muted: #8a8f97;
+  --text-dim: #5f6672;
+
+  /* 线条 */
   --border-color: #2a2e39;
+  --border-soft: rgba(42, 46, 57, 0.5);
+
+  /* 语义色（A 股习惯：红涨绿跌，不要改） */
   --accent-up: #ef476f;
   --accent-down: #00d4aa;
   --accent-gold: #ffd166;
   --accent-orange: #ff9f1c;
   --accent-blue: #118ab2;
+  --accent-purple: #9d4edd;
+
+  /* 状态色（统一 badge / tag 用） */
+  --state-ok: var(--accent-down);
+  --state-warn: var(--accent-orange);
+  --state-bad: var(--accent-up);
+  --state-info: var(--accent-blue);
+
+  /* 间距阶梯 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* 圆角 */
+  --r-1: 3px;
+  --r-2: 4px;
+  --r-3: 6px;
+  --r-4: 10px;
+  --r-pill: 999px;
+
+  /* 字号 */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+
+  /* 等宽字体（代码/数字对齐） */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 阴影与层级 */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --z-nav: 20;
+  --z-overlay: 50;
+
+  /* 布局 */
+  --content-max: 1440px;
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
 
 body {
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', sans-serif;
   font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
-#app {
-  min-height: 100vh;
-  padding: 16px 20px;
+#app { min-height: 100vh; }
+
+input, select, textarea, button { font-family: inherit; font-size: var(--fs-md); }
+
+/* 统一滚动条（暗色下默认滚动条很突兀） */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2b3038; border-radius: var(--r-pill); border: 2px solid var(--bg-primary); }
+::-webkit-scrollbar-thumb:hover { background: #3a4049; }
+
+/* ── 页面骨架 ─────────────────────────────────────────────────────────── */
+.page { max-width: var(--content-max); margin: 0 auto; }
+.page-title { font-size: var(--fs-xl); font-weight: 700; margin-bottom: var(--sp-2); }
+.hint { color: var(--text-muted); font-size: var(--fs-sm); margin-bottom: var(--sp-3); line-height: 1.6; }
+.hint code, code {
+  font-family: var(--font-mono); font-size: 0.92em;
+  background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--r-1); padding: 0 4px;
+}
+.toolbar { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-3); flex-wrap: wrap; }
+.two-col { display: flex; gap: var(--sp-5); align-items: flex-start; }
+.col-main { flex: 1; min-width: 0; }
+.col-side { width: 380px; flex-shrink: 0; }
+hr { border: 0; border-top: 1px solid var(--border-color); margin: var(--sp-4) 0; }
+
+/* ── 卡片 / 面板 ─────────────────────────────────────────────────────── */
+.card, .panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--r-3);
+  padding: var(--sp-3) var(--sp-4);
+}
+.panel { margin-bottom: var(--sp-4); }
+.card + .card { margin-top: var(--sp-3); }
+.panel > h6, .card > h6, .section-title {
+  font-size: var(--fs-md); color: var(--text-muted);
+  font-weight: 600; margin-bottom: var(--sp-2);
 }
 
-input, select, button {
-  font-family: inherit;
-  font-size: 13px;
+/* ── 按钮 ─────────────────────────────────────────────────────────────── */
+.btn, .btn-primary, .btn-ghost, .btn-danger {
+  border-radius: var(--r-2); padding: 6px 14px; cursor: pointer;
+  border: 1px solid var(--border-color); background: var(--bg-input);
+  color: var(--text-primary); transition: all 0.15s; white-space: nowrap;
+}
+.btn:hover, .btn-ghost:hover { border-color: var(--text-dim); }
+.btn-primary {
+  background: var(--accent-gold); color: #23262e; border: 0; font-weight: 600;
+  padding: 7px 18px;
+}
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-ghost { background: transparent; color: var(--text-muted); }
+.btn-danger { color: var(--state-bad); border-color: var(--state-bad); background: transparent; }
+.btn:disabled, .btn-primary:disabled, .btn-ghost:disabled, .btn-danger:disabled {
+  opacity: 0.45; cursor: not-allowed;
+}
+.btn-sm { padding: 3px 10px; font-size: var(--fs-sm); }
+
+/* ── 表格 ─────────────────────────────────────────────────────────────── */
+.data-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+.data-table th {
+  background: var(--bg-table-head); color: var(--text-muted);
+  padding: 6px var(--sp-2); text-align: right; font-weight: 600;
+  border-bottom: 1px solid var(--border-color); white-space: nowrap;
+  position: sticky; top: 0; z-index: 1;
+}
+.data-table td {
+  padding: 5px var(--sp-2); text-align: right;
+  border-bottom: 1px solid var(--border-soft); white-space: nowrap;
+}
+.data-table th:first-child, .data-table td:first-child,
+.data-table th.text-left, .data-table td.text-left { text-align: left; }
+.data-table tbody tr { transition: background 0.1s; }
+.data-table tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+.data-table tbody tr.selected, .data-table tbody tr.current { background: rgba(255, 209, 102, 0.08); }
+.data-table tbody tr.clickable { cursor: pointer; }
+.data-table td.wrap, .data-table th.wrap { white-space: normal; }
+.table-scroll { overflow: auto; max-height: 560px; }
+
+/* ── 徽标 / 标签 / 胶囊 ───────────────────────────────────────────────── */
+.tag, .badge {
+  display: inline-block; font-size: 10px; padding: 1px 6px;
+  border-radius: var(--r-pill); border: 1px solid var(--border-color);
+  color: var(--text-muted); white-space: nowrap;
+}
+.tag.ok, .badge.ok { color: var(--state-ok); border-color: var(--state-ok); }
+.tag.warn, .badge.warn { color: var(--state-warn); border-color: var(--state-warn); }
+.tag.bad, .badge.bad { color: var(--state-bad); border-color: var(--state-bad); }
+.tag.info, .badge.info { color: var(--state-info); border-color: var(--state-info); }
+.tag.gold, .badge.gold { color: var(--accent-gold); border-color: var(--accent-gold); }
+.pill-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.pill {
+  font-size: var(--fs-xs); color: var(--text-muted); background: var(--bg-card);
+  border: 1px solid var(--border-color); border-radius: var(--r-pill); padding: 2px 10px;
+}
+.pill b { color: var(--text-primary); }
+
+/* ── Tabs ─────────────────────────────────────────────────────────────── */
+.tabs { display: flex; gap: 6px; margin-bottom: var(--sp-2); flex-wrap: wrap; }
+.tab {
+  background: transparent; color: var(--text-muted); border: 1px solid var(--border-color);
+  border-radius: var(--r-2); padding: 4px 12px; font-size: var(--fs-sm); cursor: pointer;
+  transition: all 0.15s;
+}
+.tab:hover { color: var(--text-primary); }
+.tab.active { color: var(--accent-gold); border-color: var(--accent-gold); background: rgba(255, 209, 102, 0.08); }
+
+/* ── 通用语义文本 ─────────────────────────────────────────────────────── */
+.up { color: var(--accent-up); }     /* A 股口径：涨=红 */
+.down { color: var(--accent-down); }
+.ok { color: var(--state-ok); }       /* 语义色：正常/成功=绿，与"涨"无关 */
+.bad { color: var(--state-bad); }
+.warn-text { color: var(--accent-orange); }
+.muted { color: var(--text-muted); }
+.dim { color: var(--text-dim); }
+.mono { font-family: var(--font-mono); }
+.link { color: var(--accent-gold); cursor: pointer; }
+.link:hover { text-decoration: underline; }
+.tiny { font-size: var(--fs-xs); }
+.null { color: var(--text-dim); }
+
+/* ── 状态块（loading / empty / error 三合一）─────────────────────────── */
+.state-block {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--sp-2); padding: 48px var(--sp-4); text-align: center;
+  color: var(--text-muted); font-size: var(--fs-md);
+  border: 1px dashed var(--border-color); border-radius: var(--r-3);
+}
+.state-block.error { color: var(--state-bad); border-color: var(--state-bad); }
+.state-block .state-title { font-weight: 600; }
+.state-block .state-detail { font-size: var(--fs-sm); max-width: 720px; line-height: 1.6; color: var(--text-muted); white-space: pre-wrap; }
+.state-block .state-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-1); }
+
+.spinner {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid var(--border-color); border-top-color: var(--accent-gold);
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-elevated) 50%, var(--bg-card) 75%);
+  background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: var(--r-2);
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* ── 统计块 ───────────────────────────────────────────────────────────── */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--sp-3); }
+.stat-tile {
+  background: var(--bg-card); border: 1px solid var(--border-color);
+  border-radius: var(--r-3); padding: var(--sp-2) var(--sp-3);
+}
+.stat-tile .stat-label { font-size: var(--fs-xs); color: var(--text-muted); margin-bottom: 2px; }
+.stat-tile .stat-value { font-size: var(--fs-2xl); font-weight: 700; line-height: 1.15; }
+.stat-tile .stat-sub { font-size: var(--fs-xs); color: var(--text-dim); margin-top: 2px; }
+
+/* ── 横向条形图（评分/重要性/SHAP 共用）──────────────────────────────── */
+.bar-chart { padding: 4px 0; }
+.bar-row { display: flex; align-items: center; gap: var(--sp-1); height: 24px; font-size: var(--fs-xs); }
+.bar-label {
+  width: 60px; text-align: right; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto;
+}
+.bar-track {
+  flex: 1; height: 12px; background: rgba(42, 46, 57, 0.5);
+  border-radius: var(--r-1); position: relative; overflow: hidden;
+}
+.bar-fill { height: 100%; border-radius: var(--r-1); min-width: 2px; transition: width 0.2s; }
+.bar-fill.pos, .bar-fill.up { background: var(--accent-up); }
+.bar-fill.neg, .bar-fill.down { background: var(--accent-down); }
+.bar-fill.neutral { background: var(--accent-gold); }
+.bar-fill.info { background: var(--accent-blue); }
+.bar-value { width: 60px; text-align: left; color: var(--text-muted); flex: 0 0 auto; }
+
+/* ── 键值对 ───────────────────────────────────────────────────────────── */
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px var(--sp-3); font-size: var(--fs-sm); }
+.kv dt { color: var(--text-muted); }
+.kv dd { color: var(--text-primary); }
+
+/* ── 表单行 ───────────────────────────────────────────────────────────── */
+.form-row { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.form-row label { display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-xs); color: var(--text-muted); }
+.form-row label.chk { flex-direction: row; align-items: center; gap: 6px; }
+.form-row select, .form-row input {
+  background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--r-2);
+  color: var(--text-primary); padding: 6px var(--sp-2); font: inherit; min-width: 200px;
+}
+
+/* ── 日志框 ───────────────────────────────────────────────────────────── */
+.log-box { border: 1px solid var(--border-color); border-radius: var(--r-3); background: var(--bg-card); margin-bottom: var(--sp-3); }
+.log-head {
+  display: flex; justify-content: space-between; padding: 6px var(--sp-3);
+  font-size: var(--fs-xs); color: var(--text-muted); border-bottom: 1px solid var(--border-color);
+}
+.log {
+  margin: 0; padding: var(--sp-2) var(--sp-3); max-height: 300px; overflow: auto;
+  font-size: var(--fs-xs); font-family: var(--font-mono);
+  white-space: pre-wrap; color: var(--text-primary);
+}
+
+/* ── 可访问性 ─────────────────────────────────────────────────────────── */
+:focus-visible { outline: 2px solid var(--accent-gold); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ===========================================================================
+   兼容层（legacy aliases）
+   ---------------------------------------------------------------------------
+   收敛过程中保留的旧类名，避免一次性改动 3,000+ 行模板引发回归。
+   新代码请用上面的规范名；这一节只做映射，不再新增语义。
+   盘点脚本证据：这些类原先在 6~7 个页面里各写一份（见 artifacts/frontend_replan/）。
+   =========================================================================== */
+
+.empty, .empty-state { color: var(--text-muted); font-size: var(--fs-sm); }
+.empty-state { padding: 48px 0; text-align: center; }
+.controls { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-3); flex-wrap: wrap; }
+.controls select { padding: 6px 10px; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: var(--r-2); }
+.desc { font-size: var(--fs-sm); color: var(--text-muted); margin-bottom: var(--sp-3); }
+
+/* 条形图别名的旧写法（.bar-val / .bar-ic / .bar-strong …） */
+.bar-val { width: 60px; text-align: left; color: var(--text-muted); flex: 0 0 auto; }
+.bar-val.up { color: var(--accent-up); }
+.bar-val.down { color: var(--accent-down); }
+.bar-fill.bar-ic, .bar-fill.info { background: var(--accent-blue); }   /* 历史上写的 --accent-green 从未定义过 */
+.bar-fill.bar-strong, .bar-fill.pos, .bar-fill.up { background: var(--accent-up); }
+.bar-fill.bar-normal { background: var(--accent-gold); }
+.bar-fill.bar-up { background: var(--accent-up); }
+.bar-fill.bar-down { background: var(--accent-down); }
+
+/* 指标卡（组合回测） */
+.metric-cards { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-4); }
+.metric-card {
+  flex: 1; min-width: 140px; padding: var(--sp-3) var(--sp-4); border-radius: var(--r-3);
+  background: var(--bg-card); border: 1px solid var(--border-color); text-align: center;
+}
+.metric-title { font-size: var(--fs-xs); color: var(--text-muted); margin-bottom: var(--sp-1); }
+.metric-value { font-size: var(--fs-2xl); font-weight: 700; }
+.card-success .metric-value { color: var(--accent-up); }
+.card-danger .metric-value { color: var(--accent-down); }
+.card-primary .metric-value { color: var(--accent-blue); }
+.card-warning .metric-value { color: var(--accent-gold); }
+
+/* 分页条（选股结果） */
+.pagination {
+  display: flex; gap: var(--sp-2); align-items: center; justify-content: center;
+  padding: var(--sp-2) 0; font-size: var(--fs-sm);
+}
+.pagination button {
+  padding: 3px 10px; background: var(--bg-input); color: var(--text-primary);
+  border: 1px solid var(--border-color); border-radius: var(--r-1); cursor: pointer;
+}
+.pagination button:disabled { opacity: 0.4; cursor: default; }
+
+/* 运行状态（流水线 / 因子挖掘） */
+.status { font-size: var(--fs-sm); color: var(--text-muted); }
+.status.running { color: var(--accent-gold); }
+.status.done { color: var(--state-ok); }
+.status.failed { color: var(--state-bad); }
+
+/* 趋势阶段色板（K 线页 + 选股日历共用；.stage- 前缀后面拼 stage key） */
+.stage-bar { display: flex; align-items: baseline; gap: var(--sp-2); margin: 4px 0 var(--sp-2); font-size: var(--fs-sm); }
+.stage-chip { padding: 2px 10px; border-radius: var(--r-pill); border: 1px solid var(--border-color); white-space: nowrap; }
+.stage-uptrend { color: var(--accent-up); border-color: var(--accent-up); }
+.stage-downtrend { color: var(--accent-down); border-color: var(--accent-down); }
+.stage-top_risk { color: var(--accent-orange); border-color: var(--accent-orange); }
+.stage-bottom_reversal { color: var(--accent-blue); border-color: var(--accent-blue); }
+.stage-mid_trend { color: var(--text-muted); }
+.stage-why { color: var(--text-muted); }
+
+/* 档案标记小旗（已退市 / ST / 次新 …） */
+.flag {
+  font-size: 10px; padding: 0 5px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-color); margin-left: 4px;
+}
+.flag-bad { color: var(--state-bad); border-color: var(--state-bad); }
+.flag-warn { color: var(--state-warn); border-color: var(--state-warn); }
+.flag-info { color: var(--text-muted); }
+
+/* 图表容器 */
+.chart-box { min-height: 260px; width: 100%; }
+.chart-area { margin-bottom: var(--sp-3); }
+.chart-row { display: flex; position: relative; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+.title-bar { font-size: var(--fs-md); margin-bottom: 6px; color: var(--text-muted); }
+.title-bar b { color: var(--text-primary); }
+.bar-count { color: var(--text-dim); font-size: var(--fs-xs); }
+.profile { color: var(--text-muted); font-size: var(--fs-xs); margin-left: 6px; }
+
+/* 表单网格（因子挖掘） */
+.form-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: var(--sp-3); }
+.form-grid label { display: flex; flex-direction: column; gap: 5px; font-size: var(--fs-sm); color: var(--text-muted); }
+.form-grid label.full { grid-column: 1 / -1; }
+.form-grid label.inline-check { flex-direction: row; align-items: center; gap: 6px; }
+.form-grid input, .form-grid select, .form-grid textarea {
+  background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--r-2);
+  color: var(--text-primary); padding: 6px var(--sp-2); font: inherit;
+}
+
+/* 对话气泡（因子挖掘） */
+.chat {
+  max-height: 44vh; overflow-y: auto; padding: var(--sp-2);
+  background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--r-3);
+}
+.msg { display: flex; margin-bottom: var(--sp-2); }
+.msg.assistant { justify-content: flex-end; }
+.msg.error { justify-content: flex-start; }
+.bubble {
+  max-width: 88%; padding: 6px 10px; border-radius: var(--r-3); white-space: pre-wrap;
+  word-break: break-word; font-family: var(--font-mono); font-size: var(--fs-sm);
+  background: #1e222b; color: var(--text-muted);
+}
+.msg.assistant .bubble { background: #23304a; color: #dfe8ff; }
+.msg.error .bubble { background: #3a1f24; color: #ffb3b3; }
+.expr { font-family: var(--font-mono); color: var(--text-muted); max-width: 360px; }
+td.dir { max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 1100px) {
+  .form-grid { grid-template-columns: 1fr 1fr; }
+  /* 关键：`.two-col` 原本是 `align-items: flex-start`（横排时用于顶对齐，没问题）。
+     一旦改成 column，flex-start 就变成"交叉轴不拉伸"，子项宽度退化成 fit-content ——
+     实测 `.col-main` 被里面的宽表撑到 1032px（手机 390px 视口下），整页横向溢出。
+     所以翻转方向时必须同时把交叉轴改回 stretch。 */
+  .two-col { flex-direction: column; align-items: stretch; }
+  .col-side { width: 100%; }
+}
+
+.toggle-label { font-size: var(--fs-sm); color: var(--text-muted); }
+
+/* ===========================================================================
+   移动端（手机）适配
+   ---------------------------------------------------------------------------
+   背景：原样式只在 1100px 处做了断点（把两列变一列），但在手机上真正的问题是
+   **宽表横向溢出**——7 个页面里有 25 张 `.data-table`，其中 24 张外面没有滚动容器，
+   手机上会把整个页面撑出屏幕、右侧内容看不到也没法滑。
+   做法：
+     1. 容器级滚动：让"直接包含表格的容器"自己成为横向滚动容器。
+        优先用 `:has()`（Safari 15.4+/Chrome 105+）；再补一条 `.panel/.card` 兜底，
+        覆盖那些"表格直接放在 panel 里"的页面（本仓库绝大多数页面都是这个结构）。
+     2. 表格不压缩：`.data-table td` 本来就是 `white-space: nowrap`，
+        所以表格会自然撑到内容宽度、由父容器滚动，而不是把列挤成一列一个字。
+     3. 触摸目标：按钮/tab 最小高度 36px（手指点得中）。
+   =========================================================================== */
+/* 表格容器横滚 —— **全宽度生效**，不放在媒体查询里。
+   理由：宽表在桌面上同样会撑出页面（实测 1280×900 时选股日历/自动化页各溢出 8~15px），
+   而"表格在自己的面板里横滚、页面本身不横滚"才是正确行为。
+   安全性：`.panel/.card` 都是 `height: auto`，`overflow: auto` 不会产生纵向滚动条
+   （没有固定高度就没有纵向溢出），只是把横向溢出收进容器。
+   覆盖范围：本仓库 25 张 `.data-table` 里 24 张的直接父容器是 `.panel` 或普通 `div`，
+   所以 `.panel/.card` + `div:has(> .data-table)` 两条就覆盖全了。 */
+.panel, .card { overflow-x: auto; }
+div:has(> .data-table) { overflow-x: auto; }
+
+@media (max-width: 1100px) {
+  .panel, .card, div:has(> .data-table) { -webkit-overflow-scrolling: touch; }
+  .table-scroll { max-height: none; }
+}
+
+@media (max-width: 720px) {
+  :root { --content-max: 100%; }
+
+  .app-main { padding: var(--sp-3) var(--sp-3) var(--sp-6); }
+  .page-title { font-size: var(--fs-lg); }
+
+  /* 2) 表格：保留行高，去掉贴边挤压 */
+  .data-table { font-size: var(--fs-xs); }
+  .data-table th, .data-table td { padding: 6px 6px; }
+
+  /* 3) 栅格改单列/双列 */
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+  .stat-tile .stat-value { font-size: var(--fs-xl); }
+  .metric-cards { gap: var(--sp-2); }
+  .metric-card { min-width: 118px; padding: var(--sp-2); }
+  .two-col { gap: var(--sp-3); }
+  .col-side { width: 100%; }
+
+  /* 4) 触摸目标 */
+  .btn, .btn-primary, .btn-ghost, .btn-danger, .tab { min-height: 36px; }
+  .btn-sm { min-height: 30px; }
+
+  /* 5) Tabs 一行放不下时横向滚动，而不是换行把内容顶下去 */
+  .tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+  .tab { flex: 0 0 auto; }
+
+  /* 6) 条状图标签窄一点，给柱子留空间 */
+  .bar-label { width: 48px; }
+  .bar-value { width: 48px; }
+
+  /* 6b) 页头：手机上把「说明文字 + 操作按钮」从横排改成竖排。
+         横排时 flex 会让右侧按钮占位、把说明文字挤成一列几个字（实测小红书宽度只剩 2~4 字/行）。 */
+  .page-header { flex-direction: column; align-items: stretch; gap: var(--sp-2); }
+  .ph-actions { margin-left: 0; flex-wrap: wrap; }
+
+  /* 7) 弹层/提示不贴边 */
+  .global-banner { margin: var(--sp-2) var(--sp-3) 0; }
+
+  /* 8) 键值对改两行 */
+  .kv { grid-template-columns: 1fr; gap: 0; }
+  .kv dt { margin-top: var(--sp-1); }
+}
+
+/* 更窄（iPhone SE 一排） */
+@media (max-width: 380px) {
+  .stat-grid { grid-template-columns: minmax(0, 1fr); }
+  .app-main { padding: var(--sp-2) var(--sp-2) var(--sp-5); }
+}
+
+/* ===========================================================================
+   手机横屏（宽 ~844px × 高 ~390px）
+   ---------------------------------------------------------------------------
+   问题：横屏宽度超过 720px，命中不了上面的手机断点；但高度只有 ~390px，
+   于是竖屏那套「导航换行」在横屏下会占掉 **81px（21% 的屏高）**（实测 844×390）。
+   判据按**高度**给：`max-height: 500px` 基本只会命中手机横屏（平板横屏也受益）。
+   =========================================================================== */
+@media (max-height: 500px) and (max-width: 1100px) {
+  /* 1) 导航规则放在 App.vue 的 scoped 样式里 —— 见那边的注释：
+     `.app-nav` 的 `flex-wrap: wrap` 声明在 scoped 块中（选择器带 [data-v-xxx]，优先级更高），
+     写在全局 main.css 里会被它压过去，横屏改不动。 */
+
+  /* 2) 纵向空间紧张：页头回到横排，说明文字最多两行 */
+  .app-main { padding: var(--sp-2) var(--sp-3) var(--sp-4); }
+  .page-header { flex-direction: row; align-items: center; gap: var(--sp-2); }
+  .ph-actions { margin-left: auto; }
+  .page-title { font-size: var(--fs-lg); margin-bottom: 0; }
+  .page-header .hint {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; margin-top: 2px;
+  }
+  .panel, .card { padding: var(--sp-2) var(--sp-3); }
+  .group { margin-bottom: var(--sp-2); }
+  .stat-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 }

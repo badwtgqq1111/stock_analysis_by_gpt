@@ -1,0 +1,32 @@
+{
+  "_doc": "A 股执行假设的**唯一来源**。模拟盘(factor_engine/portfolio/paper_account.py)与日频回放(scripts/replay_daily_execution.py)都从这里读；改假设只改这一份，scripts/execution_parity_check.py 会核对两边实际生效值。",
+  "version": "cn-exec-2026-10-09",
+  "lot_size": 100,
+  "costs": {
+    "commission_bps": 2.5,
+    "slippage_bps": 3.0,
+    "stamp_tax_bps_sell": 10.0,
+    "_note": "佣金万2.5（双向）+ 滑点万3（双向）+ 印花税千1（仅卖出）。与「小市值轮动」原文口径一致；旧模拟盘用的是 5bp+5bp 且无印花税，属口径不一致，2026-10-09 统一。"
+  },
+  "price_limit": {
+    "main_board": 0.1,
+    "chinext_star": 0.2,
+    "chinext_star_from": "2020-08-24",
+    "basis": "execution_price_vs_prev_close",
+    "tolerance": 0.005,
+    "on_limit_up": "no_buy",
+    "on_limit_down": "no_sell",
+    "no_sell_on_limit_up": true,
+    "_note": "创业板/科创板 20%（创业板自 2020-08-24 起），其余 10%。basis=执行价/前收-1 与上限比较（两套引擎同一公式，只是「执行价」不同：模拟盘=次日开盘，回放=决策日收盘）。ST 5% 未建模（需要 PIT 名称变更史）。"
+  },
+  "suspension": {
+    "buy": "skip",
+    "sell": "hold_last_price",
+    "delist_after_missing_sessions": 20
+  },
+  "fill_reference": {
+    "paper_account": "next_session_open",
+    "replay": "decision_close",
+    "_note": "已知差异：两套引擎的成交参考价不同（这是设计差异，不在本轮统一）。其余假设（成本/整手/涨跌停/停牌/退市）已对齐。"
+  }
+}

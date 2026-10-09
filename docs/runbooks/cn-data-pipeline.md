@@ -210,7 +210,12 @@ uv run python scripts/refresh_cn_delisted_daily.py
 
 1. 退市股只在 `include_delisted = true` 且 `assets/data/meta/cn_delisted_daily.parquet` 存在时并入（当前 209 只 / 39.2 万行；中继清单 290 只，80 只早于 2014 年退市无数据）；对更早年份与老三板段仍无覆盖。
 2. 无 PIT 指数成分，股票池用沪深主板或深市 002/003 代理。
-3. ST 仍是用价格行为反推（5% 板识别，日均约 257 只），不是交易所公告口径；真实 ST 名单需 `namechange` 数据（中继当前不支持）。
+3. ST 口径**已升级为交易所公告口径的 PIT 版**（2026-10-08）：`namechange` 历史已落库
+   （`assets/data/meta/cn_stock_namechange.parquet`，13,890 行 / 5,915 只 / 1990-12 起），
+   `factor_engine/universe_pit.py` 可按 as-of 日期还原当时名称。踩过的坑：中继两个网关对
+   `namechange` **都不支持 bulk**（带 `start_date`/`end_date` 一律 HTTP 400），逐 code 拉又有上游频控
+   （约 88% 成功率）；真正可用的源是**官方 Pro**（`TUSHARE_TOKEN`，`limit`/`offset` 分页，3 页 0.7 秒拿全）。
+   该研究线路（`strategies.xiaomkt_rotation`）目前仍用 5% 板价格反推（日均约 257 只），尚未切到 PIT 名单。
 4. 市值来自稀疏估值快照的重建，且只有日线，10:00 成交用开盘价近似。
 5. 退市清算价按最后收盘价（可调 `delist_haircut`），老三板回收率未标定。
 
@@ -484,6 +489,87 @@ uv run python scripts/run_cn_pipeline.py --stage paper_account
 当前最近一次结果写入 `output/results_cn/cn_ensemble_selected.csv`：3 只持仓目标权重合计 95%，纸面账户记录在 `output/paper_trading/account/`。由于信号日期为最近交易日且后续行情尚未满观察期，`paper_outcomes` 可能全部为 `pending`；待未来交易日到达后重复执行即可自动成熟并更新统计。
 
 ## 可选研究阶段
+
+研究手臂选股（2026-10-07 新增，`arm_selection` 阶段）：
+
+```bash
+# 用 L3 里最强的那只手臂（base_v1：v1 面板 25 列的 IC 加权合成）选"最后一天"的票
+uv run python scripts/run_cn_pipeline.py --stage arm_selection
+# 或直接跑脚本（可选 --arm llm_new --as-of 2026-09-30）
+uv run python scripts/select_latest_via_arm.py
+# 产物：output/results_cn/arm_latest_selection.{csv,json}
+#   域 = 沪深主板 + 上市满 1 年 + 市值分位 ≤40% + 剔除 ST/退市风险（按当前名称，非 PIT）
+#   候选 10 → 持仓 5 等权；同时给出 45,000 元账户下的整手可买手数
+```
+
+> 这是**研究手臂**，不替代 `preselection → pk`（那条链路用 LightGBM/Transformer 模型分数）；
+> 产物与生产名单分开存放，便于对照。依据：`P1_25 §9/§15/§19`（base_v1 在逐笔回放里 30.3%/Sharpe 1.60，
+> 而 LLM sleeve 与止损/择时规则都是负贡献）。
+
+前端流水线控制台（2026-10-07 新增）：`http://127.0.0.1:8000/#/pipeline`
+
+选股日历 / 历史业绩（2026-10-07 新增）：`http://127.0.0.1:8000/#/calendar`
+
+```bash
+# 建/刷新选股台账（合并三个历史源 + 计算 1/5/10/20 日前瞻收益与全市场等权超额）
+uv run python scripts/build_selection_ledger.py
+# 输出 output/results_cn/selection_ledger.{parquet,csv} + selection_ledger_by_date.csv + _summary.json
+```
+
+三个历史源（页面里可切换，口径不同别混看）：
+`notify` = `results_cn/feishu_<date>.json` 当日最终名单；`preselected` = `selection_snapshots/<date>/*/preselected.csv`
+归档候选池（跨度最长）；`survey_raw` / `survey_gate` = 研究回看名单。对应 API：`/api/calendar/{summary,month,day,performance}`。
+
+- **阶段概览**：按 `[pipeline].stages` 标出 configured 阶段，并显示每个阶段关键产物的存在性 / 行数 /
+  大小 / 更新时间（例：`preselection → output/results_cn/cn_ensemble_preselected.csv`、
+  `pk → cn_ensemble_selected.csv`）。默认只显示"已配置 / 会覆盖 / 有产物"的阶段，可展开全部 30 个。
+- **preselect → PK 结果**：候选池与最终名单两张表 + **进 / 出差异**（新进 PK / 候选池落选 / 保留），
+  以及渠道、腿、策略、约束、model_score 分布。数据直接读 `output/results_cn/*.csv`，不重算。
+- **最近流水线报告**：`output/pipeline_reports/cn_pipeline_*.json` 的开始/结束/耗时/结果/失败阶段/配置。
+- **触发入口**：选阶段 → 运行（子进程 `scripts/run_cn_pipeline.py --stage X`），stdout 流式回显、
+  同一时刻只允许一个；`preselection / pk / selection / sleeve_targets / paper_* / exits / all`
+  会覆盖 `output/results_cn/*`，**必须勾选确认**才会启动（后端 400 拦截）。
+
+对应 API：`GET /api/pipeline/overview`、`GET /api/pipeline/selection`、
+`POST /api/pipeline/runs`、`GET /api/pipeline/runs[/{id}]`。
+
+LLM 因子挖掘 + 因子验真（2026-10-07 新增，详见 `docs/todo/P1_25_llm_factor_mining_plan.md`）：
+
+```bash
+# 0) 面板升级：v1(25 字段) → v2(41 字段：+12 财务[PIT by ann_date] +fin_age_days
+#    +size_ind_pct +listed_days +soe_flag)。产物 assets/data/meta/cn_sleeve_features_long_v2.parquet
+uv run python scripts/panel_extend_v2.py
+
+# 1) LLM 出因子（DeepSeek）：默认用 v1；要跑 v2 菜单必须显式 --panel
+uv run python scripts/llm_factor_mining.py --panel assets/data/meta/cn_sleeve_features_long_v2.parquet \
+  --rounds 2 --proposals 6 --model deepseek-flash --direction "<研究方向>"
+
+# 2) 验真：purged 5 折 / DSR / PBO(CSCV) / 残差 IC / Fama-MacBeth
+#    控制集默认冻结为 v1 的 25 列 —— 这样面板升级后"相对现有模型有没有增量"仍可比
+uv run python scripts/factor_oos_deflated.py --run output/research/llm_factor_mining_<ts> \
+  --panel assets/data/meta/cn_sleeve_features_long_v2.parquet
+
+# 3) 人读结论
+cat output/research/llm_factor_mining_<ts>/oos_deflated/REPORT.md
+
+# 4) 组合级验证（候选 10 / 买入 5 / 月频 / 含成本；域=PIT 可得的小市值域）
+uv run python scripts/llm_sleeve_oos_backtest.py \
+  --run output/research/llm_factor_mining_<ts> --factors <因子名逗号分隔>
+
+# 5) 补"真市值"（中继 daily_basic）：先月末交易日，再全交易日；按月落盘可续跑
+uv run python scripts/backfill_cn_daily_basic_relay.py --plan
+uv run python scripts/backfill_cn_daily_basic_relay.py --month-ends-only --workers 4
+uv run python scripts/backfill_cn_daily_basic_relay.py --status
+# 产物 assets/data/raw/daily_basic_relay/month=YYYY-MM.parquet
+# 注意：中继实测慢且易 502/504（单次 3~30s），全量 2123 个交易日需要长时间后台运行
+```
+
+实测：补数据后残差 IC 上限 0.0116 → **0.0428**，通过因子 **0/20 → 2/12**；PBO 0.000 → **0.603**
+（含义：候选分化后别挑单一最优，要用 sleeve 组合）。
+组合级验证（`sleeve_oos`）：LLM sleeve 24.9% vs 现有 25 列合成 **43.0%**、Sharpe 0.90 vs 1.49
+⇒ **不入模**（`P1_25` §9）。
+已知数据缺口：5min 分时 2025-10-09 起、alpha zoo 2025-03-20 起、资金流/筹码 2024-08-23 起、
+`ps_ind_pct` 上游全空、退市股日线需重算特征（工单 L8/L9）。
 
 策略标签（底部反弹、趋势跟踪和首/二板的日线代理）：
 

@@ -1,7 +1,10 @@
 """数据服务层: 封装 core/ 模块的数据访问, 提供优雅的降级处理."""
 
 import ast
+import re
 import sys
+from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +12,101 @@ import pandas as pd
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
+
+# A 股代码形如 301230.SZ / 600861.SH / 430047.BJ（与港股的 5 位数字代码区分开）
+CN_CODE = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
+_CN_BARS_DIR = PROJECT_ROOT / "assets/data/clean/ohlcv/market=CN"
+_CN_BASIC = PROJECT_ROOT / "assets/data/meta/cn_stock_basic.parquet"
+
+
+@lru_cache(maxsize=32)
+def load_cn_stock_ohlcv(stock_code: str, days: int = 365) -> pd.DataFrame | None:
+    """A 股日线（qfq 复权）→ 与港股同一形态：index=日期，列 Open/High/Low/Close/Volume。
+
+    只读 [今天-days, 今天] 覆盖到的年份分区，并用谓词下推按 stock_code 过滤；
+    结果 lru_cache（同一只票反复看图不用重复扫 parquet）。
+    """
+    import pyarrow.dataset as ds
+
+    code = str(stock_code).strip().upper()
+    end = date.today()
+    start = end - timedelta(days=int(days) + 10)
+    files = [str(p) for year in range(start.year, end.year + 1)
+             for p in _CN_BARS_DIR.glob(
+                 f"exchange=*/asset_type=equity/frequency=daily/adjust=qfq/year={year}/*.parquet")]
+    if not files:
+        return None
+    table = ds.dataset(files, format="parquet").to_table(
+        columns=["trade_date", "stock_code", "open", "high", "low", "close", "volume"],
+        filter=ds.field("stock_code") == code)
+    frame = table.to_pandas()
+    if frame.empty:
+        return None
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+    frame = frame.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
+    frame = frame.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                                  "close": "Close", "volume": "Volume"})
+    frame = frame.set_index("trade_date")[["Open", "High", "Low", "Close", "Volume"]]
+    return frame.tail(int(days))
+
+
+@lru_cache(maxsize=1)
+def _cn_basic_frame():
+    if not _CN_BASIC.exists():
+        return None
+    import pandas as pd  # 已在模块顶部导入
+    frame = pd.read_parquet(_CN_BASIC, columns=["ts_code", "symbol", "name", "industry", "market",
+                                                "list_date", "list_status"])
+    frame["ts_code"] = frame["ts_code"].astype(str)
+    return frame.set_index("ts_code")
+
+
+def cn_stock_profile(stock_code: str) -> dict | None:
+    """A 股基础档案 + 交易资格标记（退市 / ST / 次新 / 20% 涨跌幅板）。
+
+    策略的六层过滤里就包含"排除次新、ST、20% 涨跌幅板"，所以个股页把这些直接标出来，
+    避免看着图很漂亮、其实根本不在可买池里。
+    """
+    raw = str(stock_code).strip().upper()
+    if not CN_CODE.fullmatch(raw):
+        return None
+    frame = _cn_basic_frame()
+    if frame is None or raw not in frame.index:
+        return {"code": raw, "name": "", "board": "", "industry": "", "list_date": None,
+                "list_status": "", "listed_days": None, "flags": ["不在 A 股基础表内"]}
+    row = frame.loc[raw]
+    if isinstance(row, pd.DataFrame):     # 同一代码多行时取第一条（不能用 hasattr(row, "to_frame")：
+        row = row.iloc[0]                 # Series.to_frame 存在，会把 Series 误转成标量字符串，导致 str 下标报错）
+    from datetime import date as _date
+    listed_days = None
+    try:
+        listed_days = (_date.today() - pd.Timestamp(str(row["list_date"])).date()).days
+    except Exception:
+        listed_days = None
+    name = str(row["name"])
+    board = str(row["market"])
+    flags = []
+    if str(row.get("list_status", "L")) != "L":
+        flags.append("已退市")
+    if "ST" in name.upper() or "退" in name:
+        flags.append("ST/退市风险")
+    if listed_days is not None and listed_days < 365:
+        flags.append(f"次新股（上市 {listed_days} 天）")
+    if board in ("创业板", "科创板"):
+        flags.append("20% 涨跌幅板")
+    if board == "北交所":
+        flags.append("北交所（30% 涨跌幅）")
+    return {"code": raw, "symbol": str(row["symbol"]), "name": name, "board": board,
+            "industry": str(row["industry"]), "list_date": str(row["list_date"]),
+            "list_status": str(row.get("list_status", "")), "listed_days": listed_days, "flags": flags}
+
+
+@lru_cache(maxsize=1)
+def _cn_name_map() -> dict:
+    if not _CN_BASIC.exists():
+        return {}
+    table = pd.read_parquet(_CN_BASIC, columns=["ts_code", "name"])
+    return dict(zip(table["ts_code"].astype(str), table["name"].astype(str)))
 
 # 将项目根目录加入 sys.path 以便导入 core 模块
 if str(PROJECT_ROOT) not in sys.path:
@@ -70,15 +168,42 @@ def load_selected_data(factor_set: str = "") -> pd.DataFrame | None:
     return None
 
 
-def parse_shap_values(factor_explanation_str: str) -> dict | None:
-    """从 factor_explanation 字段解析 SHAP 值."""
-    if not factor_explanation_str or pd.isna(factor_explanation_str):
+_BARE_NAN = re.compile(r"(?<![\w'\"])(nan|inf|-inf)(?![\w'\"])")
+
+
+def parse_explanation(factor_explanation_str) -> dict | None:
+    """把 `factor_explanation` 这个"看起来像 dict 的字符串"解析成 dict。
+
+    2026-10-08 修：这个字段一直是**解析不出来**的，原因是里面夹了一个裸 `nan`
+    （来自 `float('nan')` 的 repr，例如 `'quality_score': nan`），
+    `ast.literal_eval` 遇到未定义名直接抛 `ValueError: malformed node or string: <ast.Name>`
+    ⇒ `get_shap` 走 except 分支返回空 ⇒ 前端「SHAP 因子贡献」区块**从来没有显示过任何数据**。
+
+    修法是先把裸 `nan/inf` 替换成 `None`（`None` 是 literal_eval 认的字面量，语义上也就是"缺失"），
+    再解析。所有取数都走这一个函数，避免各处各修一遍。
+    """
+    if factor_explanation_str is None or (not isinstance(factor_explanation_str, str) and pd.isna(factor_explanation_str)):
         return None
-    try:
-        data = ast.literal_eval(factor_explanation_str)
-        return data.get("stock_shap_values")
-    except Exception:
+    text = str(factor_explanation_str)
+    if not text.strip():
         return None
+    for candidate in (text, _BARE_NAN.sub("None", text)):
+        try:
+            data = ast.literal_eval(candidate)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def parse_shap_values(factor_explanation_str) -> dict | None:
+    """从 factor_explanation 取 `stock_shap_values`（= {'positive': [...], 'negative': [...]}）。"""
+    data = parse_explanation(factor_explanation_str)
+    if not isinstance(data, dict):
+        return None
+    shap = data.get("stock_shap_values")
+    return shap if isinstance(shap, dict) else None
 
 
 # ─── 因子 IC 数据 ──────────────────────────────────────────────────────────────
@@ -246,6 +371,8 @@ def load_stock_ohlcv(stock_code: str, days: int = 365) -> pd.DataFrame | None:
     使用 core.StockAnalyzer.load_stock_data() 获取数据.
     返回 DataFrame 包含 Open, High, Low, Close, Volume 列, 以日期为索引.
     """
+    if CN_CODE.fullmatch(str(stock_code).strip().upper()):
+        return load_cn_stock_ohlcv(stock_code, days=days)
     analyzer = get_analyzer()
     if analyzer is None:
         return None
@@ -272,6 +399,9 @@ def get_all_stock_codes() -> list[str]:
 
 def get_stock_name(stock_code: str) -> str:
     """获取股票中文名称."""
+    raw = str(stock_code).strip().upper()
+    if CN_CODE.fullmatch(raw):
+        return _cn_name_map().get(raw, "")
     analyzer = get_analyzer()
     if analyzer is None:
         return ""

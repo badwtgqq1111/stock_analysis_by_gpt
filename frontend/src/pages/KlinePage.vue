@@ -16,6 +16,15 @@
         &nbsp;{{ data.latest.change_pct >= 0 ? '+' : '' }}{{ data.latest.change_pct.toFixed(2) }}%
       </span>
       <span class="bar-count">({{ data.latest.total_bars }}根K线)</span>
+      <span v-if="data.profile" class="profile">
+        · {{ data.profile.board }}<template v-if="data.profile.industry"> / {{ data.profile.industry }}</template>
+        <template v-if="data.profile.list_date"> · 上市 {{ data.profile.list_date }}</template>
+        <span v-for="f in data.profile.flags" :key="f" class="flag" :class="flagClass(f)">· {{ f }}</span>
+      </span>
+    </div>
+    <div class="stage-bar" v-if="data?.stage && data.stage.stage !== 'insufficient'">
+      <span class="stage-chip" :class="'stage-' + data.stage.stage">{{ data.stage.label }}</span>
+      <span class="stage-why">{{ data.stage.evidence }}</span>
     </div>
     <div class="chart-area" v-if="data && data.data.length > 0">
       <div class="chart-row">
@@ -38,13 +47,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import ControlPanel from '@/components/ControlPanel.vue'
 import KlineChart from '@/components/KlineChart.vue'
 import ChipDistribution from '@/components/ChipDistribution.vue'
 import SignalStats from '@/components/SignalStats.vue'
 import { useKlineData } from '@/composables/useKlineData'
 
+const route = useRoute()
 const { data, isLoading, error, stockCode, days, showSignals, showChips } = useKlineData()
 const selectedCode = ref<string | null>(null)
 const daysModel = ref(365)
@@ -59,17 +70,18 @@ function onCode(v: string) { selectedCode.value = v }
 function onDays(v: number) { daysModel.value = v }
 function onOverlays(v: string[]) { overlays.value = v }
 function onPriceRange(r: [number, number]) { priceRange.value = r }
+
+function flagClass(flag: string) {
+  if (flag.startsWith('已退市') || flag.startsWith('ST')) return 'flag-bad'
+  if (flag.startsWith('次新')) return 'flag-warn'
+  return 'flag-info'
+}
+
+// 支持从别处跳转：/#/kline?code=301230.SZ
+onMounted(() => {
+  const code = String(route.query.code || '')
+  if (code) selectedCode.value = code
+})
+watch(() => route.query.code, v => { if (v) selectedCode.value = String(v) })
 </script>
 
-<style scoped>
-.page { max-width: 1400px; margin: 0 auto; }
-.page-title { margin-bottom: 10px; font-size: 18px; }
-.title-bar { font-size: 13px; margin-bottom: 6px; color: var(--text-muted); }
-.title-bar b { color: var(--text-primary); }
-.title-bar .up { color: var(--accent-up); }
-.title-bar .down { color: var(--accent-down); }
-.bar-count { color: #666; font-size: 11px; }
-.chart-area { margin-bottom: 10px; }
-.chart-row { display: flex; position: relative; }
-.empty-state { padding: 80px 0; text-align: center; color: var(--text-muted); font-size: 16px; }
-</style>

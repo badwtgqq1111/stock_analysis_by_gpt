@@ -46,10 +46,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import {
-  createChart, ColorType, type IChartApi, type LineData, type Time,
+  createChart, ColorType, type IChartApi, type LineData, type LineWidth, type Time,
 } from 'lightweight-charts'
 import { getPortfolio } from '@/api/client'
 import type { PortfolioResponse } from '@/types/api'
+
+// 同 FactorIC.vue：LineWidth 类型只允许 1|2|3|4，运行时按 1.5px 渲染，显式放宽类型。
+const LINE_WIDTH = 1.5 as unknown as LineWidth
 
 const data = ref<PortfolioResponse | null>(null)
 const equityRef = ref<HTMLDivElement | null>(null)
@@ -97,7 +100,7 @@ function renderCharts() {
     drawdownChart = createLc(drawdownRef.value, 180)
     const ds = drawdownChart.addAreaSeries({
       lineColor: COLORS.drawdown, topColor: 'rgba(0,212,170,0.15)', bottomColor: 'rgba(0,212,170,0.02)',
-      lineWidth: 1.5,
+      lineWidth: LINE_WIDTH,
     })
     const pts: LineData[] = data.value.dates.map((d, i) => ({
       time: d as Time, value: data.value!.drawdown[i],
@@ -142,27 +145,7 @@ function fmtStr(v: any): string {
 </script>
 
 <style scoped>
-.page { max-width: 1400px; margin: 0 auto; }
-.page-title { margin-bottom: 4px; font-size: 18px; }
-.desc { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; }
-.metric-cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-.metric-card { flex: 1; min-width: 140px; padding: 14px 16px; border-radius: 8px; background: var(--bg-card); border: 1px solid var(--border-color); text-align: center; }
-.metric-title { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
-.metric-value { font-size: 20px; font-weight: 700; }
-.card-success .metric-value { color: var(--accent-up); }
-.card-danger .metric-value { color: var(--accent-down); }
-.card-primary .metric-value { color: var(--accent-blue); }
-.card-warning .metric-value { color: var(--accent-gold); }
-.chart-row { margin-bottom: 12px; }
-.chart-left { }
+/* 页面专属：净值/回撤图容器（指标卡已上移到设计系统） */
+.chart-left { flex: 1; min-width: 0; }
 .chart-box { min-height: 180px; }
-h6 { font-size: 12px; color: var(--text-muted); margin: 8px 0 4px; }
-.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.data-table th { background: #1a1a2e; color: var(--text-muted); padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border-color); }
-.data-table td { padding: 5px 8px; border-bottom: 1px solid rgba(42,46,57,0.5); }
-.data-table tr:hover { background: rgba(255,255,255,0.03); }
-td.up { color: var(--accent-up); }
-td.down { color: var(--accent-down); }
-hr { border-color: var(--border-color); margin: 16px 0; }
-.empty-state { padding: 60px 0; text-align: center; color: var(--text-muted); }
 </style>

@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import sys
 from datetime import date, timedelta
@@ -357,7 +358,17 @@ def test_paper_account_and_strategy_label_stages_call_services() -> None:
     service = FakeService()
     assert MODULE.run_stage("paper_account", config, service)["status"] == "completed"
     assert MODULE.run_stage("strategy_labels", config, service)["status"] == "completed"
-    assert service.account["lot_size"] == 100
+    # 成本/整手不再由 TOML 兜底：不写就是 None = "用 config/execution_assumptions_cn.json 的统一假设"
+    # （第三十二轮统一执行假设；旧断言 lot_size == 100 是"TOML 里写死 100"时代的产物）
+    assert service.account["lot_size"] is None
+    assert service.account["commission_bps"] is None and service.account["slippage_bps"] is None
+    assert service.account["enforce_frictions"] is True and service.account["assumptions"] is None
+    # 显式写了就以 TOML 为准（临时覆盖通道仍然有效）
+    override = copy.deepcopy(config)
+    override["paper_account"]["lot_size"] = 100
+    override["paper_account"]["commission_bps"] = 7.5
+    MODULE.run_stage("paper_account", override, service)
+    assert service.account["lot_size"] == 100 and service.account["commission_bps"] == 7.5
     assert service.labels["days"] == 756
 
 

@@ -137,8 +137,13 @@ def build_quality(grid: pd.DataFrame, industry: pd.DataFrame) -> pd.DataFrame:
 def main() -> int:
     parser = argparse.ArgumentParser(description="构建统一长期 sleeve 特征面板")
     parser.add_argument("--start", default="2015-01-01")
-    parser.add_argument("--end", default="2026-09-30")
+    # `--end` 曾经硬编码成 "2026-09-30" —— 于是**无论什么时候重建**，面板都停在 9 月末，
+    # 下游（arm_selection / sleeve 研究 / 前端日历）拿到的一直是过期面板。
+    # 实测：2026-10-09 重建一次，v1..v4 五份产物的最新交易日都还是 2026-09-30。
+    parser.add_argument("--end", default="", help="默认=今天（留空即动态取当天）")
     args = parser.parse_args()
+    if not args.end:
+        args.end = datetime.now().strftime("%Y-%m-%d")
 
     industry = load_industry()
     tech = build_tech(args.start, args.end)

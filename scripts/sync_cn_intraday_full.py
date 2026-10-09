@@ -18,16 +18,29 @@
   uv run python scripts/sync_cn_intraday_full.py --build-codes        # 生成/刷新代码清单
   uv run python scripts/sync_cn_intraday_full.py --status             # 查看进度
   uv run python scripts/sync_cn_intraday_full.py --session-seconds 3600
+  uv run python scripts/sync_cn_intraday_full.py --refresh --limit 50   # 每日增量：只补最新交易日
+
+`--refresh`（2026-10-08 新增，接进每日自动化）
+--------------------------------------------
+不加 `--refresh` 时，"完成"的判据是**文件存在** —— 这是为一次性历史回补设计的。
+后果是：只要 5,228 个 parquet 都在了，监督器每次启动都会立刻 `done=5228` 退出，
+**永远不会去补新的一天**（实测 2026-10-08：数据停在 09-30，而 KeepAlive 每 30 秒空转一次）。
+
+`--refresh` 把判据换成"文件的最后日期 >= 最新交易日"，并且只抓
+`最后日期+1 → 今天` 这一小段（每只约 48 行），用 `--merge` 合并回原文件，
+不覆盖历史。这样它才能当每日任务跑。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -88,6 +101,75 @@ def status(freq: str, codes_path: Path, progress_path: Path) -> dict:
     }
 
 
+def acquire_lock(lock_dir: Path, stale_seconds: int = 3 * 3600) -> bool:
+    """单实例锁。LaunchAgent 的 StartInterval 触发与 run_daily_production.sh 里的 intraday 步骤
+    可能同时到点 —— 两个实例抓同一批标的纯属浪费，还可能在 merge 时互相覆盖。
+
+    持有者进程不存活、或锁超过 stale_seconds ⇒ 判定为陈旧锁并接管（与 run_daily_production.sh 同款策略）。
+    """
+    try:
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+        return True
+    except FileExistsError:
+        pid_text = (lock_dir / "pid").read_text(encoding="utf-8").strip() if (lock_dir / "pid").exists() else ""
+        alive = False
+        if pid_text.isdigit():
+            try:
+                os.kill(int(pid_text), 0)
+                alive = True
+            except OSError:
+                alive = False
+        age = time.time() - lock_dir.stat().st_mtime
+        if alive and age <= stale_seconds:
+            return False
+        shutil.rmtree(lock_dir, ignore_errors=True)
+        try:
+            lock_dir.mkdir(parents=True)
+            (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+            return True
+        except FileExistsError:
+            return False
+
+
+def latest_trade_date() -> "object":
+    """最新交易日：直接读日线（qfq）里最大的 trade_date。
+
+    不引入交易日历依赖 —— 日线本身就是"最近一次成功同步到哪天"的最可靠来源。
+    """
+    import glob
+    import pyarrow.dataset as ds
+
+    files = sorted(glob.glob(str(ROOT / "assets/data/clean/ohlcv/market=CN/exchange=*/"
+                                    "asset_type=equity/frequency=daily/adjust=qfq/year=*/*.parquet")))
+    if not files:
+        return None
+    table = ds.dataset(files, format="parquet").to_table(columns=["trade_date"]).to_pandas()
+    return pd.to_datetime(table["trade_date"]).max().date()
+
+
+def refresh_pending(freq_dir: Path, codes: list, latest) -> list:
+    """返回 [(code, last_date_or_None)]，只含"没有文件"或"最后日期落后于最新交易日"的标的。
+
+    只读 parquet 的 `date` 列（不解码 OHLCV），5,000+ 只大约几秒到几十秒。
+    """
+    pending = []
+    for code in codes:
+        path = freq_dir / f"{code.replace('.', '_')}.parquet"
+        if not path.exists():
+            pending.append((code, None))
+            continue
+        try:
+            dates = pd.read_parquet(path, columns=["date"])["date"]
+            last = pd.to_datetime(dates).max().date()
+        except Exception:
+            pending.append((code, None))
+            continue
+        if latest is None or last < latest:
+            pending.append((code, last))
+    return pending
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="全 A 股分时同步监督器")
     parser.add_argument("--freq", default="5")
@@ -103,6 +185,12 @@ def main() -> int:
     parser.add_argument("--max-failures-per-code", type=int, default=3)
     parser.add_argument("--build-codes", action="store_true")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--refresh", action="store_true",
+                        help="每日增量模式：只补「文件最后日期 < 最新交易日」的标的，且只抓缺失窗口")
+    parser.add_argument("--latest-trade-date", default="",
+                        help="最新交易日（留空=从日线数据推断）；仅 --refresh 用")
+    parser.add_argument("--limit", type=int, default=0,
+                        help=">0：本次最多处理这么多只（调试/限时用）")
     args = parser.parse_args()
 
     if args.build_codes:
@@ -115,17 +203,34 @@ def main() -> int:
 
     freq_dir = ROOT / f"assets/data/raw/intraday_baostock/frequency={args.freq}min"
     freq_dir.mkdir(parents=True, exist_ok=True)
+    if not acquire_lock(STATE_DIR / ".lock"):
+        print("[intraday] 已有实例在跑，本次直接退出（避免两个实例抓同一批）", flush=True)
+        return 0
     if not args.codes_file.exists():
         build_codes(args.freq, args.codes_file)
     target = [c for c in args.codes_file.read_text(encoding="utf-8").split() if c.strip()]
     quarantine = json.loads(args.quarantine_file.read_text()) if args.quarantine_file.exists() else {}
     session_start = time.time()
-    log(args.log, f"=== 监督器启动 目标 {len(target)} 只 freq={args.freq}min batch={args.batch_size} ===")
+    latest = None
+    if args.refresh:
+        latest = (datetime.fromisoformat(args.latest_trade_date).date() if args.latest_trade_date
+                  else latest_trade_date())
+        log(args.log, f"=== 刷新模式启动 目标 {len(target)} 只 freq={args.freq}min 最新交易日={latest} "
+                      f"batch={args.batch_size} ===")
+    else:
+        log(args.log, f"=== 监督器启动 目标 {len(target)} 只 freq={args.freq}min batch={args.batch_size} ===")
 
     processed = 0
     while True:
         have = {p.name.replace("_", ".")[:-8] for p in freq_dir.glob("*.parquet")}
-        pending = [c for c in target if c not in have and quarantine.get(c, 0) < args.max_failures_per_code]
+        if args.refresh:
+            pending = [(c, last) for c, last in refresh_pending(freq_dir, target, latest)
+                       if quarantine.get(c, 0) < args.max_failures_per_code]
+            if args.limit:
+                pending = pending[: args.limit]
+        else:
+            pending = [(c, None) for c in target
+                       if c not in have and quarantine.get(c, 0) < args.max_failures_per_code]
         if not pending:
             log(args.log, f"全部完成或有配额隔离：done={len(have)} quarantine={sum(1 for v in quarantine.values() if v >= args.max_failures_per_code)}")
             break
@@ -134,26 +239,64 @@ def main() -> int:
             break
 
         batch = pending[: args.batch_size]
-        command = [
-            str(UV), "run", "python", str(ROOT / "scripts/backfill_cn_intraday_baostock.py"),
-            "--codes", ",".join(batch), "--keep-order", "--freq", args.freq, "--start", args.start,
-            "--sleep", str(args.sleep), "--per-code-timeout", "30",
-        ]
+        # 刷新模式下每只票的起始日不同（= 自己最后一条的下一天），按 start 分组后各起一个子进程；
+        # 历史回补模式则只有一组（args.start）。正常情况下同一批的 start 完全相同，所以就是 1 个子进程。
+        groups: dict[str, list[str]] = {}
+        for code, last in batch:
+            if args.refresh and last is not None:
+                start = (last + timedelta(days=1)).isoformat()
+                if latest is not None and start > latest.isoformat():
+                    groups.setdefault("__skip__", []).append(code)   # 已经是最新，跳过
+                    continue
+            else:
+                start = args.start
+            groups.setdefault(start, []).append(code)
+        codes_batch = [c for v in groups.values() for c in v]
+        if "__skip__" in groups:
+            groups.pop("__skip__")
         batch_start = time.time()
         timed_out = False
-        try:
-            subprocess.run(command, cwd=ROOT, timeout=args.batch_timeout,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            for code in batch:
-                quarantine[code] = quarantine.get(code, 0) + 1
+        for start, group_codes in groups.items():
+            command = [
+                str(UV), "run", "python", str(ROOT / "scripts/backfill_cn_intraday_baostock.py"),
+                "--codes", ",".join(group_codes), "--keep-order", "--freq", args.freq, "--start", start,
+                "--sleep", str(args.sleep), "--per-code-timeout", "30",
+            ]
+            if args.refresh:
+                command.append("--merge")
+            try:
+                proc = subprocess.run(command, cwd=ROOT, timeout=args.batch_timeout,
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                # 原实现把子进程输出整个丢掉 ⇒ 刷新模式下"全军覆没"和"全部成功"在日志里长得一模一样。
+                # 这里把失败行捞出来写进日志，至少能看出这一批为什么没进展。
+                if args.refresh and proc.stdout:
+                    # 用带冒号的"失败："匹配逐只失败行；否则会把成功摘要
+                    # "5/5 完成（成功 5 / 跳过 0 / 失败 0）" 也当成失败（实测误报）。
+                    bad = [ln for ln in proc.stdout.splitlines()
+                           if "失败：" in ln or "错误：" in ln or "Traceback" in ln]
+                    for ln in bad[:5]:
+                        log(args.log, f"    {ln.strip()[:200]}")
+                    if bad:
+                        log(args.log, f"  批次 {len(group_codes)} 只有 {len(bad)} 行失败输出")
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                for code in group_codes:
+                    quarantine[code] = quarantine.get(code, 0) + 1
         duration = time.time() - batch_start
-        processed += len(batch)
+        processed += len(codes_batch)
 
         have_now = {p.name.replace("_", ".")[:-8] for p in freq_dir.glob("*.parquet")}
-        if not timed_out:
-            for code in batch:
+        if args.refresh and codes_batch:
+            # 刷新模式的成败只能靠"复核最后日期"来判断：文件本来就在，不能用"文件不存在=失败"。
+            # 不这么做的话，"抓取全部失败"和"全部成功"在日志上无法区分（本次就踩到了：
+            # 17:10 那轮到底补上没有，只能事后逐只读 parquet 才确认）。
+            still = {c for c, _ in refresh_pending(freq_dir, codes_batch, latest)}
+            updated = len(codes_batch) - len(still)
+            log(args.log, f"批次复核：{updated}/{len(codes_batch)} 已更新到 {latest}（未更新 {len(still)}）")
+            for code in still:
+                quarantine[code] = quarantine.get(code, 0) + 1
+        elif not timed_out:
+            for code in codes_batch:
                 if code not in have_now:
                     quarantine[code] = quarantine.get(code, 0) + 1
         args.quarantine_file.write_text(json.dumps(quarantine, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -182,6 +325,7 @@ def main() -> int:
                           f"ETA {((len(target) - done) / rate / 3600 if rate > 0 else 0):.1f}h")
 
     log(args.log, f"=== 监督器退出 done={len({p.name for p in freq_dir.glob('*.parquet')})} ===")
+    shutil.rmtree(STATE_DIR / ".lock", ignore_errors=True)
     return 0
 
 

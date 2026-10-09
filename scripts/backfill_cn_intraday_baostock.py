@@ -104,6 +104,28 @@ def _with_timeout(seconds: int, func, *args, **kwargs):
         signal.signal(signal.SIGALRM, previous)
 
 
+def _merge_frames(path: Path, new_frame, code: str):
+    """把新抓到的分时接在已有 parquet 后面，按 (date, time) 去重（新数据优先）。
+
+    为什么必须合并：`to_parquet` 是整文件覆盖，而每日增量只需要抓"最后一条之后的窗口"
+    （每只票约 48 行）。不合并的话，重拉一小段会把一年的历史全部冲掉。
+    """
+    try:
+        old = pd.read_parquet(path)
+    except Exception as exc:  # 旧文件坏了 → 用新数据重建，并明确告警，不静默丢历史
+        print(f"[intraday] {code} 旧文件读取失败（{exc}）→ 仅写新窗口", flush=True)
+        return new_frame
+    before = len(old)
+    merged = pd.concat([old, new_frame], ignore_index=True)
+    keys = [c for c in ("date", "time") if c in merged.columns]
+    merged = merged.drop_duplicates(subset=keys or None, keep="last")
+    if keys:
+        merged = merged.sort_values(keys, kind="stable")
+    merged = merged.reset_index(drop=True)
+    print(f"[intraday] {code} 合并 {before} + {len(new_frame)} → {len(merged)} 行", flush=True)
+    return merged
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="BaoStock 分时回补（单线程 + 检查点）")
     parser.add_argument("--freq", default="5", choices=["5", "15", "30", "60"])
@@ -119,6 +141,9 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--backoff", type=float, default=5.0)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--merge", action="store_true",
+                        help="与已有 parquet **合并**（增量补齐当日/当周），而不是整文件覆盖。"
+                             "配合 --start <上次最后日期+1> 使用；没有它就只能重拉整段。")
     parser.add_argument("--keep-order", action="store_true",
                         help="保持传入顺序（默认排序）；用于「策略交易过的标的优先」")
     parser.add_argument("--per-code-timeout", type=int, default=90,
@@ -185,7 +210,9 @@ def main() -> int:
                 print(f"[intraday] 会话达到 {args.session_seconds}s 上限，正常退出（下次续跑）", flush=True)
                 break
             path = freq_dir / f"{code.replace('.', '_')}.parquet"
-            if path.exists() and not args.force:
+            # --merge 也要放行：它的语义是"读旧帧 + 合并新窗口"，不是"跳过已有文件"。
+            # 早期只有 --force（整文件覆盖），一旦重拉就丢掉历史窗口，所以没法做每日增量。
+            if path.exists() and not (args.force or args.merge):
                 skipped += 1
                 continue
             try:
@@ -208,6 +235,8 @@ def main() -> int:
             consecutive_failures = 0
             if args.adaptive_sleep:
                 sleep_now = args.sleep
+            if args.merge and path.exists():
+                frame = _merge_frames(path, frame, code)
             frame.to_parquet(path, index=False)
             ok += 1
             if idx % 10 == 0 or idx == len(codes):

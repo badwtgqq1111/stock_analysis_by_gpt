@@ -48,6 +48,14 @@ uv run python scripts/run_cn_pipeline.py --stage fundamental
 | P0 | `adj_factor` | **已接入，基础网关实测 HTTP 200** | 原始复权因子时间序列保存在 `adjustment_factor_snapshots`；复权重算与停复牌校验 |
 | P0 | `daily_basic` | **已接入，基础网关实测 HTTP 200** | `pe/pb/ps/dv/total_mv/circ_mv/turnover_rate` 写入 `valuation_snapshot`；用非空合并保留其他来源的成交额/成交量 |
 | P0 | `trade_cal`, `suspend_d`, `limit_list_d`, `namechange` | `limit_list_d`、`namechange` 已实测 HTTP 200；`suspend_d` 本次为空但契约有效 | 可交易性、幸存者偏差、事件过滤 |
+
+> **2026-10-08 更正**：`namechange` 那两个"HTTP 200"是**逐 code** 的探测结果，**bulk 不可用**——
+> 带 `start_date`/`end_date` 过滤时基础网关与 ProMax 一律 HTTP 400；逐 code 拉还受上游 token 日配额限制
+> （`HTTP 503` / `频率超限(5次/天)`，12 线程实测成功率 ~88%、0.4 s/只）。
+> **真正可用的路径是官方 Pro**（`TUSHARE_TOKEN`）：`namechange` 支持 `limit`/`offset` 分页，
+> 3 页 × 5000 行、**0.7 秒**拿完 A 股全部 13,890 条更名记录（5,915 只，1990-12 起）。
+> 已落 `assets/data/meta/cn_stock_namechange.parquet`，采集脚本 `scripts/backfill_cn_namechange.py`
+> （`--source official` 默认 / `--source relay` 备源）。消费方：`factor_engine/universe_pit.py` 的 PIT ST 过滤。
 | P1 | `moneyflow`, `top_list`, `hk_hold`, `margin` | 未接入 | 资金流、龙虎榜、北向持仓、两融风险特征；必须使用交易日可得时间 |
 | P1 | `income`, `balancesheet`, `cashflow`, `fina_indicator` | 财务源较弱且覆盖有限 | 按 `ann_date` 写 PIT 财务事实表；质量、盈利、成长因子 |
 | P1 | `index_weight` | 未接入 PIT 权重 | 沪深 300、中证 500 等历史成分与权重；基准、股票池和中性化 |

@@ -13,6 +13,17 @@
   uv run python scripts/backfill_cn_financials.py --status          # 进度
   uv run python scripts/backfill_cn_financials.py --one-code 600519.SH   # 抓单只（供监督器调用）
   uv run python scripts/backfill_cn_financials.py --session-seconds 3600 # 监督器模式
+  uv run python scripts/backfill_cn_financials.py --refresh --session-seconds 1800   # 每日增量：发现新财报
+
+`--refresh`（2026-10-08 新增，接进每日自动化）
+---------------------------------------------
+不加 `--refresh` 时"完成"的判据是**文件存在** —— 为一次性历史回补设计。
+后果：5,224 只全部有文件后（实测 `done=5225`）它就永远报"全部完成"，
+**新披露的季报/年报再也不会被拉进来**，财务特征会一直停在回补那天。
+
+`--refresh` 换成"这只股票的最后公告日落后于全市场最新公告日"的判据，
+并且只重抓这些股票（`fetch_one` 本来就是拉整段历史，直接覆盖即可）。
+平时每天只剩个位数到几十只要抓（季报披露窗口内会有一波），成本可控。
 """
 
 from __future__ import annotations
@@ -93,6 +104,85 @@ def fetch_one(code: str) -> pd.DataFrame:
     return frame
 
 
+def _last_ann_date(path: Path):
+    """单只检查点里最大的 ann_date（公告日）。读不到就返回 None。"""
+    try:
+        col = pd.read_parquet(path, columns=["ann_date"])["ann_date"]
+        col = pd.to_datetime(col, format="%Y%m%d", errors="coerce").dropna()
+        return col.max() if len(col) else None
+    except Exception:
+        return None
+
+
+# A 股定期报告的法定披露截止日：(报告期, 截止日)
+_PERIOD_DEADLINES = (
+    ((3, 31), (4, 30)),      # 一季报
+    ((6, 30), (8, 31)),      # 半年报
+    ((9, 30), (10, 31)),     # 三季报
+    ((12, 31), (4, 30)),     # 年报（次年 4/30）
+)
+
+
+def expected_period(today=None) -> "pd.Timestamp":
+    """按披露截止日推算"今天应该已经能看到的最新报告期"。
+
+    为什么不直接拿"全市场最新 ann_date"当基准（第一版就是这么写的，实测踩坑）：
+    只要有一家公司提前披露，其余全部会被判成"落后"。实测 2026-10-08 时全市场最新
+    ann_date 是 09-30，而绝大多数公司停在 08-2x（半年报 8/31 截止），
+    于是 5,224 只里 5,221 只被判成陈旧 —— 每天重抓 5,000+ 只，成本完全不可接受。
+    改成按法定截止日推算后，只有"该披露却没披露"的才是真正要补的。
+    """
+    today = pd.Timestamp(today or pd.Timestamp.today().normalize())
+    year = today.year
+    best = None
+    for (pm, pday), (dm, dd) in _PERIOD_DEADLINES:
+        deadline = pd.Timestamp(year=year, month=dm, day=dd)
+        if today >= deadline:
+            # 12-31 报告期的截止日在次年 4/30，报告期年份要减 1
+            period_year = year - 1 if pm == 12 else year
+            cand = pd.Timestamp(year=period_year, month=pm, day=pday)
+            if best is None or cand > best:
+                best = cand
+    # 还没到任何截止日 → 上一年年报
+    return best if best is not None else pd.Timestamp(year=year - 1, month=12, day=31)
+
+
+def refresh_pending(target: list, out_dir: Path, lag_days: int = 3, active_window_days: int = 400,
+                    today=None) -> list:
+    """返回需要重抓的 [(code, last_end_date)]。
+
+    判据：① 无检查点 → 全新抓；
+         ② 最后**报告期**落后于 `expected_period()` → 该披露却没披露（含季报/年报换季）；
+         ③ 但最后公告日早于「今天 - active_window_days」的视为已停止披露（退市/长期停牌）→ 跳过。
+    """
+    want = expected_period(today)
+    floor_ann = pd.Timestamp(today or pd.Timestamp.today().normalize()) - pd.Timedelta(days=active_window_days)
+    pending = []
+    for code in target:
+        path = out_dir / f"{code.replace('.', '_')}.parquet"
+        if not path.exists():
+            pending.append((code, None))
+            continue
+        try:
+            cols = pd.read_parquet(path, columns=["end_date", "ann_date"])
+        except Exception:
+            pending.append((code, None))
+            continue
+        end = pd.to_datetime(cols["end_date"], format="%Y%m%d", errors="coerce").dropna()
+        ann = pd.to_datetime(cols["ann_date"], format="%Y%m%d", errors="coerce").dropna()
+        if not len(end):
+            pending.append((code, None))
+            continue
+        last_end = end.max()
+        last_ann = ann.max() if len(ann) else pd.Timestamp("1970-01-01")
+        if last_ann < floor_ann:
+            continue                      # 早已停止披露，别再反复抓
+        if last_end < want:
+            pending.append((code, last_end))
+    return pending
+
+
+
 def status(codes_path: Path, progress_path: Path) -> dict:
     have = {p.stem.replace("_", ".") for p in OUT_DIR.glob("*.parquet")}
     target = [c for c in codes_path.read_text(encoding="utf-8").split() if c.strip()] if codes_path.exists() else []
@@ -119,6 +209,13 @@ def main() -> int:
     parser.add_argument("--one-code", default="")
     parser.add_argument("--codes", default="", help="逗号分隔的批量抓取（子进程内一次抓多只，省启动开销）")
     parser.add_argument("--merge", action="store_true", help="把逐股检查点合并成一个 parquet")
+    parser.add_argument("--refresh", action="store_true",
+                        help="每日增量：只重抓「最后公告日落后于全市场最新公告日」的股票")
+    parser.add_argument("--stale-lag-days", type=int, default=3,
+                        help="保留参数（判据已改为按法定披露截止日推算应有的报告期）")
+    parser.add_argument("--active-window-days", type=int, default=400,
+                        help="--refresh：最后公告日早于「最新公告日 - N 天」的视为已停止披露，跳过重抓")
+    parser.add_argument("--limit", type=int, default=0, help="--refresh：本次最多重抓这么多只")
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -135,7 +232,8 @@ def main() -> int:
         done, failed = [], []
         for code in codes:
             path = OUT_DIR / f"{code.replace('.', '_')}.parquet"
-            if path.exists():
+            # --refresh：已有文件也要重抓（新季报），不能再"存在即跳过"
+            if path.exists() and not args.refresh:
                 done.append(code)
                 continue
             ok = False
@@ -182,21 +280,40 @@ def main() -> int:
     quarantine = json.loads(quarantine_path.read_text()) if quarantine_path.exists() else {}
     session_start = time.time()
     processed = 0
-    log(args.log, f"=== 财务回补监督器启动 目标 {len(target)} 只 ===")
+    if args.refresh:
+        log(args.log, f"=== 财务增量刷新启动 目标 {len(target)} 只"
+                      f"（判据：最后报告期 < 应有报告期 {expected_period().date()}）===")
+    else:
+        log(args.log, f"=== 财务回补监督器启动 目标 {len(target)} 只 ===")
     while True:
         have = {p.stem.replace("_", ".") for p in OUT_DIR.glob("*.parquet")}
-        pending = [c for c in target if c not in have and quarantine.get(c, 0) < args.max_failures_per_code]
-        if not pending:
-            log(args.log, f"全部完成或有配额隔离 done={len(have)}")
-            break
+        if args.refresh:
+            waiting = refresh_pending(target, OUT_DIR, args.stale_lag_days, args.active_window_days)
+            waiting = [(c, l) for c, l in waiting if quarantine.get(c, 0) < args.max_failures_per_code]
+            if args.limit:
+                waiting = waiting[: args.limit]
+            if not waiting:
+                log(args.log, f"无需刷新：{len(have)} 只检查点，均已是各自最新公告日")
+                break
+            batch_pairs = waiting[: args.batch_size]
+            if processed == 0:
+                log(args.log, f"待刷新 {len(waiting)} 只（最后报告期落后于应有报告期）")
+        else:
+            pending = [c for c in target if c not in have and quarantine.get(c, 0) < args.max_failures_per_code]
+            if not pending:
+                log(args.log, f"全部完成或有配额隔离 done={len(have)}")
+                break
+            batch_pairs = [(c, None) for c in pending[: args.batch_size]]
+        batch = [c for c, _ in batch_pairs]
         if time.time() - session_start > args.session_seconds:
             log(args.log, f"会话达到 {args.session_seconds}s，正常退出")
             break
-        batch = pending[: args.batch_size]
         timed_out = False
         try:
             proc = subprocess.run([str(UV), "run", "python", str(ROOT / "scripts/backfill_cn_financials.py"),
-                                   "--codes", ",".join(batch)], cwd=ROOT, timeout=args.batch_timeout,
+                                   "--codes", ",".join(batch)]
+                                  + (["--refresh"] if args.refresh else []),
+                                  cwd=ROOT, timeout=args.batch_timeout,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             output = (proc.stdout or "").strip().splitlines()
             if output:
@@ -209,9 +326,20 @@ def main() -> int:
         processed += len(batch)
         have_now = {p.stem.replace("_", ".") for p in OUT_DIR.glob("*.parquet")}
         if not timed_out:
-            for code in batch:
-                if code not in have_now:
+            if args.refresh:
+                # 刷新模式的成败**必须用与挑选时同一个判据**复核（最后报告期是否补上）。
+                # 第一版这里用了 ann_date 是否推进 —— 与 refresh_pending 的 end_date 判据不一致，
+                # 于是"公告日动了但报告期仍然落后"的股票会被无限重抓（实测 002731.SZ 死循环）。
+                still = {c for c, _ in refresh_pending(batch, OUT_DIR, args.stale_lag_days,
+                                                       args.active_window_days)}
+                log(args.log, f"批次复核：{len(batch) - len(still)}/{len(batch)} 报告期已补上"
+                              + (f"；仍落后 {len(still)} 只（已累计失败次数）" if still else ""))
+                for code in still:
                     quarantine[code] = quarantine.get(code, 0) + 1
+            else:
+                for code in batch:
+                    if code not in have_now:
+                        quarantine[code] = quarantine.get(code, 0) + 1
         quarantine_path.write_text(json.dumps(quarantine, ensure_ascii=False, indent=2), encoding="utf-8")
         done = len(have_now)
         rate = processed / max(time.time() - session_start, 1e-9)
@@ -223,7 +351,7 @@ def main() -> int:
             "quarantined": sum(1 for v in quarantine.values() if v >= args.max_failures_per_code),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         if processed % 50 < args.batch_size:
-            log(args.log, f"进度 {done}/{len(target)} | 本会话 {processed} | {rate:.3f} 只/秒")
+            log(args.log, f"进度 done={done}/{len(target)} | 本会话 {processed} | {rate:.3f} 只/秒")
     log(args.log, f"=== 监督器退出 done={len(list(OUT_DIR.glob('*.parquet')))} ===")
     return 0
 

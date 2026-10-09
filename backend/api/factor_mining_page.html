@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LLM 因子挖掘 · 对话面板</title>
+<style>
+  :root {
+    --bg: #0f1116; --bg-card: #171a21; --bg-elev: #1e222b;
+    --border: #2a2f3a; --text: #e6e8ee; --muted: #8b93a7; --gold: #ffd166;
+    --up: #ff6b6b; --down: #4dd4ac;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.6 -apple-system, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 18px; }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+  h1 { font-size: 17px; margin: 0; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px; margin-bottom: 14px;
+  }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+  textarea, input, select {
+    width: 100%; background: var(--bg-elev); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
+    font: inherit; outline: none;
+  }
+  textarea { min-height: 62px; resize: vertical; }
+  textarea:focus, input:focus, select:focus { border-color: var(--gold); }
+  .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+  .actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+  button {
+    background: var(--gold); color: #23262e; border: 0; border-radius: 6px;
+    padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer;
+    white-space: nowrap;   /* 视觉验收发现：窄屏下按钮文字被折成两行 */
+  }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button.tiny { padding: 2px 10px; font-size: 11px; margin-left: 6px; }
+  .chk { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .chk input { width: auto; }
+  #status { font-size: 12px; color: var(--muted); }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .badge.running { color: var(--gold); border-color: var(--gold); }
+  .badge.done { color: var(--down); border-color: var(--down); }
+  .badge.failed { color: var(--up); border-color: var(--up); }
+  #chat { max-height: 46vh; overflow-y: auto; }
+  .msg { display: flex; margin-bottom: 9px; }
+  .bubble {
+    max-width: 86%; padding: 7px 11px; border-radius: 8px; white-space: pre-wrap;
+    word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .msg.system .bubble { background: var(--bg-elev); color: var(--muted); }
+  .msg.assistant { justify-content: flex-end; }
+  .msg.assistant .bubble { background: #23304a; color: #dfe8ff; }
+  .msg.error .bubble { background: #3a1f24; color: #ffb3b3; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  td.expr { font-family: ui-monospace, Menlo, monospace; color: var(--muted); text-align: left; max-width: 380px; }
+  .empty { color: var(--muted); font-size: 12px; }
+  a { color: var(--gold); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>LLM 因子挖掘 · 对话面板</h1>
+    <span class="sub">后端直连 <code>scripts/llm_factor_mining.py</code>（DeepSeek）｜评估口径 = 月频秩 IC / NW t / BH-FDR</span>
+  </header>
+
+  <div class="card">
+    <label>挖掘方向（自然语言，越具体越省 token）</label>
+    <textarea id="direction">A 股小市值与量价/估值的交互因子：要求能在月度横截面上稳定排序，避免与 pe/pb/rps/rev 单因子高度重合</textarea>
+    <div class="row">
+      <div><label>轮数</label><input id="rounds" type="number" min="1" max="10" value="2" /></div>
+      <div><label>每轮候选数</label><input id="proposals" type="number" min="1" max="20" value="6" /></div>
+      <div><label>模型</label>
+        <select id="model">
+          <option value="deepseek-flash" selected>deepseek-flash</option>
+          <option value="deepseek-chat">deepseek-chat</option>
+          <option value="deepseek-reasoner">deepseek-reasoner</option>
+        </select>
+      </div>
+      <div><label>会话</label><input id="session" readonly placeholder="（未开始）" /></div>
+    </div>
+    <div class="actions">
+      <button id="start">开始挖掘</button>
+      <button id="stop" class="ghost" disabled>停止轮询</button>
+      <span class="chk"><input id="dry" type="checkbox" /><label for="dry" style="margin:0">自检模式（不调 LLM，只验评估链路）</label></span>
+      <span id="status">就绪</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>
+      历史会话（落盘持久化 <code>output/factor_mining_sessions/</code>，uvicorn 重启不丢）
+      <button id="refresh" class="ghost tiny">刷新</button>
+    </label>
+    <div id="history"><div class="empty">加载中…</div></div>
+  </div>
+
+  <div class="card">
+    <label>对话 / 流式日志</label>
+    <div id="chat"><div class="empty">输入方向后点「开始挖掘」。面板加载约占 2GB 内存，服务端会串行执行。</div></div>
+  </div>
+
+  <div class="card">
+    <label>本轮入档因子（按 |ICIR| 排序，仅列通过 BH-FDR q=0.05 的）</label>
+    <div id="factors"><div class="empty">暂无。</div></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let timer = null, lastCount = 0, sessionId = null;
+
+async function loadHistory() {
+  const box = $("history");
+  try {
+    const rows = await (await fetch("/api/factor-mining/sessions")).json();
+    if (!rows.length) { box.innerHTML = '<div class="empty">暂无历史会话。</div>'; return; }
+    const head = ["创建时间", "状态", "方向", "消息", "因子", ""];
+    let html = "<table><thead><tr>" + head.map((h) => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
+    for (const r of rows) {
+      html += "<tr><td>" + esc(r.created_at || "—") + "</td>"
+        + "<td>" + esc(r.status) + "</td>"
+        + '<td class="expr">' + esc(r.direction) + "</td>"
+        + "<td>" + r.n_messages + "</td><td>" + r.n_factors + "</td>"
+        + '<td><button class="ghost tiny" data-sid="' + esc(r.session_id) + '">载入</button></td></tr>';
+    }
+    box.innerHTML = html + "</tbody></table>";
+    box.querySelectorAll("button[data-sid]").forEach((b) => {
+      b.onclick = () => loadSession(b.getAttribute("data-sid"));
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="empty">历史会话加载失败。</div>';
+  }
+}
+
+async function loadSession(id) {
+  if (!id) return;
+  const res = await fetch("/api/factor-mining/sessions/" + id);
+  if (!res.ok) return;
+  const data = await res.json();
+  sessionId = data.session_id;
+  $("session").value = id;
+  lastCount = 0;
+  renderMessages(data.messages || []);
+  renderFactors(data.factors || []);
+  if (data.request && data.request.direction) $("direction").value = data.request.direction;
+  $("status").innerHTML = '<span class="badge ' + data.status + '">' + data.status + "</span>"
+    + (data.out_dir ? ' 产物 <code>' + esc(data.out_dir) + "</code>" : "");
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function renderMessages(messages) {
+  const chat = $("chat");
+  if (!messages.length) return;
+  if (messages.length === lastCount) return;
+  chat.innerHTML = "";
+  const empty = document.createElement("div");
+  empty.className = "empty";
+  chat.appendChild(empty);
+  for (const m of messages) {
+    const cls = m.role === "assistant" ? "assistant" : (/失败|错误|Traceback|ERROR/.test(m.text) ? "error" : "system");
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + cls;
+    const b = document.createElement("div");
+    b.className = "bubble";
+    b.textContent = m.text;
+    wrap.appendChild(b);
+    chat.appendChild(wrap);
+  }
+  empty.remove();
+  chat.scrollTop = chat.scrollHeight;
+  lastCount = messages.length;
+}
+
+function fmt(v, digits) {
+  if (v === "" || v === null || v === undefined) return "—";
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(digits) : "—";
+}
+
+function renderFactors(rows) {
+  const box = $("factors");
+  if (!rows || !rows.length) { box.innerHTML = '<div class="empty">暂无。</div>'; return; }
+  const head = ["因子", "IC", "ICIR", "NW t", "正号月", "maxρ", "FDR", "表达式"];
+  let html = "<table><thead><tr>" + head.map((h) => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
+  for (const r of rows) {
+    const fdr = String(r.fdr_pass).toLowerCase() === "true" ? "✅" : "—";
+    html += "<tr><td>" + esc(r.name) + "</td>"
+      + "<td>" + fmt(r.ic_mean, 4) + "</td>"
+      + "<td>" + fmt(r.icir, 3) + "</td>"
+      + "<td>" + fmt(r.nw_t, 2) + "</td>"
+      + "<td>" + (r.pos_ratio === "" ? "—" : (Number(r.pos_ratio) * 100).toFixed(1) + "%") + "</td>"
+      + "<td>" + fmt(r.max_corr_with_fields, 2) + "</td>"
+      + "<td>" + fdr + "</td>"
+      + '<td class="expr">' + esc(r.expression) + "</td></tr>";
+  }
+  box.innerHTML = html + "</tbody></table>";
+}
+
+async function poll() {
+  if (!sessionId) return;
+  try {
+    const res = await fetch("/api/factor-mining/sessions/" + sessionId);
+    if (!res.ok) return;
+    const data = await res.json();
+    renderMessages(data.messages || []);
+    renderFactors(data.factors || []);
+    const badge = $("status");
+    badge.innerHTML = '<span class="badge ' + data.status + '">' + data.status + "</span>"
+      + (data.out_dir ? ' 产物 <code>' + esc(data.out_dir) + "</code>" : "");
+    if (data.status === "done" || data.status === "failed") {
+      clearInterval(timer); timer = null;
+      $("start").disabled = false;
+      $("stop").disabled = true;
+      loadHistory();
+      if (data.error) {
+        const chat = $("chat");
+        const w = document.createElement("div");
+        w.className = "msg error";
+        w.innerHTML = '<div class="bubble">' + esc(data.error) + "</div>";
+        chat.appendChild(w);
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+  } catch (e) { /* 网络抖动忽略，下一轮再取 */ }
+}
+
+$("start").onclick = async () => {
+  const body = {
+    direction: $("direction").value.trim(),
+    rounds: Number($("rounds").value || 2),
+    proposals: Number($("proposals").value || 6),
+    model: $("model").value,
+    dry_run: $("dry").checked,
+  };
+  if (!body.direction) { $("status").textContent = "请先填写挖掘方向"; return; }
+  $("start").disabled = true;
+  $("chat").innerHTML = '<div class="empty">提交中…</div>';
+  lastCount = 0;
+  const res = await fetch("/api/factor-mining/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    $("status").textContent = "提交失败：" + res.status;
+    $("start").disabled = false;
+    return;
+  }
+  const data = await res.json();
+  sessionId = data.session_id;
+  $("session").value = sessionId;
+  $("status").innerHTML = '<span class="badge running">running</span>';
+  $("stop").disabled = false;
+  timer = setInterval(poll, 2000);
+  poll();
+};
+
+$("stop").onclick = () => {
+  if (timer) clearInterval(timer);
+  timer = null;
+  $("stop").disabled = true;
+  $("start").disabled = false;
+  $("status").textContent = "已停止轮询（服务端子进程仍在跑）";
+};
+
+$("refresh").onclick = loadHistory;
+loadHistory();
+</script>
+</body>
+</html>

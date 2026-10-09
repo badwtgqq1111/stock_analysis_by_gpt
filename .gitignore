@@ -1,5 +1,9 @@
 output/
-assets/
+# 只忽略仓库根的数据目录。写 `assets/` 会**连带匹配 frontend/dist/assets/**，
+# 导致 SPA 的入口 index.html 入库、而它引用的 bundle 不入库 → 任何一次重建
+# 都让"入库的入口"指向已删除的 hash 文件（2026-10-08 白屏事故的根因之一）。
+/assets/
+frontend/dist/
 assets.tar.gz
 __pycache__/assets/stock_data.duckdb
 __pycache__/
@@ -21,3 +25,4 @@ deploy/lightrag/data/
 config/notify.env
 config/cn_pipeline_blend_*.toml
 config/scheduler_env.sh
+.gstack/

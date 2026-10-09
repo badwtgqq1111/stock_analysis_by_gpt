@@ -678,7 +678,9 @@ def test_cost_aware_optimizer_respects_weight_industry_and_turnover_limits():
 
 def test_paper_account_enforces_next_session_fill_and_writes_nav():
     dates = pd.date_range("2025-01-01", periods=3, freq="D")
-    bars = pd.DataFrame({"stock_code": ["A"] * 3, "trade_date": dates, "open": [10, 11, 12], "close": [10, 11, 12]})
+    # 价格必须**不含涨停**：10 → 11 是 +10%，在统一执行假设下属于"涨停不买"，
+    # 会被跳过（另见 test_paper_account_skips_limit_up_buy）。这里只验 T+1 成交。
+    bars = pd.DataFrame({"stock_code": ["A"] * 3, "trade_date": dates, "open": [10, 10.05, 12], "close": [10, 10.05, 12]})
     selection = pd.DataFrame({"stock_code": ["A"], "trade_date": [dates[0]], "target_weight": [0.5]})
     account = run_paper_account(selection, bars, initial_capital=10_000, commission_bps=0, slippage_bps=0)
     assert pd.Timestamp(account["fills"].iloc[0]["fill_time"]) == dates[1]
@@ -693,6 +695,35 @@ def test_paper_account_records_pending_order_without_later_bar():
     account = run_paper_account(selection, bars, initial_capital=10_000, commission_bps=0, slippage_bps=0)
     assert account["orders"].iloc[0]["status"] == "pending"
     assert pd.isna(account["orders"].iloc[0]["executable_from"])
+
+
+def test_paper_account_skips_limit_up_buy():
+    """统一执行假设（第三十二轮）：执行日开盘 +10% → 涨停不买（与 L3 回放同规则）。"""
+    dates = pd.date_range("2025-01-01", periods=3, freq="D")
+    bars = pd.DataFrame({"stock_code": ["B"] * 3, "trade_date": dates, "open": [10, 11, 11], "close": [10, 11, 11]})
+    selection = pd.DataFrame({"stock_code": ["B"], "trade_date": [dates[0]], "target_weight": [1.0]})
+    account = run_paper_account(selection, bars, initial_capital=10_000)
+    assert list(account["orders"]["status"]) == ["skipped_limit_up"]
+    assert account["orders"]["reason"].iloc[0] == "limit_up_no_buy"
+    assert account["fills"].empty
+    assert float(account["nav"].iloc[-1]["nav"]) == 10_000.0
+
+
+def test_paper_account_defers_limit_down_sell_to_next_tradable_session():
+    """跌停卖不出 → 顺延到下一个可以卖的交易日（不丢单），且卖出计印花税。"""
+    dates = pd.date_range("2025-01-01", periods=4, freq="D")
+    bars = pd.DataFrame({"stock_code": ["C"] * 4, "trade_date": dates,
+                         "open": [10.0, 10.0, 9.0, 9.5], "close": [10.0, 10.0, 9.0, 9.5]})
+    selection = pd.DataFrame({"stock_code": ["C", "C"], "trade_date": [dates[0], dates[1]],
+                              "target_weight": [1.0, 0.0]})
+    account = run_paper_account(selection, bars, initial_capital=10_000)
+    orders = account["orders"][account["orders"]["side"] == "sell"]
+    assert list(orders["status"]) == ["deferred_limit_down"]
+    fills = account["fills"]
+    assert list(fills["side"]) == ["buy", "sell"]
+    assert str(fills["fill_time"].iloc[1])[:10] == str(dates[3])[:10]      # 顺延到第 4 天
+    sell = fills.iloc[1]
+    assert abs(float(sell["commission"]) - float(sell["quantity"]) * float(sell["price"]) * (0.00025 + 0.001)) < 1e-6
 
 
 def test_alternative_evidence_uses_available_at_for_asof_features():

@@ -1,38 +1,131 @@
 <template>
   <div class="page">
-    <h4 class="page-title">LightGBM 选股结果</h4>
+    <PageHeader
+      title="选股结果"
+      description="名单直接来自流水线产物（<code>output/results_cn/*.csv</code>），前端只做展示、不重算；下方「数据源」写明了这份名单取自哪个文件、什么时候生成的。"
+    >
+      <template #actions>
+        <span v-if="loading" class="status running">加载中…</span>
+        <button class="btn-ghost" :disabled="loading" @click="reload">刷新</button>
+      </template>
+    </PageHeader>
 
-    <div v-if="data?.empty" class="empty-state">暂无选股数据，请先运行选股模型生成 output/ 目录下的 CSV 文件</div>
+    <!-- 数据源选择 + 出处指纹：这是本轮补上的最关键的一块 —— 以前页面只读港股那份 CSV，
+         用户无从知道首页名单和命令行跑出来的名单根本不是一回事。 -->
+    <div class="panel">
+      <div class="source-bar">
+        <div class="tabs">
+          <button
+            v-for="opt in data?.available || []"
+            :key="opt.key"
+            class="tab"
+            :class="{ active: opt.key === currentSource }"
+            :disabled="!opt.available"
+            @click="switchSource(opt.key)"
+          >
+            {{ opt.label }}<span v-if="!opt.available" class="dim">（缺）</span>
+          </button>
+        </div>
+        <div v-if="data?.source" class="source-meta">
+          <span class="pill">交易日 <b>{{ data.source.trade_date || '—' }}</b></span>
+          <span class="pill">{{ data.source.row_count }} 行</span>
+          <span v-for="f in data.source.files" :key="f.path" class="pill" :title="f.path">
+            {{ f.role }} · {{ f.path.split('/').pop() }} · {{ f.mtime || '缺失' }}
+          </span>
+        </div>
+      </div>
+      <p v-if="data?.source?.note" class="hint source-note">{{ data.source.note }}</p>
+    </div>
+
+    <!-- 导出到同花顺：同花顺**不开放写接口**（自选股在账号云端），
+         所以这里做到"格式对齐 + 一键复制/下载"，人工在同花顺里点一次导入或 Ctrl+V 粘贴。 -->
+    <div class="panel" v-if="ths?.available">
+      <h6>导出到同花顺（自选股）· {{ ths.trade_date }}</h6>
+      <p class="hint tiny">
+        同花顺不开放写入接口，无法全自动同步。最快是<strong>点「复制」→ 在同花顺自选股里 Ctrl+V</strong>；
+        或下载 txt 后走「自选股 → 右键 → 导入自选股」（乱码就换 GBK 版本）。
+      </p>
+      <div class="ths-grid">
+        <div v-for="src in ths.sources" :key="src.key" class="ths-row">
+          <div class="ths-head">
+            <b>{{ src.label }}</b>
+            <span class="tag" :class="src.key === 'all' ? 'gold' : ''">{{ src.n }} 只</span>
+          </div>
+          <div class="ths-codes mono tiny" :title="src.codes.join(' ')">
+            {{ src.codes.join(' ') }}
+          </div>
+          <div class="ths-actions">
+            <button class="btn btn-sm" @click="copyCodes(src)">
+              {{ copiedKey === src.key ? '✓ 已复制' : '复制' }}
+            </button>
+            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code.txt`)"
+               download>下载 txt</a>
+            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code_gbk.txt`)"
+               download>GBK</a>
+            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code_name.txt`)"
+               download>带名称</a>
+            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}.csv`)"
+               download>CSV</a>
+          </div>
+        </div>
+      </div>
+      <p class="tiny dim" v-for="(step, i) in ths.how_to_import || []" :key="i">· {{ step }}</p>
+    </div>
+
+    <StateBlock
+      v-if="error"
+      state="error"
+      title="取数失败"
+      :detail="error"
+      :retry="reload"
+    />
+    <StateBlock v-else-if="loading && !data" state="loading" title="加载选股名单…" />
+    <StateBlock
+      v-else-if="data?.empty"
+      state="empty"
+      title="这个数据源还没有产物"
+      detail="先跑一次流水线（`uv run python scripts/run_cn_pipeline.py --stage selection`），或切换到其它数据源。"
+    />
 
     <template v-else-if="data">
       <div class="two-col">
         <div class="col-main">
-          <h6>入选股票列表</h6>
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th v-for="col in data.columns" :key="col.key" @click="sortBy(col.key)">
-                  {{ col.title }} {{ sortKey === col.key ? (sortAsc ? '▲' : '▼') : '' }}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="row in pagedRows" :key="row.stock_code"
-                :class="{ selected: selectedCode === row.stock_code, strong: row.signal_tier === 'strong' }"
-                @click="selectedCode = row.stock_code"
-              >
-                <td v-for="col in data.columns" :key="col.key">
-                  <template v-if="col.key === 'stock_code'">
-                    {{ row.stock_code }} {{ row.stock_name }}
-                  </template>
-                  <template v-else>
-                    {{ fmtVal(row[col.key]) }}
-                  </template>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <h6>名单（{{ pagedRows.length }} / {{ rows.length }}）</h6>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th v-for="col in data.columns" :key="col.key"
+                      :class="{ 'text-left': col.key === 'stock_code' || col.key === 'stock_name' || col.key === 'stage' }"
+                      @click="sortBy(col.key)">
+                    {{ col.title }} {{ sortKey === col.key ? (sortAsc ? '▲' : '▼') : '' }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(row, i) in pagedRows" :key="row.stock_code + '-' + i"
+                  class="clickable"
+                  :class="{ selected: selectedCode === row.stock_code, strong: row.in_portfolio === true || row.stage === '最终入选（PK 后）' }"
+                  @click="selectedCode = row.stock_code"
+                >
+                  <td v-for="col in data.columns" :key="col.key"
+                      :class="{ 'text-left': col.key === 'stock_code' || col.key === 'stock_name' || col.key === 'stage' }">
+                    <template v-if="col.key === 'stock_code'">
+                      <span class="mono link" @click.stop="gotoStock(row.stock_code)">{{ row.stock_code }}</span>
+                    </template>
+                    <template v-else-if="col.key === 'stock_name'">
+                      <span class="link" @click.stop="gotoStock(row.stock_code)">{{ row.stock_name || '—' }}</span>
+                    </template>
+                    <template v-else-if="col.key === 'stage'">
+                      <span class="tag" :class="row.stage === '最终入选（PK 后）' ? 'gold' : ''">{{ row.stage }}</span>
+                    </template>
+                    <template v-else>{{ fmtVal(row[col.key]) }}</template>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <div class="pagination">
             <button :disabled="page <= 1" @click="page--">上一页</button>
             <span>{{ page }} / {{ totalPages }}</span>
@@ -41,124 +134,114 @@
         </div>
 
         <div class="col-side">
-          <h6>Top 20 综合评分</h6>
-          <div class="bar-chart">
-            <div v-for="r in scoreBars" :key="r.code" class="bar-row">
-              <span class="bar-label">{{ r.code }}</span>
-              <div class="bar-track">
-                <div class="bar-fill" :class="r.tier === 'strong' ? 'bar-strong' : 'bar-normal'"
-                  :style="{ width: r.pct + '%' }"></div>
-              </div>
-              <span class="bar-val">{{ r.score.toFixed(1) }}</span>
-            </div>
-          </div>
+          <h6>{{ scoreKey ? '评分榜（' + scoreLabel + '）' : '评分榜' }}</h6>
+          <BarChart v-if="scoreBars.length" :bars="scoreBars" :label-width="72" :max-height="420" />
+          <div v-else class="empty">该数据源没有可用的评分列</div>
         </div>
       </div>
 
       <hr>
-      <div v-if="importanceData.importances.length > 0" class="importance-section">
-        <h6>全局因子重要性 (Top 30, {{ importanceData.feature_count }} 因子中)</h6>
-        <div class="bar-chart" :style="{ height: Math.min(importanceData.importances.length, 20) * 26 + 'px' }">
-          <div v-for="(f, i) in importanceData.importances.slice(0, 20)" :key="f.factor" class="bar-row">
-            <span class="bar-label" style="width:90px">{{ f.factor }}</span>
-            <div class="bar-track">
-              <div class="bar-fill bar-up" :style="{ width: (f.importance / maxImp) * 100 + '%' }"></div>
-            </div>
-            <span class="bar-val" style="width:60px">{{ f.importance.toFixed(4) }}</span>
-          </div>
+
+      <!-- SHAP / 重要性只存在于港股链路的 factor_explanation 列；CN 名单没有这个字段。
+           以前这里无条件渲染，切到 CN 后就是一片空白且没有任何解释。 -->
+      <div v-if="!data.source?.supports_shap" class="state-block">
+        <div class="state-title">本数据源没有 SHAP / 因子重要性</div>
+        <div class="state-detail">这两个分析读的是港股链路的 <code>factor_explanation</code> 字段。
+          切到「港股 LightGBM Top10」即可查看。</div>
+        <div class="state-actions">
+          <button class="btn btn-sm" @click="switchSource('hk_lightgbm')">切到港股源</button>
         </div>
       </div>
-      <hr>
-      <div>
-        <h6>SHAP 因子贡献分析 (单股)</h6>
-        <select v-model="shapCode" @change="loadShap" class="stock-select">
-          <option v-for="r in selectableStocks" :key="r.stock_code" :value="r.stock_code">
-            ★ {{ r.stock_code }} {{ r.stock_name }}
-          </option>
-        </select>
-        <div class="bar-chart shap-chart" v-if="shapFeatures.length > 0" :style="{ height: shapFeatures.length * 35 + 'px' }">
-          <div v-for="f in shapFeatures" :key="f.name" class="bar-row">
-            <span class="bar-label shap-label">{{ f.name }}</span>
-            <div class="bar-track">
-              <div class="bar-fill" :class="f.direction === 'positive' ? 'bar-up' : 'bar-down'"
-                :style="{ width: f.pct + '%', marginLeft: f.offset + '%' }"></div>
-            </div>
-            <span class="bar-val" :class="f.direction === 'positive' ? 'up' : 'down'">
-              {{ f.direction === 'positive' ? '+' : '' }}{{ f.value.toFixed(4) }}
-            </span>
-          </div>
+
+      <template v-else>
+        <div v-if="importanceData.importances.length > 0">
+          <h6>全局因子重要性（Top 20，共 {{ importanceData.feature_count }} 个因子）</h6>
+          <BarChart :bars="importanceBars" :label-width="110" :max-height="480" />
         </div>
-      </div>
+        <hr>
+        <div>
+          <h6>SHAP 因子贡献（单股）</h6>
+          <select v-model="shapCode" class="stock-select" @change="loadShap">
+            <option v-for="r in rows" :key="r.stock_code" :value="r.stock_code">
+              {{ r.stock_code }} {{ r.stock_name }}
+            </option>
+          </select>
+          <BarChart v-if="shapBars.length" :bars="shapBars" :label-width="140" />
+          <div v-else class="empty">{{ shapCode ? '该股票没有 SHAP 明细' : '先选一只股票' }}</div>
+        </div>
+      </template>
     </template>
-
-    <div v-else class="empty-state">加载中...</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
-import { getSelection, getShap, getImportance } from '@/api/client'
-import type { SelectionResponse, ShapFeature, ImportanceResponse } from '@/types/api'
+import { computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { getImportance, getSelection, getShap, getThsExportFiles, thsDownloadUrl } from '@/api/client'
+import { useAsync } from '@/composables/useAsync'
+import type { ImportanceResponse, SelectionRow, ShapFeature, ThsExportList } from '@/types/api'
+import PageHeader from '@/components/ui/PageHeader.vue'
+import StateBlock from '@/components/ui/StateBlock.vue'
+import BarChart, { type Bar } from '@/components/ui/BarChart.vue'
 
-const data = ref<SelectionResponse | null>(null)
-const selectedCode = ref<string | null>(null)
-const shapCode = ref('')
-const shapFeatures = ref<(ShapFeature & { pct: number; offset: number })[]>([])
-const importanceData = ref<ImportanceResponse>({ factor_set: '', importances: [], feature_count: 0, train_rows: 0 })
-const sortKey = ref('ranking_score')
-const sortAsc = ref(false)
+const router = useRouter()
+const currentSource = ref('')   // 留空 = 后端默认（CN 生产名单）
 const page = ref(1)
-const perPage = 15
+const perPage = 20
+const sortKey = ref('')
+const sortAsc = ref(false)
+const selectedCode = ref<string | null>(null)
 
-const maxImp = computed(() => Math.max(...importanceData.value.importances.map(f => f.importance), 0.01))
+const { data, error, loading, reload } = useAsync(() => getSelection(currentSource.value))
 
-onMounted(async () => {
-  data.value = await getSelection()
-  importanceData.value = await getImportance()
-})
-
-const selectableStocks = computed(() => data.value?.rows ?? [])
-
-const sortedRows = computed(() => {
-  if (!data.value) return []
-  const rows = [...data.value.rows]
-  rows.sort((a, b) => {
-    const va = a[sortKey.value] ?? 0, vb = b[sortKey.value] ?? 0
-    return sortAsc.value ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1)
-  })
-  return rows
-})
-
-const totalPages = computed(() => Math.max(1, Math.ceil(sortedRows.value.length / perPage)))
-const pagedRows = computed(() => {
-  const start = (page.value - 1) * perPage
-  return sortedRows.value.slice(start, start + perPage)
-})
-
-const scoreBars = computed(() => {
-  if (!data.value) return []
-  const rows = [...data.value.rows].filter(r => r.ranking_score != null)
-  rows.sort((a, b) => (b.ranking_score ?? 0) - (a.ranking_score ?? 0))
-  const top20 = rows.slice(0, 20)
-  const max = top20[0]?.ranking_score ?? 1
-  return top20.map(r => ({
-    code: r.stock_code, name: r.stock_name, score: r.ranking_score ?? 0,
-    tier: r.signal_tier, pct: ((r.ranking_score ?? 0) / max) * 100,
-  }))
-})
-
-async function loadShap() {
-  if (!shapCode.value) return
-  const res = await getShap(shapCode.value)
-  const maxAbs = Math.max(...res.features.map(f => Math.abs(f.value)), 0.01)
-  shapFeatures.value = res.features.map(f => {
-    const pct = Math.abs(f.value) / maxAbs * 80
-    return {
-      ...f, pct,
-      offset: f.direction === 'negative' ? (95 - pct) : 5,
-    }
-  })
+// 同花顺导出：每个源一行，可一键复制代码（粘贴进同花顺自选股即建分组）
+const ths = ref<ThsExportList | null>(null)
+const copiedKey = ref('')
+async function copyCodes(src: { key: string; codes: string[] }) {
+  const text = src.codes.join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    copiedKey.value = src.key
+    setTimeout(() => { if (copiedKey.value === src.key) copiedKey.value = '' }, 1600)
+  } catch {
+    // http 明文下 clipboard API 可能被拒 —— 退回到"选中文本让用户自己复制"
+    window.prompt('自动复制被浏览器拒绝，请手动复制下面这段：', text)
+  }
 }
+void (async () => {
+  try { ths.value = await getThsExportFiles() } catch { /* 没有导出产物就不显示这一块 */ }
+})()
+
+function switchSource(key: string) {
+  if (key === currentSource.value) return
+  currentSource.value = key
+  page.value = 1
+  sortKey.value = ''
+  shapCode.value = ''
+  shapFeatures.value = []
+  importanceData.value = { factor_set: '', importances: [], feature_count: 0, train_rows: 0 }
+  void reload()
+}
+
+function gotoStock(code: string) {
+  if (code) router.push({ path: '/kline', query: { code } })
+}
+
+const rows = computed<SelectionRow[]>(() => {
+  const list = [...(data.value?.rows ?? [])]
+  if (!sortKey.value) return list
+  const key = sortKey.value
+  return list.sort((a, b) => {
+    const va = a[key], vb = b[key]
+    if (va == null) return 1
+    if (vb == null) return -1
+    const cmp = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb))
+    return sortAsc.value ? cmp : -cmp
+  })
+})
+
+const totalPages = computed(() => Math.max(1, Math.ceil(rows.value.length / perPage)))
+const pagedRows = computed(() => rows.value.slice((page.value - 1) * perPage, page.value * perPage))
 
 function sortBy(key: string) {
   if (sortKey.value === key) sortAsc.value = !sortAsc.value
@@ -166,48 +249,109 @@ function sortBy(key: string) {
   page.value = 1
 }
 
-function fmtVal(v: any): string {
-  if (v === null || v === undefined) return '-'
-  if (typeof v === 'number') return v.toFixed(2)
-  return String(v)
+// 评分列随数据源变化：CN 用 model_score，手臂用 score，港股用 ranking_score
+const SCORE_KEYS = ['model_score', 'ensemble_score', 'score', 'ranking_score']
+const scoreKey = computed(() => SCORE_KEYS.find((k) => (data.value?.rows ?? []).some((r) => r[k] != null)) ?? '')
+const scoreLabel = computed(() => data.value?.columns.find((c) => c.key === scoreKey.value)?.title ?? '')
+
+const scoreBars = computed<Bar[]>(() => {
+  const key = scoreKey.value
+  if (!key) return []
+  const picks = (data.value?.rows ?? []).filter((r) => typeof r[key] === 'number')
+  if (!picks.length) return []
+  const sorted = [...picks].sort((a, b) => (b[key] as number) - (a[key] as number)).slice(0, 20)
+  const max = Math.max(...sorted.map((r) => Math.abs(r[key] as number)), 1e-9)
+  return sorted.map((r) => {
+    const v = r[key] as number
+    return {
+      key: r.stock_code,
+      label: `${r.stock_name || r.stock_code}`.slice(0, 6),
+      value: v,
+      text: v.toFixed(v > 10 ? 2 : 4),
+      tone: (r.in_portfolio === true || r.stage === '最终入选（PK 后）') ? 'pos' : 'neutral',
+      offset: 0,
+    }
+  })
+})
+
+// ── SHAP / 重要性（仅港股源） ──
+const shapCode = ref('')
+const shapFeatures = ref<(ShapFeature & { pct: number; offset: number })[]>([])
+const importanceData = ref<ImportanceResponse>({ factor_set: '', importances: [], feature_count: 0, train_rows: 0 })
+
+async function loadShap() {
+  if (!shapCode.value) return
+  try {
+    const res = await getShap(shapCode.value)
+    const maxAbs = Math.max(...res.features.map((f) => Math.abs(f.value)), 1e-9)
+    shapFeatures.value = res.features.map((f) => {
+      const pct = (Math.abs(f.value) / maxAbs) * 80
+      return { ...f, pct, offset: f.direction === 'negative' ? 95 - pct : 5 }
+    })
+  } catch {
+    shapFeatures.value = []
+  }
 }
 
-watch(selectedCode, code => {
-  if (code) { shapCode.value = code; loadShap() }
-})
+const shapBars = computed<Bar[]>(() =>
+  shapFeatures.value.map((f) => ({
+    label: f.name,
+    value: f.value,
+    text: `${f.value > 0 ? '+' : ''}${f.value.toFixed(4)}`,
+    tone: f.direction === 'positive' ? 'pos' : 'neg',
+    offset: f.offset,
+  })),
+)
+
+const importanceBars = computed<Bar[]>(() =>
+  importanceData.value.importances.slice(0, 20).map((f) => ({
+    label: f.factor,
+    value: f.importance,
+    text: f.importance.toFixed(4),
+    tone: 'info',
+  })),
+)
+
+// 只在支持 SHAP 的数据源上取重要性（CN 名单没有 factor_explanation，取了必然为空）
+watch(
+  () => data.value?.source?.supports_shap,
+  async (supported) => {
+    if (!supported || importanceData.value.importances.length) return
+    try {
+      importanceData.value = await getImportance()
+    } catch {
+      /* 取不到就留空；页面已按 supports_shap 分支处理 */
+    }
+  },
+  { immediate: true },
+)
+
+function fmtVal(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—'
+  if (typeof v === 'boolean') return v ? '是' : '否'
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(4)
+  return String(v)
+}
 </script>
 
 <style scoped>
-.page { max-width: 1400px; margin: 0 auto; }
-.page-title { margin-bottom: 10px; font-size: 18px; }
-.two-col { display: flex; gap: 20px; }
-.col-main { flex: 1; min-width: 0; }
-.col-side { width: 380px; flex-shrink: 0; }
-h6 { font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
-.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.data-table th { background: #1a1a2e; color: var(--text-muted); padding: 6px 8px; text-align: left; cursor: pointer; border-bottom: 1px solid var(--border-color); white-space: nowrap; }
-.data-table td { padding: 5px 8px; border-bottom: 1px solid rgba(42,46,57,0.5); white-space: nowrap; }
-.data-table tr:hover { background: rgba(255,255,255,0.03); }
-.data-table tr.selected { background: rgba(239,71,111,0.08); }
-.data-table tr.strong { background: rgba(239,71,111,0.12); }
-.pagination { display: flex; gap: 10px; align-items: center; justify-content: center; padding: 10px 0; font-size: 12px; }
-.pagination button { padding: 3px 10px; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; }
-.pagination button:disabled { opacity: 0.4; cursor: default; }
-.bar-chart { padding: 4px 0; }
-.bar-row { display: flex; align-items: center; gap: 4px; height: 24px; font-size: 11px; }
-.bar-label { width: 55px; text-align: right; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bar-track { flex: 1; height: 12px; background: rgba(42,46,57,0.5); border-radius: 2px; position: relative; overflow: hidden; }
-.bar-fill { height: 100%; border-radius: 2px; min-width: 2px; }
-.bar-strong { background: var(--accent-up); }
-.bar-normal { background: var(--accent-gold); }
-.bar-up { background: var(--accent-up); }
-.bar-down { background: var(--accent-down); }
-.bar-val { width: 55px; text-align: left; color: var(--text-muted); }
-.bar-val.up { color: var(--accent-up); }
-.bar-val.down { color: var(--accent-down); }
-.shap-label { width: 120px; }
-.shap-chart { min-height: 200px; }
-.stock-select { margin-bottom: 10px; padding: 6px 10px; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; max-width: 300px; }
-hr { border-color: var(--border-color); margin: 16px 0; }
-.empty-state { padding: 60px 0; text-align: center; color: var(--text-muted); }
+/* 页面专属：数据源条 + 主表/评分榜两列。其余全部走设计系统。 */
+.source-bar { display: flex; align-items: flex-start; gap: var(--sp-4); flex-wrap: wrap; }
+.source-bar .tabs { margin-bottom: 0; }
+.source-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.source-note { margin: var(--sp-2) 0 0; }
+.stock-select {
+  margin-bottom: var(--sp-3); padding: 6px 10px; background: var(--bg-input);
+  color: var(--text-primary); border: 1px solid var(--border-color);
+  border-radius: var(--r-2); max-width: 320px;
+}
+.data-table tr.strong td { box-shadow: inset 2px 0 0 var(--accent-up); }
+.ths-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: var(--sp-2); }
+.ths-row { background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--r-3); padding: var(--sp-2) var(--sp-3); }
+.ths-head { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: 4px; }
+.ths-codes { color: var(--text-muted); line-height: 1.6; margin-bottom: 6px;
+  max-height: 3.2em; overflow: hidden; word-break: break-all; }
+.ths-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ths-actions .btn { text-decoration: none; display: inline-flex; align-items: center; }
 </style>

@@ -46,7 +46,7 @@ mode = "enforce"          # enforce | warn | off
 # 覆盖率门只负责拦住成批缺失。因此阈值落 0.95。
 min_bar_coverage = 0.95
 lookback_sessions = 10
-stages = ["features", "clean_panel", "lightgbm", "model_scores", "preselection", "pk"]
+stages = ["features", "clean_panel", "lightgbm", "model_scores", "preselection", "pk", "arm_selection"]
 
 [factor_config.valuation_hk]
 # Baidu valuations are sparse observations. Keep the as-of value, and give
@@ -1040,15 +1040,31 @@ benchmark_path = ""
 output_dir = "output/paper_trading"
 
 [paper_account]
-selection_path = "output/results_cn/cn_ensemble_selected.csv"
+# 必须是**历史**（一串决策日），不能是单日文件：
+#   run_paper_account 把每个 trade_date 当成一次再平衡，用"之后第一个可得 bar"以 T+1 成交。
+#   喂单日文件时那个日期永远是最后一根 bar → next_date=None → 只挂 pending、**永不成交**。
+#   实测（2026-10-09）：指向单日文件时 nav 496 行恒为 45,000、positions/fills 空表。
+# 该历史由 scripts/archive_cn_selection.py 维护（每日归档 + 回填 + 汇总）。
+selection_path = "output/results_cn/paper_selection_history.csv"
 days = 756
 account_id = "cn_default"
 strategy_version = "cn-ensemble.v1"
 initial_capital = 45000.0
-commission_bps = 5.0
-slippage_bps = 5.0
-lot_size = 100
+# 成本 / 整手 / 涨跌停 / 停牌 / 退市 等执行假设**不再写在这里**：
+# 统一读 config/execution_assumptions_cn.json（与 L3 回放 scripts/replay_daily_execution.py 同一份）。
+# 原来这里写死 5bp+5bp 且引擎里没有印花税，与回放的 2.5bp+3bp+印花税10bp 口径不一致，
+# 两套引擎的净值不可比（2026-10-09 统一）。临时覆盖可以写回这三个键，写了就以这里的为准。
+# commission_bps = 2.5
+# slippage_bps = 3.0
+# lot_size = 100
 output_dir = "output/paper_trading/account"
+# 参考账户：把「模拟盘」绑定到哪条规则上（2026-10-09 第三十七轮）。
+# 由 scripts/run_shadow_variants.py 生成到 output/paper_trading/account_reference/，
+# 与影子组合里的同名变体**同一份名单历史**（output/results_cn/shadow_variants/<变体>.csv），
+# 所以两者净值必然逐位相同（consistency.json 每次都会核对）。
+# 候选：production（现行）/ pool_top5_rank / pool_top8_rank / pool_top10_rank ...
+# 依据：scripts/promotion_check.py —— 目前只有 pool_top10_rank 方向为正（19 期 12 好 7 差、p=0.36）。
+reference_variant = "pool_top10_rank"
 
 [graph_temporal]
 days = 365
@@ -1095,3 +1111,18 @@ transformer_device = "auto"
 # stock_code, industry_l1 and available_at; current industry labels are invalid
 # for historical graph OOS evaluation.
 industry_mapping_path = ""
+
+
+# ── 研究手臂选股（P1_25 §20/§21）：用 L3 里最强的 base_v1（v1 面板 25 列 IC 加权合成）选最新一天的票 ──
+# 产物写到 output/results_cn/arm_latest_selection.{csv,json}，**不覆盖** preselection→pk 的生产名单。
+[arm_selection]
+arm = "base_v1"          # base_v1 | llm_new
+candidates = 10          # 候选池
+holdings = 5             # 最终等权买入只数
+capital = 45000          # 账户规模（元）：用于算"整手可买"手数
+st_mode = "pit"          # pit=按 as-of 当日名称剔除 ST/退市风险（走 cn_stock_namechange.parquet，历史正确）；
+                         # current=按基础表当前名称（非 PIT，且含前视，仅作对照）；off=不过滤
+st_anchor = "start"      # PIT 锚定日：start=名称生效日（保守、不前瞻）；ann=公告日
+robust_months = 24       # 权重稳健性对照：另用最近 N 个月拟合一次，报 top-N 重合度
+# panel = "assets/data/meta/cn_sleeve_features_long_v4.parquet"   # 留空=默认 v4
+# as_of = "2026-09-30"   # 留空=最新交易日

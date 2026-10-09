@@ -11,6 +11,25 @@
 #      daily_bars → moneyflow → regime → features → clean_panel → model_scores
 #      → preselection → pk → exits → paper_account → paper_outcomes
 #      不再使用旧的一步式 --stage selection（它默认在配置里关闭）。
+#   3a.（2026-10-08 新增）主阶段**之前**先跑「数据补齐」块，把选股真正依赖的数据面凑齐：
+#        · fundamental  —— 股票基础信息 / 估值历史 / 行业分类（[industry].taxonomy）
+#        · financials   —— 财务·财报增量（Tushare fina-indicator，按"应有报告期"判定陈旧）
+#        每个步骤**非致命**：数据源会抽风（2026-10-08 baostock 就挂过），不该因此让整条选股链停摆；
+#        缺什么由最后的数据完整性报表统一暴露，而不是靠日志里有没有报错去猜。
+#        开关：DAILY_DATA_REFRESH=0 整体关闭；DAILY_FUNDAMENTAL / DAILY_FINANCIALS 可单独关。
+#   3b.（2026-10-08 新增）主阶段跑完后，再跑两个**不阻塞生产**的步骤：
+#        · arm_selection  —— 研究手臂选股（候选 10 / 买入 5），产物 output/results_cn/arm_latest_selection.*
+#        · intraday 增量  —— 只补「分时文件最后日期 < 最新交易日」的标的，只抓缺失窗口并合并
+#      这两步此前都不在每日流程里：arm_selection 只出现在 config 的 [pipeline].stages（本脚本不读那个列表），
+#      分时则只有一个"一次性历史回补"的 LaunchAgent（判据是"文件存在"，补齐 5,228 只后永远空转）。
+#      两者都需要日线先更新完（分时增量用日线的最大 trade_date 判定"最新交易日"），所以放在主阶段之后。
+#      开关：DAILY_ARM_SELECTION=0 / DAILY_INTRADAY=0 可分别关掉；DAILY_INTRADAY_SECONDS 限时（默认 1800）。
+#   3c.（2026-10-09 新增）选股台账重建 —— 前端「选股日历」读的就是它
+#        （output/results_cn/selection_ledger.parquet，由 scripts/build_selection_ledger.py 生成）。
+#        此前这一步**不在每日流程里**：日历一直显示到"上一次有人手工重建"为止
+#        （实测 2026-10-09 早上的台账还是 10-08 16:57 的，最新决策日停在 09-30，
+#          而 10-08 的 feishu_*.json 与 selection_snapshots 其实早就写好了）。
+#        必须放在 notify **之后**：台账的三路输入之一 feishu_<date>.json 是通知步骤写的。
 #   4b. 每个阶段都带 --force-rebalance：selection.rebalance_stride_days（默认 5）本意是
 #      "再平衡节奏"，但它会在 stride 窗口内直接沿用上一版组合，导致新选出来的票几天不换。
 #      需要保留 stride 行为时用 DAILY_FORCE_REBALANCE=0 关闭。
@@ -154,6 +173,39 @@ if [ "$FORCE_REBALANCE" = "1" ]; then
   PIPELINE_FLAGS="--force-rebalance"
 fi
 log "pipeline flags: ${PIPELINE_FLAGS:-none}"
+# ── 数据补齐（选股之前）────────────────────────────────────────────────────
+# 放在主阶段之前的原因：这些是 features / clean_panel 的输入。若放在主阶段之后，
+# 当天新披露的财报、新发布的行业分类要等到**第二天**才会进特征面板。
+# 每步非致命：失败只记日志不中断，最终由数据完整性报表汇总（见脚本末尾）。
+run_data_step() {
+  local name="$1"; shift
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "data-step=$name would run: $*"
+    return 0
+  fi
+  local started; started=$(date +%s)
+  if "$@" > "$LOG_DIR/data_$name.log" 2>&1; then
+    log "data-step=$name ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/data_$name.log"
+  else
+    local code=$?
+    log "data-step=$name FAILED exit=$code（不阻塞选股）-> $LOG_DIR/data_$name.log"
+    tail -3 "$LOG_DIR/data_$name.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+  fi
+}
+
+if [ "${DAILY_DATA_REFRESH:-1}" = "1" ]; then
+  if [ "${DAILY_FUNDAMENTAL:-1}" = "1" ]; then
+    run_data_step fundamental uv run python scripts/run_cn_pipeline.py --stage fundamental
+  fi
+  if [ "${DAILY_FINANCIALS:-1}" = "1" ]; then
+    # 增量：只重抓"最后报告期 < 应有报告期"的股票（判据见 backfill_cn_financials.refresh_pending）
+    run_data_step financials uv run python scripts/backfill_cn_financials.py --refresh \
+        --session-seconds "${DAILY_FINANCIALS_SECONDS:-1800}"
+    # 逐股检查点 → cn_financial_indicators.parquet（因子表达式读的就是这一份）
+    run_data_step financials_merge uv run python scripts/backfill_cn_financials.py --merge
+  fi
+fi
+
 FAILED=0
 for entry in "${STAGES[@]}"; do
   stage="${entry%%:*}"
@@ -183,6 +235,68 @@ $(tail -5 "$LOG_DIR/$stage.log")
   fi
 done
 
+# ── 研究手臂选股（arm_selection）：不替代生产名单，失败不阻塞当日生产 ──
+# 产物：output/results_cn/arm_latest_selection.{csv,json}（前端「选股结果 → CN 研究手臂」与
+# 流水线页「研究手臂（arm_selection）」tab 都读它）
+# ── sleeve 特征面板链路（v1→v2→v3→v3i→v4）─────────────────────────────
+# 为什么放在这里：arm_selection 读的就是 v4 面板。此前这条链路**完全不在每日流程里**，
+# 面板一直停在上一次手工重建的日期（实测 2026-10-09 早上面板还停在 09-30），
+# 于是"研究手臂"每天选出来的其实是上个月的月末名单，前端日历里也就看不到当天的 arm_select。
+# 依赖：日线（daily_bars）、资金流（moneyflow）、估值 relay、财务 relay —— 都在上面的主阶段跑完了。
+# 成本：实测 v1..v4 全链路 **73 秒**（27+10+14+7+15），相对于 7 小时的主流程可以忽略。
+# 非致命：失败只影响研究手臂与 sleeve 研究，不影响当日生产名单。
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_SLEEVE_PANEL:-1}" = "1" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "step=sleeve-panel would run: build_sleeve_features_long → panel_extend_v2 → panel_extend_v3 → panel_merge_intraday → build_panel_v4_delisted"
+  else
+    started=$(date +%s)
+    panel_ok=1
+    for _step in build_sleeve_features_long.py panel_extend_v2.py panel_extend_v3.py panel_merge_intraday.py build_panel_v4_delisted.py; do
+      if ! uv run python "scripts/$_step" >> "$LOG_DIR/sleeve_panel.log" 2>&1; then
+        log "sleeve-panel FAILED at $_step（不影响生产名单；arm_selection 会用旧面板）"
+        panel_ok=0
+        break
+      fi
+    done
+    [ "$panel_ok" = "1" ] && log "sleeve-panel ok ($(( $(date +%s) - started ))s) -> v4 面板已刷新"
+  fi
+fi
+
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_ARM_SELECTION:-1}" = "1" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "step=arm_selection would run: uv run python scripts/run_cn_pipeline.py --stage arm_selection"
+  else
+    log "arm-selection start（研究手臂 base_v1；候选 10 / 买入 5）"
+    started=$(date +%s)
+    if uv run python scripts/run_cn_pipeline.py --stage arm_selection > "$LOG_DIR/arm_selection.log" 2>&1; then
+      log "arm-selection ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/arm_selection.log"
+    else
+      code=$?
+      log "arm-selection FAILED exit=$code（研究手臂，不影响生产名单）-> $LOG_DIR/arm_selection.log"
+      tail -5 "$LOG_DIR/arm_selection.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+    fi
+  fi
+fi
+
+# ── 分时增量：只补「文件最后日期 < 最新交易日」的标的，且只抓缺失窗口后 --merge 回原文件 ──
+# 必须放在主阶段之后：它用日线的最大 trade_date 当"最新交易日"，日线没更新就没得补。
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_INTRADAY:-1}" = "1" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "step=intraday-refresh would run: sync_cn_intraday_full.py --refresh --session-seconds ${DAILY_INTRADAY_SECONDS:-1800}"
+  else
+    log "intraday-refresh start（5min 增量，最多 ${DAILY_INTRADAY_SECONDS:-1800}s）"
+    started=$(date +%s)
+    if NO_PROXY='*' uv run python scripts/sync_cn_intraday_full.py --refresh \
+         --session-seconds "${DAILY_INTRADAY_SECONDS:-1800}" > "$LOG_DIR/intraday_refresh.log" 2>&1; then
+      log "intraday-refresh ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/intraday_refresh.log"
+    else
+      code=$?
+      log "intraday-refresh FAILED exit=$code（不影响生产名单）-> $LOG_DIR/intraday_refresh.log"
+      tail -5 "$LOG_DIR/intraday_refresh.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+    fi
+  fi
+fi
+
 if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
   if uv run python scripts/render_two_stage_report.py --trade-date "$TRADE_DATE" >> "$LOG_DIR/run.log" 2>&1; then
     log "two-stage report ok"
@@ -199,6 +313,119 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
     fi
   else
     log "notify disabled (DAILY_NOTIFY=0)"
+  fi
+fi
+
+# ── 归档当日最终名单 + 汇总模拟盘历史 ────────────────────────────────────
+# 为什么必须做：`cn_ensemble_selected.csv` **每天被覆盖**，而模拟盘
+# （`run_cn_paper_account`）需要的是**一串决策日** —— 喂单日文件时那天永远是最后一根 bar，
+# 只会挂 pending、**永不成交**（实测 2026-10-09：nav 496 行恒为 45,000、fills 空表）。
+# 这一步归档当天 + 回填历史 + 汇总成 paper_selection_history.csv，模拟盘才跑得起来。
+# 放在 paper_account 之后的次日运行里生效（当天的成交要等 T+1 的 bar）。
+if [ "$DRY_RUN" -eq 0 ] && [ "${DAILY_ARCHIVE_SELECTION:-1}" = "1" ]; then
+  if uv run python scripts/archive_cn_selection.py >> "$LOG_DIR/archive_selection.log" 2>&1; then
+    log "archive-selection ok（当日名单已归档，模拟盘历史已汇总）"
+  else
+    log "archive-selection FAILED（模拟盘历史会缺当天）-> $LOG_DIR/archive_selection.log"
+  fi
+fi
+
+# ── 选股归因（逐股"为什么被选中"）────────────────────────────────────────
+# 两步：explain_selection 生成 LightGBM SHAP + 门禁倾斜分解；pick_attribution_report 汇总成报告。
+# 位置：这两个脚本原来一个躺在 output/verification/ 里（一次性产物）、一个在 scripts/ 但从不被调度，
+# 导致 output/results_cn/attribution/ 最新只到 2026-09-29（一个月没更新）。
+# 成本提醒：explain_selection 要加载 LGB 模型并算全市场 SHAP，shap_detail 产出约 30MB。
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_ATTRIBUTION:-1}" = "1" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "step=attribution would run: explain_selection.py $TRADE_DATE → pick_attribution_report.py $TRADE_DATE"
+  else
+    started=$(date +%s)
+    if uv run python scripts/explain_selection.py "$TRADE_DATE" >> "$LOG_DIR/attribution.log" 2>&1; then
+      log "attribution-explain ok（SHAP 分解已生成）"
+      if uv run python scripts/pick_attribution_report.py "$TRADE_DATE" >> "$LOG_DIR/attribution.log" 2>&1; then
+        log "attribution ok ($(( $(date +%s) - started ))s) -> output/results_cn/attribution/$TRADE_DATE"
+      else
+        log "attribution-report FAILED（SHAP 有了但报告没生成）-> $LOG_DIR/attribution.log"
+      fi
+    else
+      log "attribution-explain FAILED（会跳过报告）-> $LOG_DIR/attribution.log"
+    fi
+  fi
+fi
+
+# ── 选股台账重建（前端「选股日历」的数据源）──────────────────────────────
+# 必须放在 notify 之后：台账要从 feishu_<date>.json 读当日最终名单，那个文件是通知步骤写的。
+# 非致命：台账重建失败只影响日历展示，不影响当日生产结果与 production.done。
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_LEDGER:-1}" = "1" ]; then
+  started=$(date +%s)
+  if uv run python scripts/build_selection_ledger.py >> "$LOG_DIR/ledger.log" 2>&1; then
+    log "ledger ok ($(( $(date +%s) - started ))s) -> 选股日历已同步 $TRADE_DATE"
+  else
+    code=$?
+    log "ledger FAILED exit=$code（选股日历会停在上一版）-> $LOG_DIR/ledger.log"
+    tail -5 "$LOG_DIR/ledger.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+  fi
+fi
+
+# ── 前瞻收益记录 + 执行假设一致性（第三十二轮新增，都不阻塞生产）───────────
+# ① forward-validation：把选股台账里**已实现**的前瞻收益串成长样本记录
+#    （preselected 口径 2025-09 起；最终名单口径样本短，两条口径都要在页面上并存，
+#     免得拿长样本的漂亮数字当账户业绩）。必须放在 ledger 之后 —— 它读的就是台账。
+# ② execution-parity：核对模拟盘与日频回放的执行假设**实际生效值**是否一致
+#    （成本/整手/涨跌停/停牌/退市来自同一份 config/execution_assumptions_cn.json），
+#    并把快照写到 output/verification/execution_parity.json 供前端展示。
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_FORWARD_VALIDATION:-1}" = "1" ]; then
+  if uv run python scripts/build_forward_validation.py >> "$LOG_DIR/forward_validation.log" 2>&1; then
+    log "forward-validation ok -> output/results_cn/forward_validation/"
+  else
+    log "forward-validation FAILED -> $LOG_DIR/forward_validation.log"
+  fi
+fi
+
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_EXEC_PARITY:-1}" = "1" ]; then
+  if uv run python scripts/execution_parity_check.py --quiet --json output/verification/execution_parity.json >> "$LOG_DIR/execution_parity.log" 2>&1; then
+    log "execution-parity ok（模拟盘与回放执行假设一致）-> output/verification/execution_parity.json"
+  else
+    log "execution-parity 有不一致项 -> $LOG_DIR/execution_parity.log"
+    grep -E "不一致|DIFFER" "$LOG_DIR/execution_parity.log" | tail -5 | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+  fi
+fi
+
+# ── 影子组合：决策逻辑的长期对照（第三十四轮新增，不阻塞生产）─────────────
+# 用同一套统一执行假设并列跑 4 条规则（现行 / 现行+rank≤20上限 / 候选池前5等权 / 池前5低波动），
+# 名单从台账重建，所以历史立刻回填到 2025-09。**这是"决策逻辑到底行不行"唯一能积累出对照的办法**。
+# 必须放在 ledger 之后（它读台账）。开关：DAILY_SHADOW_VARIANTS=0
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_SHADOW_VARIANTS:-1}" = "1" ]; then
+  if uv run python scripts/run_shadow_variants.py >> "$LOG_DIR/shadow_variants.log" 2>&1; then
+    log "shadow-variants ok -> output/paper_trading/shadow/summary.json"
+  else
+    log "shadow-variants FAILED -> $LOG_DIR/shadow_variants.log"
+  fi
+fi
+
+# ── PK 护栏日报：下单之前把"不该拿到权重的票"点出来（第三十五轮，不阻塞生产）──
+# 背景：第三十四轮实测 6 个 notify 决策日里有 5 天把权重给了 rank>20 的票（最狠的一天 59.5% 的权重
+# 给了 rank 4017/4055），而 rank>20 是复盘里唯一通过按决策日符号检验的负向特征（p=0.02）。
+# 只读、不改生产权重。开关：DAILY_PK_GUARD=0
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_PK_GUARD:-1}" = "1" ]; then
+  if uv run python scripts/pk_guard_report.py >> "$LOG_DIR/pk_guard.log" 2>&1; then
+    tail -3 "$LOG_DIR/pk_guard.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+    log "pk-guard ok -> output/results_cn/pk_guard/latest.json"
+  else
+    log "pk-guard FAILED -> $LOG_DIR/pk_guard.log"
+  fi
+fi
+
+# ── 上线闸门：影子组合的结果够不够硬（第三十六轮，不阻塞生产）────────────
+# 对每条候选改动做四项体检（窗口可比性 / 逐期配对符号检验 / 单票集中度 / 收益集中度），
+# 输出 PROMOTE / KEEP / REJECT。**样本不够时它只会说 KEEP**，自动随影子组合累积而升级。
+# 它不改任何生产参数：只是把"能不能进生产"变成每天可查的结论。开关：DAILY_PROMOTION_CHECK=0
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_PROMOTION_CHECK:-1}" = "1" ]; then
+  if uv run python scripts/promotion_check.py >> "$LOG_DIR/promotion_check.log" 2>&1; then
+    grep -E "^  \[" "$LOG_DIR/promotion_check.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+    log "promotion-check ok -> output/results_cn/promotion_check/"
+  else
+    log "promotion-check FAILED -> $LOG_DIR/promotion_check.log"
   fi
 fi
 
@@ -220,11 +447,55 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${RUN_IC_PROTOCOL:-auto}" != "0" ]; then
   fi
 fi
 
+# ── 导出同花顺可导入的自选股文件（含 reference 参考账户）────────────────
+# 必须放在 shadow-variants **之后**：reference 源读的是参考账户的持仓（第三十七轮）。
+# 同花顺**不开放写接口**（自选股在账号云端），所以只能做到"格式对齐 + 生成文件"，
+# 人工在同花顺里点一次「导入自选股」。这份文件同时是"每天要买什么"的最终产物，
+# 也可以直接拿去别的地方用（Excel/脚本）。
+if [ "$DRY_RUN" -eq 0 ] && [ "${DAILY_THS_EXPORT:-1}" = "1" ]; then
+  if uv run python scripts/export_ths_watchlist.py >> "$LOG_DIR/ths_export.log" 2>&1; then
+    log "ths-export ok（holdings/preselected/arm/all 四个源）-> output/results_cn/ths_watchlist/"
+  else
+    log "ths-export FAILED（同花顺文件没生成）-> $LOG_DIR/ths_export.log"
+  fi
+fi
+
+# ── 数据完整性报表：用产物说话，不看"任务有没有 exit 0" ────────────────────
+# 独立于上面的 steps：即使某一步失败，这里也会如实列出"哪份数据没到最新交易日"。
+if [ "${DAILY_COMPLETENESS:-1}" = "1" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "step=data-completeness would run: scripts/data_completeness_report.py --quiet"
+    log "step=ledger would run: scripts/build_selection_ledger.py（选股日历的数据源）"
+    log "step=archive-selection would run: scripts/archive_cn_selection.py（模拟盘历史）"
+    log "step=attribution would run: explain_selection.py + pick_attribution_report.py（选股归因）"
+    log "step=forward-validation would run: scripts/build_forward_validation.py（前瞻收益记录）"
+    log "step=execution-parity would run: scripts/execution_parity_check.py（模拟盘 vs 回放执行假设一致性）"
+    log "step=shadow-variants would run: scripts/run_shadow_variants.py（决策逻辑对照：现行 vs 池前5/8/10 vs 降频 vs rank上限）"
+    log "step=pk-guard would run: scripts/pk_guard_report.py（PK 护栏：不该拿到权重的票）"
+    log "step=promotion-check would run: scripts/promotion_check.py（上线闸门：够不够硬）"
+    log "step=ths-export would run: scripts/export_ths_watchlist.py（同花顺自选股 · 五个源，含 reference 参考账户）"
+  else
+    # 注意：不带 --strict 时这个脚本**退出码恒为 0**，所以不能用退出码判断"是否达标" ——
+    # 第一版就是这么写的，于是"未达标 3/8"的那次在 run.log 里被打成了"ok（全部达标）"，
+    # 正好和这个报表想解决的问题（"没跑"和"跑了"分不清）撞在一起。
+    # 现在用它自己在 stdout 里打的结论行来判断。
+    cmp_out="$(uv run python scripts/data_completeness_report.py 2>&1 || true)"
+    printf '%s\n' "$cmp_out" >> "$LOG_DIR/run.log"
+    summary="$(printf '%s\n' "$cmp_out" | sed -n 's/^\[data-completeness\] //p' | tail -1)"
+    if printf '%s' "$summary" | grep -q '未达标 0/'; then
+      log "data-completeness ok（8/8 达标）-> output/data_quality/data_completeness.md"
+    else
+      log "data-completeness 有未达标项：${summary:-未知} -> output/data_quality/data_completeness.md"
+      sed -n '/未达标/p' output/data_quality/data_completeness.md 2>/dev/null | tail -1 | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+    fi
+  fi
+fi
+
 if [ "$FAILED" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   date '+%Y-%m-%dT%H:%M:%S%z' > "$MARKER"
   log "done: $TRADE_DATE 生产完成（当日后续触发会跳过；失败则下一次触发自动重试）"
 elif [ "$DRY_RUN" -eq 1 ]; then
-  log "dry-run finished: 上面的阶段序列即每日生产实际执行顺序（未执行任何命令）"
+  log "dry-run finished: 上面的阶段序列 + sleeve-panel + arm_selection + intraday-refresh + attribution + data-completeness + ledger + archive-selection + ths-export + forward-validation + execution-parity + shadow-variants + pk-guard + promotion-check 即每日生产实际执行顺序（未执行任何命令）"
 else
   log "finished with failures"
 fi

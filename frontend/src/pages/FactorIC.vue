@@ -75,9 +75,13 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { createChart, ColorType, type IChartApi, type ISeriesApi, type LineData, type Time } from 'lightweight-charts'
+import { createChart, ColorType, type IChartApi, type ISeriesApi, type LineData, type LineWidth, type Time } from 'lightweight-charts'
 import { getFactorIC } from '@/api/client'
 import type { FactorICResponse, FactorICSummary } from '@/types/api'
+
+// lightweight-charts v4 的 LineWidth 类型只允许 1|2|3|4，但运行时会按 1.5px 渲染；
+// 这里显式放宽类型，保住原本想要的细线观感（原先直接写 1.5 会导致 vue-tsc 构建失败）。
+const LINE_WIDTH = 1.5 as unknown as LineWidth
 
 const data = ref<FactorICResponse | null>(null)
 const factorSet = ref('qlib_alpha158')
@@ -130,7 +134,7 @@ function renderIcChart() {
   icChartRef.value.style.height = '350px'
 
   data.value.factors.forEach((f, i) => {
-    const series = icChart!.addLineSeries({ color: LINE_COLORS[i % LINE_COLORS.length], lineWidth: 1.5 })
+    const series = icChart!.addLineSeries({ color: LINE_COLORS[i % LINE_COLORS.length], lineWidth: LINE_WIDTH })
     const points: LineData[] = []
     const vals = data.value!.ic_series[f] ?? []
     data.value!.dates.forEach((d, j) => {
@@ -150,7 +154,7 @@ function renderRankChart() {
   rankChartRef.value.style.height = '350px'
 
   data.value.factors.forEach((f, i) => {
-    const series = rankChart!.addLineSeries({ color: LINE_COLORS[i % LINE_COLORS.length], lineWidth: 1.5 })
+    const series = rankChart!.addLineSeries({ color: LINE_COLORS[i % LINE_COLORS.length], lineWidth: LINE_WIDTH })
     const points: LineData[] = []
     const vals = data.value!.rank_ic_series[f] ?? []
     data.value!.dates.forEach((d, j) => {
@@ -193,29 +197,11 @@ function ff(v: any): string {
 </script>
 
 <style scoped>
-.page { max-width: 1400px; margin: 0 auto; }
-.page-title { margin-bottom: 10px; font-size: 18px; }
-.controls { display: flex; gap: 10px; margin-bottom: 12px; }
-.controls select { padding: 6px 10px; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; }
-.charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.chart-panel h6 { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
-.chart-box { min-height: 350px; }
-.two-col { display: flex; gap: 20px; }
+/* 页面专属：IC 走势图网格 + 左侧因子榜首栏宽度 */
+.charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+.chart-panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--r-3); padding: var(--sp-2) var(--sp-3); }
 .col-left { width: 380px; flex-shrink: 0; }
 .col-right { flex: 1; min-width: 0; }
-h6 { font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
-.bar-chart { padding: 4px 0; }
-.bar-row { display: flex; align-items: center; gap: 4px; height: 22px; font-size: 11px; }
-.bar-label { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .top-label { width: 100px; text-align: right; }
-.bar-track { flex: 1; height: 10px; background: rgba(42,46,57,0.5); border-radius: 2px; }
-.bar-fill { height: 100%; border-radius: 2px; min-width: 2px; }
-.bar-ic { background: var(--accent-green); }
-.bar-val { width: 65px; text-align: left; color: var(--text-muted); }
-.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.data-table th { background: #1a1a2e; color: var(--text-muted); padding: 6px 8px; text-align: left; cursor: pointer; border-bottom: 1px solid var(--border-color); }
-.data-table td { padding: 5px 8px; border-bottom: 1px solid rgba(42,46,57,0.5); }
-.data-table tr:hover { background: rgba(255,255,255,0.03); }
-hr { border-color: var(--border-color); margin: 16px 0; }
-.empty-state { padding: 60px 0; text-align: center; color: var(--text-muted); }
+@media (max-width: 1100px) { .charts-grid { grid-template-columns: 1fr; } .col-left { width: 100%; } }
 </style>

@@ -5,6 +5,8 @@ import type {
   ForwardValidation, ForwardSeries,
   RankingsOverview, RankingsChangeResponse, RankingsMoneyflowResponse,
   LimitUpLadder, LimitUpDetail, LimitUpLive, IntradayResponse, IntradayQuote, IntradayCoverage, SessionPhase,
+  IndustryOverview, IndustryHeatResponse, IndustryStocksResponse,
+  IndustryHeatmapResponse,
 } from '@/types/api'
 
 /** 统一的接口错误：页面只认 `err.message` 与 `err.status`，不用各自解析 axios 的结构。 */
@@ -187,6 +189,8 @@ export interface SelectionPayload {
 export interface PipelineSelection {
   source_dir: string
   arm?: { payload: SelectionPayload; meta: Record<string, any> }
+  // 概念/板块手臂（arm_concept 阶段）：与 base_v1 手臂并列，带月频回放摘要
+  arm_concept?: { payload: SelectionPayload; meta: Record<string, any>; backtest?: Record<string, any> }
   candidate_dirs: { dir: string; mtime_text: string; rows: number }[]
   stats: Record<string, any>
   preselected: SelectionPayload
@@ -247,6 +251,11 @@ export interface CalendarPick {
   excess_r10: number | null; excess_r20: number | null
   reason: string; stage: string; stage_label: string; stage_evidence: string
   risk: string; risk_notes: string
+  /** 这只票命中的策略（后端按 STRATEGY_META 映射，明细行与对比行都有） */
+  strategy_keys?: string[]
+  strategy_labels?: string[]
+  strategy_groups?: string[]
+  strategy_text?: string
 }
 export interface CalendarSourceRelation {
   a: string; b: string
@@ -263,6 +272,11 @@ export interface CalendarCompareRow {
   r1?: number | null; r5?: number | null; r10?: number | null; r20?: number | null
   excess_r1?: number | null; excess_r5?: number | null
   excess_r10?: number | null; excess_r20?: number | null
+  /** 这只票命中的策略（后端 STRATEGY_META 映射）*/
+  strategy_keys?: string[]
+  strategy_labels?: string[]
+  strategy_groups?: string[]
+  strategy_text?: string
 }
 export interface CalendarDayDetail {
   date: string; source: string; count: number; per_source: Record<string, number>
@@ -270,6 +284,8 @@ export interface CalendarDayDetail {
   mean_excess: Record<string, number | null>
   strategies?: string[]
   compare?: CalendarCompareRow[]
+  strategy_meta?: Record<string, { label: string; group: string }>
+  strategy_summary?: { key: string; label: string; group: string; n: number; stocks: string[] }[]
   source_relations?: CalendarSourceRelation[]
   rows: CalendarPick[]
 }
@@ -458,4 +474,118 @@ export async function getIntradayQuotes(codes: string[]): Promise<{ quotes: Intr
   const resp = await fetch(`/api/intraday/quotes?codes=${encodeURIComponent(codes.join(','))}`)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return (await resp.json()) as { quotes: IntradayQuote[]; session: SessionPhase }
+}
+
+// ─── 行业热度（分行业排名 + 行业内涨跌排名）───
+export async function getIndustryOverview(): Promise<IndustryOverview> {
+  const resp = await fetch('/api/industry/overview')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as IndustryOverview
+}
+
+export async function getIndustryHeat(
+  period: 'daily' | 'weekly' | 'monthly', limit = 60, minN = 0,
+): Promise<IndustryHeatResponse> {
+  const query = new URLSearchParams({ period, limit: String(limit), min_n: String(minN) })
+  const resp = await fetch(`/api/industry/heat?${query}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as IndustryHeatResponse
+}
+
+export async function getIndustryStocks(
+  industry: string, period: 'daily' | 'weekly' | 'monthly', direction: 'up' | 'down', limit = 50,
+): Promise<IndustryStocksResponse> {
+  const query = new URLSearchParams({ period, direction, limit: String(limit) })
+  const resp = await fetch(`/api/industry/${encodeURIComponent(industry)}/stocks?${query}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as IndustryStocksResponse
+}
+
+/** 行业热力图（a-share-heatmap 风格：面积=流通市值、颜色=区间涨跌幅、两级下钻）。 */
+export async function getIndustryHeatmap(
+  period: 'daily' | 'weekly' | 'monthly', market = '',
+): Promise<IndustryHeatmapResponse> {
+  const query = new URLSearchParams({ period })
+  if (market) query.set('market', market)
+  const resp = await fetch(`/api/industry/heatmap?${query}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as IndustryHeatmapResponse
+}
+
+
+// ─── 个股资料包（日 K 页右侧：档案/估值/财务/资金/龙虎榜/选股记录/公告）───
+export interface StockBundle {
+  code: string
+  built_at: string
+  profile: Record<string, any>
+  valuation: Record<string, any>
+  financials: { available: boolean; rows?: Record<string, any>[]; reason?: string }
+  flow: Record<string, any>
+  lhb: Record<string, any>
+  limits: Record<string, any>
+  selections: Record<string, any>
+  announcements: Record<string, any>
+  links: Record<string, string>
+  notes: string[]
+}
+
+export async function getStockBundle(code: string): Promise<StockBundle> {
+  const resp = await fetch(`/api/stocks/${encodeURIComponent(code)}/bundle`)
+  if (!resp.ok) {
+    let detail: any = null
+    try { detail = (await resp.json()).detail } catch { /* 非 JSON 错误体 */ }
+    throw new Error(typeof detail === 'string' ? detail : `HTTP ${resp.status}`)
+  }
+  return (await resp.json()) as StockBundle
+}
+
+
+// ─── Web 页面新鲜度（自动化最后一步的体检产物）───
+export interface WebFreshness {
+  available: boolean
+  latest_trade_date: string | null
+  generated_at?: string
+  ok?: boolean
+  stale?: string[]
+  rows?: { page: string; kind: string; date: string | null; ok: boolean | null
+           note: string; artifact: string; mode?: string }[]
+  markdown_path?: string | null
+  hint?: string
+}
+
+export async function getWebFreshness(): Promise<WebFreshness> {
+  const resp = await fetch('/api/freshness')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as WebFreshness
+}
+
+// ─── 策略池 ─────────────────────────────────────────────────────────────────
+export interface StrategyCandidateInput {
+  name: string
+  summary?: string
+  id?: string
+  kind?: string
+  origin?: string
+  owner?: string
+  entry?: string
+  stage?: string
+  metrics?: Record<string, unknown>
+  artifacts?: string[]
+  evidence?: string[]
+}
+
+export async function getStrategyPool(refresh = true): Promise<import('@/types/api').StrategyPoolResponse> {
+  const { data } = await http.get('/strategies', { params: { refresh } })
+  return data
+}
+
+/** 把挖掘结果登记成候选策略（因子挖掘页「入池」按钮）。同 id 幂等覆盖。 */
+export async function registerStrategyCandidate(payload: StrategyCandidateInput) {
+  const { data } = await http.post('/strategies/candidates', payload)
+  return data as { ok: boolean; id: string; file: string; totals: Record<string, unknown> }
+}
+
+export async function setStrategyStage(id: string, stage: string) {
+  const { data } = await http.post(`/strategies/${encodeURIComponent(id)}/stage`, { stage })
+  return data as { ok: boolean; id: string; stage: string; hint?: string }
 }

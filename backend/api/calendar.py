@@ -25,6 +25,16 @@ SUMMARY = ROOT / "output" / "results_cn" / "selection_ledger_summary.json"
 HORIZONS = (1, 5, 10, 20)
 
 router = APIRouter(prefix="/api/calendar", tags=["calendar"])
+
+# 台账 source → 策略口径（前端「多策略对比」按这个分组显示）
+STRATEGY_META = {
+    "notify": {"label": "模型策略（PK 后最终名单）", "group": "模型策略"},
+    "preselected": {"label": "模型策略（候选池）", "group": "模型策略"},
+    "arm": {"label": "小市值/研究手臂（arm_select）", "group": "小市值手臂"},
+    "arm_concept": {"label": "行业轮动（概念/板块手臂）", "group": "行业轮动"},
+    "survey_raw": {"label": "调研回看（原）", "group": "调研"},
+    "survey_gate": {"label": "调研回看（门禁）", "group": "调研"},
+}
 _cache: dict[str, object] = {"mtime": None, "frame": None}
 
 
@@ -190,13 +200,45 @@ def day(date: str = Query(...), source: str = Query("")) -> dict:
         e.pop("_rank", None)
         e.pop("_src", None)
 
+    # ── 策略分组（2026-10-09 新增）────────────────────────────────────────
+    # 用户要"一眼看出每只票是哪种策略选出来的"。台账里的 source 是流水线内部名
+    # （notify/preselected/arm/arm_concept/survey_*），这里映射成三种**策略**：
+    #   模型策略（preselect → PK）、小市值/研究手臂（arm_select）、行业轮动（概念手臂）
+    # 并把每只票命中的策略名直接写进行里，前端不用再自己拼。
+    for e in compare_rows:
+        keys = list(e["cells"].keys())
+        e["strategy_keys"] = keys
+        e["strategy_labels"] = [STRATEGY_META.get(k, {}).get("label", k) for k in keys]
+        e["strategy_groups"] = sorted({STRATEGY_META.get(k, {}).get("group", "其它") for k in keys})
+        e["strategy_text"] = "+".join(e["strategy_groups"])
+    # 注意：`sets` 是后面"源之间的关系"才定义的变量，这里必须自己算一份 ——
+    # 第一版直接引用 `sets` 触发 NameError，`/api/calendar/day` 直接 500
+    # （页面表现为"选股日历整页报错"）。
+    local_sets = {src: set(g["stock_code"].astype(str)) for src, g in sub.groupby("source")}
+    # 汇总按**策略组**合并（notify 与 preselected 都属于"模型策略"，分成两行会让人以为有 4 种策略）
+    grouped_members: dict[str, set] = {}
+    grouped_sources: dict[str, list] = {}
+    for key, group_meta in STRATEGY_META.items():
+        members = local_sets.get(key)
+        if not members:
+            continue
+        group = group_meta["group"]
+        grouped_members.setdefault(group, set()).update(members)
+        grouped_sources.setdefault(group, []).append(key)
+    strategy_summary = [{"group": group, "n": len(members), "stocks": sorted(members),
+                         "sources": grouped_sources.get(group, []),
+                         # label 只留策略组名：notify/preselected 的 label 前缀都是"模型策略"，
+                         # 拼起来会变成"模型策略 + 模型策略"（实测）。
+                         "label": group}
+                        for group, members in grouped_members.items()]
+
     # ── 源之间的关系（2026-10-09 新增）────────────────────────────────────
     # 用户问"明细列表里 notify / preselected 不是重复么？为什么都要展示？" ——
     # 实测答案是"分情况"：全台账里 preselected 覆盖 20 个决策日、notify 覆盖 6 个，
     # **只有 3 天两者同时存在**；其中 2 天几乎不相交（只重叠 1 只），
     # 只有 2026-10-08 那一天两边完全相同（PK 一只没淘汰）。
     # 既然"完全重叠"会让人以为数据重复，就把关系算出来明说，而不是让人猜。
-    sets = {src: set(g["stock_code"].astype(str)) for src, g in sub.groupby("source")}
+    sets = local_sets          # 与策略分组共用一份，避免重复 groupby
     relations = []
     for a in strategies:
         for b in strategies:
@@ -217,9 +259,24 @@ def day(date: str = Query(...), source: str = Query("")) -> dict:
             relations.append({"a": a, "b": b, "relation": relation,
                               "both": both, "only_a": only_a, "only_b": only_b})
 
+    # 明细行也带上策略字段：用户看的是"每只票是哪种策略选出来的"，
+    # 不管他在"明细列表"还是"多策略对比"页签里，都得能直接看到。
+    pick_groups = {e["stock_code"]: (e.get("strategy_groups") or []) for e in compare_rows}
+    pick_labels = {e["stock_code"]: (e.get("strategy_labels") or []) for e in compare_rows}
+    pick_keys = {e["stock_code"]: (e.get("strategy_keys") or []) for e in compare_rows}
+    pick_text = {e["stock_code"]: (e.get("strategy_text") or "") for e in compare_rows}
+    for r in rows:
+        code = str(r["stock_code"])
+        r["strategy_groups"] = pick_groups.get(code, [])
+        r["strategy_labels"] = pick_labels.get(code, [])
+        r["strategy_keys"] = pick_keys.get(code, [])
+        r["strategy_text"] = pick_text.get(code, "")
+
     return {
         "date": date, "source": source or "all", "count": len(rows),
         "strategies": strategies,
+        "strategy_meta": STRATEGY_META,
+        "strategy_summary": strategy_summary,
         "compare": compare_rows,
         "source_relations": relations,
         "per_source": {k: int(v) for k, v in sub["source"].value_counts().items()},

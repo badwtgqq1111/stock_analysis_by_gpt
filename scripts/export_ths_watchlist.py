@@ -16,6 +16,7 @@
   holdings     3 只   生产名单里**真的给了目标权重**的（PK 之后要买的）
   preselected  8 只   生产链路的**候选池**（PK 的输入）
   arm         10 只   研究手臂（5 只持仓 + 5 只候选）
+  arm_concept 10 只   概念/板块轮动手臂（独立策略项）
   reference   10 只   **参考账户**（模拟盘绑定的那条规则）的当前持仓 —— 第三十七轮新增；
                       "拿模拟盘做参考"时真正要导入同花顺的就是这一份
   all         24 只   上面四者的**去重并集**（一键导入用）
@@ -113,6 +114,15 @@ def load_sources(date: str) -> dict[str, pd.DataFrame]:
             [{"stock_code": c, "weight": w} for c, w in zip(d["stock_code"], d["target_weight"])],
             date, "arm", names, industries)
 
+    # ③b arm_concept：概念/板块轮动手臂（独立策略项，与 arm 并列各导一组）
+    arm_concept = RESULTS / "arm_concept_selection.csv"
+    if arm_concept.exists():
+        d = pd.read_csv(arm_concept)
+        d = d[d["trade_date"].astype(str) == date]
+        frames["arm_concept"] = _frame(
+            [{"stock_code": c, "weight": w} for c, w in zip(d["stock_code"], d["target_weight"])],
+            date, "arm_concept", names, industries)
+
     # ④ reference：参考账户（模拟盘绑定的那条规则）的**当前持仓** —— 第三十七轮新增。
     #    这就是"拿模拟盘做参考"时真正要导入同花顺的那份清单。
     ref_pos = ROOT / "output/paper_trading/account_reference/positions.csv"
@@ -201,8 +211,8 @@ def write_outputs(frames: dict[str, pd.DataFrame], date: str, out_dir: Path) -> 
 def main() -> int:
     ap = argparse.ArgumentParser(description="导出同花顺可导入的自选股文件（多源）")
     ap.add_argument("--date", default="", help="留空=最新交易日")
-    ap.add_argument("--sources", default="holdings,preselected,arm,reference,all",
-                    help="逗号分隔：holdings,preselected,arm,reference,all（reference=参考账户持仓）")
+    ap.add_argument("--sources", default="holdings,preselected,arm,arm_concept,reference,all",
+                    help="逗号分隔：holdings,preselected,arm,arm_concept,reference,all")
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     args = ap.parse_args()
 

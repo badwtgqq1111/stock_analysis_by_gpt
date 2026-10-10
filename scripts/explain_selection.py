@@ -26,7 +26,11 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[3]
+# ROOT 必须是**仓库根**：脚本在 <repo>/scripts/ 下，parents[1] = 仓库根。
+# 原来写的是 parents[3]（= /Users/ccs/code），于是 sys.path 里没有仓库根，
+# `import factor_engine` 直接 ModuleNotFoundError —— 2026-10-10 02:45 的每日归因步骤
+# 就是这样静默失败的（日志里只有这一行 Traceback，页面停在 10-08）。
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import lightgbm as lgb  # noqa: E402
@@ -35,6 +39,7 @@ from factor_engine.ml.preprocessing import preprocess_features_by_date  # noqa: 
 from factor_engine.ml.strategy_labels import build_cn_strategy_labels  # noqa: E402
 from data.ingest.service import MarketDataService  # noqa: E402
 
+SHAP_DEFAULT_DIR = ROOT / "output/verification/p1_22_shap_attribution_20260925"
 MANIFEST = ROOT / "output/models/cn/lightgbm/alpha_zoo_hk/model_manifest.json"
 MODEL = ROOT / "output/models/cn/lightgbm/alpha_zoo_hk/model.txt"
 MATCHERS = [
@@ -64,9 +69,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("trade_date")
     ap.add_argument("codes", nargs="?", default="")
+    # 产物目录必须显式给默认值：下游 pick_attribution_report.py 读的是这个目录。
+    ap.add_argument("--out-dir", default=str(SHAP_DEFAULT_DIR))
     args = ap.parse_args()
     date = args.trade_date
-    out_dir = Path(__file__).resolve().parent
+    # 原来这里是 Path(__file__).resolve().parent —— 脚本搬到 scripts/ 之后，
+    # 三个 SHAP 产物（shap_detail 30MB）就写进了 scripts/ 目录，下游按约定路径找不到，
+    # 每日归因链第二步直接 FileNotFoundError（2026-10-10 实测）。
+    out_dir = Path(args.out_dir)
 
     manifest = json.load(open(MANIFEST))
     cols = manifest["feature_columns"]

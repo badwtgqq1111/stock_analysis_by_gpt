@@ -7,6 +7,7 @@
   2. `output/selection_snapshots/<date>/*/preselected.csv` —— 归档的**候选池**（每次 preselection 的精确输入）
   3. `output/scratch_p1_17/survey_selections/selected_<date>_{raw,gate}.csv` —— 研究回看名单（门禁前后）
   4. `output/results_cn/arm_selection_history/<date>.csv`       —— 研究手臂（arm_selection）每日快照
+  5. `output/results_cn/arm_concept_history/<date>.csv`         —— 概念/板块轮动手臂（arm_concept）每日快照
 
 收益口径：
   * 用 `assets/data/clean/ohlcv/.../adjust=qfq` 日线复权收盘价；决策日取"当日或之后第一个交易日"（非交易日自动顺延）；
@@ -156,8 +157,12 @@ def build_reason_text(row: pd.Series) -> str:
     parts = []
     if isinstance(row.get("feishu_reason"), str) and row["feishu_reason"]:
         parts.append(str(row["feishu_reason"]))
-    if isinstance(row.get("note"), str) and row["note"] and row.get("source") == "notify":
-        parts.append(str(row["note"]))                       # pk_status：PK 权重/手数/RPS/风控系数
+    # 人读说明不只 notify 有：两条手臂（arm / arm_concept）的 note 里也带着
+    # "板块｜持仓/候选｜个股分｜概念分｜手数"，只放行 notify 会让日历里这两行
+    # 退化成"来源：xxx 归档，无当日文字说明"——明明有说明。（2026-10-09 修）
+    if (isinstance(row.get("note"), str) and row["note"]
+            and row.get("source") in ("notify", "arm", "arm_concept")):
+        parts.append(str(row["note"]))
     if isinstance(row.get("selection_reason"), str) and row["selection_reason"]:
         parts.append(str(row["selection_reason"]))
     if not parts:                                            # 历史归档：用快照事实拼
@@ -370,6 +375,44 @@ def read_arm_history() -> list[dict]:
     return rows
 
 
+def read_arm_concept_history() -> list[dict]:
+    """概念/板块轮动手臂的历史快照 → 台账（与 arm 手臂并列的独立策略项）。
+
+    产物 `output/results_cn/arm_concept_history/<trade_date>.csv` 由
+    `scripts/select_concept_arm.py` 每次运行时写。**必须和「选股结果」页同步**：
+    那一页已经能切到 `cn_arm_concept` 来源，日历若无这个源，用户就会看到
+    "选股结果里有、选股日历里没有"这种两边对不上的情况（2026-10-09 用户报的问题）。
+    """
+    rows = []
+    hist = RESULTS / "arm_concept_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            held = bool(r.get("in_portfolio"))
+            rows.append({
+                "decision_date": path.stem,
+                "source": "arm_concept",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"{r.get('board') or ''}概念｜{'持仓' if held else '候选'}"
+                         f"｜个股分 {r.get('score')}｜概念分 {r.get('concept_score')}"
+                         f"｜5日 {r.get('rev_5d')}｜手数 {r.get('lots_at_capital')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"arm_concept_history/{path.name}",
+            })
+    return rows
+
+
 def read_survey() -> list[dict]:
     rows = []
     if not SURVEY.exists():
@@ -400,7 +443,8 @@ def main() -> int:
     ap.add_argument("--end", default="2026-12-31")
     args = ap.parse_args()
 
-    ledger = pd.DataFrame(read_feishu() + read_snapshots() + read_survey() + read_arm_history())
+    ledger = pd.DataFrame(read_feishu() + read_snapshots() + read_survey() + read_arm_history()
+                          + read_arm_concept_history())
     if ledger.empty:
         raise SystemExit("三个来源都没读到选股记录")
     ledger = ledger.drop_duplicates(["decision_date", "source", "stock_code"]).reset_index(drop=True)

@@ -20,6 +20,8 @@
       <div class="nav-status" :title="healthTitle">
         <span class="dot" :class="healthClass" />
         <span class="tiny">{{ healthText }}</span>
+        <!-- 构建戳：新增功能"前端看不到"时，第一件事是确认浏览器跑的是哪一版构建 -->
+        <span class="tiny dim build-stamp" v-if="buildStamp">build {{ buildStamp }}</span>
       </div>
     </nav>
 
@@ -60,6 +62,7 @@ const navGroups = [
   {
     label: '研究',
     links: [
+      { to: '/strategies', label: '策略池' },
       { to: '/factor-ic', label: '因子 IC' },
       { to: '/attribution', label: '选股归因' },
       { to: '/factor-mining', label: '因子挖掘' },
@@ -85,6 +88,7 @@ const navGroups = [
     label: '行情',
     links: [
       { to: '/rankings', label: '涨跌/资金排行' },
+      { to: '/industry', label: '行业热度' },
       { to: '/limitup', label: '连板统计' },
       { to: '/intraday', label: '分时行情' },
     ],
@@ -105,10 +109,18 @@ onMounted(async () => {
 const frontendWarning = computed(() => Boolean(health.value?.frontend && !health.value.frontend.ok))
 const healthClass = computed(() => (healthErr.value ? 'bad' : frontendWarning.value ? 'warn' : 'ok'))
 const healthText = computed(() => (healthErr.value ? '后端离线' : frontendWarning.value ? '前端资源缺失' : '服务正常'))
+const buildStamp = computed(() => {
+  const built = health.value?.frontend?.built_at
+  const entry = health.value?.frontend?.entry || ''
+  const hash = entry ? entry.replace(/^.*index-/, '').replace(/\.js$/, '') : ''
+  return built ? `${built.slice(5, 16)}${hash ? ` · ${hash.slice(0, 8)}` : ''}` : ''
+})
 const healthTitle = computed(() =>
   healthErr.value
     ? `GET /health 失败：${healthErr.value}`
-    : `dist=${health.value?.frontend?.dist ?? '—'}｜入口引用 ${health.value?.frontend?.refs?.length ?? 0} 个资源｜缺失 ${health.value?.frontend?.missing?.length ?? 0} 个`,
+    : `dist=${health.value?.frontend?.dist ?? '—'}｜构建 ${health.value?.frontend?.built_at ?? '—'}` +
+      `｜入口 ${health.value?.frontend?.entry ?? '—'}｜引用 ${health.value?.frontend?.refs?.length ?? 0} 个资源` +
+      `｜缺失 ${health.value?.frontend?.missing?.length ?? 0} 个`,
 )
 </script>
 
@@ -161,8 +173,11 @@ const healthTitle = computed(() =>
 
 .app-main { flex: 1; padding: var(--sp-4) var(--sp-5) var(--sp-6); }
 
+.build-stamp { font-family: var(--font-mono); }
+
 @media (max-width: 1100px) {
   .app-nav { gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); }
+  .build-stamp { display: none; }
   .nav-group-label { display: none; }
   .app-main { padding: var(--sp-3); }
 }

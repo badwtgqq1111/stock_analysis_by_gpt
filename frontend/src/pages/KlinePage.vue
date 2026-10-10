@@ -1,6 +1,11 @@
 <template>
   <div class="page">
     <h4 class="page-title">K线图表</h4>
+    <div class="two-col">
+      <div class="col-side">
+        <StockWatchlist v-model="selectedCode" />
+      </div>
+      <div class="col-main">
     <ControlPanel
       :selected-code="selectedCode"
       :days="days"
@@ -91,12 +96,16 @@
     </div>
 
     <SignalStats :stats="data?.signal_stats ?? null" />
+    <StockInfoPanel :code="selectedCode"
+                    @update:code="(c: string) => { if (c) selectedCode = c }" />
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import ControlPanel from '@/components/ControlPanel.vue'
 import KlineChart from '@/components/KlineChart.vue'
 import ChipDistribution from '@/components/ChipDistribution.vue'
@@ -104,11 +113,14 @@ import SignalStats from '@/components/SignalStats.vue'
 import StatTile from '@/components/ui/StatTile.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import IntradayChart from '@/components/IntradayChart.vue'
+import StockWatchlist from '@/components/StockWatchlist.vue'
+import StockInfoPanel from '@/components/StockInfoPanel.vue'
 import { useKlineData } from '@/composables/useKlineData'
 import { getIntraday, getIntradayCoverage } from '@/api/client'
 import type { IntradayCoverage, IntradayResponse } from '@/types/api'
 
 const route = useRoute()
+const router = useRouter()
 const { data, isLoading, error, stockCode, days, showSignals, showChips } = useKlineData()
 const selectedCode = ref<string | null>(null)
 const daysModel = ref(365)
@@ -236,10 +248,20 @@ onMounted(() => {
   const code = String(route.query.code || '')
   if (code) selectedCode.value = code
 })
-watch(() => route.query.code, v => { if (v) selectedCode.value = String(v) })
+watch(() => route.query.code, v => { if (v && String(v) !== selectedCode.value) selectedCode.value = String(v) })
+// 页面内换票（自选股侧栏 / 手动输入）也写回 URL：刷新、分享、从别的页返回都停在同一只票。
+// 不回写的话，用侧栏切了 5 只票再刷新，又回到最开始的代码（实测踩过）。
+watch(selectedCode, (code) => {
+  if (!code || String(route.query.code || '') === code) return
+  void router.replace({ query: { ...route.query, code } })
+})
 </script>
 
 <style scoped>
+/* 左侧自选股在长页面上保持可见：K 线页要滚很久（图 + 分时 + 资料），
+   侧栏跟着滚走的话，用户每次换票都得先滚回顶部。 */
+.col-side { position: sticky; top: 64px; align-self: flex-start; }
+@media (max-width: 1100px) { .col-side { position: static; } }
 .click-hint { margin-top: var(--sp-2); }
 .intraday-panel h6 { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .close-btn { margin-left: auto; }

@@ -1,5 +1,6 @@
 import hashlib
 import re
+from datetime import datetime
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
@@ -25,6 +26,10 @@ from backend.api.forward import router as forward_router
 from backend.api.rankings import router as rankings_router
 from backend.api.limitup import router as limitup_router
 from backend.api.intraday import router as intraday_router
+from backend.api.industry import router as industry_router
+from backend.api.stock_info import router as stock_info_router
+from backend.api.freshness import router as freshness_router
+from backend.api.strategies import router as strategies_router
 
 app = FastAPI(title="Quant Analysis API", version="2.0")
 
@@ -34,6 +39,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def api_no_store(request: Request, call_next):
+    """`/api/*` 一律 `Cache-Control: no-store`。
+
+    为什么必须加（2026-10-09 事故同款）：静态资源早就按"内容哈希强缓存 / index.html 不强缓存"
+    分流了，但 **API 响应一个缓存头都没有** —— 浏览器对无缓存头的 GET 会**启发式缓存**。
+    实测后果：`/api/selection` 被缓存住之后，「选股结果」页的来源 tab 一直显示旧的 3 个，
+    新加的 `cn_arm_concept`（概念/板块手臂）**在页面上怎么刷新都不出现**，
+    而后端与命令行都是好的 —— 与 2026-10-08 那次"index.html 被缓存导致白屏"是同一类问题。
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 app.include_router(stocks_router)
 app.include_router(ohlcv_router)
@@ -53,6 +75,10 @@ app.include_router(forward_router)
 app.include_router(rankings_router)
 app.include_router(limitup_router)
 app.include_router(intraday_router)
+app.include_router(industry_router)
+app.include_router(stock_info_router)
+app.include_router(freshness_router)
+app.include_router(strategies_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,15 +112,27 @@ def _resolve_frontend_dist() -> Path | None:
 
 
 def _audit_dist(dist: Path) -> dict:
-    """启动自检：入口 html 引用的每个 /assets/... 是否真的存在。
+    """启动自检：入口 html 引用的每个 /assets/... 是否真的存在 + 构建戳。
 
     这是白屏事故的**守门人** —— 缺文件时应用照样起来，但会在启动日志和 `/health`
     里明确报出来，而不是等用户对着白屏猜。
+
+    `built_at` / `entry` 是给"我明明加了功能，前端却看不到"这类问题用的：
+    页面把构建时间显在导航栏，用户一眼就能确认浏览器里跑的是不是最新构建
+    （2026-10-09：概念手臂在后端与命令行都正常，但页面因 API 被缓存看不到）。
     """
     html = (dist / "index.html").read_text(encoding="utf-8", errors="replace")
     refs = sorted(set(_ASSET_REF_RE.findall(html)))
     missing = [r for r in refs if not (dist / r.lstrip("/")).is_file()]
-    return {"dist": str(dist), "refs": refs, "missing": missing, "ok": not missing}
+    index_path = dist / "index.html"
+    built_at = None
+    try:
+        built_at = datetime.fromtimestamp(index_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except OSError:
+        pass
+    entry = next((r for r in refs if r.endswith(".js")), None)
+    return {"dist": str(dist), "refs": refs, "missing": missing, "ok": not missing,
+            "built_at": built_at, "entry": entry}
 
 
 def _validators(path: Path) -> tuple[str, str]:
@@ -123,7 +161,8 @@ def _file_with_conditional(request: Request, path: Path, cache_control: str) -> 
 
 
 frontend_dist = _resolve_frontend_dist()
-frontend_audit: dict = {"dist": None, "refs": [], "missing": [], "ok": False}
+frontend_audit: dict = {"dist": None, "refs": [], "missing": [], "ok": False,
+                        "built_at": None, "entry": None}
 
 if frontend_dist is None:
     print(

@@ -10,9 +10,9 @@
       </template>
     </PageHeader>
 
-    <!-- 数据源选择 + 出处指纹：这是本轮补上的最关键的一块 —— 以前页面只读港股那份 CSV，
+    <!-- ① 来源 + 出处指纹（页面第一屏）：以前页面只读港股那份 CSV，
          用户无从知道首页名单和命令行跑出来的名单根本不是一回事。 -->
-    <div class="panel">
+    <div class="panel source-panel">
       <div class="source-bar">
         <div class="tabs">
           <button
@@ -26,50 +26,16 @@
             {{ opt.label }}<span v-if="!opt.available" class="dim">（缺）</span>
           </button>
         </div>
-        <div v-if="data?.source" class="source-meta">
-          <span class="pill">交易日 <b>{{ data.source.trade_date || '—' }}</b></span>
-          <span class="pill">{{ data.source.row_count }} 行</span>
-          <span v-for="f in data.source.files" :key="f.path" class="pill" :title="f.path">
-            {{ f.role }} · {{ f.path.split('/').pop() }} · {{ f.mtime || '缺失' }}
-          </span>
-        </div>
+      </div>
+      <div v-if="data?.source" class="source-meta">
+        <span class="pill">交易日 <b>{{ data.source.trade_date || '—' }}</b></span>
+        <span class="pill">{{ rows.length }} 只（原始 {{ data.source.row_count }} 行）</span>
+        <span class="pill" v-if="filterActive">筛选命中 {{ rows.length }}</span>
+        <span v-for="f in data.source.files" :key="f.path" class="pill" :title="f.path">
+          {{ f.role }} · {{ f.path.split('/').pop() }} · {{ f.mtime || '缺失' }}
+        </span>
       </div>
       <p v-if="data?.source?.note" class="hint source-note">{{ data.source.note }}</p>
-    </div>
-
-    <!-- 导出到同花顺：同花顺**不开放写接口**（自选股在账号云端），
-         所以这里做到"格式对齐 + 一键复制/下载"，人工在同花顺里点一次导入或 Ctrl+V 粘贴。 -->
-    <div class="panel" v-if="ths?.available">
-      <h6>导出到同花顺（自选股）· {{ ths.trade_date }}</h6>
-      <p class="hint tiny">
-        同花顺不开放写入接口，无法全自动同步。最快是<strong>点「复制」→ 在同花顺自选股里 Ctrl+V</strong>；
-        或下载 txt 后走「自选股 → 右键 → 导入自选股」（乱码就换 GBK 版本）。
-      </p>
-      <div class="ths-grid">
-        <div v-for="src in ths.sources" :key="src.key" class="ths-row">
-          <div class="ths-head">
-            <b>{{ src.label }}</b>
-            <span class="tag" :class="src.key === 'all' ? 'gold' : ''">{{ src.n }} 只</span>
-          </div>
-          <div class="ths-codes mono tiny" :title="src.codes.join(' ')">
-            {{ src.codes.join(' ') }}
-          </div>
-          <div class="ths-actions">
-            <button class="btn btn-sm" @click="copyCodes(src)">
-              {{ copiedKey === src.key ? '✓ 已复制' : '复制' }}
-            </button>
-            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code.txt`)"
-               download>下载 txt</a>
-            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code_gbk.txt`)"
-               download>GBK</a>
-            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code_name.txt`)"
-               download>带名称</a>
-            <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}.csv`)"
-               download>CSV</a>
-          </div>
-        </div>
-      </div>
-      <p class="tiny dim" v-for="(step, i) in ths.how_to_import || []" :key="i">· {{ step }}</p>
     </div>
 
     <StateBlock
@@ -88,13 +54,26 @@
     />
 
     <template v-else-if="data">
+      <!-- ② 名单（主区）+ 评分榜（侧栏）：名单是页面的主体，放在第一屏，导出与归因往后放 -->
       <div class="two-col">
         <div class="col-main">
-          <h6>名单（{{ pagedRows.length }} / {{ rows.length }}）</h6>
+          <h6>
+            名单（{{ pagedRows.length }} / {{ rows.length }}）
+            <span class="dim tiny">点代码/名称进 K 线，点 ★ 加自选（与 K 线页侧栏、选股日历同一份）</span>
+          </h6>
+          <div class="toolbar-row">
+            <input v-model="keyword" class="search" placeholder="搜索 代码 / 名称 / 行业 / 阶段" />
+            <button class="btn-ghost btn-sm" :class="{ 'wl-on': onlyWatchlist }"
+                    @click="onlyWatchlist = !onlyWatchlist">
+              ★ 只看自选 <span class="dim">{{ onlyWatchlist ? '(' + watchHits + ')' : watchlist.size.value }}</span>
+            </button>
+            <button class="btn-ghost btn-sm" v-if="filterActive" @click="clearFilters">清空</button>
+          </div>
           <div class="table-scroll">
             <table class="data-table">
               <thead>
                 <tr>
+                  <th class="star-col">★</th>
                   <th v-for="col in data.columns" :key="col.key"
                       :class="{ 'text-left': col.key === 'stock_code' || col.key === 'stock_name' || col.key === 'stage' }"
                       @click="sortBy(col.key)">
@@ -109,6 +88,12 @@
                   :class="{ selected: selectedCode === row.stock_code, strong: row.in_portfolio === true || row.stage === '最终入选（PK 后）' }"
                   @click="selectedCode = row.stock_code"
                 >
+                  <td class="star-col">
+                    <button class="star" :class="{ on: watchlist.has(row.stock_code) }"
+                            :title="watchlist.has(row.stock_code) ? '从自选移除' : '加入自选'"
+                            @click.stop="watchlist.toggle(row.stock_code, row.stock_name || '')">{{
+                      watchlist.has(row.stock_code) ? '★' : '☆' }}</button>
+                  </td>
                   <td v-for="col in data.columns" :key="col.key"
                       :class="{ 'text-left': col.key === 'stock_code' || col.key === 'stock_name' || col.key === 'stage' }">
                     <template v-if="col.key === 'stock_code'">
@@ -140,6 +125,43 @@
         </div>
       </div>
 
+      <!-- ③ 导出到同花顺：同花顺**不开放写接口**（自选股在账号云端），
+           所以这里做到"格式对齐 + 一键复制/下载"，人工在同花顺里点一次导入或 Ctrl+V 粘贴。
+           默认折叠：它是"看完名单之后的动作"，不该占着第一屏。 -->
+      <details class="panel collapse" v-if="ths?.available">
+        <summary>导出到同花顺（自选股）· {{ ths.trade_date }}</summary>
+        <p class="hint tiny">
+          同花顺不开放写入接口，无法全自动同步。最快是<strong>点「复制」→ 在同花顺自选股里 Ctrl+V</strong>；
+          或下载 txt 后走「自选股 → 右键 → 导入自选股」（乱码就换 GBK 版本）。
+        </p>
+        <div class="ths-grid">
+          <div v-for="src in ths.sources" :key="src.key" class="ths-row">
+            <div class="ths-head">
+              <b>{{ src.label }}</b>
+              <span class="tag" :class="src.key === 'all' ? 'gold' : ''">{{ src.n }} 只</span>
+            </div>
+            <div class="ths-codes mono tiny" :title="src.codes.join(' ')">
+              {{ src.codes.join(' ') }}
+            </div>
+            <div class="ths-actions">
+              <button class="btn btn-sm" @click="copyCodes(src)">
+                {{ copiedKey === src.key ? '✓ 已复制' : '复制' }}
+              </button>
+              <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code.txt`)"
+                 download>下载 txt</a>
+              <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code_gbk.txt`)"
+                 download>GBK</a>
+              <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}_code_name.txt`)"
+                 download>带名称</a>
+              <a class="btn btn-sm" :href="thsDownloadUrl(`${ths.trade_date}_${src.key}.csv`)"
+                 download>CSV</a>
+            </div>
+          </div>
+        </div>
+        <p class="tiny dim" v-for="(step, i) in ths.how_to_import || []" :key="i">· {{ step }}</p>
+      </details>
+
+      <!-- ④ 归因 / 风险：SHAP 与全局因子重要性（只港股链路有 factor_explanation） -->
       <hr>
 
       <!-- SHAP / 重要性只存在于港股链路的 factor_explanation 列；CN 名单没有这个字段。
@@ -176,21 +198,30 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { getImportance, getSelection, getShap, getThsExportFiles, thsDownloadUrl } from '@/api/client'
 import { useAsync } from '@/composables/useAsync'
+import { useWatchlist } from '@/composables/useWatchlist'
 import type { ImportanceResponse, SelectionRow, ShapFeature, ThsExportList } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import BarChart, { type Bar } from '@/components/ui/BarChart.vue'
 
 const router = useRouter()
-const currentSource = ref('')   // 留空 = 后端默认（CN 生产名单）
+const route = useRoute()
+const watchlist = useWatchlist()
+// 留空 = 后端默认（CN 生产名单）。支持 `/#/?source=cn_arm_concept` 深链：
+// 其它页面（如行业热度页的"概念/板块手臂名单 →"）可以直接把人送到这个来源上，
+// 不用再让用户自己去来源 tab 里找。
+const currentSource = ref(String(route.query.source || ''))
 const page = ref(1)
 const perPage = 20
 const sortKey = ref('')
 const sortAsc = ref(false)
 const selectedCode = ref<string | null>(null)
+/** 名单筛选：关键字（代码/名称/行业/阶段）+ 只看自选（与 K 线页侧栏同一份自选） */
+const keyword = ref('')
+const onlyWatchlist = ref(false)
 
 const { data, error, loading, reload } = useAsync(() => getSelection(currentSource.value))
 
@@ -215,6 +246,8 @@ void (async () => {
 function switchSource(key: string) {
   if (key === currentSource.value) return
   currentSource.value = key
+  // 同步到 URL：刷新/分享后仍停在同一来源
+  void router.replace({ query: key ? { ...route.query, source: key } : { ...route.query, source: undefined } })
   page.value = 1
   sortKey.value = ''
   shapCode.value = ''
@@ -228,7 +261,13 @@ function gotoStock(code: string) {
 }
 
 const rows = computed<SelectionRow[]>(() => {
-  const list = [...(data.value?.rows ?? [])]
+  let list = [...(data.value?.rows ?? [])]
+  const kw = keyword.value.trim().toLowerCase()
+  if (kw) {
+    list = list.filter((row) => Object.values(row).some(
+      (v) => v !== null && v !== undefined && String(v).toLowerCase().includes(kw)))
+  }
+  if (onlyWatchlist.value) list = list.filter((row) => watchlist.has(String(row.stock_code)))
   if (!sortKey.value) return list
   const key = sortKey.value
   return list.sort((a, b) => {
@@ -239,6 +278,22 @@ const rows = computed<SelectionRow[]>(() => {
     return sortAsc.value ? cmp : -cmp
   })
 })
+
+const filterActive = computed(() => keyword.value.trim() !== '' || onlyWatchlist.value)
+const watchHits = computed(() => (data.value?.rows ?? [])
+  .filter((row) => watchlist.has(String(row.stock_code))).length)
+
+function clearFilters() {
+  keyword.value = ''
+  onlyWatchlist.value = false
+}
+
+// 名单里出现过的名称顺手回填自选缓存（日历/行业页只有代码时也能显示名字）
+watch(rows, (list) => {
+  if (list.length) {
+    watchlist.rememberMany(list.map((row) => ({ code: String(row.stock_code), name: String(row.stock_name || '') })))
+  }
+}, { immediate: false })
 
 const totalPages = computed(() => Math.max(1, Math.ceil(rows.value.length / perPage)))
 const pagedRows = computed(() => rows.value.slice((page.value - 1) * perPage, page.value * perPage))
@@ -354,4 +409,25 @@ function fmtVal(v: unknown): string {
   max-height: 3.2em; overflow: hidden; word-break: break-all; }
 .ths-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .ths-actions .btn { text-decoration: none; display: inline-flex; align-items: center; }
+
+/* ── 排布优化（2026-10-10）───────────────────────────────────────────
+   ① 来源与出处合并成一块"第一屏"信息条（原来来源 tab 与出处 pill 分散在两行）；
+   ② 名单加工具条（搜索 / 只看自选 / 清空）+ ★ 列，与 K 线页自选共用一份状态；
+   ③ 同花顺导出改成折叠块 —— 它是"看完名单之后的动作"，不该占第一屏。 */
+.source-panel .source-meta { margin-left: 0; margin-top: var(--sp-2); }
+.toolbar-row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap;
+  margin-bottom: var(--sp-2); }
+.search { flex: 1; min-width: 180px; max-width: 320px; padding: 5px 8px;
+  background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--r-2); color: var(--text-primary); }
+.btn-ghost.wl-on { color: var(--accent-gold); border-color: var(--accent-gold);
+  background: rgba(255, 209, 102, 0.08); }
+.star-col { width: 30px; text-align: center; }
+.star { background: none; border: none; cursor: pointer; font-size: 13px; line-height: 1;
+  color: var(--text-dim); padding: 0 2px; }
+.star.on, .star:hover { color: var(--accent-gold); }
+.collapse summary { cursor: pointer; font-size: var(--fs-md); color: var(--text-muted);
+  padding: 2px 0; }
+.collapse summary:hover { color: var(--text-primary); }
+.collapse[open] summary { margin-bottom: var(--sp-2); }
 </style>

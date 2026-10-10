@@ -31,6 +31,10 @@ CN_BASIC = ROOT / "assets/data/meta/cn_stock_basic.parquet"
 # 展示列白名单：(csv 列名, 中文表头, 是否文本列)
 _COLS = {
     "rank": ("rank", "#", False),
+    # 概念/板块手臂（cn_arm_concept）新增列
+    "concept_score": ("concept_score", "概念分", False),
+    "rev_5d": ("rev_5d", "5日涨幅", False),
+    "board": ("board", "概念/板块", True),
     "stock_code": ("stock_code", "代码", True),
     "name": ("name", "名称", True),
     "stage": ("stage", "阶段", True),
@@ -89,6 +93,19 @@ SOURCES: dict[str, dict] = {
             "rank", "stock_code", "board", "industry", "score", "in_portfolio",
             "target_weight", "last_close", "lots_at_capital", "planned_amount",
             "pit_name", "mktcap_rank",
+        ],
+        "supports_shap": False,
+    },
+    "cn_arm_concept": {
+        "label": "CN 概念/板块手臂（concept_rotation）",
+        "note": "板块层（概念动量×资金流−涨停密度）→ 个股层（板块内反转×资金流×流动性）；"
+                "独立策略项，**不替代** preselection→pk 的生产名单。",
+        "files": [("arm", RESULTS_CN / "arm_concept_selection.csv")],
+        "code_style": "ts_code",
+        "columns": [
+            "rank", "stock_code", "board", "industry", "score", "concept_score", "rev_5d",
+            "in_portfolio", "target_weight", "last_close", "lots_at_capital", "planned_amount",
+            "pit_name",
         ],
         "supports_shap": False,
     },
@@ -299,7 +316,11 @@ def load_source(key: str) -> dict:
     for col in wanted:
         if col in ("stock_code", "name"):
             continue
-        columns.append({"key": col, "title": _COLS[col][1]})
+        # 兜底：没注册标题的列直接用列名当标题。**不要**直接下标 `_COLS[col]` ——
+        # 那样会在 `selection_service` 的 `except KeyError` 里被吞掉，表现为
+        # 「未知数据源 xxx，已回退到默认源」，看起来像数据源没注册（实测踩过：
+        # 新增概念手臂时 concept_score 未注册，排查了半天才发现是列标题缺失）。
+        columns.append({"key": col, "title": _COLS.get(col, (col, col, False))[1]})
 
     return {
         "key": key,

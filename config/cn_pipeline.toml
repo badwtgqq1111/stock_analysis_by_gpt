@@ -176,7 +176,10 @@ enabled = false
 start_date = ""
 end_date = ""
 # Independent raw adj_factor audit snapshot; this does not overwrite OHLCV.
-adjustment_factors_enabled = false
+# 2026-10-09 打开：数据体检长期报 adj_factor 未达标，排查发现是**这个开关从来没开**，
+# 而 relay 的 adj_factor 接口实测可用（000001.SZ 2026-10-08 = 142.0699）。
+# 配套同步脚本 scripts/sync_cn_adj_factor.py（按日全市场 + 逐股历史），已进每日自动化。
+adjustment_factors_enabled = true
 
 [strategy_labels]
 days = 756
@@ -1126,3 +1129,15 @@ st_anchor = "start"      # PIT 锚定日：start=名称生效日（保守、不�
 robust_months = 24       # 权重稳健性对照：另用最近 N 个月拟合一次，报 top-N 重合度
 # panel = "assets/data/meta/cn_sleeve_features_long_v4.parquet"   # 留空=默认 v4
 # as_of = "2026-09-30"   # 留空=最新交易日
+
+[arm_concept]
+# 概念/板块轮动手臂（独立策略项，与 [arm_selection] 并列）：板块层用新浪概念成分
+# （assets/data/meta/cn_board_membership.parquet，由 scripts/sync_cn_boards.py 每日更新），
+# 个股层在选中概念内做"反转×资金流×流动性"。
+# 已知弱点：概念动量近 5 年失效（后半段 -1.51%/月）、成分表非 PIT —— 研究用，不替代生产名单。
+top_boards = 3
+candidates = 10
+holdings = 5
+per_board = 4        # 每个概念进候选池的只数上限（避免单一概念占满）
+max_per_board = 2    # 持仓里单个概念的只数上限（强制分散）
+capital = 45000

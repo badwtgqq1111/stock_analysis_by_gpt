@@ -15,6 +15,41 @@
     <StateBlock v-else-if="!status" state="loading" title="加载中…" />
 
     <template v-else>
+      <!-- ── Web 页面新鲜度：自动化跑完后每个页面是否都是最新交易日 ── -->
+      <div class="panel" v-if="freshness?.available">
+        <h6>
+          Web 页面新鲜度
+          <span class="pill" :class="freshness.ok ? 'ok' : 'bad'">
+            {{ freshness.ok ? '全部达标' : `不达标 ${freshness.stale?.length || 0} 项` }}
+          </span>
+          <span class="pill dim tiny">基准交易日 {{ freshness.latest_trade_date || '—' }}</span>
+          <span class="dim tiny" v-if="freshness.generated_at">体检于 {{ freshness.generated_at }}</span>
+        </h6>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th class="text-left">页面</th><th>口径</th><th>数据日期</th><th>状态</th>
+              <th class="text-left">读的产物</th></tr></thead>
+            <tbody>
+              <tr v-for="row in freshness.rows || []" :key="row.page + row.artifact">
+                <td class="text-left">{{ row.page }}</td>
+                <td class="tiny dim">{{ row.kind }}</td>
+                <td class="mono">{{ row.date || '—' }}</td>
+                <td>
+                  <span v-if="row.ok === true" class="tag ok">✅</span>
+                  <span v-else-if="row.ok === false" class="tag bad">❌</span>
+                  <span v-else class="tag dim">—</span>
+                </td>
+                <td class="text-left tiny dim" :title="row.artifact">{{ row.note }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="hint tiny">
+          `eq` 口径要求"数据日期 == 最新交易日"，`ge` 用于按运行日命名的产物（流水线报告）；
+          `event/live` 只报告不判死。不达标会同时写进 <code>output/data_quality/web_freshness.md</code> 并触发通知。
+        </p>
+      </div>
+
       <!-- ── 总览 ───────────────────────────────────────────── -->
       <div class="panel">
         <div class="overview">
@@ -161,13 +196,15 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { getAutomationStatus } from '@/api/client'
+import { getAutomationStatus, getWebFreshness } from '@/api/client'
 import type { AutomationStage, AutomationStatus } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import StatTile from '@/components/ui/StatTile.vue'
 
 const status = ref<AutomationStatus | null>(null)
+// Web 页面新鲜度体检（每日流水线最后一步的产物）
+const freshness = ref<any>(null)
 const error = ref('')
 const loading = ref(false)
 const pollSeconds = 5
@@ -177,6 +214,8 @@ async function reload() {
   loading.value = true
   try {
     status.value = await getAutomationStatus()
+    // 体检产物独立于运行状态：加载失败不影响主面板
+    try { freshness.value = await getWebFreshness() } catch { /* 忽略 */ }
     error.value = ''
   } catch (e) {
     error.value = String(e)

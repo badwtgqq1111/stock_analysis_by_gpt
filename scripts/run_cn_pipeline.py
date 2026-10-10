@@ -564,6 +564,22 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
         out = {"steps": [_run_research_script("select_latest_via_arm.py", args)]}
         out["status"] = "completed" if out["steps"][0]["exit_code"] == 0 else "failed"
         return out
+    if name == "arm_concept":
+        # 概念/板块轮动手臂（独立策略项）：板块层（概念动量×资金流−涨停密度）→ 个股层
+        # （板块内反转×资金流×流动性）。产物 output/results_cn/arm_concept_selection.*，
+        # 与 base_v1 手臂并列展示、互不覆盖；研究口径见 scripts/select_concept_arm.py 头部。
+        layer = config.get("arm_concept", {})
+        args = ["--top-boards", str(layer.get("top_boards", 3)),
+                "--candidates", str(layer.get("candidates", 10)),
+                "--holdings", str(layer.get("holdings", 5)),
+                "--capital", str(layer.get("capital", 45000)),
+                "--per-board", str(layer.get("per_board", 4)),
+                "--max-per-board", str(layer.get("max_per_board", 2))]
+        if layer.get("as_of"):
+            args += ["--as-of", str(layer["as_of"])]
+        out = {"steps": [_run_research_script("select_concept_arm.py", args)]}
+        out["status"] = "completed" if out["steps"][0]["exit_code"] == 0 else "failed"
+        return out
     if name == "exits":
         layer = config.get(name, {})
         return service.plan_cn_exit_rules(
@@ -1073,7 +1089,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run CN data, feature, model, OOS evaluation and selection stages.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="TOML pipeline configuration")
     parser.add_argument("--stage", choices=["all", "daily_bars", "moneyflow", "cyq_chips", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_diagnostics", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison",
-                          "arm_selection"], default="all")
+                          "arm_selection", "arm_concept"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
     parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
     parser.add_argument("--trade-date", default=None,
@@ -1103,7 +1119,7 @@ def main() -> int:
     result = {"started_at": started, "config": str(args.config), "stages": [], "result": "failed"}
     data_health = dict((config.get("pipeline") or {}).get("data_health") or {})
     stages = ["daily_bars", "moneyflow", "intraday_bars", "fundamental", "alternative", "strategy_labels", "features", "regime", "xiaomkt_rotation", "sleeve_features", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions", "model_comparison",
-                   "arm_selection"] if args.stage == "all" else [args.stage]
+                   "arm_selection", "arm_concept"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
     pipeline_config = config["pipeline"]

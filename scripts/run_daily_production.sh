@@ -24,6 +24,19 @@
 #      分时则只有一个"一次性历史回补"的 LaunchAgent（判据是"文件存在"，补齐 5,228 只后永远空转）。
 #      两者都需要日线先更新完（分时增量用日线的最大 trade_date 判定"最新交易日"），所以放在主阶段之后。
 #      开关：DAILY_ARM_SELECTION=0 / DAILY_INTRADAY=0 可分别关掉；DAILY_INTRADAY_SECONDS 限时（默认 1800）。
+#   3d.（2026-10-09 新增）**板块/龙虎榜/申万行业**三块研究数据面（全部非阻塞，失败不影响选股）：
+#        · boards  —— 新浪行业/概念/地域 板块行情 + **全量成分股**（255 个板块，实测 79s），
+#                     同花顺 90 行业汇总（带净流入）+ 375 概念名单。
+#                     来源选型：东财板块接口走 push2 clist，本机代理稳定 403；同花顺成分页被 Nginx 403；
+#                     **新浪可用且最快**，所以成分取新浪、行业资金流口径取同花顺。
+#        · lhb     —— 龙虎榜明细 + 机构买卖统计（按**交易日**增量，节假日不再误报失败）
+#        · sw2021  —— 申万 2021 一级行业成分（乐咕乐股；限流，默认每次最多补 8 个行业、分几天补齐）
+#      开关：DAILY_BOARDS / DAILY_LHB / DAILY_SW2021 / DAILY_ADJ_FACTOR / DAILY_ARM_CONCEPT / DAILY_PERFORMANCE = 0 可分别关闭；
+#      DAILY_BOARDS_SESSION_SECONDS（默认 900）/ DAILY_LHB_DAYS（默认 15）/ DAILY_SW2021_MAX（默认 4，小预算）/
+#      DAILY_ADJ_FACTOR_DAYS（默认 8）/ DAILY_ADJ_FACTOR_STOCKS（默认 200，历史回补预算）/
+#      DAILY_ARM_CONCEPT_BACKTEST_MONTHS（默认 24，概念手臂月频回放窗口）。
+#        · adj_factor —— 复权因子审计快照（Tushare relay：按日全市场 + 逐股历史）。此前开关是关的，
+#          数据体检一直报「目录不存在」；实测 relay 接口可用，属配置问题不是数据缺失。
 #   3c.（2026-10-09 新增）选股台账重建 —— 前端「选股日历」读的就是它
 #        （output/results_cn/selection_ledger.parquet，由 scripts/build_selection_ledger.py 生成）。
 #        此前这一步**不在每日流程里**：日历一直显示到"上一次有人手工重建"为止
@@ -34,6 +47,13 @@
 #      "再平衡节奏"，但它会在 stride 窗口内直接沿用上一版组合，导致新选出来的票几天不换。
 #      需要保留 stride 行为时用 DAILY_FORCE_REBALANCE=0 关闭。
 #   4. 每个阶段写独立日志，最后按阶段生成两阶段选股报告。
+# launchd / cron 的环境**没有 LANG/LC_ALL**，bash 会退化成逐字节解析：
+#   变量名紧跟全角括号时会被吃掉半个多字节字符 → 变成未定义变量 → set -u 终止脚本
+#   → `set -u` 直接终止整个脚本（2026-10-09 事故：数据步骤失败本应"只记日志不阻塞"，
+#      结果整个每日生产在 19:30 / 20:30 两次静默退出，主阶段一步没跑）。
+# 两道保险：① 显式设 UTF-8 locale；② 所有 `$var` 紧跟中文的地方改写 `${var}`。
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -155,7 +175,7 @@ notify_alert() {
 }
 
 # 预检：跑一遍与本次改动相关的回归测试（约 1 秒），把"代码级错误"挡在 70 分钟的重活之前
-PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py -q}"
+PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py -q}"
 if [ "${DAILY_PREFLIGHT:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
   if eval "$PREFLIGHT_CMD" > "$LOG_DIR/preflight.log" 2>&1; then
     log "preflight ok: $PREFLIGHT_CMD"
@@ -188,7 +208,7 @@ run_data_step() {
     log "data-step=$name ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/data_$name.log"
   else
     local code=$?
-    log "data-step=$name FAILED exit=$code（不阻塞选股）-> $LOG_DIR/data_$name.log"
+    log "data-step=$name FAILED exit=${code}（不阻塞选股）-> $LOG_DIR/data_$name.log"
     tail -3 "$LOG_DIR/data_$name.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
   fi
 }
@@ -253,7 +273,7 @@ if [ "$FAILED" -eq 0 ] && [ "${DAILY_SLEEVE_PANEL:-1}" = "1" ]; then
     panel_ok=1
     for _step in build_sleeve_features_long.py panel_extend_v2.py panel_extend_v3.py panel_merge_intraday.py build_panel_v4_delisted.py; do
       if ! uv run python "scripts/$_step" >> "$LOG_DIR/sleeve_panel.log" 2>&1; then
-        log "sleeve-panel FAILED at $_step（不影响生产名单；arm_selection 会用旧面板）"
+        log "sleeve-panel FAILED at ${_step}（不影响生产名单；arm_selection 会用旧面板）"
         panel_ok=0
         break
       fi
@@ -272,10 +292,48 @@ if [ "$FAILED" -eq 0 ] && [ "${DAILY_ARM_SELECTION:-1}" = "1" ]; then
       log "arm-selection ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/arm_selection.log"
     else
       code=$?
-      log "arm-selection FAILED exit=$code（研究手臂，不影响生产名单）-> $LOG_DIR/arm_selection.log"
+      log "arm-selection FAILED exit=${code}（研究手臂，不影响生产名单）-> $LOG_DIR/arm_selection.log"
       tail -5 "$LOG_DIR/arm_selection.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
     fi
   fi
+fi
+
+# ── 板块 / 龙虎榜 / 申万行业：研究数据面（非阻塞）──────────────────────────
+# 位置说明：这三块**不喂当天选股**（板块热度与行业轮动还在研究阶段），所以放在主阶段之后，
+# 用 run_data_step 的"失败只记日志"语义，网络抽风不会拖垮 7 小时的生产链。
+# 依赖：无（纯外部数据源：新浪 / 同花顺 / 东财数据中心 / 乐咕乐股）。
+if [ "${DAILY_BOARDS:-1}" = "1" ]; then
+  run_data_step boards uv run python scripts/sync_cn_boards.py \
+      --session-seconds "${DAILY_BOARDS_SESSION_SECONDS:-900}"
+fi
+if [ "${DAILY_ADJ_FACTOR:-1}" = "1" ]; then
+  # 复权因子审计快照：先按日同步全市场（1~2 个请求/交易日），再用小预算补历史（逐股口径，
+  # 首次全量约 1.9 小时，之后每天只补当天新增）。此前 relay_data.adjustment_factors_enabled
+  # 一直是 false，数据体检里表现为「目录不存在」——是开关问题，不是 Tushare 没有这份数据。
+  run_data_step adj_factor uv run python scripts/sync_cn_adj_factor.py --mode auto --days "${DAILY_ADJ_FACTOR_DAYS:-8}" --max-per-run "${DAILY_ADJ_FACTOR_STOCKS:-200}"
+fi
+if [ "${DAILY_ARM_CONCEPT:-1}" = "1" ]; then
+  # 概念/板块轮动手臂：**必须在 boards 之后**（板块成分表当天刷新完才有意义）。
+  # 与 arm_selection 并列的独立策略项，产物 output/results_cn/arm_concept_selection.*，
+  # 前端「选股结果」的来源下拉与「流水线」页各占一个 tab。
+  run_data_step arm_concept uv run python scripts/run_cn_pipeline.py --stage arm_concept
+  # 月频回放摘要（前端「概念手臂」tab 上的期均/基准数字）：规则一变就该重算，
+  # 与名单一起放在同一步里，避免"名单是新的、回放数字是上个月的"。
+  run_data_step arm_concept_backtest uv run python scripts/select_concept_arm.py --backtest --months "${DAILY_ARM_CONCEPT_BACKTEST_MONTHS:-24}"
+fi
+if [ "${DAILY_PERFORMANCE:-1}" = "1" ]; then
+  # 回测绩效页的数据链：**逐笔回放（4 个 arm，实测 ~2.5s/arm）→ portfolio_performance**。
+  # 此前这条链完全不在每日流程里，页面窗口停在上一次手工跑（实测 2026-10-10 还停在 10-07）。
+  # picks 的月末决策只到研究那次跑出来的最后一个月，重跑解决的是"净值/指标推进到最新交易日"，
+  # 新的调仓决策需要重跑 llm_sleeve_oos_backtest（研究口径，另行排期）。
+  run_data_step performance uv run python scripts/refresh_performance_chain.py
+fi
+if [ "${DAILY_LHB:-1}" = "1" ]; then
+  run_data_step lhb uv run python scripts/sync_cn_lhb.py --days "${DAILY_LHB_DAYS:-15}"
+fi
+if [ "${DAILY_SW2021:-1}" = "1" ]; then
+  run_data_step sw2021 uv run python scripts/sync_cn_sw2021_industry.py \
+      --max-per-run "${DAILY_SW2021_MAX:-4}" --sleep "${DAILY_SW2021_SLEEP:-2.0}"
 fi
 
 # ── 分时增量：只补「文件最后日期 < 最新交易日」的标的，且只抓缺失窗口后 --merge 回原文件 ──
@@ -291,7 +349,7 @@ if [ "$FAILED" -eq 0 ] && [ "${DAILY_INTRADAY:-1}" = "1" ]; then
       log "intraday-refresh ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/intraday_refresh.log"
     else
       code=$?
-      log "intraday-refresh FAILED exit=$code（不影响生产名单）-> $LOG_DIR/intraday_refresh.log"
+      log "intraday-refresh FAILED exit=${code}（不影响生产名单）-> $LOG_DIR/intraday_refresh.log"
       tail -5 "$LOG_DIR/intraday_refresh.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
     fi
   fi
@@ -362,7 +420,7 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_LEDGER:-1}" = "1" ]
     log "ledger ok ($(( $(date +%s) - started ))s) -> 选股日历已同步 $TRADE_DATE"
   else
     code=$?
-    log "ledger FAILED exit=$code（选股日历会停在上一版）-> $LOG_DIR/ledger.log"
+    log "ledger FAILED exit=${code}（选股日历会停在上一版）-> $LOG_DIR/ledger.log"
     tail -5 "$LOG_DIR/ledger.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
   fi
 fi
@@ -491,11 +549,57 @@ if [ "${DAILY_COMPLETENESS:-1}" = "1" ]; then
   fi
 fi
 
+# ── 策略池同步（2026-10-10 新增）────────────────────────────────────────
+# 用户要求："应该有个策略池（模型选股 / arm_select / 行业轮动），agent 挖掘好的新策略应该进入策略池"。
+# 这一步把「声明式登记表（config/strategies.json）+ 候选登记（output/strategy_pool/candidates/）
+# + 研究证据（output/research/*/REPORT.md）」合成一份前端可读快照，并**点名落后的生产策略**。
+# 位置：必须放在 arm_concept / arm_selection 名单写完之后（它读这些产物判新鲜度）；
+# 也放在 web-freshness 之前（策略池页面本身也要进体检）。
+# 非致命：同步失败只影响「策略池」页展示，不影响当日生产结果。
+if [ "$DRY_RUN" -eq 1 ]; then
+  log "step=strategy-pool would run: scripts/sync_strategy_pool.py --strict（策略池快照 + 生产策略新鲜度）"
+elif [ "$FAILED" -eq 0 ]; then
+  pool_out="$(uv run python scripts/sync_strategy_pool.py --strict --print 2>&1 && echo "__POOL_OK__")"
+  printf '%s\n' "$pool_out" >> "$LOG_DIR/strategy_pool.log"
+  if printf '%s' "$pool_out" | grep -q '__POOL_OK__'; then
+    log "strategy-pool ok（生产策略全部到最新交易日）-> output/strategy_pool/strategy_pool.json"
+  else
+    stale_line="$(printf '%s\n' "$pool_out" | grep -E '^  \[STALE\]' | sed 's/^ *//')"
+    log "strategy-pool 有落后的策略：${stale_line:-未知} -> $LOG_DIR/strategy_pool.log"
+    notify_alert "策略池有策略未更新 ${TRADE_DATE}" "以下生产策略的最新交易日落后于基准：
+${stale_line:-未知}
+
+明细：output/strategy_pool/strategy_pool.md"
+  fi
+fi
+
+# ── Web 页面新鲜度体检（每日流程的**最后一步**）─────────────────────────────
+# 用户要求（2026-10-10）："自动化跑完，所有 web site 全部更新到最新"。
+# 这条要求不能靠人肉记：audit_web_freshness.py 给每个页面登记"读哪个产物、怎么取数据日期"，
+# 这里跑一次 --strict，不达标的页面**在日志和通知里直接点名**（但不阻塞 .done：
+# 数据面本身缺了是上游问题，不该把整条流水线判死）。
+if [ "$DRY_RUN" -eq 1 ]; then
+  log "step=web-freshness would run: scripts/audit_web_freshness.py --strict（每个页面是否都是最新交易日）"
+elif [ "$FAILED" -eq 0 ]; then
+  fresh_out="$(uv run python scripts/audit_web_freshness.py --strict 2>&1 || true)"
+  printf '%s\n' "$fresh_out" >> "$LOG_DIR/run.log"
+  if printf '%s' "$fresh_out" | grep -q '所有每日页面都已是基准交易日'; then
+    log "web-freshness ok（所有页面 == 最新交易日）-> output/data_quality/web_freshness.md"
+  else
+    stale_line="$(printf '%s\n' "$fresh_out" | sed -n 's/^\[web-freshness\] ❌ 不达标：//p' | tail -1)"
+    log "web-freshness 有页面未更新：${stale_line:-未知} -> output/data_quality/web_freshness.md"
+    notify_alert "Web 页面未更新到最新交易日 ${TRADE_DATE}" "以下页面的数据日期落后于最新交易日：
+${stale_line:-未知}
+
+明细：output/data_quality/web_freshness.md"
+  fi
+fi
+
 if [ "$FAILED" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   date '+%Y-%m-%dT%H:%M:%S%z' > "$MARKER"
   log "done: $TRADE_DATE 生产完成（当日后续触发会跳过；失败则下一次触发自动重试）"
 elif [ "$DRY_RUN" -eq 1 ]; then
-  log "dry-run finished: 上面的阶段序列 + sleeve-panel + arm_selection + intraday-refresh + attribution + data-completeness + ledger + archive-selection + ths-export + forward-validation + execution-parity + shadow-variants + pk-guard + promotion-check 即每日生产实际执行顺序（未执行任何命令）"
+  log "dry-run finished: 上面的阶段序列 + sleeve-panel + arm_selection + 研究数据面（boards/adj_factor/arm_concept/回放/performance/lhb/sw2021）+ intraday-refresh + attribution + data-completeness + ledger + archive-selection + ths-export + forward-validation + execution-parity + shadow-variants + pk-guard + promotion-check + strategy-pool + web-freshness 即每日生产实际执行顺序（未执行任何命令）"
 else
   log "finished with failures"
 fi

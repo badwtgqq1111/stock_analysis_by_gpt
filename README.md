@@ -922,21 +922,311 @@ bun run dev
 
 | 页面 | 路由 | 功能 |
 |---|---|---|
-| 选股结果 | `/` | LightGBM TopN、评分、SHAP 特征解释 |
-| 因子 IC 分析 | `/factor-ic` | IC/RankIC 时序和因子汇总 |
-| K 线图表 | `/kline` | K 线、均线、成交量、信号标记；**点任意一根 K 线看当日分时** |
-| 选股日历 | `/calendar` | 逐日选股台账、来源对照、T+N 前瞻收益 |
+| 选股结果 | `/` | 来源 tab + **名单搜索/★自选** + 评分榜 + 同花顺导出（折叠）+ SHAP 归因 |
+| 策略池 | `/strategies` | **所有选股策略的登记处**：生产 / 候选中转 / 研究证据，见下节 |
+| 因子 IC 分析 | `/factor-ic` | **因子池体检**：按仓库审计口径分级（无效/合格/优质/很强）+ 一键登记候选 |
+| K 线图表 | `/kline` | K 线、均线、成交量、信号标记；**点任意一根 K 线看当日分时**；左侧自选股、右侧个股资料 |
+| 选股日历 | `/calendar` | 逐日选股台账、来源对照、T+N 前瞻收益；**★自选联动 + 只看自选 + 分析视图 tab** |
 | 选股归因 | `/attribution` | 逐股 SHAP + 启动门禁 tilt 拆分 |
-| 因子挖掘 | `/factor-mining` | LLM 因子挖掘会话与产物 |
+| 因子挖掘 | `/factor-mining` | **agent 工作台**（左会话 / 中任务+轨迹 / 右产物），跑完可**一键入池** |
 | 数据流水线 | `/pipeline` | 各阶段产物、最近运行、单阶段重跑 |
 | 自动化进度 | `/automation` | 每日生产任务的实时日志 |
 | 回测绩效 | `/performance` | 净值、回撤、月度收益、交易明细（`/portfolio` 已重定向到此） |
 | 模拟盘 | `/paper` | 前向模拟账户持仓与成交 |
 | **涨跌/资金排行** | `/rankings` | 每日 / 每周（近 5 日）全市场涨跌幅与资金流排行 |
+| **行业热度** | `/industry` | 热度网格 + **股票热力图**（面积=流通市值、颜色=涨跌，行业可下钻）+ 选中行业**自动列出**成分股 |
 | **连板统计** | `/limitup` | 一板 / 两板 / 三板 / 四板+ 每日家数、最高板、晋级率 |
 | **分时行情** | `/intraday` | 当日 1 / 5 分钟分时 + 均价线，盘中自动刷新 |
 
-### 行情页面（2026-10-09 新增）
+#**「自动化跑完 → 所有页面都是最新交易日」怎么保证**（2026-10-10 起）：
+
+```bash
+uv run python scripts/audit_web_freshness.py --strict   # 每个页面的数据日期 vs 最新交易日
+# → output/data_quality/web_freshness.{json,md}；不达标会写日志 + 触发通知
+uv run python scripts/refresh_performance_chain.py      # 回放（4 arm）→ 绩效指标，实测 ~15s
+```
+
+| 环节 | 做法 |
+|---|---|
+| 页面清单 | **17 项**登记在 `audit_web_freshness.py`：选股结果（生产/研究手臂/概念手臂）、选股日历、选股归因、K 线、榜单+行业热度+连板、回测绩效、数据流水线、自动化进度、模拟盘、同花顺导出、个股资料（龙虎榜/概念成分）、分时、因子挖掘 |
+| 判定口径 | `eq`：数据日期必须 == 最新交易日；`ge`：按**运行日**命名的产物（流水线报告，跨零点会是次日）；`event/live`：只报告不判死 |
+| 每日流程 | 研究数据面 `boards → adj_factor → arm_concept → arm_concept_backtest → **performance（回放+指标）** → lhb → sw2021`；收尾为 **`sync_strategy_pool.py --strict`（策略池）→ `audit_web_freshness.py --strict`**，不达标直接点名并通知 |
+| 页面可见 | `/api/freshness` + 「自动化进度」页顶部的 **Web 页面新鲜度**面板（17 行：页面 / 口径 / 数据日期 / 状态 / 读的产物） |
+| 守门测试 | `test/test_web_freshness.py`（页面清单覆盖、口径语义、产物与接口一致、回放净值必须推进到最新交易日、脚本接线） |
+
+2026-10-10 实测：体检 **全部达标**（17/17；此前"回测绩效/选股归因"两项落后 —— 归因链的 `ROOT=parents[3]`
+与产物目录写错已修，绩效链（回放+基准）已接进每日流程，页面窗口已推进到 2026-10-09）。
+
+**选股日历表格支持按列筛选**（2026-10-10）：明细列表与多策略对比**两张表**都有筛选行 ——
+文本列包含匹配（`!x` 取反）、数值列支持 `>0` / `<=2` / `1~3` / `=2.5`、收益与权重按**百分数**填
+（所见即所填），另有「入选策略」「来源」下拉、命中行数提示与「清空筛选」。实测 2026-10-08：
+策略=行业轮动 28→10 行、T+1 > 0 → 12 行、T+1 <= -2 → 9 行、行业含"银行" → 3 行。
+
+**2026-10-10 修掉的两处"页面没跟到最新日期"**：
+| 症状 | 根因 | 处理 |
+|---|---|---|
+| 选股归因页停在 10-08 | `scripts/explain_selection.py` 的 `ROOT` 写成 `parents[3]`（= `/Users/ccs/code`）→ `import factor_engine` 直接 ModuleNotFoundError；且产物目录用 `Path(__file__).parent`，脚本搬到 `scripts/` 后把 30MB SHAP 明细写进了 `scripts/`，下游 `pick_attribution_report.py` 按约定路径取不到 → FileNotFoundError | ROOT 改 `parents[1]`、新增 `--out-dir` 默认写回 `output/verification/p1_22_shap_attribution_20260925/`；已补跑 10-09，`test/test_calendar_filters_and_fixes.py` 钉住这两点 |
+| 回测绩效页窗口不推进 | `scripts/portfolio_performance.py` 从来不在每日流程里 | 新增 `DAILY_PERFORMANCE=1` 步骤（每次数据面之后跑）；注意它读的是 `l3_replay` 的净值 CSV，净值序列本身要靠 `replay_daily_execution.py`（研究口径，另行排期）|
+
+**选股结果 ↔ 选股日历 必须同步**（用户 2026-10-09 报过"结果里有、日历里没有"）：
+日历的数据底座是 `output/results_cn/selection_ledger.parquet`，由 `scripts/build_selection_ledger.py`
+从各来源的**逐日历史**合并。概念手臂写入 `arm_concept_history/<date>.csv` 后，台账读取器
+（`read_arm_concept_history`）把它并进台账、日历来源下拉就是 `arm_concept`。
+以后再新增手臂，**三步都要做**：① 写 `<arm>_history/<date>.csv`；② 在台账装配里注册读取器；
+③ 前端 `SelectionCalendar.vue` 的 `SOURCE_LABEL / SOURCE_SHORT / SOURCE_LETTER` 三张表补上，
+否则会出现"选股结果有、日历没有"或"下拉是英文 key、格子里是乱序字母"。
+
+**三种策略与"每只票是哪种策略选出来的"**（2026-10-09）：台账里按策略分组显示 ——
+`模型策略`（`preselected` 候选池 + `notify` PK 后最终名单）、`小市值手臂`（`arm` = arm_select）、
+`行业轮动`（`arm_concept` 概念/板块手臂）。选股日历的「多策略对比」有 **入选策略** 列（带颜色标签）
+与策略构成汇总（当天每个策略各选出多少只）；后端 `STRATEGY_META` 负责 source→策略映射。
+
+**任意股票代码/名称可点**：全站统一跳 `/#/kline?code=<ts_code>`；日 K 页新增
+- **左侧「自选股」侧栏**：本地自选（localStorage，★ 增删）+ 快速分组（概念手臂/研究手臂/生产名单/模拟盘持仓）；
+- **右侧「个股资料」面板**（`GET /api/stocks/{code}/bundle`）：概况（含概念/申万/涨停统计/估值）、
+  财务（8 期 ROE/毛利率/负债率/EPS/增速）、资金（5/20 日 + 东财/同花顺口径）、龙虎榜（含机构）、
+  **选股记录（哪些策略哪一天选过它 + 前瞻收益）**、公告（巨潮，10 分钟缓存）。
+  新闻：仓库没有本地新闻源 —— 给东财/同花顺/雪球/巨潮**外站链接**，前端标注"外站"，不假装是本地数据。
+
+**前端在哪看**（如果"刷新了还是看不到"，先看这里）：
+
+| 入口 | 位置 |
+|---|---|
+| 选股结果页 | 来源 tab 第 3 个 **CN 概念/板块手臂（concept_rotation）**；也支持深链 `/#/?source=cn_arm_concept` |
+| 行业热度页 | 右上角入口 **「概念/板块手臂名单 →」** 直达上面那个来源 |
+| 流水线页 | tab **概念手臂（concept_rotation）**（含选中概念 + 月频回放摘要） |
+| 同花顺导出 | 选股结果页的导出块里单列一组 **arm_concept**（10 只，可直接导入自选股） |
+| 导航栏 | 右上角 **`build 10-09 19:29 · DB13K4a6`** —— 一眼确认浏览器跑的是不是最新构建 |
+
+> 2026-10-09 踩坑：功能在内核/命令行/API 都正常，但页面上怎么刷新都不显示 ——
+> 根因是 **`/api/*` 响应没有缓存头**，浏览器对无缓存头的 GET 会启发式缓存，
+> 来源 tab 一直用着旧的 3 个。现已给全部 `/api/*` 加 `Cache-Control: no-store`，
+> 并在 `/health` 与导航栏加了构建戳（同 `test/test_web_cache_and_build.py` 三条契约）。
+
+#### 概念/板块轮动手臂（独立策略项，与 arm_selection 并列）
+
+```bash
+uv run python scripts/select_concept_arm.py                    # 生成名单（或走流水线阶段）
+uv run python scripts/run_cn_pipeline.py --stage arm_concept    # 每日自动化里的同一条路径
+uv run python scripts/select_concept_arm.py --backtest         # 月频回放该规则
+```
+
+| 面 | 位置 |
+|---|---|
+| 阶段 | `run_cn_pipeline.py --stage arm_concept`（配置节 `[arm_concept]`） |
+| 产物 | `output/results_cn/arm_concept_selection.{csv,json}`、`arm_concept_history/<date>.csv`、`arm_concept_backtest.json` |
+| 选股结果页 | 来源下拉新增 **CN 概念/板块手臂（concept_rotation）**（`selection_sources.SOURCES` 的 `cn_arm_concept`） |
+| 流水线页 | 新增 tab **概念手臂（concept_rotation）**（含选中概念与月频回放摘要） |
+| 每日自动化 | `DAILY_ARM_CONCEPT=1`（排在 `boards` 之后，因为要用当天刷新的概念成分表） |
+
+信号口径：板块层 `0.5×概念20日动量 + 0.3×资金流强度 − 0.2×涨停密度`（概念来自新浪 175 个板块，
+成分表每日刷新）→ 个股层在选中概念内 `0.4×短期反转 + 0.3×资金流 + 0.3×流动性`；
+持仓强制单概念 ≤2 只、非 ST(PIT)、非涨停、20 日均成交额 ≥5000 万。
+
+实测（月频回放，2025-01 ~ 2026-09，22 期）：期均 **+3.88%**、全市场等权基准 +2.27%、
+超额 **+1.94%/月**、胜率 64%、累计 +101.5%、最大回撤 -21.9%。
+
+**边界**：概念成分表是**当前快照**（无 PIT 历史）→ 回放有前视，属于上界；概念动量近 5 年失效
+（后半段 -1.51%/月），弱市里应停用或降权；未建模涨停买不进与冲击成本。
+
+#### 数据体检"未达标"的排查结论（2026-10-09）
+
+体检从 **未达标 5/11 → 0/11**，三项的根因**都不是"Tushare 没有数据"**：
+
+| 体检项 | 表面现象 | 真实根因 | 处理 |
+|---|---|---|---|
+| `adj_factor` | 目录不存在 | `[relay_data].adjustment_factors_enabled = false` —— **开关从来没开**；relay 的 `adj_factor` 实测可用（`000001.SZ` 2026-10-08 = 142.0699） | 打开开关 + 新增 `scripts/sync_cn_adj_factor.py`（按日全市场 1~2 个请求/日 + 逐股历史小预算），已进每日自动化 |
+| `intraday_5min` | "落后 11 只" | 判据用**全市场 as_of** 去卡每只票；这 11 只是停牌/退市（日线与分时都停在同一旧日期） | 判据改为按**个股自己的最后一根日线**比对，停牌票豁免；真实落后 0 只 |
+| `financials` | 待补 1 只 | 待补的是 **\*ST萃华(002731.SZ，日线止于 2026-08-31)**，Tushare 上游最新报告期也只到 2025-09-30 —— 公司不再披露 | 判据加"已停止交易则豁免"，仍保留"正常交易的票一只不能漏" |
+
+（"未达标"是**数据体检**的结论，不是 pytest：相关回归 **50 passed**。）
+
+#### 板块/龙虎榜/申万行业数据面（2026-10-09 补齐，已进每日自动化）
+
+```bash
+uv run python scripts/sync_cn_boards.py                 # 新浪 行业49/概念175/地域31 板块行情+全量成分；同花顺 90 行业汇总+375 概念名单（实测 79s）
+uv run python scripts/sync_cn_lhb.py --days 15          # 龙虎榜明细+机构买卖（按交易日增量，实测 8.6s）
+uv run python scripts/sync_cn_sw2021_industry.py        # 申万2021一级行业成分（乐咕限流，每次最多补 8 个，分日补齐）
+```
+
+| 产物 | 说明 |
+|---|---|
+| `assets/data/meta/cn_board_membership.parquet` | 板块成分长表（255 板块 / 19,174 行 / 5,943 只票）——**概念板块研究从此可用** |
+| `assets/data/derived/cn_board_daily/taxonomy=*/board_daily.parquet` | 板块日行情（涨跌幅/成交额/净流入/家数/领涨股），按日追加去重 |
+| `assets/data/derived/cn_lhb/lhb_daily.parquet` | 龙虎榜长表（含机构买卖、净额占比），只收"已完成交易日" |
+| `assets/data/meta/cn_sw2021_industry.parquet` | 申万 2021 一级行业成分（19/31，限流渐进补齐） |
+
+源选型（实测）：东财板块接口走 `push2/api/qt/clist` **本机代理稳定 403**；同花顺成分页 Nginx 403
+（hexin-v 反爬）；**新浪可用且最快**（成分 255 个板块 79s），行业资金流口径另取同花顺 `stock_board_industry_summary_ths`。
+
+每日自动化接线（`scripts/run_daily_production.sh`，主阶段之后、非阻塞）：
+
+```
+DAILY_BOARDS=1  → run_data_step boards  uv run python scripts/sync_cn_boards.py --session-seconds 900
+DAILY_LHB=1     → run_data_step lhb     uv run python scripts/sync_cn_lhb.py --days 15
+DAILY_SW2021=1  → run_data_step sw2021  uv run python scripts/sync_cn_sw2021_industry.py --max-per-run 8
+```
+
+三个新数据面已进 `scripts/data_completeness_report.py` 的每日体检（板块/龙虎榜 ✅，申万按事件类）。
+回归测试 `test/test_board_sync.py` 已加进 `DAILY_PREFLIGHT_CMD`（接线断了会直接卡在预检）。
+
+#### 板块轮动经典文献的复现（J×K 行业动量 / 短期反转）
+
+```bash
+uv run python scripts/reproduce_industry_rotation_papers.py --start 2016-01-01 --end 2026-10-08
+# → output/research/industry_rotation/reproduce_papers.{md,json}
+```
+
+对标文献元数据经 Crossref 核对（MG1999 doi:10.1111/0022-1082.00146；Gong2016 doi:10.2139/ssrn.2724618；
+Wu2010 doi:10.1007/s11156-010-0206-z；Li&Yang2018 doi:10.2139/ssrn.3141660；Ackert&Huang2015 doi:10.1016/j.jbef.2015.01.001）。
+`--taxonomy` 可选 `tushare_industry` / `sina_concept` / `sina_industry` / `sina_area`。
+
+结论（**概念成分表补齐后已更新**）：
+* **行业口径**：动量不复现（全样本最强 t=1.14；2021 年后连方向都翻转），短期反转仅近 5 年显著（t=-2.04，
+  且只体现在多空价差上，多头端在等权口径下是亏的）；
+* **概念口径（新浪 175 概念，本轮新补的数据）**：**动量可复现** —— 全样本最强 J=1/K=12 = **+2.65%/月
+  （NW t=+2.18）**、J=6/K=6 = +2.14%（t=1.52）、J=12/K=6 = +2.32%（t=1.74）；但**动量集中在前半段**
+  （前半段 J=1/K=6 +2.50%，t=3.52；后半段 -1.51%，t=-1.45），2021 年后失效。这与 Li & Yang (2018)
+  "概念板块动量"以及 A 股题材炒作 2021 后被压制的经验一致。
+* **席位/操纵型行业动量（He&Su 2009）**：龙虎榜+机构席位数据已入库，复现设计留待下一步。
+复现脚本的"持有期起点"曾有一处 off-by-one（写成 `index+1` 等于凭空跳一个月，会把反转算成动量），
+`test/test_reproduce_papers.py` 用合成正/负自相关面板把这个坑钉死了。
+
+### 行业热度选股研究：LLM 行业因子挖掘 + 行业轮动回测
+
+结论详见 `output/research/industry_rotation/REPORT.md`（2024-01~2026-10，110 个行业）：
+
+```bash
+uv run python scripts/build_industry_panel.py --start 2024-01-01          # 行业×交易日面板 + 前瞻标签
+uv run python scripts/llm_factor_mining.py --panel output/research/industry_rotation/industry_panel.parquet \
+    --label ind_fwd20 --start 2024-01-01 --rounds 2 --proposals 8 \
+    --direction "A股行业轮动选行业" --rounds-out output/research/industry_rotation/mining_fwd20
+uv run python scripts/industry_rotation_backtest.py --hold 20 --top-k 5 --signal "rank(flow_5d) * (1 - rank(zt_20d))"
+```
+
+要点：**热度本身不是可交易的信号**（中位数口径 IC -0.05~-0.13 是反转；等权口径 IC≈0，追热度周频年化 -2.1%、
+跑输随机 5 行业的 +4.7%）；LLM 挖出的强因子是"**资金持续流入 + 低换手 + 避开涨停潮**"（IC +0.14，t=7.3），
+叠加"行业内买滞涨票"后月度年化 +40.4% vs 全市场等权 +26.6% —— 但 25/133 期的配对检验 t=1.06~1.53，
+**不显著**，只能当方向性证据。
+
+### 打板（涨停接力）研究：LLM 因子挖掘 + 打板口径回测
+
+默认的 LLM 因子挖掘跑的是**月频选股**（标签 20 日前向收益、每 20 个交易日一个决策日）。
+打板是隔夜博弈，两者标签/频率都不同，所以另开了一条打板口径（见 `output/research/zt_board/REPORT.md`）：
+
+```bash
+# 1) 打板特征面板：连板结构 + 封板形态 + 量能 + 市场情绪温度 + 次日标签
+uv run python scripts/build_zt_board_features.py --start 2016-01-01
+# 2) 打板口径挖掘：候选池=当日涨停、标签=次日续板/次日收益、日频 IC
+uv run python scripts/llm_factor_mining.py --panel output/research/zt_board/zt_board_panel.parquet \
+    --label next_zt --universe zt --freq day --start 2024-01-01 --rounds 2 --proposals 8 \
+    --direction "A股打板/接力：在当日涨停股里预判次日能否继续涨停" \
+    --rounds-out output/research/zt_board/mining_next_zt
+# 3) top-k 打板回测（含成本、含/不含一字板两版）
+uv run python scripts/zt_strategy_backtest.py --expr "rank(boards) + rank(max_boards_20d) - rank(turnover)" --top-k 5
+```
+
+结论（2024-01~2026-09，666 个交易日 / 42,940 个涨停股票日）：打板次日溢价真实存在
+（今收→明收 +2.02% vs 全市场 +0.07%），但**只在当天买**（次日开盘再买 -0.37%）；
+LLM 挖出的有效因子全部落在"高位板 + 封板结实 + 缩量"这一个家族，没有比
+`rank(boards) - rank(turnover)` 这条启发式更强的新维度；情绪择时（晋级率/涨停家数）无证据；
+最大的未量化项是**封板买不进**（因子 top-5 含一字板版日均 +4.91%，但 87% 的选票是一字板）。
+
+## 策略池与工作台（2026-10-10 新增）
+
+四件事一起做：**策略进池**、**自选股穿透**、**热力图**、**因子池闸门**。
+
+### 1. 策略池 `/strategies` —— 策略的唯一登记处
+
+三层结构（声明与运行时分开放，避免"改一行配置就把运行状态抹掉"）：
+
+| 层 | 位置 | 谁写 | 内容 |
+|---|---|---|---|
+| 声明层 | `config/strategies.json` | 人 | id / 名称 / 分组 / 阶段 / 入口命令 / 产物路径 |
+| 运行时层 | `output/strategy_pool/strategy_pool.json` | `scripts/sync_strategy_pool.py` | 最新交易日 / 名单条数 / 历史快照数 / 是否落后 |
+| 候选层 | `output/strategy_pool/candidates/*.json` | agent / LLM 挖掘 / 人工 | 还没进生产的策略（`stage=candidate`） |
+
+```bash
+uv run python scripts/sync_strategy_pool.py --print    # 快照 + 打印表格
+uv run python scripts/sync_strategy_pool.py --strict   # 生产策略落后 → 退出码 1（每日流程用）
+uv run python scripts/sync_strategy_pool.py --register cand.json
+uv run python scripts/sync_strategy_pool.py --set-stage <id> research|production
+```
+
+* 当前池里 **3 个生产策略**：`cn_ensemble`（模型策略）/ `arm_select`（小市值手臂）/ `arm_concept`（行业轮动）。
+* **agent / LLM 挖出来的新策略从这里入池**：「因子挖掘」页跑完点「入池」→ 登记成候选；
+  「因子 IC」页把分级挑中的因子批量入池 → 也是候选。升到 `research` 可在页面上一键完成；
+  升到 **`production` 必须人工补 `config/strategies.json` 并加进每日自动化**（脚本只提醒，不自动改配置）。
+* 研究证据区列出 `output/research/*/REPORT.md`（21 份）—— 策略的**来源出处**，不是策略本身。
+* 判定口径：`最新交易日` 取自**产物里的日期列 / 历史快照文件名**，不看文件 mtime
+  （否则重跑一次旧产物就会显示成今天）。
+* 接线：`/api/strategies`（`backend/api/strategies.py`）+ 每日流程收尾 `--strict` + 新鲜度体检
+  新增「策略池」一行（取生产策略最新交易日的 **min**，有一个落后就算不达标）。
+* 守门测试 `test/test_strategy_pool.py`（登记可用性 / 幂等 / 阶段切换 / 三处接线）。
+
+### 2. 自选股穿透：一份状态，四个页面
+
+`frontend/src/composables/useWatchlist.ts` 是唯一状态源（沿用旧 key `kline.watchlist.v1`，
+升级不丢自选；模块级 ref 单例 + 同 tab 广播 + 跨 tab storage 事件）：
+
+| 页面 | 用法 |
+|---|---|
+| K 线图表 | 左侧自选股面板（★ / 快速分组 / 搜索） |
+| 选股日历 | 每行 ★ + 顶部 **「★ 只看自选」** + 「本日全部加入自选」 |
+| 行业热度 | 成分股列表每行 ★（选中行业即列出） |
+| 选股结果 | 名单 ★ 列 + **「★ 只看自选」** + 关键字搜索 |
+
+### 3. 股票热力图（a-share-heatmap 风格）
+
+* 后端 `GET /api/industry/heatmap?period=&market=`：**面积 = 流通市值**（Tushare daily_basic 月频快照，
+  回传 `mktcap_date`）、**颜色 = 区间涨跌幅**（红涨绿跌）、两级结构（行业 → 成分股，可下钻）。
+* 前端 `IndustryHeatmap.vue` + `lib/treemap.ts`：自己实现的 **squarified treemap**（仓库无 d3），
+  Canvas 绘制、DPR 缩放、悬停 tooltip、点行业下钻、点个股进 K 线。
+* 行业热度页把「热度网格 / 股票热力图」做成视图切换，右侧固定一列**选中行业的成分股**
+  （进页面默认选热度第 1 名，**自动列出**，不需要再点开）。
+* 实测：111 个行业 / 5,209 只个股 / 合计流通市值 **95.97 万亿**，市值快照 2026-09-30。
+* 踩坑记录：`cells` 这个 computed 被 `watch(cells, …)` 引用，而 `watch` 为了拿 oldValue 会
+  **在 setup 阶段同步跑一次 getter** —— 助手函数若写成文件末尾的 `const`，就会撞 TDZ 让整个
+  组件渲染不出来（实测 `Cannot access 'E' before initialization`）。所以格式化助手必须是
+  函数声明并放在 computeds **之前**。
+
+### 4. 因子 IC = 因子池闸门（不再是"两张曲线"）
+
+* 用**仓库自己的审计口径**分级（阈值抄自 `scripts/ic_rubric_audit.py`，
+  出处 `output/research/ic_rubric_audit/REPORT.md`）：
+  |IC| < 0.02 无效 / 0.02~0.04 合格(入池) / 0.04~0.07 优质 / ≥0.07 很强(查过拟合)；
+  ICIR 分档 0.3 / 0.5 / 0.8。
+* 概览 tiles（有效 / 合格+ / 优质+ / 中位 |IC| / 中位 |ICIR| / **缓存区间**）+ 全文检索 + 等级筛选 + 排序。
+* 每行「入池」、以及「把当前筛选的 N 个因子批量入池」→ 写进策略池候选（`kind=factor_candidate`）。
+* **口径诚实说明**：`ic_rubric_audit` 的阈值是为**月频秩 IC** 定的，本页缓存是**日频** IC
+  （实测 2026-04-23 止 345 期），噪声更大 —— 页面明确写"只能当粗筛，入池后要由
+  `llm_factor_mining.py` 的月频秩 IC / Newey-West t / BH-FDR 复核"，两套口径不共享缓存。
+
+### 5. 排布优化
+
+* **选股结果**：来源+出处合并成第一屏信息条 → 名单（搜索 / ★ / 只看自选）→ 评分榜侧栏 →
+  同花顺导出**折叠**（它是"看完名单之后的动作"）→ 归因。
+* **选股日历**：月历 → 当日明细 → 底部三张分析表收成一组 tab（阶段表现 / 来源覆盖 / 业绩回顾），
+  从"竖着铺三屏"变成一次只看一个。
+* **颜色口径修正**：选股日历此前用**绿色表示正收益**（西方口径），与榜单/行业热度/连板页相反；
+  现已统一为 **红涨绿跌**。状态色（新鲜/达标）单独用 `--state-ok/--state-bad`，不再与涨跌色混用。
+
+**实测验收**（Playwright + `chrome-mac-arm64`，8 个页面逐个加载并截图，产物在
+`output/verification/p1_47_web_layout_20261010/`）：
+
+| 页面 | 关键断言 | 结果 |
+|---|---|---|
+| `/strategies` | 3 张策略卡 + 新鲜度「全部达标」+ 21 份研究证据 | ✅ |
+| `/industry`（网格） | 110 个热度格子 + 右侧**自动列出** 24 只成分股 + ★ | ✅ |
+| `/industry`（热力图） | canvas 1002×620、48 种颜色（面积/颜色都画上了） | ✅ |
+| `/calendar` | 28 个 ★ + 「只看自选」+ 5 个 tab | ✅ |
+| `/` | 8 行名单 + ★ 列 + 搜索 + 折叠导出 | ✅ |
+| `/factor-mining` | 三栏工作台（会话 / 任务+轨迹 / 产物）+ 入池入口 | ✅ |
+| `/factor-ic` | 158 行分级表 + 7 个概览 tile + 2 张曲线 | ✅ |
+| `/kline` | 自选侧栏 + 资料面板 + 7 个 canvas | ✅ |
+| **全部** | **console errors = 0** | ✅ |
+
+## 行情页面（2026-10-09 新增）
 
 后端 `backend/api/{rankings,limitup,intraday}.py`，数据层 `backend/services/{market_board_service,live_quotes}.py`，
 测试 `test/test_market_board_views.py`。**本地优先、网络仅增强**：断网时三个页面仍能出数（用本地 parquet），
@@ -952,6 +1242,9 @@ bun run dev
 | `GET /api/limitup/live` | 盘中实时涨停池梯队 |
 | `GET /api/intraday/{code}?period=1\|5&mode=auto\|live\|store&date=` | 分时序列 + 均价线 + 前收（K 线页点日期走这里） |
 | `GET /api/intraday/coverage/{code}` | 该票分时可用的日期（本地归档区间 / 实时源覆盖的几天） |
+| `GET /api/industry/overview` | 行业清单、周期、热度权重、口径说明 |
+| `GET /api/industry/heat?period=daily\|weekly\|monthly&min_n=` | 分行业热度排名（热度 0~100 + 各分项 + Δ热度） |
+| `GET /api/industry/{name}/stocks?period=&direction=up\|down` | 行业内个股涨跌排名 |
 | `GET /api/intraday/quotes?codes=a,b,c` | 批量最新快照（分时页顶部快捷条） |
 
 口径与已知边界（都实测过，详见各模块 docstring）：
@@ -967,7 +1260,14 @@ bun run dev
    分时页 `mode=auto` 依次降级 → 本地 5 分钟归档，返回体里的 `source`/`source_label` 会写明这次到底用了哪条。
 6. 本地 5 分钟分时由 `scripts/sync_cn_intraday_full.py --refresh` 收盘后增量补齐（实测覆盖约一年：
    2025-10-09 ~ 2026-09-30），只取文件里最后一天（不截断会把一整年的 5 分钟线当"当日分时"）。
-7. **本地归档必须按日对齐到日线刻度**（K 线页点日期看分时就是这条路径）：两边的前复权基准不同，
+7. **行业热度指数**（`/industry`）＝ 5 个分项在**行业之间**的横截面 z 加权后取分位（0~100）：
+   区间涨跌幅 0.30 · 上涨家数占比 0.15 · 净流入÷成交额 0.25 · 涨停密度 0.20 · 放量程度 0.10；
+   权重写死在 `industry_heat_service.HEAT_WEIGHTS`，并由 `test/test_industry_heat.py`
+   断言"回算的加权 z 必须等于返回的 heat_z"，防止改权重时文档/实现漂移。
+   两个单位坑：净流入面板是**万元**、成交额是**元**（不换算会被四舍五入成 0.000，整条分项静默失效）；
+   行业归属用 `cn_stock_basic.industry`（110 个行业，无行业的票归"未分类"且不参与排名）。
+   热度只描述"最近在不在风口上"，**不是收益预测**（尚未做行业层面的前瞻检验）。
+8. **本地归档必须按日对齐到日线刻度**（K 线页点日期看分时就是这条路径）：两边的前复权基准不同，
    同一交易日整段差一个常数因子（实测 2025-10-27 差 2.18%）。对齐后分时的
    开/高/低/收 与当天那根 K 线逐项对上（11.17/11.24/11.07/11.15 vs 11.17/11.24/11.08/11.15）。
    均价还要再折一次：baostock 的 `amount`/`volume` 是**不复权**金额与股数，直接用会画出一条

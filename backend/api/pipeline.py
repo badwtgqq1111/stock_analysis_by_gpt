@@ -40,7 +40,7 @@ STAGE_CHOICES = [
     "sleeve_diagnostics", "sleeve_train", "sleeve_combine", "sleeve_budgets", "sleeve_targets",
     "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "selection",
     "pk", "paper_outcomes", "paper_account", "exits", "graph_temporal", "oos_predictions",
-    "model_comparison", "arm_selection",
+    "model_comparison", "arm_selection", "arm_concept",
 ]
 # 会写 output/results_cn/* 的阶段 → 必须确认后才可以跑
 OVERWRITE_STAGES = {"preselection", "pk", "selection", "sleeve_targets", "paper_account",
@@ -60,6 +60,8 @@ STAGE_ARTIFACTS: dict[str, list[str]] = {
     "exits": ["output/results_cn/cn_exit_plan.csv"],
     "arm_selection": ["output/results_cn/arm_latest_selection.csv",
                       "output/results_cn/arm_latest_selection.json"],
+    "arm_concept": ["output/results_cn/arm_concept_selection.csv",
+                    "output/results_cn/arm_concept_selection.json"],
 }
 SELECTION_CANDIDATES = [
     RESULTS_DIR,
@@ -320,10 +322,32 @@ def selection() -> dict:
                 "tradable", "limit_up", "lots_at_capital", "planned_amount", "in_portfolio",
                 "target_weight", "pit_name"]
 
+    # 概念/板块手臂（arm_concept 阶段）：与 base_v1 手臂**并列**返回，前端各占一个 tab
+    concept_path = RESULTS_DIR / "arm_concept_selection.csv"
+    concept_cfg = RESULTS_DIR / "arm_concept_selection.json"
+    concept_meta = {}
+    if concept_cfg.exists():
+        try:
+            concept_meta = json.loads(concept_cfg.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            concept_meta = {}
+    concept_backtest = {}
+    concept_bt_path = RESULTS_DIR / "arm_concept_backtest.json"
+    if concept_bt_path.exists():
+        try:
+            concept_backtest = json.loads(concept_bt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            concept_backtest = {}
+    concept_cols = ["rank", "stock_code", "name", "board", "industry", "score", "concept_score",
+                    "rev_5d", "last_close", "tradable", "limit_up", "lots_at_capital",
+                    "planned_amount", "in_portfolio", "target_weight", "pit_name"]
+
     return {
         "source_dir": str(base.relative_to(ROOT)),
         "candidate_dirs": dirs,
         "arm": {"payload": _frame_payload(arm_path, arm_cols), "meta": arm_meta},
+        "arm_concept": {"payload": _frame_payload(concept_path, concept_cols),
+                        "meta": concept_meta, "backtest": concept_backtest},
         "stats": stats,
         "preselected": _frame_payload(pre_path, PRE_COLS, frame=pre),
         "selected": _frame_payload(sel_path, SEL_COLS, frame=sel),

@@ -22,9 +22,10 @@ SOURCE_LABELS = {
     "holdings": "生产名单（实际买入）",
     "preselected": "候选池（PK 输入）",
     "arm": "研究手臂",
+    "arm_concept": "概念/板块手臂",
     "all": "全部合并（一键导入）",
 }
-SOURCE_ORDER = ["all", "holdings", "preselected", "arm"]
+SOURCE_ORDER = ["all", "holdings", "preselected", "arm", "arm_concept"]
 
 
 def _safe(name: str) -> Path:

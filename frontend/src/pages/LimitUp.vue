@@ -46,7 +46,10 @@
               <span class="tag gold">{{ cn(r.boards) }}板</span>
               <span class="lc-name">{{ r.name }}</span>
             </div>
-            <div class="lc-code mono tiny dim">{{ r.stock_code }} · {{ r.industry || '—' }}</div>
+            <div class="lc-code mono tiny dim">
+              <span class="link" @click="gotoKline(r.stock_code)">{{ r.stock_code }}</span>
+              · {{ r.industry || '—' }}
+            </div>
             <div class="lc-meta tiny">
               <span :class="tone(r.pct_chg)">{{ pct(r.pct_chg) }}</span>
               <span class="dim">封 {{ money(r.seal_amount) }}</span>

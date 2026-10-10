@@ -681,3 +681,209 @@ export interface IntradayQuote {
   time?: string
   reason?: string | null
 }
+
+// ─── 行业热度（分行业排名 + 行业内涨跌排名）───
+export interface IndustryHeatWeight { key: string; weight: number; label: string }
+
+export interface IndustryOverview {
+  latest_trade_date: string | null
+  trade_dates: string[]
+  periods: { key: string; label: string; span: number }[]
+  weights: IndustryHeatWeight[]
+  n_industries: number
+  industries: { industry: string; n: number }[]
+  session: SessionPhase
+  notes: string[]
+}
+
+export interface IndustryHeatRow {
+  rank: number
+  industry: string
+  heat: number
+  heat_z: number
+  heat_prev: number | null
+  heat_delta: number | null
+  ret: number
+  ret_mean: number
+  up_ratio: number
+  n: number
+  net_amount_wan: number
+  net_amount_yi: number | null
+  flow_intensity: number
+  zt_days: number
+  zt_density: number
+  boards_ge2: number
+  amount: number
+  volume_boost: number
+  leaders: string
+}
+
+export interface IndustryHeatResponse {
+  available: boolean
+  period: string
+  period_label: string
+  weights: IndustryHeatWeight[]
+  market: {
+    date: string; base_date: string; span: number; ret: number; up_ratio: number
+    n_stocks: number; n_industries: number; n_unclassified: number
+    net_amount_wan: number; zt_days: number; amount: number; source: string
+  }
+  rows: IndustryHeatRow[]
+  n_total: number
+  min_n?: number
+  notes: string[]
+  hint?: string
+}
+
+export interface IndustryStockRow {
+  rank: number
+  stock_code: string
+  name: string
+  market: string
+  period_ret: number
+  pct_chg: number | null
+  close: number | null
+  amount: number | null
+  net_amount_wan: number | null
+  net_amount_yi: number | null
+  boards: number
+  is_limit_up: boolean
+  is_st: boolean
+}
+
+export interface IndustryStocksResponse {
+  available: boolean
+  industry: string
+  period: string
+  period_label: string
+  stats: { n: number; ret: number; up_ratio: number; net_amount_yi: number | null }
+  market: IndustryHeatResponse['market']
+  rows: IndustryStockRow[]
+  n_total: number
+}
+
+// ─── 行业热力图（行业 → 成分股 两级；面积 = 流通市值，颜色 = 区间涨跌幅）─────────
+export interface IndustryHeatmapStock {
+  stock_code: string
+  name: string
+  ret: number | null
+  pct_chg: number | null
+  close: number | null
+  mktcap_yi: number | null
+  amount: number | null
+  boards: number
+  is_limit_up: boolean
+}
+
+export interface IndustryHeatmapIndustry {
+  industry: string
+  n: number
+  ret: number | null
+  mktcap_yi: number | null
+  amount: number | null
+  up_ratio: number | null
+  stocks: IndustryHeatmapStock[]
+}
+
+export interface IndustryHeatmapResponse {
+  available: boolean
+  period: string
+  period_label: string
+  date: string
+  base_date: string
+  span: number
+  market_filter: string
+  mktcap_date: string | null
+  mktcap_missing: number
+  industries: IndustryHeatmapIndustry[]
+  totals: {
+    n_stocks: number
+    n_industries: number
+    mktcap_yi: number | null
+    up: number
+    down: number
+    flat: number
+  }
+  notes: string[]
+  hint?: string
+}
+
+// ─── 策略池（config/strategies.json + output/strategy_pool/*）─────────────────
+export interface StrategyArtifact {
+  path: string
+  exists: boolean
+  rows: number | null
+  latest_date: string | null
+  mtime: string | null
+  bytes: number | null
+  detail: string
+}
+
+export interface StrategyPoolEntry {
+  id: string
+  name: string
+  group: string
+  kind: string
+  stage: string
+  stage_label: string
+  owner: string
+  tag_class: string
+  summary: string
+  entry: string
+  schedule: string
+  ledger_sources: string[]
+  latest_date: string | null
+  lag_days: number | null
+  fresh: boolean
+  n_picks: number | null
+  n_snapshots: number
+  history_dir: string
+  artifacts: StrategyArtifact[]
+  health: 'ok' | 'stale' | 'missing'
+}
+
+export interface StrategyCandidate {
+  id: string
+  name: string
+  kind: string
+  stage: string
+  stage_label: string
+  owner: string
+  origin: string
+  summary: string
+  entry: string
+  metrics: Record<string, unknown>
+  artifacts: string[]
+  evidence: string[]
+  created_at: string
+  updated_at: string
+  file: string
+}
+
+export interface StrategyEvidence {
+  key: string
+  title: string
+  path: string
+  mtime: string
+}
+
+export interface StrategyPoolResponse {
+  generated_at: string
+  reference_trade_date: string | null
+  config_path: string
+  config_updated_at: string
+  stages: { key: string; label: string }[]
+  strategies: StrategyPoolEntry[]
+  candidates: StrategyCandidate[]
+  evidence: StrategyEvidence[]
+  totals: {
+    n_strategies: number
+    n_production: number
+    n_candidates: number
+    n_evidence: number
+    stale_production: string[]
+    fresh: boolean
+  }
+  notes?: string[]
+  sync_error?: string
+}

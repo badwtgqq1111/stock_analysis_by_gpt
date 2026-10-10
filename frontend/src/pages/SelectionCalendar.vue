@@ -18,8 +18,14 @@
         <button class="btn-ghost" @click="shiftMonth(1)">下月 ▶</button>
         <select v-model="source" @change="onSourceChange">
           <option value="">全部来源</option>
-          <option v-for="s in summary.sources" :key="s" :value="s">{{ s }}</option>
+          <option v-for="s in summary.sources" :key="s" :value="s">{{ sourceLabel(s) }}</option>
         </select>
+        <!-- 自选联动：K 线页侧栏、行业热度页勾的 ★ 与这里共用同一份 localStorage -->
+        <button class="btn-ghost" :class="{ 'wl-on': onlyWatchlist }"
+                :title="'只显示在自选里的票（当前自选 ' + watchlist.size.value + ' 只）'"
+                @click="onlyWatchlist = !onlyWatchlist">
+          ★ 只看自选 <span class="dim">{{ onlyWatchlist ? '(' + watchHits + ')' : watchlist.size.value }}</span>
+        </button>
         <span class="meta">记录 {{ totalRecords }} 条 / {{ summary.dates.length }} 个决策日 ·
           {{ sourceCountsText }}</span>
       </div>
@@ -52,7 +58,7 @@
           <span><i class="sw gain"></i>超额 &gt; 0</span>
           <span><i class="sw loss"></i>超额 &lt; 0</span>
           <span><i class="sw none"></i>无收益数据（未来交易日不足）</span>
-          <span>来源标记：A=arm（研究手臂） N=notify（PK 后最终名单） P=preselected（归档候选池） R=survey_raw G=survey_gate</span>
+          <span>来源标记：A=arm（研究手臂 base_v1） C=arm_concept（概念/板块手臂） N=notify（PK 后最终名单） P=preselected（归档候选池） R=survey_raw G=survey_gate</span>
         </div>
       </div>
 
@@ -79,21 +85,71 @@
         <!-- 多策略对比：同一只票只占一行，每个策略一列。
              平铺列表里 preselected(候选池) 与 notify(PK 后最终名单) 往往是同一批票，
              看起来就是"重复"（实测 2026-10-08：8 只票 × 2 个源 = 16 行）。 -->
+        <div class="pill-row" v-if="(day.strategy_summary || []).length">
+          <span class="pill" v-for="s in day.strategy_summary" :key="s.key" :title="s.stocks.join(' ')">
+            <b class="gold">{{ s.group }}</b> {{ s.n }} 只
+            <span class="dim tiny">{{ s.label }}</span>
+          </span>
+        </div>
+        <div class="filter-bar">
+          <span class="tiny dim">
+            命中
+            <b>{{ dayView === 'compare' ? compareFiltered.length : detailFiltered.length }}</b>
+            / {{ dayView === 'compare' ? (day.compare || []).length : (day.rows || []).length }} 行
+            <template v-if="onlyWatchlist"> · 只看自选</template>
+          </span>
+          <span class="tiny dim">筛选说明：文本列填关键字（<code>!x</code> 排除）；数值列支持
+            <code>&gt;0</code>、<code>&lt;=2</code>、<code>1~3</code>；收益/权重按百分数填。</span>
+          <button class="btn-ghost btn-sm" @click="starDay">★ 本日全部加入自选</button>
+          <button class="btn-ghost btn-sm" v-if="filterActive" @click="clearFilters">清空筛选</button>
+        </div>
         <table class="data-table" v-if="dayView === 'compare'">
           <thead>
             <tr>
-              <th>代码</th><th>名称</th><th>行业</th>
-              <th v-for="st in day.strategies || []" :key="st" :title="st">{{ sourceShort(st) }}</th>
+              <th>★</th><th>代码</th><th>名称</th><th>行业</th>
+              <th>入选策略</th>
+              <th v-for="st in day.strategies || []" :key="st" :title="strategyLabel(st)">{{ sourceShort(st) }}</th>
               <th>阶段</th><th>T+1</th><th>T+5</th><th>T+20</th><th>超额T+5</th><th>入选原因</th>
+            </tr>
+            <!-- 按列筛选：文本框做包含匹配（`!x` 取反），数值列支持 `>0`、`<=2`、`1~3`、`=2.5`；
+                 收益类列按**百分数**填（如 `>5` 表示 +5% 以上）。 -->
+            <tr class="filter-row">
+              <th></th>
+              <th><input v-model="filters.code" placeholder="代码" /></th>
+              <th><input v-model="filters.name" placeholder="名称" /></th>
+              <th><input v-model="filters.industry" placeholder="行业" /></th>
+              <th>
+                <select v-model="filters.strategy">
+                  <option value="">全部</option>
+                  <option v-for="g in strategyGroups" :key="g" :value="g">{{ g }}</option>
+                </select>
+              </th>
+              <th v-for="st in day.strategies || []" :key="'f+' + st"></th>
+              <th><input v-model="filters.stage" placeholder="阶段" /></th>
+              <th><input v-model="filters.r1" placeholder=">5" /></th>
+              <th><input v-model="filters.r5" placeholder=">5" /></th>
+              <th><input v-model="filters.r20" placeholder=">10" /></th>
+              <th><input v-model="filters.excess_r5" placeholder=">0" /></th>
+              <th><input v-model="filters.reason" placeholder="含/!不含" /></th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="c in day.compare || []" :key="c.stock_code"
+            <tr v-for="c in compareFiltered" :key="c.stock_code"
                 :class="{ active: c.stock_code === selectedCode }"
                 @mouseenter="selectedCode = c.stock_code">
+              <td><button class="star" :class="{ on: watchlist.has(c.stock_code) }"
+                          :title="watchlist.has(c.stock_code) ? '从自选移除' : '加入自选'"
+                          @click.stop="watchlist.toggle(c.stock_code, c.name)">{{
+                  watchlist.has(c.stock_code) ? '★' : '☆' }}</button></td>
               <td class="mono link" @click="gotoStock(c.stock_code)">{{ c.stock_code }}</td>
               <td class="left link" @click="gotoStock(c.stock_code)">{{ c.name || '—' }}</td>
               <td class="left tiny">{{ shortIndustry(c.industry) }}</td>
+              <!-- 这只票是被哪种策略选出来的（模型策略 / 小市值手臂 / 行业轮动） -->
+              <td class="left">
+                <span v-for="g in c.strategy_groups || []" :key="g" class="tag"
+                      :class="strategyTagClass(g)" :title="(c.strategy_labels || []).join(' + ')">{{ g }}</span>
+                <span v-if="!(c.strategy_groups || []).length" class="dim">—</span>
+              </td>
               <td v-for="st in day.strategies || []" :key="st" :class="{ 'cell-in': c.cells[st] }">
                 <template v-if="c.cells[st]">
                   <span class="tag gold">#{{ c.cells[st].rank ?? '—' }}</span>
@@ -121,17 +177,56 @@
         <p v-if="relationNote" class="hint tiny relation-note">{{ relationNote }}</p>
 
         <table class="data-table">
-          <thead><tr><th>来源</th><th>代码</th><th>名称</th><th>阶段</th><th>入选原因</th><th>风险描述</th>
+          <thead><tr><th>★</th><th>来源</th><th>代码</th><th>名称</th><th>入选策略</th><th>阶段</th><th>入选原因</th>
+            <th>风险描述</th>
             <th>rank</th><th>权重</th><th>手数</th>
             <th>T+1</th><th>T+5</th><th>T+10</th><th>T+20</th><th>超额T+5</th></tr></thead>
+          <tr class="filter-row">
+            <th></th>
+            <th>
+              <select v-model="filters.source">
+                <option value="">全部来源</option>
+                <option v-for="s in (day.strategies || [])" :key="s" :value="s">{{ sourceShort(s) }}</option>
+              </select>
+            </th>
+            <th><input v-model="filters.code" placeholder="代码" /></th>
+            <th><input v-model="filters.name" placeholder="名称" /></th>
+            <th>
+              <select v-model="filters.strategy">
+                <option value="">全部</option>
+                <option v-for="g in strategyGroups" :key="g" :value="g">{{ g }}</option>
+              </select>
+            </th>
+            <th><input v-model="filters.stage" placeholder="阶段" /></th>
+            <th><input v-model="filters.reason" placeholder="含/!不含" /></th>
+            <th><input v-model="filters.risk" placeholder="含/!不含" /></th>
+            <th><input v-model="filters.rank" placeholder="<=3" /></th>
+            <th><input v-model="filters.weight" placeholder=">5" /></th>
+            <th><input v-model="filters.lots" placeholder=">0" /></th>
+            <th><input v-model="filters.r1" placeholder=">5" /></th>
+            <th><input v-model="filters.r5" placeholder=">5" /></th>
+            <th><input v-model="filters.r10" placeholder=">5" /></th>
+            <th><input v-model="filters.r20" placeholder=">10" /></th>
+            <th><input v-model="filters.excess_r5" placeholder=">0" /></th>
+          </tr>
           <tbody>
-            <tr v-for="(r, i) in day.rows" :key="i" :class="{ active: r.stock_code === selectedCode }"
+            <tr v-for="(r, i) in detailFiltered" :key="i" :class="{ active: r.stock_code === selectedCode }"
                 @mouseenter="selectedCode = r.stock_code">
+              <td><button class="star" :class="{ on: watchlist.has(r.stock_code) }"
+                          :title="watchlist.has(r.stock_code) ? '从自选移除' : '加入自选'"
+                          @click.stop="watchlist.toggle(r.stock_code, r.name)">{{
+                  watchlist.has(r.stock_code) ? '★' : '☆' }}</button></td>
               <td class="mono">{{ r.source }}
                 <span v-if="alsoIn(r)" class="tag dim" :title="'同一只票也出现在：' + alsoIn(r)">同 {{ alsoIn(r) }}</span>
               </td>
               <td class="mono link" @click="gotoStock(r.stock_code)">{{ r.stock_code }}</td>
               <td class="left link" @click="gotoStock(r.stock_code)">{{ r.name || '—' }}</td>
+              <td class="left">
+                <span v-for="(g, i) in r.strategy_groups || []" :key="g" class="tag"
+                      :class="strategyTagClass(g)" :title="(r.strategy_labels || []).join(' + ')">
+                  {{ g }}</span>
+                <span v-if="!(r.strategy_groups || []).length" class="dim">—</span>
+              </td>
               <td class="left"><span class="stage-chip" :class="'stage-' + r.stage"
                     :title="r.stage_evidence">{{ r.stage_label || '—' }}</span></td>
               <td class="left multiline" :title="r.reason">{{ r.reason || '—' }}</td>
@@ -153,7 +248,27 @@
         </template>
       </div>
 
+      <!-- 分析视图收成一组 tab（2026-10-10 排布优化）：月历 → 当日明细 → 分析。
+           原来三张表竖着铺，滚到"业绩回顾"要翻过两屏半，实际上一次只看其中一个。 -->
       <div class="panel">
+        <h6>
+          分析视图
+          <span class="tabs inline">
+            <button class="tab" :class="{ active: analysisView === 'stage' }" @click="analysisView = 'stage'">
+              阶段表现
+            </button>
+            <button class="tab" :class="{ active: analysisView === 'source' }" @click="analysisView = 'source'">
+              来源覆盖
+            </button>
+            <button class="tab" :class="{ active: analysisView === 'perf' }" @click="analysisView = 'perf'">
+              业绩回顾
+            </button>
+          </span>
+          <span class="dim tiny">三张表口径不同（阶段=状态描述，来源=不同覆盖窗口，业绩=按期复利），别混着横向比</span>
+        </h6>
+      </div>
+
+      <div class="panel" v-show="analysisView === 'stage'">
         <h6>阶段 → 后续表现（判断"这个阶段到底值不值得买"）</h6>
         <table class="data-table">
           <thead><tr><th>阶段</th><th>样本</th><th>T+5 均值</th><th>T+5 超额</th><th>T+5 胜率</th><th>T+20 均值</th></tr></thead>
@@ -174,7 +289,7 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" v-show="analysisView === 'source'">
         <h6>各来源覆盖与表现（口径不同，别混着看）</h6>
         <table class="data-table">
           <thead><tr><th>来源</th><th>记录</th><th>决策日</th><th>区间</th><th>可评估</th>
@@ -200,7 +315,7 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" v-show="analysisView === 'perf'">
         <h6>业绩回顾（{{ perf?.source === 'all' ? '全部来源' : perf?.source }}）：按决策日等权，
           期与期之间按顺序复利</h6>
         <div class="pill-row" v-if="perf?.overall">
@@ -251,9 +366,11 @@ import {
   type CalendarDayBrief, type CalendarDayDetail, type CalendarMonth, type CalendarPerformance,
   type CalendarSummary,
 } from '@/api/client'
+import { useWatchlist } from '@/composables/useWatchlist'
 
 const router = useRouter()
 const route = useRoute()
+const watchlist = useWatchlist()
 const STATE_KEY = 'selection_calendar_state_v1'
 const summary = ref<CalendarSummary | null>(null)
 const monthData = ref<CalendarMonth | null>(null)
@@ -262,6 +379,10 @@ const perf = ref<CalendarPerformance | null>(null)
 const month = ref('')
 const source = ref('')
 const dayView = ref<'compare' | 'list'>('compare')
+/** 只看自选（★）：与 K 线页侧栏 / 行业热度页共用一份 localStorage 自选 */
+const onlyWatchlist = ref(false)
+/** 底部三张分析表的切换（阶段表现 / 来源覆盖 / 业绩回顾），避免竖着铺三屏 */
+const analysisView = ref<'stage' | 'source' | 'perf'>('stage')
 const selectedDate = ref('')
 const selectedCode = ref('')
 const horizons = [1, 5, 10, 20]
@@ -320,7 +441,8 @@ function tone(v: number | null | undefined) {
 function color(v: number | null | undefined) {
   if (v == null || !Number.isFinite(Number(v))) return 'rgba(42,46,57,0.6)'
   const a = Math.min(0.85, Math.abs(Number(v)) * 12 + 0.12)
-  return Number(v) > 0 ? `rgba(0,212,170,${a})` : `rgba(239,71,111,${a})`
+  // 红涨绿跌（A 股口径）
+  return Number(v) > 0 ? `rgba(239,71,111,${a})` : `rgba(0,212,170,${a})`
 }
 function gotoStock(code: string) {
   if (code) router.push({ path: '/kline', query: { code } })
@@ -331,9 +453,130 @@ const STAGE_KEYS: Record<string, string> = {
 }
 function stageKey(label: string) { return STAGE_KEYS[label] || 'mid_trend' }
 /** 策略列的短标签：列窄，长名字会把表格挤爆 */
+// 来源的三种展示形态（下拉全文 / 短名 / 日历格子里的单字母）。
+// 新增来源（如 arm_concept 概念/板块手臂）必须**三张表都补**，否则下拉里是英文 key、
+// 格子里变成乱序字母 —— 用户就会觉得"日历和选股结果对不上"。
+const SOURCE_LABEL: Record<string, string> = {
+  notify: '最终名单（notify）', preselected: '候选池（preselected）',
+  arm: '研究手臂 base_v1（arm）', arm_concept: '概念/板块手臂（arm_concept）',
+  survey_raw: '调研回看(原)（survey_raw）', survey_gate: '调研回看(门禁)（survey_gate）',
+}
 const SOURCE_SHORT: Record<string, string> = {
   notify: '最终名单', preselected: '候选池', arm: '研究手臂',
-  survey_raw: '调研(原)', survey_gate: '调研(门禁)',
+  arm_concept: '概念手臂', survey_raw: '调研(原)', survey_gate: '调研(门禁)',
+}
+const SOURCE_LETTER: Record<string, string> = {
+  arm: 'A', arm_concept: 'C', notify: 'N', preselected: 'P', survey_raw: 'R', survey_gate: 'G',
+}
+// ── 按列筛选（2026-10-10 用户要求）────────────────────────────────────────────
+// 文本列：包含匹配，`!x` 表示排除；数值列：`>0` / `<=2` / `1~3` / `=2.5`，
+// 收益/权重类列按**百分数**填（页面上显示的也是百分数，所见即所填）。
+const filters = ref({
+  code: '', name: '', industry: '', strategy: '', source: '', stage: '',
+  reason: '', risk: '', rank: '', weight: '', lots: '',
+  r1: '', r5: '', r10: '', r20: '', excess_r5: '',
+})
+
+function matchText(value: unknown, expr: string): boolean {
+  const e = (expr || '').trim()
+  if (!e) return true
+  const text = String(value ?? '')
+  if (e.startsWith('!')) return !text.includes(e.slice(1))
+  return text.toLowerCase().includes(e.toLowerCase())
+}
+
+function matchNum(value: unknown, expr: string, scale = 1): boolean {
+  const e = (expr || '').trim()
+  if (!e) return true
+  const raw = Number(value)
+  if (value === null || value === undefined || Number.isNaN(raw)) return false
+  const v = raw * scale
+  const range = e.match(/^(-?\d+(?:\.\d+)?)\s*~\s*(-?\d+(?:\.\d+)?)$/)
+  if (range) return v >= Number(range[1]) && v <= Number(range[2])
+  const cmp = e.match(/^(>=|<=|>|<|=)\s*(-?\d+(?:\.\d+)?)$/)
+  if (cmp) {
+    const n = Number(cmp[2])
+    return cmp[1] === '>' ? v > n : cmp[1] === '<' ? v < n
+      : cmp[1] === '>=' ? v >= n : cmp[1] === '<=' ? v <= n : Math.abs(v - n) < 1e-9
+  }
+  const n = Number(e)
+  return Number.isNaN(n) ? true : Math.abs(v - n) < 1e-9
+}
+
+const strategyGroups = computed(() => {
+  const set = new Set<string>()
+  for (const row of [...(day.value?.compare || []), ...(day.value?.rows || [])]) {
+    for (const g of (row as any).strategy_groups || []) set.add(g)
+  }
+  return [...set].sort()
+})
+
+const compareFiltered = computed(() => (day.value?.compare || []).filter((c: any) =>
+  (!onlyWatchlist.value || watchlist.has(c.stock_code))
+  && matchText(c.stock_code, filters.value.code) && matchText(c.name, filters.value.name)
+  && matchText(c.industry, filters.value.industry)
+  && (!filters.value.strategy || (c.strategy_groups || []).includes(filters.value.strategy))
+  && (!filters.value.stage || String(c.stage_label || '').includes(filters.value.stage))
+  && matchText(c.reason, filters.value.reason)
+  && matchNum(c.r1, filters.value.r1, 100) && matchNum(c.r5, filters.value.r5, 100)
+  && matchNum(c.r20, filters.value.r20, 100)
+  && matchNum(c.excess_r5, filters.value.excess_r5, 100)))
+
+const detailFiltered = computed(() => (day.value?.rows || []).filter((r: any) =>
+  (!onlyWatchlist.value || watchlist.has(r.stock_code))
+  && matchText(r.stock_code, filters.value.code) && matchText(r.name, filters.value.name)
+  && matchText(r.industry, filters.value.industry)
+  && (!filters.value.source || r.source === filters.value.source)
+  && (!filters.value.strategy || (r.strategy_groups || []).includes(filters.value.strategy))
+  && matchText(r.stage_label, filters.value.stage)
+  && matchText(r.reason, filters.value.reason) && matchText(r.risk, filters.value.risk)
+  && matchNum(r.rank, filters.value.rank) && matchNum(r.weight, filters.value.weight, 100)
+  && matchNum(r.lots, filters.value.lots)
+  && matchNum(r.r1, filters.value.r1, 100) && matchNum(r.r5, filters.value.r5, 100)
+  && matchNum(r.r10, filters.value.r10, 100) && matchNum(r.r20, filters.value.r20, 100)
+  && matchNum(r.excess_r5, filters.value.excess_r5, 100)))
+
+const filterActive = computed(() => Object.values(filters.value).some((v) => String(v).trim() !== ''))
+function clearFilters() {
+  filters.value = { code: '', name: '', industry: '', strategy: '', source: '', stage: '',
+                    reason: '', risk: '', rank: '', weight: '', lots: '',
+                    r1: '', r5: '', r10: '', r20: '', excess_r5: '' }
+  onlyWatchlist.value = false
+}
+
+/** 当前选股日里命中自选的只数（按钮上的提示数字） */
+const watchHits = computed(() => {
+  const seen = new Set<string>()
+  for (const row of [...(day.value?.compare || []), ...(day.value?.rows || [])] as any[]) {
+    if (watchlist.has(row.stock_code)) seen.add(row.stock_code)
+  }
+  return seen.size
+})
+
+/** 把当天名单整体加入自选（一次性把"日历上看到的票"变成 K 线页的自选列表） */
+function starDay() {
+  const rows = (day.value?.compare || []) as any[]
+  if (!rows.length) return
+  for (const row of rows) watchlist.add(row.stock_code, row.name)
+}
+
+function sourceLabel(src: string) { return SOURCE_LABEL[src] || src }
+
+/** 台账 source → 策略全称（后端 `strategy_meta` 也带一份，这里兜底免得老缓存缺字段）。 */
+const STRATEGY_LABEL: Record<string, string> = {
+  notify: '模型策略（PK 后最终名单）', preselected: '模型策略（候选池）',
+  arm: '小市值/研究手臂（arm_select）', arm_concept: '行业轮动（概念/板块手臂）',
+  survey_raw: '调研回看（原）', survey_gate: '调研回看（门禁）',
+}
+function strategyLabel(src: string) {
+  return (day.value?.strategy_meta?.[src]?.label) || STRATEGY_LABEL[src] || src
+}
+/** 三种策略用不同颜色标签，避免"一眼看不出是谁选的" */
+function strategyTagClass(group: string) {
+  if (group === '模型策略') return 'gold'
+  if (group === '小市值手臂') return 'info'
+  if (group === '行业轮动') return 'ok'
+  return 'dim'
 }
 function sourceShort(src: string) { return SOURCE_SHORT[src] || src }
 /** 行业名很长（"C29橡胶和塑料制品业"），只取前 6 字，完整值放 title */
@@ -386,10 +629,6 @@ function alsoIn(row: { stock_code: string; source: string }) {
 }
 
 /** 来源 → 单字母：小写 'a' 会和 'A' 混淆，arm 统一用 A */
-const SOURCE_LETTER: Record<string, string> = {
-  arm: 'A', notify: 'N', preselected: 'P', survey_raw: 'R', survey_gate: 'G',
-}
-
 function sourceDots(per: Record<string, number> | undefined) {
   if (!per) return ''
   return Object.entries(per).map(([k, v]) => `${SOURCE_LETTER[k] || k[0]}${v}`).join(' ')
@@ -502,13 +741,16 @@ onMounted(async () => {
 .bar { height: 4px; border-radius: 2px; margin: 4px 0; }
 .cell-mid { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); }
 .src { font-family: ui-monospace, Menlo, monospace; }
-.ok { color: var(--accent-down); }
-.bad { color: var(--accent-up); }
+/* A 股口径：红涨绿跌（与全局设计令牌一致）。
+   2026-10-10 修正：本页原先正收益用绿色（西方口径），和榜单页/行业热度页/连板页正好相反，
+   同一套系统里两种颜色语义会直接看错方向。 */
+.ok { color: var(--accent-up); }
+.bad { color: var(--accent-down); }
 .muted { color: var(--text-muted); }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; color: var(--text-muted); }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
-.sw.gain { background: rgba(0,212,170,0.7); }
-.sw.loss { background: rgba(239,71,111,0.7); }
+.sw.gain { background: rgba(239,71,111,0.7); }
+.sw.loss { background: rgba(0,212,170,0.7); }
 .sw.none { background: rgba(42,46,57,0.8); }
 .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .pill { font-size: 11px; color: var(--text-muted); background: var(--bg-card);
@@ -528,6 +770,12 @@ onMounted(async () => {
 .subtle { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
 .link { color: var(--accent-gold); cursor: pointer; }
 .link:hover { text-decoration: underline; }
+/* 自选 ★：与 K 线页侧栏 / 行业热度页同一份状态（composables/useWatchlist.ts） */
+.star { background: none; border: none; cursor: pointer; font-size: 13px; line-height: 1;
+  color: var(--text-dim); padding: 0 2px; }
+.star.on, .star:hover { color: var(--accent-gold); }
+.btn-ghost.wl-on { color: var(--accent-gold); border-color: var(--accent-gold);
+  background: rgba(255, 209, 102, 0.08); }
 .stage-chip { padding: 1px 8px; border-radius: 9px; border: 1px solid var(--border-color);
   font-size: 11px; white-space: nowrap; }
 .stage-uptrend { color: var(--accent-up); border-color: var(--accent-up); }

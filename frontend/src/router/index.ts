@@ -8,6 +8,8 @@ const routes = [
   // 与「回测绩效」口径冲突 → 从导航下线，老书签重定向过去，避免继续误导。
   { path: '/portfolio', redirect: '/performance' },
   { path: '/factor-mining', name: 'factor-mining', component: () => import('@/pages/FactorMining.vue') },
+  // 策略池（2026-10-10）：模型选股 / arm_select / 行业轮动 的登记处，也是新策略的入口
+  { path: '/strategies', name: 'strategies', component: () => import('@/pages/StrategyPool.vue') },
   { path: '/pipeline', name: 'pipeline', component: () => import('@/pages/Pipeline.vue') },
   { path: '/calendar', name: 'calendar', component: () => import('@/pages/SelectionCalendar.vue') },
   { path: '/automation', name: 'automation', component: () => import('@/pages/Automation.vue') },
@@ -18,6 +20,7 @@ const routes = [
   { path: '/rankings', name: 'rankings', component: () => import('@/pages/Rankings.vue') },
   { path: '/limitup', name: 'limitup', component: () => import('@/pages/LimitUp.vue') },
   { path: '/intraday', name: 'intraday', component: () => import('@/pages/Intraday.vue') },
+  { path: '/industry', name: 'industry', component: () => import('@/pages/IndustryHeat.vue') },
 ]
 
 export default createRouter({

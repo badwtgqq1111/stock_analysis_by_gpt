@@ -144,10 +144,12 @@ def load_daily(days: int = 90) -> pd.DataFrame:
     """
     def build():
         import pyarrow.dataset as ds
-        dates = trade_dates()
+        # 要多少天就取多少天：trade_dates() 默认只返回最近 400 个交易日，
+        # 直接 dates[-700] 会 IndexError（实测：概念手臂做 24 个月回放时炸在这里）。
+        dates = trade_dates(max(int(days) + 5, 400))
         if not dates:
             return pd.DataFrame()
-        cutoff = dates[-int(days)]
+        cutoff = dates[max(-int(days), -len(dates))]
         years = sorted({cutoff.year, dates[-1].year})
         dataset, files = _daily_dataset(years)
         if dataset is None:

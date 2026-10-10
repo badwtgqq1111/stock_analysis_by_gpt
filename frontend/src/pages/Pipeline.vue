@@ -141,6 +141,48 @@
         </div>
       </div>
 
+      <div v-else-if="tab === 'arm_concept'">
+        <div class="pill-row">
+          <span class="pill warn-pill">概念/板块手臂 · 不替代 preselect/pk 生产名单</span>
+          <span class="pill" v-if="selection?.arm_concept?.meta?.snapshot_date">
+            快照日 {{ selection.arm_concept.meta.snapshot_date }}</span>
+          <span class="pill" v-if="selection?.arm_concept?.meta?.arm">
+            手臂 {{ selection.arm_concept.meta.arm }}</span>
+          <span class="pill" v-if="selection?.arm_concept?.meta?.candidates">
+            候选 {{ selection.arm_concept.meta.candidates }} / 持仓 {{ selection.arm_concept.meta.holdings }}</span>
+          <span class="pill" v-if="(selection?.arm_concept?.meta?.boards || []).length">
+            选中概念 {{ (selection?.arm_concept?.meta?.boards || []).map((b: any) => b.board).join('、') }}</span>
+          <span class="pill" v-if="selection?.arm_concept?.backtest?.available">
+            月频回放 {{ selection?.arm_concept?.backtest?.months }} 期：期均
+            {{ ((selection?.arm_concept?.backtest?.period_mean ?? 0) * 100).toFixed(2) }}% / 基准
+            {{ ((selection?.arm_concept?.backtest?.bench_mean ?? 0) * 100).toFixed(2) }}%</span>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>概念</th><th>行业</th>
+            <th>个股分</th><th>概念分</th><th>5日涨幅</th>
+            <th>收盘</th><th>手数</th><th>金额</th><th>持仓</th></tr></thead>
+          <tbody>
+            <tr v-for="(r, i) in selection?.arm_concept?.payload?.rows || []" :key="i">
+              <td>{{ r.rank }}</td>
+              <td class="mono link" @click="gotoStock(r.stock_code)">{{ r.stock_code }}</td>
+              <td class="link" @click="gotoStock(r.stock_code)">{{ r.name || '—' }}</td>
+              <td>{{ r.board }}</td><td>{{ r.industry }}</td>
+              <td>{{ num(r.score, 4) }}</td><td>{{ num(r.concept_score, 3) }}</td>
+              <td :class="(r.rev_5d || 0) >= 0 ? 'up' : 'down'">{{ num(r.rev_5d, 4) }}</td>
+              <td>{{ num(r.last_close, 2) }}</td>
+              <td>{{ r.lots_at_capital }}</td><td>{{ r.planned_amount }}</td>
+              <td>{{ truthy(r.in_portfolio) ? '✅' : '候选' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="empty tiny" v-if="selection?.arm_concept?.meta?.note">
+          {{ selection.arm_concept.meta.note }}
+        </div>
+        <div class="empty tiny" v-if="selection?.arm_concept?.backtest?.caveat">
+          回放口径限制：{{ selection.arm_concept.backtest.caveat }}
+        </div>
+      </div>
+
       <div v-else class="diff-grid">
         <div class="diff-col">
           <h6 class="ok">新进 PK（{{ selection?.diff?.entered?.length || 0 }}）</h6>
@@ -238,6 +280,7 @@ const tabs = [
   { key: 'preselected', label: '候选池（preselect）' },
   { key: 'selected', label: '最终名单（PK 后）' },
   { key: 'arm', label: '研究手臂（arm_selection）' },
+  { key: 'arm_concept', label: '概念手臂（concept_rotation）' },
   { key: 'diff', label: '进 / 出差异' },
 ]
 

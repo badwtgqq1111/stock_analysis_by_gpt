@@ -7,7 +7,15 @@
  */
 export interface HealthResponse {
   status: string
-  frontend?: { dist: string | null; refs: string[]; missing: string[]; ok: boolean }
+  frontend?: {
+    dist: string | null
+    refs: string[]
+    missing: string[]
+    ok: boolean
+    /** 构建时间与入口 bundle：用来判断"浏览器里跑的是不是最新构建" */
+    built_at?: string | null
+    entry?: string | null
+  }
 }
 
 export async function getHealth(timeoutMs = 8000): Promise<HealthResponse> {

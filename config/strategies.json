@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。",
+  "updated_at": "2026-10-10",
+  "strategies": [
+    {
+      "id": "cn_ensemble",
+      "name": "模型策略选股",
+      "group": "模型策略",
+      "kind": "model",
+      "stage": "production",
+      "owner": "pipeline",
+      "tag_class": "gold",
+      "summary": "LightGBM / Transformer / CNN 多模型打分 → 风控与流动性门禁 → preselect 候选池 → PK 得到最终名单。",
+      "entry": "uv run python scripts/run_cn_pipeline.py --stage selection",
+      "schedule": "每日自动化主阶段（preselection → pk）",
+      "artifacts": [
+        "output/results_cn/cn_ensemble_selected.csv",
+        "output/results_cn/cn_ensemble_preselected.csv"
+      ],
+      "history_dir": "",
+      "ledger_sources": ["notify", "preselected"],
+      "date_column": "trade_date"
+    },
+    {
+      "id": "arm_select",
+      "name": "小市值手臂（arm_select）",
+      "group": "小市值手臂",
+      "kind": "research_arm",
+      "stage": "production",
+      "owner": "pipeline",
+      "tag_class": "info",
+      "summary": "v4 面板 25 列 IC 加权合成（base_v1），在小市值域内选候选 10 / 买入 5；PIT ST 过滤，不追涨停。",
+      "entry": "uv run python scripts/run_cn_pipeline.py --stage arm_selection",
+      "schedule": "每日自动化（sleeve 面板链路之后）",
+      "artifacts": [
+        "output/results_cn/arm_latest_selection.csv",
+        "output/results_cn/arm_latest_selection.json"
+      ],
+      "history_dir": "output/results_cn/arm_selection_history",
+      "ledger_sources": ["arm"],
+      "date_column": "trade_date"
+    },
+    {
+      "id": "arm_concept",
+      "name": "行业轮动（概念/板块手臂）",
+      "group": "行业轮动",
+      "kind": "research_arm",
+      "stage": "production",
+      "owner": "pipeline",
+      "tag_class": "ok",
+      "summary": "概念/板块热度 + 板块内动量打分（concept_score），板块轮动研究的落地名单；带 24 个月月频回放摘要。",
+      "entry": "uv run python scripts/run_cn_pipeline.py --stage arm_concept",
+      "schedule": "每日自动化（boards 之后）",
+      "artifacts": [
+        "output/results_cn/arm_concept_selection.csv",
+        "output/results_cn/arm_concept_selection.json",
+        "output/results_cn/arm_concept_backtest.json"
+      ],
+      "history_dir": "output/results_cn/arm_concept_history",
+      "ledger_sources": ["arm_concept"],
+      "date_column": "trade_date"
+    }
+  ]
+}

@@ -44,6 +44,9 @@ DATASETS = {
     "valuation": ("估值快照（daily_basic）", "市值/PE/PB 分位", "monthly"),
     "industry": ("行业分类", "行业中性化", "event"),
     "corporate_actions": ("公司行动", "复权/分红除权", "event"),
+    "boards": ("板块成分+行情（新浪/同花顺）", "板块轮动、概念热度研究", "daily"),
+    "lhb": ("龙虎榜（含机构席位）", "席位/操纵型行业动量研究", "daily"),
+    "sw2021": ("申万 2021 一级行业成分", "行业轮动第二口径（稳健性检验）", "event"),
 }
 
 # event 类：距上次快照超过这么多天算"太久没更新"
@@ -58,6 +61,11 @@ class Check:
     n: int | None = None
     detail: str = ""
     ok: bool = False
+    # True = 该 check 已经用"自己的口径"给出结论（例如分时按个股自己的交易日比、
+    # 财报按"是否仍在交易"豁免），主流程不要再用通用的"latest == as_of"覆盖它。
+    # 踩过的坑：分时的 latest 是 "4522/4522" 这种计数串，被通用判据一覆盖就成了 ⚠️，
+    # 明明"真实落后 0 只"。
+    self_judged: bool = False
     extras: dict = field(default_factory=dict)
 
 
@@ -109,7 +117,19 @@ def check_adj_factor() -> Check:
     d = ROOT / "assets/data/raw/adjustment_factor_snapshots"
     files = sorted(d.rglob("*.parquet")) if d.exists() else []
     if not files:
-        return Check("adj_factor", detail="目录不存在（[relay_data].adjustment_factors_enabled=false）")
+        return Check("adj_factor", detail="目录不存在（跑 scripts/sync_cn_adj_factor.py）")
+    # 优先读同步脚本写的 `_coverage.json`：按日快照有上万行也没必要为了"最新日期"
+    # 去反序列化几千个 parquet（实测体检因此从 ~20s 掉到瞬时）。
+    coverage = d / "market=CN/source=tushare_relay/_coverage.json"
+    if coverage.exists():
+        try:
+            payload = json.loads(coverage.read_text(encoding="utf-8"))
+            return Check("adj_factor", latest=payload.get("latest_date"), n=len(files),
+                         detail=f"按日快照 {payload.get('by_date_files')} 天 + 逐股 "
+                                f"{payload.get('by_stock_files')} 只；"
+                                f"最新日 {payload.get('stocks_on_latest')} 只")
+        except (OSError, json.JSONDecodeError):
+            pass
     cols = ["trade_date"] if "trade_date" in pd.read_parquet(files[-1]).columns else None
     if cols is None:
         return Check("adj_factor", n=len(files), detail=f"{len(files)} 个文件（无 trade_date 列）")
@@ -128,6 +148,53 @@ def check_moneyflow() -> Check:
                  n=int(len(f)), ok=last is not None, detail=f"{len(f):,} 行")
 
 
+def _last_daily_date_by_code() -> dict:
+    """每只票自己的最后一根日线日期（缓存）。
+
+    "是否落后"必须拿**这只票自己的交易日**去比：停牌/退市/长期停牌的票，日线与分时都停在
+    同一天，用全市场 as_of 去卡它们会永远报落后 —— 实测 4,533 只里有 11 只长期不交易的票
+    把整项体检卡成 ⚠️（看起来像"分时同步坏了"，其实是判据错了）。
+    """
+    cache = getattr(_last_daily_date_by_code, "_cache", None)
+    if cache is not None:
+        return cache
+    mapping: dict = {}
+    bars_dir = ROOT / "assets/data/clean/ohlcv/market=CN"
+    files = sorted(str(p) for p in bars_dir.glob(
+        "exchange=*/asset_type=equity/frequency=daily/adjust=qfq/year=*/*.parquet"))
+    if files:
+        try:
+            import pyarrow.dataset as ds
+            frame = ds.dataset(files, format="parquet").to_table(
+                columns=["trade_date", "stock_code"]).to_pandas()
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+            mapping = frame.groupby("stock_code")["trade_date"].max().dt.date.to_dict()
+        except Exception:                                       # noqa: BLE001
+            mapping = {}
+    _last_daily_date_by_code._cache = mapping                   # type: ignore[attr-defined]
+    return mapping
+
+
+def classify_intraday(last_intraday, own_last_daily, as_of) -> str:
+    """分时新鲜度分类：`ok` / `lag` / `suspended`。
+
+    `own_last_daily` = 该股自己最后一根日线的日期（没有日线 → None）。
+    停牌/退市的票，分时与日线都停在同一天，不能拿全市场 as_of 去卡（实测 11 只长期
+    不交易的票把整项体检卡成 ⚠️；真实落后其实是 0）。
+    """
+    import datetime as _dt
+    want = pd.Timestamp(as_of).date()
+    own = own_last_daily
+    if own is None or own < want:
+        return "suspended" if (last_intraday is None or last_intraday >= own) else "lag"
+    return "ok" if last_intraday is not None and last_intraday >= want else "lag"
+
+
+def is_stopped_stock(own_last_daily, as_of) -> bool:
+    """该股是否已停止交易（日线停在 as_of 之前）——用于财报"待补"的豁免判定。"""
+    return own_last_daily is None or own_last_daily < pd.Timestamp(as_of).date()
+
+
 def check_intraday(as_of: str) -> Check:
     files = glob.glob(str(ROOT / "assets/data/raw/intraday_baostock/frequency=5min/*.parquet"))
     if not files:
@@ -135,17 +202,21 @@ def check_intraday(as_of: str) -> Check:
     codes_file = ROOT / "assets/data/raw/intraday_baostock/_sync/codes.txt"
     target = [c for c in codes_file.read_text().split() if c.strip()] if codes_file.exists() else []
     want = pd.Timestamp(as_of).date()
-    cur = lag = 0
+    last_bar = _last_daily_date_by_code()
+    cur = lag = suspended = 0
     for code in target:
         p = ROOT / f"assets/data/raw/intraday_baostock/frequency=5min/{code.replace('.', '_')}.parquet"
-        if not p.exists():
-            lag += 1
-            continue
-        last = pd.to_datetime(pd.read_parquet(p, columns=["date"])["date"]).max().date()
-        cur += int(last >= want)
-        lag += int(last < want)
-    return Check("intraday_5min", latest=f"{cur}/{cur+lag}", n=len(files), ok=lag == 0,
-                 detail=f"已到 {as_of}: {cur} 只 / 落后 {lag} 只", extras={"lag": lag, "target": cur + lag})
+        last = (pd.to_datetime(pd.read_parquet(p, columns=["date"])["date"]).max().date()
+                if p.exists() else None)
+        verdict = classify_intraday(last, last_bar.get(code), as_of)
+        cur += int(verdict == "ok")
+        lag += int(verdict == "lag")
+        suspended += int(verdict == "suspended")
+    checked = cur + lag
+    return Check("intraday_5min", latest=as_of, n=len(files), ok=lag == 0, self_judged=True,
+                 detail=f"已到 {as_of}: {cur}/{max(checked, 1)} 只 / 真实落后 {lag} 只；"
+                        f"{suspended} 只已停止交易（豁免）",
+                 extras={"lag": lag, "target": max(checked, 1), "suspended": suspended})
 
 
 def check_financials(as_of: str) -> Check:
@@ -162,9 +233,20 @@ def check_financials(as_of: str) -> Check:
     if merged.exists():
         m = pd.read_parquet(merged, columns=["ts_code", "ann_date"])
         rows, codes = int(len(m)), int(m["ts_code"].nunique())
-    return Check("financials", latest=str(want.date()), n=codes, ok=len(pending) == 0,
-                 detail=f"应有报告期 {want.date()}｜待补 {len(pending)} 只｜已合并 {rows:,} 行 / {codes} 只",
-                 extras={"pending": len(pending), "rows": rows})
+    # 只把"还在正常交易、却没拿到最新报告期"的票算作待补；停牌/退市的票上游也没有新报告
+    # （实测：待补 1 只 = *ST萃华 002731.SZ，其日线止于 2026-08-31、Tushare 侧最新报告期
+    # 也只到 2025-09-30 —— 属于公司不再披露，不是我们没抓）。
+    last_bar = _last_daily_date_by_code()
+    as_of_date = pd.Timestamp(as_of).date()
+    active_pending, stopped = [], []
+    for code, _ in pending:
+        (stopped if is_stopped_stock(last_bar.get(code), as_of) else active_pending).append(code)
+    return Check("financials", latest=str(want.date()), n=codes, ok=len(active_pending) == 0,
+                 self_judged=True,
+                 detail=f"应有报告期 {want.date()}｜待补 {len(pending)} 只"
+                        f"（其中 {len(stopped)} 只已停止交易，豁免）｜已合并 {rows:,} 行 / {codes} 只",
+                 extras={"pending": len(pending), "pending_active": len(active_pending),
+                         "stopped": len(stopped), "rows": rows})
 
 
 def check_valuation() -> Check:
@@ -189,6 +271,51 @@ def check_industry() -> Check:
     mt = datetime.fromtimestamp(newest.stat().st_mtime)
     return Check("industry", latest=mt.strftime("%Y-%m-%d %H:%M"), n=len(files),
                  detail=f"{len(files)} 个文件；最新 {newest.name}")
+
+
+def check_boards() -> Check:
+    """板块成分与行情：读派生日表（`board_daily.parquet`）+ 成分长表。"""
+    daily = ROOT / "assets/data/derived/cn_board_daily"
+    files = sorted(daily.rglob("board_daily.parquet")) if daily.exists() else []
+    membership = ROOT / "assets/data/meta/cn_board_membership.parquet"
+    if not files:
+        return Check("boards", detail="无板块日表")
+    frames = []
+    for path in files:
+        frame = pd.read_parquet(path, columns=["trade_date", "taxonomy", "board"])
+        frames.append(frame)
+    merged = pd.concat(frames, ignore_index=True)
+    latest = pd.to_datetime(merged["trade_date"]).max()
+    taxonomies = sorted(merged["taxonomy"].unique().tolist())
+    boards = int(merged[merged["trade_date"] == latest].groupby("taxonomy")["board"].nunique().sum())
+    rows = int(pd.read_parquet(membership).shape[0]) if membership.exists() else 0
+    return Check("boards", latest=latest.strftime("%Y-%m-%d"), n=boards,
+                 detail=f"{len(taxonomies)} 类（{', '.join(taxonomies)}）；当日 {boards} 个板块；"
+                        f"成分长表 {rows:,} 行")
+
+
+def check_lhb() -> Check:
+    derived = ROOT / "assets/data/derived/cn_lhb/lhb_daily.parquet"
+    raw = ROOT / "assets/data/raw/lhb_snapshots"
+    days = len(list(raw.glob("date=*/lhb_detail.parquet"))) if raw.exists() else 0
+    if not derived.exists():
+        return Check("lhb", detail="无龙虎榜派生表")
+    frame = pd.read_parquet(derived, columns=["trade_date"])
+    latest = pd.to_datetime(frame["trade_date"]).max()
+    return Check("lhb", latest=latest.strftime("%Y-%m-%d"), n=days,
+                 detail=f"逐日快照 {days} 天；长表 {len(frame):,} 行")
+
+
+def check_sw2021() -> Check:
+    path = ROOT / "assets/data/meta/cn_sw2021_industry.parquet"
+    if not path.exists():
+        return Check("sw2021", detail="未落地（跑 scripts/sync_cn_sw2021_industry.py）")
+    frame = pd.read_parquet(path)
+    mt = datetime.fromtimestamp(path.stat().st_mtime)
+    industries = int(frame["industry_code"].nunique())
+    return Check("sw2021", latest=mt.strftime("%Y-%m-%d %H:%M"), n=industries,
+                 detail=f"{industries}/31 个一级行业（乐咕限流，按日渐进补齐）；"
+                        f"{frame['stock_code'].nunique()} 只票")
 
 
 def check_corporate_actions() -> Check:
@@ -217,6 +344,7 @@ def main() -> int:
     checks = [
         bars, check_adj_factor(), check_moneyflow(), check_intraday(as_of),
         check_financials(as_of), check_valuation(), check_industry(), check_corporate_actions(),
+        check_boards(), check_lhb(), check_sw2021(),
     ]
     # 按各自的更新频率判定达标（各 check 内部已经给出 ok 的，只有 daily/report 类才采纳）
     now = datetime.now()
@@ -224,7 +352,11 @@ def main() -> int:
         c.as_of = as_of
         cadence = DATASETS[c.key][2]
         if cadence == "daily":
-            c.ok = bool(c.latest) and c.latest[:10] == as_of
+            # 日线是**当晚**由流水线写入的，而板块/龙虎榜这些外部数据面是收盘后立刻抓的：
+            # 同一天里，"日线基准日"可能还停在前一交易日。两者都算达标，否则每天都会假报警。
+            if not c.self_judged:
+                accept = {as_of, now.strftime("%Y-%m-%d")}
+                c.ok = bool(c.latest) and c.latest[:10] in accept
         elif cadence == "report":
             pass                                  # check_financials 已按"待补只数"给出 ok
         elif cadence == "monthly":

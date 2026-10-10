@@ -60,7 +60,10 @@
       </div>
 
       <div class="panel" v-if="selected">
-        <h6>{{ selected.stock_code }} 族贡献（SHAP 按因子族求和）</h6>
+        <h6>
+          <span class="link" @click="gotoStock(selected.stock_code)">{{ selected.stock_code }}</span>
+          族贡献（SHAP 按因子族求和）
+        </h6>
         <BarChart :bars="familyBars" :label-width="150" :max-height="300" />
       </div>
 

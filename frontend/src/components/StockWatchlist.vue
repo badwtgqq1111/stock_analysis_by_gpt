@@ -3,16 +3,26 @@
     <h6>
       自选股
       <span class="dim tiny">{{ local.length }} 自选 / {{ visibleRows.length }} 显示</span>
+      <button class="btn-ghost btn-sm" :disabled="refreshing" @click="reloadGroups">刷新</button>
       <button class="btn-ghost btn-sm add-btn" @click="clearAll" v-if="local.length" title="清空本地自选">清空</button>
     </h6>
 
     <!-- 快速分组：直接取各策略的最新名单，省得一只一只搜 -->
     <div class="groups">
+      <button class="chip" :class="{ active: group === 'local' }" @click="group = 'local'">我的自选 {{ local.length }}</button>
+      <button class="chip" :class="{ active: group === 'all' }" @click="group = 'all'">全部策略 {{ allRows.length }}</button>
       <button v-for="g in groups" :key="g.key" class="chip" :class="{ active: group === g.key }"
-              :title="g.note" @click="toggleGroup(g.key)">
-        {{ g.label }}<span v-if="g.rows.length" class="dim tiny"> {{ g.rows.length }}</span>
+              :title="g.note + (g.date ? ' · ' + g.date : '')" @click="toggleGroup(g.key)">
+        {{ g.label }}<span class="dim tiny"> {{ g.loading ? '…' : g.rows.length }}</span>
       </button>
     </div>
+    <p v-if="poolError" class="hint tiny">{{ poolError }}</p>
+    <p v-if="activeGroup" class="hint tiny">{{ activeGroup.stage }} · 名单交易日 {{ activeGroup.date || '—' }}
+      <span v-if="activeGroup.loading"> · 加载中…</span>
+      <span v-if="activeGroup.error"> · {{ activeGroup.error }}</span>
+    </p>
+    <p v-if="group === 'all' && failedGroups.length" class="hint tiny">部分名单待加载：{{ failedGroups.join('、') }}</p>
+    <button v-if="group !== 'local' && visibleRows.length" class="btn-ghost btn-sm batch-add" @click="addGroupToLocal">★ 当前分组全部加入自选</button>
 
     <div class="search">
       <input v-model="query" placeholder="代码 / 名称 / 拼音，回车添加" @keydown.enter="addByQuery"
@@ -34,16 +44,18 @@
         <button class="star" :title="row.local ? '从自选移除' : '加入自选'"
                 @click.stop="toggleLocal(row)">{{ row.local ? '★' : '☆' }}</button>
       </li>
-      <li v-if="!visibleRows.length" class="empty tiny">还没有自选股：用上面的搜索或分组添加</li>
+      <li v-if="!visibleRows.length" class="empty tiny">{{ emptyText }}</li>
     </ul>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { getPaperStatus, getSelection, searchStocks } from '@/api/client'
+import { getPaperStatus, getSelection, getStrategyPool, searchStocks } from '@/api/client'
 import type { StockSearchHit } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
+import { groupRows, strategyGroups } from './watchlistStrategies'
+import type { WatchlistGroup, WatchlistRow } from './watchlistStrategies'
 
 const props = defineProps<{ modelValue: string | null }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
@@ -52,40 +64,37 @@ const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 // 选股日历 / 行业热度页勾的 ★ 会实时出现在这里，反之亦然。
 const watchlist = useWatchlist()
 
-const GROUP_META = [
-  { key: 'cn_arm_concept', label: '概念手臂', note: '板块轮动手臂（arm_concept）当日名单' },
-  { key: 'cn_arm', label: '研究手臂', note: 'base_v1 研究手臂当日名单' },
-  { key: 'cn_ensemble', label: '生产名单', note: 'preselect→pk 的生产名单' },
-  { key: 'paper', label: '模拟盘持仓', note: '模拟盘当前持仓' },
-] as const
-
-interface Row { code: string; name: string; tag?: string; local: boolean }
-
 const local = watchlist.codes
-const groups = ref<{ key: string; label: string; note: string; rows: { code: string; name: string }[] }[]>(
-  GROUP_META.map((g) => ({ ...g, rows: [] })),
-)
-const group = ref<string>('cn_arm_concept')
+const groups = ref<WatchlistGroup[]>([])
+const group = ref('all')
+const refreshing = ref(false)
+const poolError = ref('')
+const activeGroup = computed(() => groups.value.find((g) => g.key === group.value))
+const allRows = computed(() => groupRows(groups.value, 'all'))
+const failedGroups = computed(() => groups.value.filter((g) => g.key !== 'paper' && g.error).map((g) => g.label))
 const query = ref('')
 const suggestions = ref<StockSearchHit[]>([])
 let timer: ReturnType<typeof setTimeout> | null = null
 
-const visibleRows = computed<Row[]>(() => {
-  const seen = new Map<string, Row>()
-  const active = groups.value.find((g) => g.key === group.value)
-  for (const code of local.value) {
-    seen.set(code, { code, name: watchlist.names.value[code] || '', local: true, tag: '自选' })
-  }
-  for (const item of active?.rows || []) {
-    const exist = seen.get(item.code)
-    if (exist) { exist.tag = exist.tag ? `${exist.tag}·${active!.label}` : active!.label }
-    else seen.set(item.code, { code: item.code, name: item.name, local: false, tag: active!.label })
-  }
-  return [...seen.values()]
+const visibleRows = computed<WatchlistRow[]>(() => {
+  if (group.value === 'local') return local.value.map((code) => ({
+    code, name: watchlist.names.value[code] || '', local: true, tag: '自选',
+  }))
+  return groupRows(groups.value, group.value).map((row) => ({
+    ...row, name: row.name || watchlist.names.value[row.code] || '', local: watchlist.has(row.code),
+  }))
 })
+const emptyText = computed(() => refreshing.value || activeGroup.value?.loading ? '正在加载策略名单…'
+  : activeGroup.value?.error ? '名单加载失败，点击刷新重试'
+  : group.value === 'local' ? '还没有自选股：用搜索或策略分组添加'
+  : '当前分组暂无每日名单')
 
-function toggleLocal(row: Row) {
+function toggleLocal(row: WatchlistRow) {
   watchlist.toggle(row.code, row.name)
+}
+
+function addGroupToLocal() {
+  for (const row of visibleRows.value) watchlist.add(row.code, row.name)
 }
 
 function addStock(code: string, name = '') {
@@ -115,27 +124,49 @@ function onInput() {
 async function toggleGroup(key: string) {
   group.value = key
   const target = groups.value.find((g) => g.key === key)
-  if (target && !target.rows.length) await loadGroup(key)
+  if (target && !target.loading && (!target.rows.length || target.error)) await loadGroup(key)
 }
 
 async function loadGroup(key: string) {
   const target = groups.value.find((g) => g.key === key)
   if (!target) return
-  if (key === 'paper') {
-    try {
-      const status: any = await getPaperStatus()
-      const positions = (status?.positions || []) as { stock_code: string; name?: string }[]
-      target.rows = positions.map((p) => ({ code: String(p.stock_code), name: String(p.name || '') }))
-    } catch { target.rows = [] }
-    return
-  }
+  target.loading = true
+  target.error = ''
   try {
-    const data: any = await getSelection(key)
-    target.rows = (data?.rows || []).map((r: any) => ({
-      code: String(r.stock_code), name: String(r.stock_name || r.name || ''),
-    }))
+    if (key === 'paper') {
+      const status = await getPaperStatus()
+      const positions = status.positions || []
+      target.rows = positions.map((p) => ({ code: String(p.stock_code), name: String(p.name || '') }))
+    } else {
+      const data = await getSelection(target.source)
+      if (data.source?.key !== target.source) throw new Error('名单来源不匹配')
+      target.date = data.source.trade_date
+      target.rows = [...new Map((data.rows || []).map((r) => [String(r.stock_code), {
+        code: String(r.stock_code), name: String(r.stock_name || r.name || ''),
+      }])).values()]
+    }
     watchlist.rememberMany(target.rows)
-  } catch { target.rows = [] }
+  } catch (error) {
+    target.rows = []
+    target.error = error instanceof Error ? error.message : '名单加载失败'
+  } finally { target.loading = false }
+}
+
+async function reloadGroups() {
+  if (refreshing.value) return
+  refreshing.value = true
+  poolError.value = ''
+  try {
+    const pool = await getStrategyPool()
+    groups.value = [...strategyGroups(pool.strategies), {
+      key: 'paper', label: '模拟盘持仓', note: '模拟盘当前持仓', source: '', stage: '模拟盘',
+      date: null, rows: [], loading: false, error: '',
+    }]
+    if (!['all', 'local'].includes(group.value) && !groups.value.some((g) => g.key === group.value)) group.value = 'all'
+    await Promise.all(groups.value.map((g) => loadGroup(g.key)))
+  } catch (error) {
+    poolError.value = '策略分组加载失败：' + (error instanceof Error ? error.message : '请点击刷新重试')
+  } finally { refreshing.value = false }
 }
 
 function clearAll() {
@@ -143,13 +174,14 @@ function clearAll() {
 }
 
 onMounted(async () => {
-  await Promise.all(GROUP_META.map((g) => loadGroup(g.key)))
+  await reloadGroups()
   if (!props.modelValue && visibleRows.value.length) emit('update:modelValue', visibleRows.value[0].code)
 })
 </script>
 
 <style scoped>
 .watchlist .groups { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--sp-2); }
+.batch-add { margin-bottom: var(--sp-2); }
 .chip { padding: 3px 8px; border-radius: var(--r-pill); border: 1px solid var(--border-color);
   background: var(--bg-input); color: var(--text-muted); font-size: var(--fs-xs); cursor: pointer; }
 .chip.active { border-color: var(--accent-gold); color: var(--accent-gold); background: rgba(255, 209, 102, 0.08); }
@@ -167,6 +199,7 @@ onMounted(async () => {
 .rows li.active { background: rgba(255, 209, 102, 0.1); color: var(--accent-gold); }
 .rows .code { color: inherit; }
 .rows .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rows .tag { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .star { background: none; border: none; color: var(--accent-gold); cursor: pointer; font-size: var(--fs-md); padding: 0 2px; }
 .add-btn { margin-left: auto; }
 </style>

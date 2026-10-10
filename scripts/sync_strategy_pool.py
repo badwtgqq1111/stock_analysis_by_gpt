@@ -140,6 +140,47 @@ def _history_count(rel_dir: str) -> int:
                 if len(p.stem) == 10 and p.stem[4] == "-" and p.stem[:4].isdigit()])
 
 
+def _metrics_from_files(rel_paths, keys: dict[str, str]) -> list[dict]:
+    """把一串指标文件合并成一张表（后面的文件覆盖同名字段）。
+
+    为什么要支持多个：一条策略的"它行不行"往往分散在两个产物里 ——
+    例：`arm_concept_backtest.json` 有期均/基准/累计/回撤，`arm_concept_robustness.json`
+    有前半/后半超额与判定。只看前者会把"半窗为负"的策略显示成 +0.52% 的漂亮数字。
+    """
+    if isinstance(rel_paths, str):
+        rel_paths = [rel_paths]
+    merged: dict[str, float] = {}
+    for rel in rel_paths or []:
+        for row in _metrics_from_file(rel, keys):
+            merged[row["key"]] = row["value"]
+    return [{"key": key, "label": keys[key], "value": value}
+            for key, value in merged.items() if key in keys]
+
+
+def _metrics_from_file(rel_path: str, keys: dict[str, str]) -> list[dict]:
+    """策略自己的回放指标（策略卡上直接显示"它到底行不行"，不用点进别的页面）。
+
+    约定：`metrics_file` 是一个 JSON（如 arm_concept_backtest.json），`metrics_map` 给出
+    字段 → 中文名；`metrics_pct` 里的字段按百分数显示。缺文件/缺字段时返回空表，不编造。
+    """
+    if not rel_path:
+        return []
+    path = ROOT / rel_path
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = []
+    for key, label in keys.items():
+        value = payload.get(key)
+        if value is None or not isinstance(value, (int, float)):
+            continue
+        rows.append({"key": key, "label": label, "value": float(value)})
+    return rows
+
+
 def _research_evidence(limit: int = 200) -> list[dict]:
     """`output/research/*/REPORT.md` → 研究证据（标题取第一行 markdown 标题）。"""
     rows: list[dict] = []
@@ -265,6 +306,18 @@ def build_pool() -> dict:
         raise SystemExit(f"缺少策略登记表：{CONFIG_PATH}")
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     reference = latest_trade_date()
+    performance_path = ROOT / "output/strategy_pool/performance.json"
+    try:
+        performance = json.loads(performance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        performance = {}
+
+    def performance_for(ident: str, latest: str | None = None) -> dict:
+        value = dict(performance.get("strategies", {}).get(ident, {}))
+        value["stale"] = bool(value) and (
+            performance.get("reference_trade_date") != reference or
+            bool(latest and value.get("tracking", {}).get("latest_signal_date") != latest))
+        return value
 
     strategies: list[dict] = []
     for item in config.get("strategies", []):
@@ -299,6 +352,8 @@ def build_pool() -> dict:
             "entry": item.get("entry", ""),
             "schedule": item.get("schedule", ""),
             "ledger_sources": item.get("ledger_sources", []),
+            "selection_source": item.get("selection_source", ""),
+            "performance": performance_for(item["id"], latest),
             "latest_date": latest,
             "lag_days": lag,
             "fresh": fresh,
@@ -306,6 +361,9 @@ def build_pool() -> dict:
             "n_snapshots": history_count,
             "history_dir": history_dir,
             "artifacts": artifacts,
+            "metrics": _metrics_from_files(
+                item.get("metrics_files") or item.get("metrics_file", ""), item.get("metrics_map", {})),
+            "metrics_pct": item.get("metrics_pct", []),
             "health": "ok" if fresh else ("stale" if latest else "missing"),
         })
 
@@ -328,6 +386,9 @@ def build_pool() -> dict:
             "created_at": payload.get("created_at", ""),
             "updated_at": payload.get("updated_at", ""),
             "file": payload.get("_file", ""),
+            "selection_source": next((s["selection_source"] for s in strategies
+                                      if s["id"] == payload.get("id")), ""),
+            "performance": performance_for(payload.get("id", "")),
         })
     candidates.sort(key=lambda c: (STAGES.index(c["stage"]) if c["stage"] in STAGES else 9,
                                    c.get("updated_at") or "", c["id"] or ""))
@@ -343,6 +404,8 @@ def build_pool() -> dict:
         "stages": [{"key": k, "label": STAGE_LABEL[k]} for k in STAGES if k != "nowhere"],
         "strategies": strategies,
         "candidates": candidates,
+        "performance_generated_at": performance.get("generated_at"),
+        "common_window": performance.get("common_window", {"status": "insufficient_history"}),
         "evidence": evidence,
         "totals": {
             "n_strategies": len(strategies),
@@ -367,15 +430,20 @@ def write_pool(payload: dict) -> None:
              f"生成 {payload['generated_at']}｜生产 {payload['totals']['n_production']} 个"
              f"｜候选 {payload['totals']['n_candidates']} 个"
              f"｜研究证据 {payload['totals']['n_evidence']} 份", "",
-             "| 策略 | 分组 | 阶段 | 最新交易日 | 落后 | 名单条数 | 快照 | 产物 |", "|---|---|---|---|---|---|---|---|"]
+             "| 策略 | 分组 | 阶段 | 最新交易日 | 落后 | 名单条数 | 快照 | 回放指标 | 产物 |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for item in payload["strategies"]:
         mark = "✅" if item["fresh"] else ("❌" if item["health"] == "stale" else "—")
         artifact_text = "、".join(f"`{a['path']}`" for a in item["artifacts"])
+        metric_text = "；".join(
+            f"{m['label']} " + (f"{m['value'] * 100:+.2f}%" if m["key"] in (item.get("metrics_pct") or [])
+                                else f"{m['value']:.3f}")
+            for m in item.get("metrics", [])) or "—"
         lines.append(
             f"| {item['name']} | {item['group']} | {item['stage_label']} | {item['latest_date'] or '—'} {mark} "
             f"| {item['lag_days'] if item['lag_days'] is not None else '—'} "
             f"| {item['n_picks'] if item['n_picks'] is not None else '—'} | {item['n_snapshots']} "
-            f"| {artifact_text} |"
+            f"| {metric_text} | {artifact_text} |"
         )
     if payload["candidates"]:
         lines += ["", "## 候选策略", "",

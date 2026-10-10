@@ -79,3 +79,41 @@ def test_calendar_page_has_column_filters():
         assert name in text, f"缺少过滤实现 {name}"
     assert ">=" in text and "~" in text, "数值筛选要支持比较与区间"
     assert "清空筛选" in text
+
+
+# ─── 4. "多因子策略"要能看出是哪个具体策略（2026-10-10 用户反馈）──────────────
+def test_calendar_row_names_the_specific_strategy_not_just_the_group(client):
+    """用户反馈："日历选股，多因子策略有两个：动态诊断 ROE＋0.25×ROA / 聚宽多因子
+    （低市值+高ROE），具体是哪个？看不出来。"
+
+    原因：`多因子策略` 是**策略组**，组里有两个策略；行内原来只渲染组名（具体策略名藏在
+    tooltip 里）。现在行内必须按**具体策略**渲染 `J 聚宽多因子` / `D 动态诊断`，
+    筛选下拉也要能直接选具体策略；策略组 pill 还要把组内成员与行数写出来。
+    """
+    text = (ROOT / "frontend/src/pages/SelectionCalendar.vue").read_text(encoding="utf-8")
+    assert "strategy_keys" in text and "strategyChipLabel" in text, "行内 chip 必须按具体策略渲染"
+    assert "strategyGroupOf" in text, "chip 颜色要按策略组取"
+    assert "jq_multi_factor: '聚宽多因子'" in text and "jq_roe_roa: '动态诊断'" in text
+    assert "策略组：" in text, "下拉里要同时有『具体策略』和『策略组』两种口径"
+    assert "perSourceCount" in text, "策略组 pill 要写出组内每个策略的行数"
+
+    body = client.get("/api/calendar/day", params={"date": "2026-10-09"}).json()
+    rows = body.get("rows") or []
+    if not any(r.get("source") == "jq_multi_factor" for r in rows):
+        pytest.skip("台账没有 2026-10-09 的候选策略名单（先重建台账）")
+
+    # 接口必须给出行级 strategy_keys（前端就是靠它渲染具体策略，而不是组名）
+    jq = next(r for r in rows if r["source"] == "jq_multi_factor")
+    assert jq["strategy_keys"] == ["jq_multi_factor"], jq["strategy_keys"]
+    assert "聚宽多因子" in jq["strategy_labels"][0], jq["strategy_labels"]
+    jd = next(r for r in rows if r["source"] == "jq_roe_roa")
+    assert jd["strategy_keys"] == ["jq_roe_roa"], jd["strategy_keys"]
+    assert "动态诊断" in jd["strategy_labels"][0], jd["strategy_labels"]
+    # 两者在同一个策略组里 —— 这正是"只写组名看不出来"的根源
+    assert jq["strategy_groups"] == jd["strategy_groups"] == ["多因子策略"]
+
+    # 策略组 pill 的成员来源（前端用它拼 "J 聚宽多因子 20 行 / D 动态诊断 20 行"）
+    summary = {s["group"]: s for s in body.get("strategy_summary") or []}
+    assert "多因子策略" in summary, summary.keys()
+    assert set(summary["多因子策略"]["sources"]) == {"jq_multi_factor", "jq_roe_roa"}
+    assert body["per_source"]["jq_multi_factor"] == 20 and body["per_source"]["jq_roe_roa"] == 20

@@ -18,9 +18,13 @@
         "output/results_cn/cn_ensemble_selected.csv",
         "output/results_cn/cn_ensemble_preselected.csv"
       ],
-      "history_dir": "",
-      "ledger_sources": ["notify", "preselected"],
-      "date_column": "trade_date"
+      "history_dir": "output/results_cn/selection_history",
+      "ledger_sources": [
+        "notify",
+        "preselected"
+      ],
+      "date_column": "trade_date",
+      "selection_source": "cn_ensemble"
     },
     {
       "id": "arm_select",
@@ -38,8 +42,11 @@
         "output/results_cn/arm_latest_selection.json"
       ],
       "history_dir": "output/results_cn/arm_selection_history",
-      "ledger_sources": ["arm"],
-      "date_column": "trade_date"
+      "ledger_sources": [
+        "arm"
+      ],
+      "date_column": "trade_date",
+      "selection_source": "cn_arm"
     },
     {
       "id": "arm_concept",
@@ -49,16 +56,92 @@
       "stage": "production",
       "owner": "pipeline",
       "tag_class": "ok",
-      "summary": "概念/板块热度 + 板块内动量打分（concept_score），板块轮动研究的落地名单；带 24 个月月频回放摘要。",
+      "summary": "板块轮动：板块层 动量0.7−涨停密度0.3（去掉聚合资金流项）→ 板块内买滞涨；候选每板块≤4、每行业≤2。⚠️ 稳健性拆分显示**所有候选口径的前半窗超额都为负**（含本口径 -0.07%），只应当研究用，不要当生产 alpha。",
       "entry": "uv run python scripts/run_cn_pipeline.py --stage arm_concept",
       "schedule": "每日自动化（boards 之后）",
       "artifacts": [
         "output/results_cn/arm_concept_selection.csv",
         "output/results_cn/arm_concept_selection.json",
-        "output/results_cn/arm_concept_backtest.json"
+        "output/results_cn/arm_concept_backtest.json",
+        "output/results_cn/arm_concept_grid_compare.json",
+        "output/results_cn/arm_concept_robustness.json"
       ],
       "history_dir": "output/results_cn/arm_concept_history",
-      "ledger_sources": ["arm_concept"],
+      "ledger_sources": [
+        "arm_concept"
+      ],
+      "date_column": "trade_date",
+      "metrics_file": "output/results_cn/arm_concept_backtest.json",
+      "metrics_map": {
+        "period_mean": "期均",
+        "bench_mean": "基准",
+        "excess_mean": "超额",
+        "win_rate": "胜率",
+        "cumulative": "累计",
+        "max_drawdown": "最大回撤",
+        "excess_all": "全窗超额",
+        "excess_h1": "前半",
+        "excess_h2": "后半"
+      },
+      "metrics_pct": [
+        "period_mean",
+        "bench_mean",
+        "excess_mean",
+        "win_rate",
+        "cumulative",
+        "max_drawdown",
+        "excess_all",
+        "excess_h1",
+        "excess_h2"
+      ],
+      "metrics_files": [
+        "output/results_cn/arm_concept_backtest.json",
+        "output/results_cn/arm_concept_robustness.json"
+      ],
+      "selection_source": "cn_arm_concept"
+    },
+    {
+      "id": "jq_multi_factor_size_roe",
+      "name": "聚宽多因子（低市值+高ROE）",
+      "group": "多因子策略",
+      "kind": "factor_candidate",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "info",
+      "summary": "历史沪深300成分内按 rank(roe) − rank(market_cap) 选20股；每日收盘生成研究名单。原策略复验未达生产，名单展示不改变生产交易权重。",
+      "entry": "uv run python scripts/select_jq_multi_factor.py",
+      "schedule": "每日自动化非阻塞研究步骤（收盘名单；非15日调仓账户）",
+      "artifacts": [
+        "output/results_cn/jq_multi_factor_selection.csv",
+        "output/results_cn/jq_multi_factor_selection.json"
+      ],
+      "history_dir": "output/results_cn/jq_multi_factor_history",
+      "ledger_sources": [
+        "jq_multi_factor"
+      ],
+      "selection_source": "cn_jq_multi_factor",
+      "date_column": "trade_date"
+    },
+    {
+      "id": "jq_roe_roa_diagnostic",
+      "name": "动态诊断候选：ROE＋0.25×ROA",
+      "group": "多因子策略",
+      "kind": "factor_candidate",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "info",
+      "summary": "2015—2026全窗回放累计174.83%，高于原低市值+ROE的2.61%；但训练前半窗相对ROE-only -2.50个百分点，未过预设稳健门槛，2021—2023验证累计-52.29%。每日名单仅用于前瞻观察。",
+      "entry": "uv run python scripts/select_jq_multi_factor.py --variant dynamic",
+      "schedule": "每日自动化非阻塞研究步骤（不进入生产权重）",
+      "artifacts": [
+        "output/results_cn/jq_roe_roa_selection.csv",
+        "output/results_cn/jq_roe_roa_selection.json"
+      ],
+      "history_dir": "output/results_cn/jq_roe_roa_history",
+      "ledger_sources": [
+        "jq_roe_roa"
+      ],
+      "selection_source": "cn_jq_roe_roa",
       "date_column": "trade_date"
     }
   ]

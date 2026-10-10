@@ -32,6 +32,8 @@ STRATEGY_META = {
     "preselected": {"label": "模型策略（候选池）", "group": "模型策略"},
     "arm": {"label": "小市值/研究手臂（arm_select）", "group": "小市值手臂"},
     "arm_concept": {"label": "行业轮动（概念/板块手臂）", "group": "行业轮动"},
+    "jq_multi_factor": {"label": "聚宽多因子（低市值+高ROE）", "group": "多因子策略"},
+    "jq_roe_roa": {"label": "动态诊断候选：ROE＋0.25×ROA", "group": "多因子策略"},
     "survey_raw": {"label": "调研回看（原）", "group": "调研"},
     "survey_gate": {"label": "调研回看（门禁）", "group": "调研"},
 }
@@ -61,6 +63,10 @@ def _num(v) -> float | None:
     return float(v) if v is not None and pd.notna(v) else None
 
 
+def _string(v, default: str = "") -> str:
+    return str(v) if v is not None and pd.notna(v) else default
+
+
 def _row_payload(row: pd.Series) -> dict:
     item = {
         "decision_date": str(row.get("decision_date")), "source": row.get("source"),
@@ -72,6 +78,15 @@ def _row_payload(row: pd.Series) -> dict:
         "stage": row.get("stage") or "", "stage_label": row.get("stage_label") or "",
         "stage_evidence": row.get("stage_evidence") or "",
         "risk": row.get("risk_summary") or "", "risk_notes": row.get("risk_notes_summary") or "",
+        "ai_action": _string(row.get("ai_action"), "待分析"),
+        "ai_confidence": _num(row.get("ai_confidence")),
+        "ai_summary": _string(row.get("ai_summary")),
+        "ai_bull_case": _string(row.get("ai_bull_case")),
+        "ai_bear_case": _string(row.get("ai_bear_case")),
+        "ai_risk_flags": _string(row.get("ai_risk_flags")),
+        "ai_horizon": _string(row.get("ai_horizon")),
+        "ai_status": _string(row.get("ai_status"), "pending"),
+        "ai_generated_at": _string(row.get("ai_generated_at")),
     }
     for h in HORIZONS:
         item[f"r{h}"] = _num(row.get(f"r{h}"))
@@ -189,7 +204,9 @@ def day(date: str = Query(...), source: str = Query("")) -> dict:
         if p_new < p_old:
             entry["_src"] = r["source"]
             for key in ("rank", "lots", "note", "reason", "stage", "stage_label",
-                        "stage_evidence", "risk", "risk_notes"):
+                        "stage_evidence", "risk", "risk_notes", "ai_action", "ai_confidence",
+                        "ai_summary", "ai_bull_case", "ai_bear_case", "ai_risk_flags",
+                        "ai_horizon", "ai_status", "ai_generated_at"):
                 entry[key] = r[key]
             for h in HORIZONS:
                 entry[f"r{h}"] = r[f"r{h}"]

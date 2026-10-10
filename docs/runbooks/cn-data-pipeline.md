@@ -1276,7 +1276,29 @@ bash scripts/run_daily_production.sh --skip-retrain   # 跳过 features/clean_pa
 `daily_bars → moneyflow → regime → features → clean_panel → model_scores → preselection → pk →
 exits → paper_account → paper_outcomes`；④ 每阶段独立日志 + 失败即停 + 末尾生成两阶段报告；
 ⑤ 运行前先加载 `config/scheduler_env.sh` 与 `config/notify.env`，并跑一遍
-`DAILY_PREFLIGHT_CMD`（默认 3 个回归测试文件）把代码级错误挡在重活之前。
+`DAILY_PREFLIGHT_CMD`（默认 17 个回归测试文件）把代码级错误挡在重活之前。
+
+主阶段之后的**非阻塞**链路（每一步失败只记日志 + 通知，不阻塞当日生产结果与 `.done`）：
+
+```
+sleeve 面板链路 → arm_selection → boards/adj_factor/arm_concept（含回放/网格/行业研究）
+→ performance → lhb → sw2021 → intraday 增量 → 两阶段报告 → notify（feishu_<date>.json）
+→ archive_selection → attribution → **jq_multi_factor（备选/候选每日名单）
+→ ai_picks（全部策略逐股 AI 多空分析：买入/持有/卖出）** → ledger（选股台账 = 选股日历数据源）
+→ forward-validation → execution-parity → shadow-variants → pk-guard → promotion-check
+→ ths-export → data-completeness → strategy-performance → strategy-pool → web-freshness
+```
+
+两条**顺序不变量**（2026-10-10 修，见 `test/test_ai_pick_analysis.py`）：
+
+* `jq_multi_factor` 必须在 `ledger` **之前** —— 否则当天选出的候选（备选）名单要等到
+  第二天重建台账才出现在「选股日历」里，做不到"每天日历可查"；
+* `ai_picks` 必须在 `ledger` **之前** —— 台账的 `attach_ai_analysis` 读
+  `output/results_cn/ai_pick_analysis/<date>.json`，放在之后的话日历上永远是"待分析"。
+
+开关：`DAILY_JQ_MULTI_FACTOR=0` / `DAILY_AI_PICKS=0` 可分别关闭；
+AI 步骤用 `DEEPSEEK_API_KEY`（在 `config/scheduler_env.sh`），`--skip-existing` 保证
+当天 19:00/20:30/22:00 的失败重试只补"待分析"的股票，不重复调用 API。
 
 ## 调度方式（三选一）
 

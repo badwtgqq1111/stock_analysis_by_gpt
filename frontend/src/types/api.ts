@@ -740,6 +740,10 @@ export interface IndustryStockRow {
   stock_code: string
   name: string
   market: string
+  /** 流通市值（亿元），缺市值快照时为 null */
+  mktcap_yi: number | null
+  /** 行业内流通市值排名：1=龙一、2=龙二、null=未进前二（只标不荐，买龙头回放更差） */
+  leader_rank: number | null
   period_ret: number
   pct_chg: number | null
   close: number | null
@@ -819,6 +823,31 @@ export interface StrategyArtifact {
   detail: string
 }
 
+export interface StrategyPerformanceCurve {
+  status: string
+  kind: string
+  reason: string
+  methodology: string
+  benchmark_name: string
+  benchmark_code: string
+  start_date?: string
+  end_date?: string
+  observations?: number
+  dates: string[]
+  nav: number[]
+  benchmark_nav: number[]
+  metrics: Record<string, number | null>
+  benchmark_metrics: Record<string, number | null>
+  excess_return?: number
+}
+
+export interface StrategyPerformance {
+  tracking?: StrategyPerformanceCurve
+  research?: StrategyPerformanceCurve
+  common?: StrategyPerformanceCurve
+  stale?: boolean
+}
+
 export interface StrategyPoolEntry {
   id: string
   name: string
@@ -832,6 +861,8 @@ export interface StrategyPoolEntry {
   entry: string
   schedule: string
   ledger_sources: string[]
+  selection_source: string
+  performance?: StrategyPerformance
   latest_date: string | null
   lag_days: number | null
   fresh: boolean
@@ -839,6 +870,9 @@ export interface StrategyPoolEntry {
   n_snapshots: number
   history_dir: string
   artifacts: StrategyArtifact[]
+  /** 策略自己的回放指标（来自 metrics_file，如 arm_concept_backtest.json） */
+  metrics: { key: string; label: string; value: number }[]
+  metrics_pct: string[]
   health: 'ok' | 'stale' | 'missing'
 }
 
@@ -858,6 +892,8 @@ export interface StrategyCandidate {
   created_at: string
   updated_at: string
   file: string
+  selection_source?: string
+  performance?: StrategyPerformance
 }
 
 export interface StrategyEvidence {
@@ -875,6 +911,8 @@ export interface StrategyPoolResponse {
   stages: { key: string; label: string }[]
   strategies: StrategyPoolEntry[]
   candidates: StrategyCandidate[]
+  performance_generated_at?: string | null
+  common_window?: { status: string; start_date?: string; end_date?: string; reason?: string }
   evidence: StrategyEvidence[]
   totals: {
     n_strategies: number
@@ -886,4 +924,56 @@ export interface StrategyPoolResponse {
   }
   notes?: string[]
   sync_error?: string
+}
+
+// ─── 逐股 AI 多空综合分析（K 线页 /api/stocks/<code>/ai）────────────────────
+export interface AiPickRow {
+  decision_date: string
+  stock_code: string
+  name: string
+  /** 命中的策略 id（cn_ensemble / arm_select / arm_concept / jq_multi_factor / ...） */
+  strategies: string[]
+  /** 策略 id 的中文名（后端按 config/strategies.json 映射） */
+  strategy_labels: string[]
+  /** 买入 / 持有 / 卖出；未分析时为「待分析」 */
+  action: string
+  /** 0~1；资料不足时可能为 null */
+  confidence: number | null
+  summary: string
+  bull_case: string
+  bear_case: string
+  risk_flags: string[]
+  horizon: string
+  status: string
+  error: string
+  generated_at: string
+}
+
+export interface StockAiResponse {
+  code: string
+  available: boolean
+  n: number
+  name?: string
+  latest: AiPickRow | null
+  rows: AiPickRow[]
+  actions: Record<string, number>
+  dates?: string[]
+  hint?: string
+}
+
+export interface AiPicksSummaryDay {
+  date: string
+  n: number
+  actions: Record<string, number>
+  pending: number
+  strategies: string[]
+  strategy_labels: string[]
+}
+
+export interface AiPicksSummary {
+  available: boolean
+  latest_date?: string
+  dates: string[]
+  by_date: AiPicksSummaryDay[]
+  hint?: string
 }

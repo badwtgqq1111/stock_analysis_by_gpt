@@ -30,6 +30,14 @@ CN_BASIC = ROOT / "assets/data/meta/cn_stock_basic.parquet"
 
 # 展示列白名单：(csv 列名, 中文表头, 是否文本列)
 _COLS = {
+    "roa": ("roa", "ROA(%)", False),
+    "roa_rank": ("roa_rank", "ROA分位", False),
+    "roe": ("roe", "ROE(%)", False),
+    "market_cap": ("market_cap", "总市值(亿元)", False),
+    "roe_rank": ("roe_rank", "ROE分位", False),
+    "market_cap_rank": ("market_cap_rank", "市值分位", False),
+    "ann_date": ("ann_date", "公告日(PIT)", True),
+    "end_date": ("end_date", "财报期", True),
     "rank": ("rank", "#", False),
     # 概念/板块手臂（cn_arm_concept）新增列
     "concept_score": ("concept_score", "概念分", False),
@@ -68,6 +76,28 @@ _COLS = {
 }
 
 SOURCES: dict[str, dict] = {
+    "cn_jq_roe_roa": {
+        "label": "动态诊断：ROE＋0.25×ROA",
+        "note": "全窗回放累计174.83%为已观察候选中最高，但2015—17半窗相对ROE-only为-2.50个百分点，"
+                "未过预设训练稳健门槛；2021—23验证累计-52.29%。这是独立候选研究名单，非生产策略。"
+                "历史沪深300成分内按rank(roe)+0.25×rank(roa)前20股等权，严格公告日PIT。",
+        "files": [("research", RESULTS_CN / "jq_roe_roa_selection.csv")],
+        "code_style": "ts_code",
+        "columns": ["rank", "stock_code", "stage", "roe", "roa", "roe_rank", "roa_rank",
+                    "score", "target_weight", "ann_date", "end_date"],
+        "supports_shap": False,
+    },
+    "cn_jq_multi_factor": {
+        "label": "聚宽多因子（低市值+高ROE）",
+        "note": "候选研究名单，历史沪深300成分内 rank(roe)−rank(market_cap) 前20股等权；"
+                "公告日严格早于信号日、当日市值、63交易日可交易过滤。每日收盘排名，"
+                "与15日调仓研究回测区分；不是ROE-only，不改变生产权重。",
+        "files": [("research", RESULTS_CN / "jq_multi_factor_selection.csv")],
+        "code_style": "ts_code",
+        "columns": ["rank", "stock_code", "stage", "roe", "market_cap", "roe_rank",
+                    "market_cap_rank", "score", "target_weight", "ann_date", "end_date"],
+        "supports_shap": False,
+    },
     "cn_ensemble": {
         "label": "CN 生产名单（preselect → PK）",
         "note": "流水线 [selection] 阶段产物；preselected 与 selected 合并展示，用「阶段」列区分。",
@@ -98,7 +128,10 @@ SOURCES: dict[str, dict] = {
     },
     "cn_arm_concept": {
         "label": "CN 概念/板块手臂（concept_rotation）",
-        "note": "板块层（概念动量×资金流−涨停密度）→ 个股层（板块内反转×资金流×流动性）；"
+        "note": "板块层（动量0.7−涨停密度0.3，2026-10-10 去掉聚合资金流项：该项按 净流入÷成交额 "
+                "打分，体量越大越占便宜，选出来的全是银行主导的「超大盘/央企50」；12 组网格回放里"
+                "只有这一口径跑赢全市场等权）→ 个股层（板块内买滞涨 + 资金流 + 流动性；"
+                "12 组里三种「买龙头」口径全部更差）；候选每板块≤4、每行业≤2；"
                 "独立策略项，**不替代** preselection→pk 的生产名单。",
         "files": [("arm", RESULTS_CN / "arm_concept_selection.csv")],
         "code_style": "ts_code",
@@ -223,7 +256,8 @@ def _read_merged(spec: dict) -> pd.DataFrame:
     if len(frames) == 1:
         (role, frame), = frames.items()
         out = frame.copy()
-        out["stage"] = "最终入选（PK 后）" if role == "selected" else "候选池（preselect）"
+        out["stage"] = ("候选研究名单" if role == "research" else
+                        "最终入选（PK 后）" if role == "selected" else "候选池（preselect）")
         return _sort(out)
 
     primary = "selected" if "selected" in frames else next(iter(frames))

@@ -285,7 +285,7 @@ export interface CalendarDayDetail {
   strategies?: string[]
   compare?: CalendarCompareRow[]
   strategy_meta?: Record<string, { label: string; group: string }>
-  strategy_summary?: { key: string; label: string; group: string; n: number; stocks: string[] }[]
+  strategy_summary?: { key: string; label: string; group: string; n: number; stocks: string[]; sources?: string[] }[]
   source_relations?: CalendarSourceRelation[]
   rows: CalendarPick[]
 }
@@ -588,4 +588,17 @@ export async function registerStrategyCandidate(payload: StrategyCandidateInput)
 export async function setStrategyStage(id: string, stage: string) {
   const { data } = await http.post(`/strategies/${encodeURIComponent(id)}/stage`, { stage })
   return data as { ok: boolean; id: string; stage: string; hint?: string }
+}
+
+// ─── 逐股 AI 多空综合分析（K 线页）───────────────────────────────────────────
+/** 这只票历史上每次被选中时，AI 的多空分析与买入/持有/卖出评价。 */
+export async function getStockAi(code: string, limit = 20): Promise<import('@/types/api').StockAiResponse> {
+  const { data } = await http.get(`/stocks/${encodeURIComponent(code)}/ai`, { params: { limit } })
+  return data
+}
+
+/** AI 结论按决策日的覆盖情况（哪个交易日已经分析过、买/持/卖分布）。 */
+export async function getAiPicksSummary(): Promise<import('@/types/api').AiPicksSummary> {
+  const { data } = await http.get('/ai-picks/summary')
+  return data
 }

@@ -437,6 +437,55 @@ def read_survey() -> list[dict]:
     return rows
 
 
+def read_jq_history() -> list[dict]:
+    """两个每日多因子研究名单，分别保留独立 source 与 rank。"""
+    rows = []
+    names = _cn_names()
+    for directory, source in (("jq_multi_factor_history", "jq_multi_factor"),
+                              ("jq_roe_roa_history", "jq_roe_roa")):
+        for path in sorted((RESULTS / directory).glob("*.csv")):
+            try:
+                frame = pd.read_csv(path)
+            except (OSError, pd.errors.ParserError):
+                continue
+            for _, r in frame.iterrows():
+                if str(r.get("trade_date"))[:10] != path.stem:
+                    continue
+                code = _norm_code(r.get("stock_code"))
+                rows.append({"decision_date": path.stem, "source": source,
+                             "stock_code": code, "name": names.get(code), "industry": None,
+                             "model_score": r.get("score"), "rank": r.get("rank"),
+                             "weight": r.get("target_weight"), "lots": None,
+                             "note": f"ROE {r.get('roe')}；ROA {r.get('roa') if source == 'jq_roe_roa' else '—'}；市值 {r.get('market_cap')}",
+                             "origin_date": path.stem, "file": f"{directory}/{path.name}"})
+    return rows
+
+
+def attach_ai_analysis(ledger: pd.DataFrame) -> pd.DataFrame:
+    """同一日同一股票共享一份 AI 结论；缺失时明确标记待分析。"""
+    ledger = ledger.copy()
+    fields = ("action", "confidence", "summary", "bull_case", "bear_case",
+              "risk_flags", "horizon", "status", "generated_at")
+    analyses = {}
+    for path in sorted((RESULTS / "ai_pick_analysis").glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(payload.get("date")) != path.stem:
+            continue
+        for row in payload.get("rows", []):
+            if isinstance(row, dict):
+                analyses[(path.stem, _norm_code(row.get("stock_code")))] = row
+    for field in fields:
+        default = "待分析" if field == "action" else ("pending" if field == "status" else None)
+        ledger[f"ai_{field}"] = [analyses.get((str(date)[:10], code), {}).get(field, default)
+                                  for date, code in zip(ledger["decision_date"], ledger["stock_code"])]
+    ledger["ai_risk_flags"] = ledger["ai_risk_flags"].map(
+        lambda v: "；".join(map(str, v)) if isinstance(v, list) else v)
+    return ledger
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="构建选股台账（选股日历 + 收益回顾）")
     ap.add_argument("--start", default="2025-01-01")
@@ -444,11 +493,12 @@ def main() -> int:
     args = ap.parse_args()
 
     ledger = pd.DataFrame(read_feishu() + read_snapshots() + read_survey() + read_arm_history()
-                          + read_arm_concept_history())
+                          + read_arm_concept_history() + read_jq_history())
     if ledger.empty:
         raise SystemExit("三个来源都没读到选股记录")
     ledger = ledger.drop_duplicates(["decision_date", "source", "stock_code"]).reset_index(drop=True)
     ledger = attach_reason_risk(ledger)
+    ledger = attach_ai_analysis(ledger)
     print(f"[ledger] 原始记录 {len(ledger)} 行；决策日 {ledger['decision_date'].nunique()} 个；"
           f"来源 {ledger['source'].value_counts().to_dict()}", flush=True)
     has_reason = ledger["selection_reason"].notna().sum()

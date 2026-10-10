@@ -355,13 +355,33 @@ def industry_stocks(industry: str, period: str = "daily", direction: str = "up",
                 "hint": f"没有行业「{industry}」（或该行业全部为未分类）"}
     sub = sub.dropna(subset=["period_ret"])
     sub = sub.sort_values("period_ret", ascending=(direction == "down"))
+
+    # 行业龙头 / 次龙头：按**流通市值**在行业内排名（用户看热力图时最直觉的口径：
+    # "这个行业里谁最大"）。只作为**标签**展示，不改变排序（排序仍是区间涨跌幅）。
+    # 注意：把选股口径改成"买龙头"在本仓库 12 组网格回放里全部更差
+    # （见 scripts/select_concept_arm.py 的模块 docstring），所以这里只标、不推荐。
+    mktcap, _stamp = _mktcap_lookup()
+    cap_rank: dict[str, int] = {}
+    # 踩坑：第一版写 `caps.sort_values(...).index` —— 那是 DataFrame 的**行标签**（0,1,2…），
+    # 不是股票代码，于是 cap_rank 的键全成了 "0"/"1"/"2"，get(stock_code) 永远 None，
+    # 页面上一个"龙一"标签都不会出现。必须按**列值**遍历。
+    caps = (sub[["stock_code"]]
+            .assign(mktcap=sub["stock_code"].map(mktcap))
+            .dropna(subset=["mktcap"])
+            .sort_values("mktcap", ascending=False))
+    for order, code in enumerate(caps["stock_code"], 1):
+        cap_rank[str(code)] = order
+
     rows = []
     for i, (_, r) in enumerate(sub.head(int(limit)).iterrows(), 1):
+        code = str(r["stock_code"])
         rows.append({
             "rank": i,
-            "stock_code": str(r["stock_code"]),
+            "stock_code": code,
             "name": str(r["name"] or ""),
             "market": str(r["market"] or ""),
+            "mktcap_yi": _num(mktcap.get(code), 2),
+            "leader_rank": cap_rank.get(code),      # 1=龙一 2=龙二，None=未进前二
             "period_ret": round(float(r["period_ret"]), 5),
             "pct_chg": None if pd.isna(r["pct_chg"]) else round(float(r["pct_chg"]), 5),
             "close": None if pd.isna(r["close"]) else round(float(r["close"]), 3),

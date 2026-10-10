@@ -145,3 +145,33 @@ def test_heatmap_market_filter_and_api(client):
     assert filtered["available"]
     assert filtered["totals"]["n_stocks"] < body["totals"]["n_stocks"]
     assert body["mktcap_date"], "市值快照日期必须回传（页面上要写明是哪天的市值）"
+
+
+# ─── 行业龙头 / 次龙头标签（2026-10-10 用户提问："应该选行业龙头或者次龙头么？"）───
+def test_industry_stocks_marks_cap_leaders():
+    """龙一/龙二 = 行业内**流通市值**前二，且标签必须真的落在市值最大的两只上。
+
+    踩坑回归：第一版把 `caps.sort_values(...).index`（行标签 0/1/2…）当成股票代码，
+    cap_rank 的键全错，页面上一个"龙一"都标不出来。
+    """
+    result = ihs.industry_stocks(industry="银行", period="daily", direction="up", limit=200)
+    if not result.get("available"):
+        pytest.skip("本地日线不可用")
+    rows = result["rows"]
+    tagged = {row["leader_rank"]: row for row in rows if row["leader_rank"] in (1, 2)}
+    assert set(tagged) == {1, 2}, "银行行业必须标出龙一与龙二"
+    caps = {r["mktcap_yi"] for r in rows if r["mktcap_yi"] is not None}
+    assert tagged[1]["mktcap_yi"] == max(caps), "龙一必须是行业内流通市值最大"
+    assert tagged[2]["mktcap_yi"] == sorted(caps)[-2], "龙二必须是行业内流通市值第二"
+    assert all(r["mktcap_yi"] is not None for r in rows), "每行都要能给出流通市值"
+    # 标签不改变排序：涨跌榜仍按区间涨跌幅降序
+    rets = [r["period_ret"] for r in rows]
+    assert rets == sorted(rets, reverse=True)
+
+
+def test_industry_stocks_leader_label_survives_json(client):
+    body = client.get("/api/industry/银行/stocks?period=daily&limit=200").json()
+    if not body.get("available"):
+        pytest.skip("本地日线不可用")
+    ranks = [r.get("leader_rank") for r in body["rows"]]
+    assert any(r == 1 for r in ranks) and any(r == 2 for r in ranks)

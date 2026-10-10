@@ -81,16 +81,34 @@ def test_kline_page_has_watchlist_and_info_panel():
     assert 'class="col-side"' in page and 'class="col-main"' in page
 
 
-def test_watchlist_component_groups_and_local_storage():
+def test_watchlist_component_groups_and_local_storage(client):
+    """侧栏的快速分组改为**由策略池驱动**（2026-10-10），不再硬编码来源子集。
+
+    为什么改成契约测试而不是"组件里出现 cn_arm 字样"：分组来自
+    `getStrategyPool()` → `strategyGroups()`，按 `selection_source` 过滤，
+    所以**新的策略（含备选/候选）一进池就自动出现在侧栏**；写死字符串的断言
+    反而会把这条链路钉回硬编码（而且候选策略 `cn_jq_*` 根本没有对应的旧字符串）。
+    """
     text = (ROOT / "frontend/src/components/StockWatchlist.vue").read_text(encoding="utf-8")
-    for group in ("cn_arm_concept", "cn_arm", "cn_ensemble", "paper"):
-        assert group in text, f"自选股侧栏缺少快速分组 {group}"
+    assert "getStrategyPool" in text and "strategyGroups" in text, "分组必须来自策略池"
+    assert "key: 'paper'" in text or "'paper'" in text, "侧栏要有模拟盘持仓分组"
     # 2026-10-10：持久化搬进了共享 composable（选股日历 / 行业热度 / 选股结果 也用同一份自选），
     # 侧栏改成消费它。所以"本地自选需要持久化"这条不变量现在落在 useWatchlist.ts 上。
     assert "useWatchlist" in text, "侧栏必须用共享自选 composable"
     composable = (ROOT / "frontend/src/composables/useWatchlist.ts").read_text(encoding="utf-8")
     assert "localStorage" in composable, "本地自选需要持久化"
     assert "kline.watchlist.v1" in composable, "沿用旧 key，避免升级后用户自选丢失"
+
+    # 池里每一个带 selection_source 的策略（生产 + 备选）都要能变成侧栏分组
+    pool = client.get("/api/strategies", params={"refresh": "false"}).json()
+    sources = {s.get("selection_source") for s in pool["strategies"] if s.get("selection_source")}
+    expected = {"cn_ensemble", "cn_arm", "cn_arm_concept",
+                "cn_jq_multi_factor", "cn_jq_roe_roa"}
+    assert expected <= sources, f"策略池缺少这些来源：{sorted(expected - sources)}"
+
+    helper = (ROOT / "frontend/src/components/watchlistStrategies.ts").read_text(encoding="utf-8")
+    assert "selection_source" in helper and "retired" in helper, \
+        "分组按选择来源过滤，且 retired 的策略不再出现"
 
 
 def test_info_panel_tabs_cover_existing_data():

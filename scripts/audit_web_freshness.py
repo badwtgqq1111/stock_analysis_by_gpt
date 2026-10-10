@@ -97,6 +97,19 @@ def _subdir_max(parent: Path, pattern: str = "*") -> str | None:
     return max(names) if names else None
 
 
+def _file_stem_max(parent: Path, pattern: str = "*") -> str | None:
+    """只认文件名形如 `YYYY-MM-DD.<ext>` 的产物。
+
+    AI 逐股结论是 `output/results_cn/ai_pick_analysis/<决策日>.json` —— 一天一个文件，
+    不是一天一个目录，所以 `_subdir_max` 认不出来（会把这一行永远记成"缺数据"）。
+    """
+    if not parent.exists():
+        return None
+    names = [p.stem for p in parent.glob(pattern)
+             if len(p.stem) == 10 and p.stem[4] == "-" and p.stem[:4].isdigit()]
+    return max(names) if names else None
+
+
 def _freshness_checks() -> list[dict]:
     from backend.services import market_board_service as mbs
     rows = []
@@ -118,6 +131,9 @@ def _freshness_checks() -> list[dict]:
     add("选股归因", "daily", _subdir_max(RESULTS / "attribution"),
         "explain_selection → pick_attribution_report", "output/results_cn/attribution/<date>/")
     add("K 线图表", "daily", _daily_bars_max(), "clean/qfq 日线", "assets/data/clean/ohlcv ... daily/adjust=qfq")
+    add("AI 多空分析（K 线页）", "daily", _file_stem_max(RESULTS / "ai_pick_analysis", "*.json"),
+        "analyze_strategy_picks_ai（全部策略逐股 买入/持有/卖出）",
+        "output/results_cn/ai_pick_analysis/<决策日>.json")
     add("榜单 / 行业热度 / 连板", "daily", _parquet_max(ROOT / "assets/data/derived/cn_moneyflow_features.parquet", "trade_date"),
         "日线 + 资金流面板", "assets/data/derived/cn_moneyflow_features.parquet")
     add("回测绩效", "daily", _json_window_end(RESULTS / "performance/summary.json"),

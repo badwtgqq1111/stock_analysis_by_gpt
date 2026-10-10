@@ -31,6 +31,8 @@
       <span class="stage-chip" :class="'stage-' + data.stage.stage">{{ data.stage.label }}</span>
       <span class="stage-why">{{ data.stage.evidence }}</span>
     </div>
+    <!-- 逐股 AI 多空综合分析（买入/持有/卖出）：与 K 线同页，用户要求 -->
+    <AiAnalysisPanel :code="selectedCode" />
     <div class="chart-area" v-if="data && data.data.length > 0">
       <div class="chart-row">
         <KlineChart
@@ -115,6 +117,7 @@ import StateBlock from '@/components/ui/StateBlock.vue'
 import IntradayChart from '@/components/IntradayChart.vue'
 import StockWatchlist from '@/components/StockWatchlist.vue'
 import StockInfoPanel from '@/components/StockInfoPanel.vue'
+import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
 import { useKlineData } from '@/composables/useKlineData'
 import { getIntraday, getIntradayCoverage } from '@/api/client'
 import type { IntradayCoverage, IntradayResponse } from '@/types/api'

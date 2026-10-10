@@ -116,7 +116,9 @@
             <p class="hint tiny side-hint" v-if="selected">
               中位 {{ pct(stocks?.stats.ret) }} · 上涨占比
               {{ stocks ? (stocks.stats.up_ratio * 100).toFixed(0) : '—' }}% ·
-              净流入 {{ fmt(stocks?.stats.net_amount_yi, 2) }} 亿
+              净流入 {{ fmt(stocks?.stats.net_amount_yi, 2) }} 亿<br />
+              <b>龙一/龙二 = 行业内流通市值前二</b>（只标不荐：把选股口径改成"买龙头"，
+              12 组网格回放里全部更差，见「策略池 → 行业轮动」的回放指标）
             </p>
             <StateBlock v-if="stocksError" state="error" title="取不到成分股" :detail="stocksError" />
             <div v-else-if="!stocks" class="loading-mini">加载中…</div>
@@ -125,7 +127,13 @@
                   @click="gotoKline(s.stock_code)">
                 <span class="sr-rank dim">{{ s.rank }}</span>
                 <span class="sr-main">
-                  <span class="sr-name">{{ s.name }}</span>
+                  <span class="sr-name">
+                    {{ s.name }}
+                    <!-- 行业龙头/次龙头 = 行业内**流通市值**前二。只标不荐：
+                         "改买龙头"在 12 组网格回放里全部更差（超额 -0.79% ~ -1.38%/月）。 -->
+                    <span v-if="s.leader_rank === 1" class="tag gold tiny" title="行业内流通市值第 1">龙一</span>
+                    <span v-else-if="s.leader_rank === 2" class="tag info tiny" title="行业内流通市值第 2">龙二</span>
+                  </span>
                   <span class="sr-code mono dim">{{ s.stock_code }}</span>
                 </span>
                 <span class="sr-ret mono" :class="tone(s.period_ret)">{{ pct(s.period_ret) }}</span>
@@ -169,7 +177,7 @@
             <thead>
               <tr>
                 <th>#</th><th class="text-left">代码</th><th class="text-left">名称</th><th class="text-left">板块</th>
-                <th>{{ stocks.period_label }}涨跌</th><th>当日</th><th>收盘</th><th>成交额</th>
+                <th>{{ stocks.period_label }}涨跌</th><th>当日</th><th>收盘</th><th>流通市值(亿)</th><th>成交额</th>
                 <th>净流入(亿)</th><th>连板</th><th>自选</th><th class="text-left">操作</th>
               </tr>
             </thead>
@@ -179,12 +187,15 @@
                 <td class="mono text-left link" @click="gotoKline(s.stock_code)">{{ s.stock_code }}</td>
                 <td class="text-left">
                   <a class="link" @click="gotoKline(s.stock_code)">{{ s.name }}</a>
+                  <span v-if="s.leader_rank === 1" class="tag gold" title="行业内流通市值第 1">龙一</span>
+                  <span v-else-if="s.leader_rank === 2" class="tag info" title="行业内流通市值第 2">龙二</span>
                   <span v-if="s.is_st" class="flag flag-bad">ST</span>
                 </td>
                 <td class="text-left tiny dim">{{ s.market || '—' }}</td>
                 <td :class="tone(s.period_ret)"><b>{{ pct(s.period_ret) }}</b></td>
                 <td :class="tone(s.pct_chg)">{{ pct(s.pct_chg) }}</td>
                 <td>{{ fmt(s.close, 2) }}</td>
+                <td class="dim">{{ fmt(s.mktcap_yi, 0) }}</td>
                 <td class="dim">{{ money(s.amount) }}</td>
                 <td :class="tone(s.net_amount_yi)">{{ fmt(s.net_amount_yi, 2) }}</td>
                 <td>

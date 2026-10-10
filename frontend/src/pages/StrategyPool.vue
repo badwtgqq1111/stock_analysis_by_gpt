@@ -28,9 +28,12 @@
           落后的策略：{{ pool.totals.stale_production.join('、') }} —— 每日自动化末尾会跑
           <code>sync_strategy_pool.py --strict</code>，不达标的会写进运行日志并告警。
         </p>
+        <p class="hint tiny">统一对比基准：中证500（000905.SH） · 绩效快照 {{ pool.performance_generated_at || '待生成' }}。
+          同窗比较：{{ pool.common_window?.status === 'ok' ? `${pool.common_window.start_date} — ${pool.common_window.end_date}` : '共同历史不足，暂不跨策略排名' }}。
+          名单跟踪毛收益与独立研究回测分开展示，非真实账户净收益。</p>
       </div>
 
-      <!-- 生产策略卡片 -->
+      <!-- 每日名单策略卡片：包括仍处于 candidate 阶段的多因子 -->
       <div class="strategy-grid">
         <div v-for="s in pool.strategies" :key="s.id" class="panel strategy-card">
           <div class="sc-head">
@@ -64,6 +67,17 @@
             <label>调度</label>
             <span class="tiny">{{ s.schedule || '—' }}</span>
           </div>
+          <!-- 回放指标直接摊在卡上：策略"到底行不行"不该点进别的页面才知道 -->
+          <div class="sc-row" v-if="s.metrics && s.metrics.length">
+            <label>月度回放（同窗口，基准=全市场等权）</label>
+            <span class="metric-row">
+              <span v-for="m in s.metrics" :key="m.key" class="metric"
+                    :class="{ neg: m.key === 'excess_mean' && m.value < 0 }">
+                <label>{{ m.label }}</label>
+                <b class="mono">{{ m.value !== null ? fmtMetric(m, s.metrics_pct) : '—' }}</b>
+              </span>
+            </span>
+          </div>
           <div class="sc-row">
             <label>台账来源</label>
             <span>
@@ -86,6 +100,7 @@
             <a class="btn-ghost btn-sm" :href="selectionLink(s)">看最新名单 →</a>
             <a class="btn-ghost btn-sm" href="#/calendar">选股日历 →</a>
           </div>
+          <StrategyPerformance :data="s.performance" />
         </div>
       </div>
 
@@ -108,6 +123,7 @@
           <tbody>
             <tr v-for="c in pool.candidates" :key="c.id">
               <td class="left">
+                <a v-if="c.selection_source" class="btn-ghost btn-sm" :href="`#/?source=${c.selection_source}`">看每日名单 →</a>
                 <b>{{ c.name }}</b>
                 <div class="tiny dim mono">{{ c.id }}</div>
               </td>
@@ -166,6 +182,7 @@ import { getStrategyPool, setStrategyStage } from '@/api/client'
 import type { StrategyPoolEntry, StrategyPoolResponse } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
+import StrategyPerformance from '@/components/StrategyPerformance.vue'
 
 const pool = ref<StrategyPoolResponse | null>(null)
 const error = ref('')
@@ -187,8 +204,17 @@ async function reload() {
 
 /** 该策略的名单在「选股结果」页对应的来源 tab（台账 source key 的第一个） */
 function selectionLink(item: StrategyPoolEntry): string {
-  const source = item.ledger_sources[0] || ''
+  const source = item.selection_source || ''
   return source ? `#/?source=${encodeURIComponent(source)}` : '#/'
+}
+
+/** 回放指标：`metrics_pct` 里的字段按百分数显示（超额/胜率/回撤…） */
+function fmtMetric(metric: { key: string; value: number }, pctKeys: string[]): string {
+  if ((pctKeys || []).includes(metric.key)) {
+    const sign = metric.value > 0 ? '+' : ''
+    return `${sign}${(metric.value * 100).toFixed(2)}%`
+  }
+  return metric.value.toFixed(3)
 }
 
 async function changeStage(id: string, stage: string) {
@@ -222,6 +248,11 @@ onMounted(reload)
 .st-retired { color: var(--text-dim); }
 .sc-summary { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.6; }
 .sc-stats { display: flex; gap: var(--sp-4); flex-wrap: wrap; }
+.metric-row { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
+.metric { display: flex; flex-direction: column; gap: 0; }
+.metric label { font-size: 10px; color: var(--text-dim); }
+.metric b { font-size: var(--fs-sm); color: var(--text-primary); }
+.metric.neg b { color: var(--accent-down); }
 .sc-stat { display: flex; flex-direction: column; gap: 1px; }
 .sc-stat label, .sc-row label { font-size: 10px; color: var(--text-dim); text-transform: uppercase;
   letter-spacing: 0.04em; }

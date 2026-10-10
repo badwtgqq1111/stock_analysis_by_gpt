@@ -58,7 +58,7 @@
           <span><i class="sw gain"></i>超额 &gt; 0</span>
           <span><i class="sw loss"></i>超额 &lt; 0</span>
           <span><i class="sw none"></i>无收益数据（未来交易日不足）</span>
-          <span>来源标记：A=arm（研究手臂 base_v1） C=arm_concept（概念/板块手臂） N=notify（PK 后最终名单） P=preselected（归档候选池） R=survey_raw G=survey_gate</span>
+          <span>来源标记：A=arm（研究手臂 base_v1） C=arm_concept（概念/板块手臂） N=notify（PK 后最终名单） P=preselected（归档候选池） J=聚宽多因子（备选） D=动态诊断候选（备选） R=survey_raw G=survey_gate</span>
         </div>
       </div>
 
@@ -85,10 +85,14 @@
         <!-- 多策略对比：同一只票只占一行，每个策略一列。
              平铺列表里 preselected(候选池) 与 notify(PK 后最终名单) 往往是同一批票，
              看起来就是"重复"（实测 2026-10-08：8 只票 × 2 个源 = 16 行）。 -->
+        <!-- 策略组 pill：组名太粗 —— "多因子策略"底下有两个策略（聚宽多因子 / 动态诊断候选），
+             只写组名看不出某只票到底是哪一个选中的。这里把组内**具体策略**和行数一并写出来。 -->
         <div class="pill-row" v-if="(day.strategy_summary || []).length">
-          <span class="pill" v-for="s in day.strategy_summary" :key="s.key" :title="s.stocks.join(' ')">
+          <span class="pill" v-for="s in day.strategy_summary" :key="s.group" :title="s.stocks.join(' ')">
             <b class="gold">{{ s.group }}</b> {{ s.n }} 只
-            <span class="dim tiny">{{ s.label }}</span>
+            <template v-for="src in s.sources || []" :key="src">
+              <span class="dim tiny">{{ strategyChipLabel(src) }} {{ perSourceCount(src) }} 行</span>
+            </template>
           </span>
         </div>
         <div class="filter-bar">
@@ -121,7 +125,10 @@
               <th>
                 <select v-model="filters.strategy">
                   <option value="">全部</option>
-                  <option v-for="g in strategyGroups" :key="g" :value="g">{{ g }}</option>
+                  <option v-for="st in day.strategies || []" :key="'src-' + st" :value="st">
+                    {{ strategyChipLabel(st) }}
+                  </option>
+                  <option v-for="g in strategyGroups" :key="'grp-' + g" :value="g">策略组：{{ g }}</option>
                 </select>
               </th>
               <th v-for="st in day.strategies || []" :key="'f+' + st"></th>
@@ -144,11 +151,18 @@
               <td class="mono link" @click="gotoStock(c.stock_code)">{{ c.stock_code }}</td>
               <td class="left link" @click="gotoStock(c.stock_code)">{{ c.name || '—' }}</td>
               <td class="left tiny">{{ shortIndustry(c.industry) }}</td>
-              <!-- 这只票是被哪种策略选出来的（模型策略 / 小市值手臂 / 行业轮动） -->
+              <!-- 这只票是被哪个**具体策略**选出来的。同一个策略组下可能有多个策略
+                   （"多因子策略" = 聚宽多因子 + 动态诊断候选），只写组名会看不出是哪一个，
+                   所以这里逐策略显示 `J 聚宽多因子` / `D 动态诊断`。 -->
               <td class="left">
-                <span v-for="g in c.strategy_groups || []" :key="g" class="tag"
-                      :class="strategyTagClass(g)" :title="(c.strategy_labels || []).join(' + ')">{{ g }}</span>
-                <span v-if="!(c.strategy_groups || []).length" class="dim">—</span>
+                <span v-for="k in c.strategy_keys || []" :key="k" class="tag"
+                      :class="strategyTagClass(strategyGroupOf(k))" :title="strategyChipTitle(k)">
+                  {{ strategyChipLabel(k) }}</span>
+                <template v-if="!(c.strategy_keys || []).length">
+                  <span v-for="g in c.strategy_groups || []" :key="g" class="tag"
+                        :class="strategyTagClass(g)">{{ g }}</span>
+                </template>
+                <span v-if="!((c.strategy_keys || c.strategy_groups || []).length)" class="dim">—</span>
               </td>
               <td v-for="st in day.strategies || []" :key="st" :class="{ 'cell-in': c.cells[st] }">
                 <template v-if="c.cells[st]">
@@ -194,7 +208,10 @@
             <th>
               <select v-model="filters.strategy">
                 <option value="">全部</option>
-                <option v-for="g in strategyGroups" :key="g" :value="g">{{ g }}</option>
+                <option v-for="st in day.strategies || []" :key="'src-' + st" :value="st">
+                  {{ strategyChipLabel(st) }}
+                </option>
+                <option v-for="g in strategyGroups" :key="'grp-' + g" :value="g">策略组：{{ g }}</option>
               </select>
             </th>
             <th><input v-model="filters.stage" placeholder="阶段" /></th>
@@ -222,10 +239,14 @@
               <td class="mono link" @click="gotoStock(r.stock_code)">{{ r.stock_code }}</td>
               <td class="left link" @click="gotoStock(r.stock_code)">{{ r.name || '—' }}</td>
               <td class="left">
-                <span v-for="(g, i) in r.strategy_groups || []" :key="g" class="tag"
-                      :class="strategyTagClass(g)" :title="(r.strategy_labels || []).join(' + ')">
-                  {{ g }}</span>
-                <span v-if="!(r.strategy_groups || []).length" class="dim">—</span>
+                <span v-for="k in r.strategy_keys || []" :key="k" class="tag"
+                      :class="strategyTagClass(strategyGroupOf(k))" :title="strategyChipTitle(k)">
+                  {{ strategyChipLabel(k) }}</span>
+                <template v-if="!(r.strategy_keys || []).length">
+                  <span v-for="g in r.strategy_groups || []" :key="g" class="tag"
+                        :class="strategyTagClass(g)">{{ g }}</span>
+                </template>
+                <span v-if="!((r.strategy_keys || r.strategy_groups || []).length)" class="dim">—</span>
               </td>
               <td class="left"><span class="stage-chip" :class="'stage-' + r.stage"
                     :title="r.stage_evidence">{{ r.stage_label || '—' }}</span></td>
@@ -459,14 +480,19 @@ function stageKey(label: string) { return STAGE_KEYS[label] || 'mid_trend' }
 const SOURCE_LABEL: Record<string, string> = {
   notify: '最终名单（notify）', preselected: '候选池（preselected）',
   arm: '研究手臂 base_v1（arm）', arm_concept: '概念/板块手臂（arm_concept）',
+  // 备选（候选）策略也在每日自动化里跑，日历必须能查到它们当天的名单
+  jq_multi_factor: '聚宽多因子 低市值+高ROE（jq_multi_factor）',
+  jq_roe_roa: '动态诊断候选 ROE＋0.25×ROA（jq_roe_roa）',
   survey_raw: '调研回看(原)（survey_raw）', survey_gate: '调研回看(门禁)（survey_gate）',
 }
 const SOURCE_SHORT: Record<string, string> = {
   notify: '最终名单', preselected: '候选池', arm: '研究手臂',
-  arm_concept: '概念手臂', survey_raw: '调研(原)', survey_gate: '调研(门禁)',
+  arm_concept: '概念手臂', jq_multi_factor: '聚宽多因子', jq_roe_roa: '动态诊断',
+  survey_raw: '调研(原)', survey_gate: '调研(门禁)',
 }
 const SOURCE_LETTER: Record<string, string> = {
   arm: 'A', arm_concept: 'C', notify: 'N', preselected: 'P', survey_raw: 'R', survey_gate: 'G',
+  jq_multi_factor: 'J', jq_roe_roa: 'D',
 }
 // ── 按列筛选（2026-10-10 用户要求）────────────────────────────────────────────
 // 文本列：包含匹配，`!x` 表示排除；数值列：`>0` / `<=2` / `1~3` / `=2.5`，
@@ -515,7 +541,7 @@ const compareFiltered = computed(() => (day.value?.compare || []).filter((c: any
   (!onlyWatchlist.value || watchlist.has(c.stock_code))
   && matchText(c.stock_code, filters.value.code) && matchText(c.name, filters.value.name)
   && matchText(c.industry, filters.value.industry)
-  && (!filters.value.strategy || (c.strategy_groups || []).includes(filters.value.strategy))
+  && strategyHit(c, filters.value.strategy)
   && (!filters.value.stage || String(c.stage_label || '').includes(filters.value.stage))
   && matchText(c.reason, filters.value.reason)
   && matchNum(c.r1, filters.value.r1, 100) && matchNum(c.r5, filters.value.r5, 100)
@@ -527,7 +553,7 @@ const detailFiltered = computed(() => (day.value?.rows || []).filter((r: any) =>
   && matchText(r.stock_code, filters.value.code) && matchText(r.name, filters.value.name)
   && matchText(r.industry, filters.value.industry)
   && (!filters.value.source || r.source === filters.value.source)
-  && (!filters.value.strategy || (r.strategy_groups || []).includes(filters.value.strategy))
+  && strategyHit(r, filters.value.strategy)
   && matchText(r.stage_label, filters.value.stage)
   && matchText(r.reason, filters.value.reason) && matchText(r.risk, filters.value.risk)
   && matchNum(r.rank, filters.value.rank) && matchNum(r.weight, filters.value.weight, 100)
@@ -566,6 +592,7 @@ function sourceLabel(src: string) { return SOURCE_LABEL[src] || src }
 const STRATEGY_LABEL: Record<string, string> = {
   notify: '模型策略（PK 后最终名单）', preselected: '模型策略（候选池）',
   arm: '小市值/研究手臂（arm_select）', arm_concept: '行业轮动（概念/板块手臂）',
+  jq_multi_factor: '多因子策略（低市值+高ROE）', jq_roe_roa: '多因子策略（ROE＋0.25×ROA）',
   survey_raw: '调研回看（原）', survey_gate: '调研回看（门禁）',
 }
 function strategyLabel(src: string) {
@@ -576,9 +603,41 @@ function strategyTagClass(group: string) {
   if (group === '模型策略') return 'gold'
   if (group === '小市值手臂') return 'info'
   if (group === '行业轮动') return 'ok'
+  if (group === '多因子策略') return 'warn'   // 备选/候选策略：橙色与生产策略区分开
   return 'dim'
 }
 function sourceShort(src: string) { return SOURCE_SHORT[src] || src }
+function sourceLetter(src: string) { return SOURCE_LETTER[src] || (src ? src[0].toUpperCase() : '') }
+
+/** 来源 → 策略组。后端 `strategy_meta` 也带一份，这里兜底免得老缓存缺字段。 */
+const STRATEGY_GROUP: Record<string, string> = {
+  notify: '模型策略', preselected: '模型策略', arm: '小市值手臂', arm_concept: '行业轮动',
+  jq_multi_factor: '多因子策略', jq_roe_roa: '多因子策略',
+  survey_raw: '调研', survey_gate: '调研',
+}
+function strategyGroupOf(src: string) {
+  return day.value?.strategy_meta?.[src]?.group || STRATEGY_GROUP[src] || '其它'
+}
+
+/** 行内 chip 文案：`J 聚宽多因子` / `D 动态诊断` —— 组名相同也要能一眼分清是哪一个策略。 */
+function strategyChipLabel(src: string) {
+  return `${sourceLetter(src)} ${SOURCE_SHORT[src] || src}`
+}
+function strategyChipTitle(src: string) {
+  return `${strategyLabel(src)}（策略组：${strategyGroupOf(src)}）`
+}
+/** 策略组 pill 里的"n 行"：来自当天 per_source（行数，不是去重只数）。 */
+function perSourceCount(src: string) {
+  return (day.value?.per_source || {})[src] ?? 0
+}
+/** 筛选：填具体策略 key（jq_multi_factor）或策略组名（多因子策略）都能命中。 */
+function strategyHit(row: any, want: string) {
+  if (!want) return true
+  const keys: string[] = row.strategy_keys || []
+  if (keys.includes(want)) return true
+  if ((row.strategy_groups || []).includes(want)) return true
+  return keys.some((k) => `${strategyChipLabel(k)} ${strategyLabel(k)}`.includes(want))
+}
 /** 行业名很长（"C29橡胶和塑料制品业"），只取前 6 字，完整值放 title */
 function shortIndustry(text: string | undefined) {
   const t = (text || '').trim()

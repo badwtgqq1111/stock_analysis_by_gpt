@@ -43,6 +43,14 @@
 #        （实测 2026-10-09 早上的台账还是 10-08 16:57 的，最新决策日停在 09-30，
 #          而 10-08 的 feishu_*.json 与 selection_snapshots 其实早就写好了）。
 #        必须放在 notify **之后**：台账的三路输入之一 feishu_<date>.json 是通知步骤写的。
+#   3e.（2026-10-10 新增）**备选（候选）策略名单 + 逐股 AI 多空分析**，两步都提到台账之前：
+#        · jq_multi_factor —— 候选策略（低市值+高ROE / ROE＋0.25×ROA）的每日名单，
+#          此前排在台账**之后**跑，当天名单要等第二天重建台账才进日历（"每天日历可查"做不到）；
+#        · ai_picks —— `analyze_strategy_picks_ai.py` 对当日**全部策略**（生产 + 备选）的
+#          每只被选个股做多空综合分析，给出 买入/持有/卖出（DeepSeek，key 取 DEEPSEEK_API_KEY）。
+#          产物 output/results_cn/ai_pick_analysis/<date>.json 由台账合进选股日历，
+#          并作为前端 K 线页「AI 多空分析」面板的数据源（/api/stocks/<code>/ai）。
+#        开关：DAILY_JQ_MULTI_FACTOR / DAILY_AI_PICKS = 0；两者都非致命。
 #   4b. 每个阶段都带 --force-rebalance：selection.rebalance_stride_days（默认 5）本意是
 #      "再平衡节奏"，但它会在 stride 窗口内直接沿用上一版组合，导致新选出来的票几天不换。
 #      需要保留 stride 行为时用 DAILY_FORCE_REBALANCE=0 关闭。
@@ -175,7 +183,7 @@ notify_alert() {
 }
 
 # 预检：跑一遍与本次改动相关的回归测试（约 1 秒），把"代码级错误"挡在 70 分钟的重活之前
-PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py -q}"
+PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py -q}"
 if [ "${DAILY_PREFLIGHT:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
   if eval "$PREFLIGHT_CMD" > "$LOG_DIR/preflight.log" 2>&1; then
     log "preflight ok: $PREFLIGHT_CMD"
@@ -317,9 +325,38 @@ if [ "${DAILY_ARM_CONCEPT:-1}" = "1" ]; then
   # 与 arm_selection 并列的独立策略项，产物 output/results_cn/arm_concept_selection.*，
   # 前端「选股结果」的来源下拉与「流水线」页各占一个 tab。
   run_data_step arm_concept uv run python scripts/run_cn_pipeline.py --stage arm_concept
-  # 月频回放摘要（前端「概念手臂」tab 上的期均/基准数字）：规则一变就该重算，
+  # 月频回放摘要（前端「概念手臂」tab 与策略池卡上的期均/基准/超额数字）：规则一变就该重算，
   # 与名单一起放在同一步里，避免"名单是新的、回放数字是上个月的"。
   run_data_step arm_concept_backtest uv run python scripts/select_concept_arm.py --backtest --months "${DAILY_ARM_CONCEPT_BACKTEST_MONTHS:-24}"
+  # 板块层×个股层 12 组网格回放（"买龙头还是买滞涨""要不要资金流项"这类口径变更的裁决依据）：
+  # 一次约 60s，按**周**跑（默认周日）而不是每天 —— 口径不是每天变的，没必要天天烧。
+  # 产物 output/results_cn/arm_concept_grid_compare.json；开关 DAILY_ARM_CONCEPT_GRID=0/1/always
+  if [ "${DAILY_ARM_CONCEPT_GRID:-auto}" != "0" ]; then
+    run_grid=0
+    case "${DAILY_ARM_CONCEPT_GRID:-auto}" in
+      1|always) run_grid=1 ;;
+      auto) [ "$(date +%u)" = "7" ] && run_grid=1 || run_grid=0 ;;
+    esac
+    if [ "$run_grid" = "1" ]; then
+      run_data_step arm_concept_grid uv run python scripts/select_concept_arm.py --compare-grid --months "${DAILY_ARM_CONCEPT_BACKTEST_MONTHS:-24}"
+      # 稳健性拆分：网格第一 ≠ 能上线（实测 mom_only×leader 全窗 +1.83% 但前半窗 -1.08%）。
+      # 结果写进策略池卡的指标里（arm_concept_robustness.json），页面上一眼能看到"前半窗"。
+      run_data_step arm_concept_robustness uv run python scripts/select_concept_arm.py --robustness --months "${DAILY_ARM_CONCEPT_BACKTEST_MONTHS:-24}"
+    elif [ "$DRY_RUN" -eq 1 ]; then
+      log "step=arm_concept_grid would run（按周：本周日；DAILY_ARM_CONCEPT_GRID=always 可强制今天就跑）"
+    fi
+    # 同理按周跑一次「行业动量多窗口研究」（日/周/月 × 行业层 + 行业内），
+    # 约 5 分钟（B/C 两段要全市场个股面板）。产物 output/research/industry_momentum/。
+    if [ "$run_grid" = "1" ]; then
+      run_data_step industry_momentum uv run python scripts/industry_momentum_study.py
+      # 行业反转实验台（训练/验证切分）：用来回答"行业反转能不能进生产"。
+      # 2026-10-10 结论是**不能**（训练期最好的 3 个设计在验证期全部转负），
+      # 但口径会随数据变化，所以按周重跑一次、把结论留在产物里。
+      run_data_step industry_reversal_lab uv run python scripts/industry_reversal_lab.py --stage split
+      # 行业 veto 日报（只读）：把"行业层面是反转"用在**已有生产名单**上，逐期做配对符号检验。
+      run_data_step industry_veto uv run python scripts/industry_veto_report.py
+    fi
+  fi
 fi
 if [ "${DAILY_PERFORMANCE:-1}" = "1" ]; then
   # 回测绩效页的数据链：**逐笔回放（4 个 arm，实测 ~2.5s/arm）→ portfolio_performance**。
@@ -408,6 +445,34 @@ if [ "$FAILED" -eq 0 ] && [ "${DAILY_ATTRIBUTION:-1}" = "1" ]; then
     else
       log "attribution-explain FAILED（会跳过报告）-> $LOG_DIR/attribution.log"
     fi
+  fi
+fi
+
+# ── 备选/候选策略名单 + 逐股 AI 多空分析（都必须在台账之前）───────────────
+# 用户要求（2026-10-10）："不管备选策略还是生产策略我都想进每日自动化，并且每天日历可查。
+#                          被选中的每只个股再用 AI 做多空综合分析，评价买入/持有/卖出。"
+# 位置是这次改动的**关键**：台账（选股日历的数据源）按决策日合并所有来源，
+#   ① 候选策略（jq_multi_factor / jq_roe_roa）此前排在台账**之后**，当天选出来的候选名单
+#      要等到**第二天**重建台账才出现在日历里 —— 违反"每天日历可查"；
+#   ② 逐股 AI 结论写 output/results_cn/ai_pick_analysis/<date>.json，台账的 attach_ai_analysis
+#      读它。放在台账之后 = 日历上永远是"待分析"。
+# 所以这两步都提到台账之前，且都在 notify 之后（AI 要读当日 feishu_<date>.json 的最终名单）。
+# 两者都非致命（run_data_step 只记日志）：候选名单/AI 失败不该让当日生产结果与 .done 停摆。
+if [ "${DAILY_JQ_MULTI_FACTOR:-1}" = "1" ]; then
+  # 多因子每日候选名单：研究产物，不参与生产订单或权重。
+  run_data_step jq_multi_factor uv run python scripts/select_jq_multi_factor.py
+fi
+
+if [ "${DAILY_AI_PICKS:-1}" = "1" ]; then
+  # 当日全部策略（生产 + 备选）逐股多空分析 → 买入/持有/卖出。
+  # --skip-existing：当天 19:00/20:30/22:00 的失败重试只补"待分析"的股票，不重复烧 API。
+  # 开关：DAILY_AI_PICKS=0；显式给 key 时用 DAILY_AI_PICKS_KEY 覆盖 DEEPSEEK_API_KEY。
+  run_data_step ai_picks uv run python scripts/analyze_strategy_picks_ai.py \
+      --date "$TRADE_DATE" --skip-existing
+  if [ -f "output/results_cn/ai_pick_analysis/$TRADE_DATE.json" ]; then
+    log "ai-picks -> output/results_cn/ai_pick_analysis/$TRADE_DATE.json（K 线页 / 选股日历逐股 AI 结论）"
+  else
+    log "ai-picks 未产出名单（见 $LOG_DIR/data_ai_picks.log；不阻塞生产）"
   fi
 fi
 
@@ -532,6 +597,8 @@ if [ "${DAILY_COMPLETENESS:-1}" = "1" ]; then
     log "step=pk-guard would run: scripts/pk_guard_report.py（PK 护栏：不该拿到权重的票）"
     log "step=promotion-check would run: scripts/promotion_check.py（上线闸门：够不够硬）"
     log "step=ths-export would run: scripts/export_ths_watchlist.py（同花顺自选股 · 五个源，含 reference 参考账户）"
+    log "step=jq-multi-factor would run: scripts/select_jq_multi_factor.py（候选策略每日名单，进台账）"
+    log "step=ai-picks would run: scripts/analyze_strategy_picks_ai.py --date $TRADE_DATE --skip-existing（全部策略逐股 AI 多空分析）"
   else
     # 注意：不带 --strict 时这个脚本**退出码恒为 0**，所以不能用退出码判断"是否达标" ——
     # 第一版就是这么写的，于是"未达标 3/8"的那次在 run.log 里被打成了"ok（全部达标）"，
@@ -547,6 +614,11 @@ if [ "${DAILY_COMPLETENESS:-1}" = "1" ]; then
       sed -n '/未达标/p' output/data_quality/data_completeness.md 2>/dev/null | tail -1 | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
     fi
   fi
+fi
+
+# 多因子候选名单已提前到台账之前（见上）；这里只保留绩效快照。
+if [ "${DAILY_STRATEGY_PERFORMANCE:-1}" = "1" ]; then
+  run_data_step strategy_performance uv run python scripts/build_strategy_pool_performance.py
 fi
 
 # ── 策略池同步（2026-10-10 新增）────────────────────────────────────────

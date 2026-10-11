@@ -137,3 +137,38 @@ def test_dynamic_api_source_and_candidate_card():
         assert item["n_picks"] == 20
         assert item["performance"]["research"]["strategy_id"] == item["id"]
         assert item["performance"]["research"]["benchmark_code"] == "000905.SH"
+
+
+# ─── 影子组合曲线：稀疏决策日的策略也要有"中证500 对比曲线"（2026-10-10 用户反馈）────
+def test_rot_arm_has_csi500_curve_from_shadow_account():
+    """用户问："行业轮动手臂（MST 大类 + 7 因子等权）这个没有对比中证500 的收益曲线对比呢？"
+
+    原因：`tracking`（名单跟踪毛收益）要求**连续交易日**都有归档名单（见 METHOD），
+    而按决策日归档的策略（rot_arm 每周/每月一份）只能拿到"最近几个连续交易日"的样本
+    —— 实测只有 8 个观测，卡片上等于没有可用曲线。
+    修法：把影子组合（同一套执行假设、含成本的模拟账户）的日度净值作为 `research` 曲线接上，
+    历史回填到 2025-09（23 个决策日 → 259 个收益观测），基准仍是中证500。
+    """
+    payload = perf.build()
+    row = payload["strategies"].get("rot_arm")
+    assert row, "rot_arm 必须在绩效快照里"
+    tracking = row["tracking"]
+    research = row.get("research")
+    assert research, "rot_arm 必须有研究/模拟盘曲线（否则卡片上没有中证500 对比）"
+    assert research["kind"] == "shadow_account_net"
+    assert research["benchmark_code"] == "000905.SH" and research["benchmark_name"] == "中证500"
+    assert research["status"] == "ok" and len(research["nav"]) == len(research["benchmark_nav"])
+    assert research["observations"] >= 200, f"曲线要够长（实测 259）：{research['observations']}"
+    assert len(tracking["nav"]) <= research["observations"], "名单跟踪不应比模拟盘曲线更长"
+    assert research["metrics"]["total_return"] == row["research"]["metrics"]["total_return"]
+    assert "含佣金" in research["methodology"] or "含佣金" in research["reason"]
+    # 影子组合产物必须真实存在（曲线不是编的）
+    assert (ROOT / "output/paper_trading/shadow/rot_arm/nav.csv").exists()
+
+
+def test_frontend_prefers_long_curve_for_sparse_decision_strategies():
+    text = (ROOT / "frontend/src/components/StrategyPerformance.vue").read_text(encoding="utf-8")
+    assert "defaultMode" in text and "observations ?? 0) < 60" in text, \
+        "名单跟踪样本太短时要自动切到研究/模拟盘曲线"
+    assert "shadow_account_net" in text, "卡片要写明当前曲线口径（模拟盘净值/含成本）"
+    assert "个收益观测" in text

@@ -109,6 +109,11 @@ def check_daily_bars() -> Check:
     t["trade_date"] = pd.to_datetime(t["trade_date"])
     last = t["trade_date"].max()
     n = int(t.loc[t["trade_date"] == last, "stock_code"].nunique())
+    # 说明（2026-10-10 实测）：这里**不**做"中间缺口"自检 —— 本仓库的
+    # `market_board_service.trade_dates()` 是从自己的日线推出来的，拿它当基准等于自己查自己：
+    # 2026-09-25 两边同时"缺"，而新浪独立日历确认那天**本来就不是交易日**。
+    # 也就是说这类现象不是数据缺口，而是"决策日可能落在非交易日"（流水线按运行日写决策），
+    # 下游按决策日回填时必须显式跳过（行业轮动手臂遇到时会直接报错，不静默退回最新日）。
     return Check("daily_bars", latest=str(last.date()), n=n, ok=n > 0,
                  detail=f"最新交易日 {n} 只")
 

@@ -22,89 +22,216 @@
           <span class="pill" :class="pool.totals.fresh ? '' : 'bad-pill'">
             新鲜度 <b>{{ pool.totals.fresh ? '全部达标 ✅' : '不达标 ' + pool.totals.stale_production.length + ' 项 ❌' }}</b>
           </span>
+          <span class="pill" v-if="negativeCount">负期望 <b class="down">{{ negativeCount }}</b></span>
           <span class="pill dim tiny">配置更新 {{ pool.config_updated_at || '—' }} · 快照 {{ pool.generated_at }}</span>
         </div>
         <p class="hint tiny" v-if="pool.totals.stale_production.length">
           落后的策略：{{ pool.totals.stale_production.join('、') }} —— 每日自动化末尾会跑
           <code>sync_strategy_pool.py --strict</code>，不达标的会写进运行日志并告警。
         </p>
-        <p class="hint tiny">统一对比基准：中证500（000905.SH） · 绩效快照 {{ pool.performance_generated_at || '待生成' }}。
-          同窗比较：{{ pool.common_window?.status === 'ok' ? `${pool.common_window.start_date} — ${pool.common_window.end_date}` : '共同历史不足，暂不跨策略排名' }}。
-          名单跟踪毛收益与独立研究回测分开展示，非真实账户净收益。</p>
+        <p class="hint tiny">
+          左侧点策略看详情。统一对比基准：中证500（000905.SH） · 绩效快照 {{ pool.performance_generated_at || '待生成' }}。
+          <b>负期望</b>（样本 ≥{{ RULES.minObsForJudgement }} 且日度 t ≤ −{{ RULES.significantT }}）的策略默认折叠曲线，
+          只保留结论；<b>正期望</b>的展示与中证500 的对比。
+        </p>
       </div>
 
-      <!-- 每日名单策略卡片：包括仍处于 candidate 阶段的多因子 -->
-      <div class="strategy-grid">
-        <div v-for="s in pool.strategies" :key="s.id" class="panel strategy-card">
-          <div class="sc-head">
-            <span class="sc-name">{{ s.name }}</span>
-            <span class="tag" :class="s.tag_class">{{ s.group }}</span>
-            <span class="stage-badge" :class="'st-' + s.stage">{{ s.stage_label }}</span>
+      <!-- ── 主区：左侧策略列表 + 右侧详情 ─────────────────────────────── -->
+      <div class="pool-layout">
+        <aside class="pool-side">
+          <div class="panel side-panel">
+            <h6>
+              策略列表
+              <span class="dim tiny">{{ visible.length }} / {{ pool.strategies.length }}</span>
+            </h6>
+            <input v-model="query" class="side-search" placeholder="搜索名称 / id / 分组" />
+            <div class="side-tabs">
+              <button v-for="f in filterTabs" :key="f.key" class="tab"
+                      :class="{ active: filter === f.key }" @click="filter = f.key">
+                {{ f.label }} <span class="dim">{{ f.count }}</span>
+              </button>
+            </div>
+            <ul class="strategy-list">
+              <li v-for="s in visible" :key="s.id" class="strategy-item"
+                  :class="{ active: s.id === selectedId, negative: shouldCollapse(detailOf(s).curve) }"
+                  @click="select(s.id)">
+                <div class="si-row">
+                  <span class="si-name">{{ s.name }}</span>
+                  <span class="tag" :class="detailOf(s).identity.groupClass">{{ s.group }}</span>
+                </div>
+                <div class="si-row">
+                  <span class="stage-badge" :class="detailOf(s).identity.stageClass">
+                    {{ detailOf(s).identity.stageLabel }}</span>
+                  <span class="tag" :class="toneTag(detailOf(s).verdict.headline.tone)">
+                    {{ detailOf(s).verdict.headline.label }}</span>
+                  <span class="tiny dim" v-if="detailOf(s).curve.available">
+                    {{ detailOf(s).curve.observations }} 观测</span>
+                </div>
+                <div class="si-metric mono tiny" v-if="detailOf(s).curve.available">
+                  累计 <b :class="(detailOf(s).curve.total ?? 0) < 0 ? 'down' : 'up'">
+                    {{ pctText(detailOf(s).curve.total) }}</b>
+                  <span class="dim">·</span> 相对中证500
+                  <b :class="(detailOf(s).curve.excess ?? 0) < 0 ? 'down' : 'up'">
+                    {{ pctText(detailOf(s).curve.excess) }}</b>
+                </div>
+                <div class="si-metric tiny dim" v-else>暂无曲线</div>
+                <div class="si-row tiny dim">
+                  最新 {{ detailOf(s).freshness.latestDate || '—' }}
+                  <span v-if="detailOf(s).freshness.lagDays">（落后 {{ detailOf(s).freshness.lagDays }} 天）</span>
+                  · 名单 {{ detailOf(s).freshness.nPicks ?? '—' }} 只
+                  · 快照 {{ detailOf(s).freshness.nSnapshots }}
+                </div>
+              </li>
+              <li v-if="!visible.length" class="dim tiny" style="padding:8px">没有匹配的策略</li>
+            </ul>
           </div>
-          <p class="sc-summary">{{ s.summary }}</p>
+        </aside>
 
-          <div class="sc-stats">
-            <span class="sc-stat">
-              <label>最新交易日</label>
-              <b class="mono" :class="s.fresh ? 'ok' : 'bad'">{{ s.latest_date || '—' }}</b>
-              <span class="tiny dim" v-if="s.lag_days">{{ s.lag_days }} 天前</span>
-            </span>
-            <span class="sc-stat">
-              <label>最新名单</label>
-              <b class="mono">{{ s.n_picks ?? '—' }} 只</b>
-            </span>
-            <span class="sc-stat">
-              <label>历史快照</label>
-              <b class="mono">{{ s.n_snapshots }}</b>
-            </span>
+        <section class="pool-main" v-if="current">
+          <!-- ① 概览：身份 + 判定 -->
+          <div class="panel detail-head">
+            <div class="dh-top">
+              <h5>{{ current.identity.name }}</h5>
+              <span class="tag" :class="current.identity.groupClass">{{ current.identity.group }}</span>
+              <span class="stage-badge" :class="current.identity.stageClass">{{ current.identity.stageLabel }}</span>
+              <span class="tag" :class="toneTag(current.verdict.headline.tone)">
+                {{ current.verdict.headline.label }}</span>
+              <span class="dh-why tiny dim">{{ current.verdict.headline.detail }}</span>
+            </div>
+            <p class="dh-summary">{{ current.identity.summary }}</p>
+            <div class="dh-meta tiny dim mono">
+              id {{ current.identity.id }} · kind {{ current.identity.kind }} · owner {{ current.identity.owner }}
+              · 曲线口径 {{ current.curve.kindLabel }}
+              <template v-if="current.curve.available">
+                （{{ current.curve.startDate }} ~ {{ current.curve.endDate }}）</template>
+            </div>
+            <div class="dh-actions">
+              <a class="btn-ghost btn-sm" :href="selectionLink(entryById(current.identity.id))">看最新名单 →</a>
+              <a class="btn-ghost btn-sm" href="#/calendar">选股日历 →</a>
+            </div>
           </div>
 
-          <div class="sc-row">
-            <label>入口命令</label>
-            <code class="sc-code">{{ s.entry || '—' }}</code>
-          </div>
-          <div class="sc-row">
-            <label>调度</label>
-            <span class="tiny">{{ s.schedule || '—' }}</span>
-          </div>
-          <!-- 回放指标直接摊在卡上：策略"到底行不行"不该点进别的页面才知道 -->
-          <div class="sc-row" v-if="s.metrics && s.metrics.length">
-            <label>月度回放（同窗口，基准=全市场等权）</label>
-            <span class="metric-row">
-              <span v-for="m in s.metrics" :key="m.key" class="metric"
-                    :class="{ neg: m.key === 'excess_mean' && m.value < 0 }">
-                <label>{{ m.label }}</label>
-                <b class="mono">{{ m.value !== null ? fmtMetric(m, s.metrics_pct) : '—' }}</b>
+          <!-- ② 公共指标（所有策略同一套字段） -->
+          <div class="panel">
+            <h6>
+              公共指标
+              <span class="dim tiny" v-if="current.curve.available">
+                {{ current.curve.kindLabel }} · {{ current.curve.observations }} 个收益观测 · 基准中证500
               </span>
-            </span>
-          </div>
-          <div class="sc-row">
-            <label>台账来源</label>
-            <span>
-              <span v-for="src in s.ledger_sources" :key="src" class="tag dim tiny">{{ src }}</span>
-              <span v-if="!s.ledger_sources.length" class="dim tiny">—</span>
-            </span>
-          </div>
-          <div class="sc-row">
-            <label>产物</label>
-            <span class="artifact-list">
-              <span v-for="a in s.artifacts" :key="a.path" class="artifact"
-                    :class="{ missing: !a.exists }" :title="a.path + (a.detail ? '｜' + a.detail : '')">
-                {{ a.path.split('/').pop() }}
-                <span class="dim tiny">{{ a.latest_date || (a.exists ? '存在' : '缺失') }}</span>
-              </span>
-            </span>
+              <span class="dim tiny" v-else>暂无曲线（缺收益数据）</span>
+            </h6>
+            <div class="tile-grid">
+              <div class="tile" v-for="t in metricTiles" :key="t.label">
+                <label>{{ t.label }}</label>
+                <b class="mono" :class="t.tone">{{ t.value }}</b>
+                <span class="tiny dim">{{ t.sub }}</span>
+              </div>
+            </div>
           </div>
 
-          <div class="sc-actions">
-            <a class="btn-ghost btn-sm" :href="selectionLink(s)">看最新名单 →</a>
-            <a class="btn-ghost btn-sm" href="#/calendar">选股日历 →</a>
+          <!-- ③ 优劣：只由数据规则得出 -->
+          <div class="panel">
+            <h6>
+              优劣
+              <span class="dim tiny">判定阈值：样本 ≥{{ RULES.minObsForJudgement }} 才判方向、≥{{ RULES.minObsForConfidence }} 算充足；|日度 t| ≥{{ RULES.significantT }} 视为有方向性证据（正式上线判定走 promotion_check.py）</span>
+            </h6>
+            <div class="verdict-grid">
+              <div class="vcol">
+                <div class="vcol-head ok">✅ 优势 <span class="dim tiny">{{ current.verdict.pros.length }}</span></div>
+                <ul>
+                  <li v-for="p in current.verdict.pros" :key="p.key">
+                    <span class="tag ok tiny">{{ p.label }}</span>
+                    <span class="tiny">{{ p.detail }}</span>
+                  </li>
+                  <li v-if="!current.verdict.pros.length" class="dim tiny">（暂无）</li>
+                </ul>
+              </div>
+              <div class="vcol">
+                <div class="vcol-head bad">⚠️ 风险 / 不足 <span class="dim tiny">{{ current.verdict.cons.length }}</span></div>
+                <ul>
+                  <li v-for="c in current.verdict.cons" :key="c.key">
+                    <span class="tag tiny" :class="toneTag(c.tone)">{{ c.label }}</span>
+                    <span class="tiny">{{ c.detail }}</span>
+                  </li>
+                  <li v-if="!current.verdict.cons.length" class="dim tiny">（暂无）</li>
+                </ul>
+              </div>
+            </div>
           </div>
-          <StrategyPerformance :data="s.performance" />
-        </div>
+
+          <!-- ④ 单策略：与中证500 对比（正期望默认展开；负期望折叠成一行） -->
+          <div class="panel">
+            <h6>
+              与中证500 对比
+              <span class="dim tiny" v-if="curveCollapsed">负期望 → 曲线默认折叠（结论见上）</span>
+              <button v-if="current.curve.available" class="btn-ghost btn-sm" style="margin-left:auto"
+                      @click="curveCollapsed = !curveCollapsed">
+                {{ curveCollapsed ? '展开曲线' : '收起曲线' }}
+              </button>
+            </h6>
+            <div v-if="curveCollapsed" class="collapsed-row">
+              <span class="tiny dim">累计</span>
+              <b class="mono down">{{ pctText(current.curve.total) }}</b>
+              <span class="tiny dim">相对中证500</span>
+              <b class="mono down">{{ pctText(current.curve.excess) }}</b>
+              <span class="tiny" v-if="current.curve.t !== null">
+                日度 t <b class="mono down">{{ current.curve.t.toFixed(2) }}</b></span>
+              <span class="tiny dim">曲线与指标只用于说明「这条规则不可上线」。</span>
+            </div>
+            <StrategyPerformance v-else :data="entryById(current.identity.id)?.performance" />
+          </div>
+
+          <!-- ⑤ 多策略对比曲线 -->
+          <div class="panel">
+            <h6>
+              多策略对比
+              <span class="dim tiny">共同窗口内归一到 1；口径逐条标注（毛收益 / 含成本 / 逐笔模拟）</span>
+            </h6>
+            <div class="pick-row">
+              <button v-for="s in curveEntries" :key="s.id" class="btn-ghost btn-sm"
+                      :class="{ on: compareIds.includes(s.id) }" @click="toggleCompare(s.id)">
+                {{ s.name }}
+              </button>
+            </div>
+            <StrategyCurveCompare :series="compareSeries" />
+          </div>
+
+          <!-- ⑥ 配置与产物 -->
+          <div class="panel">
+            <h6>配置与产物 <span class="dim tiny">声明在 config/strategies.json，运行时状态由产物扫描得出</span></h6>
+            <div class="kv-grid">
+              <div class="kv"><label>入口命令</label><code class="sc-code">{{ current.config.entry || '—' }}</code></div>
+              <div class="kv"><label>调度</label><span class="tiny">{{ current.config.schedule || '—' }}</span></div>
+              <div class="kv"><label>台账来源</label>
+                <span>
+                  <span v-for="src in current.config.ledgerSources" :key="src" class="tag dim tiny">{{ src }}</span>
+                  <span v-if="!current.config.ledgerSources.length" class="dim tiny">—</span>
+                </span>
+              </div>
+              <div class="kv"><label>选股结果页来源</label>
+                <span class="mono tiny">{{ current.config.selectionSource || '—' }}</span></div>
+              <div class="kv"><label>历史目录</label><span class="mono tiny">{{ current.freshness.historyDir || '—' }}</span></div>
+              <div class="kv"><label>新鲜度</label>
+                <span class="tiny">
+                  <b :class="current.freshness.fresh ? 'ok' : 'bad'">
+                    {{ current.freshness.fresh ? '达标' : '不达标' }}</b>
+                  · 最新交易日 {{ current.freshness.latestDate || '—' }}
+                  <template v-if="current.freshness.lagDays">（落后 {{ current.freshness.lagDays }} 天）</template>
+                </span>
+              </div>
+            </div>
+            <div class="artifact-list" style="margin-top:6px">
+              <span v-for="a in current.freshness.artifacts" :key="a.path" class="artifact"
+                    :class="{ missing: !a.exists }" :title="a.path">
+                {{ a.label }} <span class="dim tiny">{{ a.latestDate || (a.exists ? '存在' : '缺失') }}</span>
+              </span>
+              <span v-if="!current.freshness.artifacts.length" class="dim tiny">（未登记产物）</span>
+            </div>
+          </div>
+        </section>
       </div>
 
-      <!-- 候选池 -->
+      <!-- ── 候选策略（登记表）────────────────────────────────────────── -->
       <div class="panel">
         <h6>
           候选策略（agent / LLM 挖掘产出，需人工升格才会进生产）
@@ -147,21 +274,21 @@
         <p class="hint tiny mt" v-if="stageHint">{{ stageHint }}</p>
       </div>
 
-      <!-- 研究证据 -->
+      <!-- ── 研究证据 ──────────────────────────────────────────────── -->
       <div class="panel">
         <h6>
           研究证据（<code>output/research/*/REPORT.md</code>）
           <span class="dim tiny">策略的来源出处；不是策略本身（不产生每日名单）</span>
         </h6>
         <ul class="evidence">
-          <li v-for="e in pool.evidence.slice(0, 24)" :key="e.key">
+          <li v-for="e in pool.evidence.slice(0, 12)" :key="e.key">
             <span class="ev-title">{{ e.title }}</span>
             <span class="ev-path mono tiny dim">{{ e.path }}</span>
             <span class="ev-time tiny dim">{{ e.mtime }}</span>
           </li>
         </ul>
-        <p class="hint tiny mt" v-if="pool.evidence.length > 24">
-          只列最近 24 份，共 {{ pool.evidence.length }} 份。
+        <p class="hint tiny mt" v-if="pool.evidence.length > 12">
+          只列最近 12 份，共 {{ pool.evidence.length }} 份。
         </p>
       </div>
 
@@ -169,7 +296,7 @@
         <h6>口径说明</h6>
         <ul class="hint tiny">
           <li v-for="n in pool.notes || []" :key="n">{{ n }}</li>
-          <li>「最新交易日」取自产物里的日期列 / 历史快照文件名，**不看文件 mtime**（否则重跑一次旧产物也会显示成今天）。</li>
+          <li>「最新交易日」取自产物里的日期列 / 历史快照文件名，<b>不看文件 mtime</b>（否则重跑一次旧产物也会显示成今天）。</li>
         </ul>
       </div>
     </template>
@@ -177,44 +304,139 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { getStrategyPool, setStrategyStage } from '@/api/client'
 import type { StrategyPoolEntry, StrategyPoolResponse } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import StrategyPerformance from '@/components/StrategyPerformance.vue'
+import StrategyCurveCompare from '@/components/StrategyCurveCompare.vue'
+import type { CompareSeries } from '@/components/StrategyCurveCompare.vue'
+import { RULES, pctText, primaryCurve, shouldCollapse, strategyDetail, type StrategyDetail } from '@/components/strategyDetail'
 
 const pool = ref<StrategyPoolResponse | null>(null)
 const error = ref('')
 const loading = ref(false)
 const busy = ref('')
 const stageHint = ref('')
+const selectedId = ref('')
+const query = ref('')
+const filter = ref<'all' | 'production' | 'candidate' | 'positive' | 'negative'>('all')
+const compareIds = ref<string[]>([])
+const curveCollapsed = ref(false)
 
-async function reload() {
-  loading.value = true
-  try {
-    pool.value = await getStrategyPool(true)
-    error.value = ''
-  } catch (e) {
-    error.value = String(e)
-  } finally {
-    loading.value = false
+/** 公共显示项：一套函数给所有策略算出同一份结构（身份/新鲜度/曲线/配置/优劣） */
+function detailOf(entry: StrategyPoolEntry): StrategyDetail {
+  return strategyDetail(entry)
+}
+const details = computed<Record<string, StrategyDetail>>(() => {
+  const out: Record<string, StrategyDetail> = {}
+  for (const item of pool.value?.strategies || []) out[item.id] = detailOf(item)
+  return out
+})
+function strategyDetailCollapsed(d: StrategyDetail): boolean {
+  const curve = d.curve
+  if (!curve.available || curve.observations < RULES.minObsForJudgement || !curve.negative) return false
+  return curve.t === null || curve.t <= -RULES.significantT
+}
+
+const filterTabs = computed(() => {
+  const items = pool.value?.strategies || []
+  const counts = {
+    all: items.length,
+    production: items.filter((s) => s.stage === 'production').length,
+    candidate: items.filter((s) => s.stage === 'candidate').length,
+    positive: items.filter((s) => (details.value[s.id]?.curve.total ?? 0) > 0).length,
+    negative: items.filter((s) => (details.value[s.id]?.curve.negative ?? false)).length,
+  }
+  return [
+    { key: 'all' as const, label: '全部', count: counts.all },
+    { key: 'production' as const, label: '生产', count: counts.production },
+    { key: 'candidate' as const, label: '候选', count: counts.candidate },
+    { key: 'positive' as const, label: '正期望', count: counts.positive },
+    { key: 'negative' as const, label: '负期望', count: counts.negative },
+  ]
+})
+
+const visible = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  return (pool.value?.strategies || []).filter((s) => {
+    const d = details.value[s.id]
+    if (filter.value === 'production' && s.stage !== 'production') return false
+    if (filter.value === 'candidate' && s.stage !== 'candidate') return false
+    if (filter.value === 'positive' && !((d?.curve.total ?? 0) > 0)) return false
+    if (filter.value === 'negative' && !(d?.curve.negative ?? false)) return false
+    if (!q) return true
+    return `${s.name} ${s.id} ${s.group}`.toLowerCase().includes(q)
+  })
+})
+
+const current = computed(() => details.value[selectedId.value] || null)
+const negativeCount = computed(() =>
+  (pool.value?.strategies || []).filter((s) => details.value[s.id]?.curve.negative).length)
+
+function entryById(id: string): StrategyPoolEntry | undefined {
+  return (pool.value?.strategies || []).find((s) => s.id === id)
+}
+
+function select(id: string) {
+  selectedId.value = id
+  if (!compareIds.value.includes(id)) {
+    compareIds.value = [...compareIds.value, id].slice(-4)
   }
 }
 
-/** 该策略的名单在「选股结果」页对应的来源 tab（台账 source key 的第一个） */
-function selectionLink(item: StrategyPoolEntry): string {
-  const source = item.selection_source || ''
+function toggleCompare(id: string) {
+  compareIds.value = compareIds.value.includes(id)
+    ? compareIds.value.filter((x) => x !== id)
+    : [...compareIds.value, id]
+}
+
+const curveEntries = computed(() =>
+  (pool.value?.strategies || []).filter((s) => details.value[s.id]?.curve.available))
+
+/** 多策略对比的数据：基准取任一曲线的 benchmark_nav（都是中证500 同窗） */
+const compareSeries = computed<CompareSeries[]>(() => {
+  const out: CompareSeries[] = []
+  let benchmark: CompareSeries | null = null
+  for (const s of curveEntries.value) {
+    if (!compareIds.value.includes(s.id)) continue
+    const curve = primaryCurve(s.performance)
+    if (!curve?.nav?.length) continue
+    out.push({ id: s.id, label: s.name, kind: curve.kind || '', dates: curve.dates || [], nav: curve.nav })
+    if (!benchmark && curve.benchmark_nav?.length) {
+      benchmark = { id: '__benchmark__', label: '中证500', kind: '', dates: curve.dates || [], nav: curve.benchmark_nav }
+    }
+  }
+  return benchmark ? [benchmark, ...out] : out
+})
+
+const metricTiles = computed(() => {
+  const c = current.value?.curve
+  const f = current.value?.freshness
+  const ok = (v: number | null, goodWhenPositive = true) =>
+    v === null ? '' : (goodWhenPositive ? (v >= 0 ? 'up' : 'down') : (v >= 0 ? 'down' : 'up'))
+  return [
+    { label: '累计收益', value: pctText(c?.total ?? null), sub: c?.kindLabel || '无曲线', tone: ok(c?.total ?? null) },
+    { label: '相对中证500', value: pctText(c?.excess ?? null), sub: '基准 000905.SH', tone: ok(c?.excess ?? null) },
+    { label: '年化收益', value: pctText(c?.annual ?? null), sub: c && c.observations < RULES.minObsForConfidence ? '样本不足一年，仅参考' : '同期', tone: ok(c?.annual ?? null) },
+    { label: '最大回撤', value: pctText(c?.maxDrawdown ?? null), sub: '越小越好', tone: ok(c?.maxDrawdown ?? null, false) },
+    { label: '卡玛', value: c?.calmar === null || c?.calmar === undefined ? '—' : c.calmar.toFixed(3), sub: '年化 / |回撤|', tone: ok(c?.calmar ?? null) },
+    { label: '夏普（无风险=0）', value: c?.sharpe === null || c?.sharpe === undefined ? '—' : c.sharpe.toFixed(3), sub: '日频年化', tone: ok(c?.sharpe ?? null) },
+    { label: '日度 t', value: c?.t === null || c?.t === undefined ? '—' : c.t.toFixed(2), sub: `|t| ≥ ${RULES.significantT} 视为有方向性证据`, tone: ok(c?.t ?? null) },
+    { label: '收益观测', value: c?.available ? String(c.observations) : '—', sub: c?.available ? `${c.startDate} ~ ${c.endDate}` : '无曲线', tone: '' },
+    { label: '最新交易日', value: f?.latestDate || '—', sub: f?.lagDays ? `落后 ${f.lagDays} 天` : '与基准一致', tone: f?.fresh ? 'up' : 'down' },
+    { label: '最新名单 / 快照', value: `${f?.nPicks ?? '—'} 只 / ${f?.nSnapshots ?? 0}`, sub: '名单条数 / 历史快照数', tone: '' },
+  ]
+})
+
+function toneTag(tone: string): string {
+  return tone === 'ok' ? 'ok' : tone === 'bad' ? 'bad' : tone === 'warn' ? 'warn' : 'dim'
+}
+
+function selectionLink(item?: StrategyPoolEntry): string {
+  const source = item?.selection_source || ''
   return source ? `#/?source=${encodeURIComponent(source)}` : '#/'
-}
-
-/** 回放指标：`metrics_pct` 里的字段按百分数显示（超额/胜率/回撤…） */
-function fmtMetric(metric: { key: string; value: number }, pctKeys: string[]): string {
-  if ((pctKeys || []).includes(metric.key)) {
-    const sign = metric.value > 0 ? '+' : ''
-    return `${sign}${(metric.value * 100).toFixed(2)}%`
-  }
-  return metric.value.toFixed(3)
 }
 
 async function changeStage(id: string, stage: string) {
@@ -231,54 +453,110 @@ async function changeStage(id: string, stage: string) {
   }
 }
 
+async function reload() {
+  loading.value = true
+  try {
+    pool.value = await getStrategyPool(true)
+    error.value = ''
+    const items = pool.value.strategies
+    if (!selectedId.value || !items.some((s) => s.id === selectedId.value)) {
+      // 默认选中"最值得看"的那条：先正期望、再样本多
+      const ranked = [...items].sort((a, b) => {
+        const da = details.value[a.id] || detailOf(a)
+        const db = details.value[b.id] || detailOf(b)
+        // 默认详情优先给"既正收益、又跑赢中证500"的策略；其次正收益；再用观测数兜底
+        const score = (d: StrategyDetail) => {
+          const total = d.curve.total ?? -1
+          const excess = d.curve.excess ?? -1
+          const tier = total > 0 && excess > 0 ? 2 : total > 0 ? 1 : 0
+          return tier * 10000 + d.curve.observations
+        }
+        return score(db) - score(da)
+      })
+      selectedId.value = ranked[0]?.id || ''
+    }
+    if (!compareIds.value.length) {
+      // 默认对比：**样本最长**的 3 条（否则生产策略只有 1~2 个观测，会把共同窗口压成两天）
+      compareIds.value = items
+        .map((s) => ({ id: s.id, obs: detailOf(s).curve.observations }))
+        .filter((x) => x.obs > 1)
+        .sort((a, b) => b.obs - a.obs)
+        .slice(0, 3)
+        .map((x) => x.id)
+    }
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 选中策略变化 → 负期望的默认折叠曲线（计算属性里不写状态，避免副作用告警） */
+watch([selectedId, () => pool.value], () => {
+  const entry = entryById(selectedId.value)
+  curveCollapsed.value = entry ? strategyDetailCollapsed(detailOf(entry)) : false
+}, { immediate: true })
+
 onMounted(reload)
 </script>
 
 <style scoped>
-.strategy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: var(--sp-3); margin-bottom: var(--sp-3); }
-.strategy-card { display: flex; flex-direction: column; gap: var(--sp-2); }
-.sc-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
-.sc-name { font-weight: 700; font-size: var(--fs-lg); }
+.pool-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--sp-3); align-items: start; }
+@media (max-width: 1100px) { .pool-layout { grid-template-columns: 1fr; } }
+.pool-side { position: sticky; top: 64px; }
+@media (max-width: 1100px) { .pool-side { position: static; } }
+.side-panel { padding: var(--sp-2); }
+.side-search { width: 100%; padding: 4px 8px; background: var(--bg-input);
+  border: 1px solid var(--border-color); border-radius: var(--r-2); color: var(--text-primary);
+  font-size: var(--fs-sm); margin: 6px 0; }
+.side-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.strategy-list { list-style: none; margin: 0; padding: 0; max-height: 70vh; overflow-y: auto; }
+.strategy-item { padding: 8px; border: 1px solid var(--border-color); border-radius: var(--r-2);
+  margin-bottom: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 3px;
+  background: var(--bg-card); }
+.strategy-item:hover { border-color: var(--accent-blue); }
+.strategy-item.active { border-color: var(--accent-gold); background: rgba(255, 209, 102, 0.06); }
+.strategy-item.negative { border-left: 3px solid var(--accent-down); }
+.si-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.si-name { font-weight: 600; font-size: var(--fs-sm); }
+.si-metric { line-height: 1.5; }
+.pool-main { display: flex; flex-direction: column; gap: var(--sp-3); }
+.detail-head { padding: var(--sp-3); }
+.dh-top { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.dh-top h5 { margin: 0; font-size: var(--fs-xl); }
+.dh-why { margin-left: auto; }
+.dh-summary { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.7; margin: 8px 0; }
+.dh-meta { line-height: 1.6; }
+.dh-actions { display: flex; gap: 6px; margin-top: 6px; }
+.tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-2); }
+.tile { display: flex; flex-direction: column; gap: 1px; padding: var(--sp-2);
+  border: 1px solid var(--border-color); border-radius: var(--r-2); background: var(--bg-input); }
+.tile label { font-size: 10px; color: var(--text-dim); letter-spacing: 0.04em; }
+.tile b { font-size: var(--fs-lg); }
+.verdict-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+@media (max-width: 900px) { .verdict-grid { grid-template-columns: 1fr; } }
+.vcol-head { font-weight: 600; margin-bottom: 4px; }
+.vcol ul { list-style: none; margin: 0; padding: 0; }
+.vcol li { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; line-height: 1.5;
+  border-bottom: 1px dashed var(--border-color); }
+.collapsed-row { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: baseline;
+  padding: var(--sp-2); border: 1px dashed var(--border-color); border-radius: var(--r-2); }
+.pick-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+.pick-row .on { color: var(--accent-gold); border-color: var(--accent-gold); }
+.kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--sp-2); }
+.kv { display: flex; flex-direction: column; gap: 2px; }
+.kv label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.sc-code { display: block; font-size: var(--fs-xs); background: var(--bg-input);
+  border: 1px solid var(--border-color); border-radius: var(--r-2); padding: 3px 6px;
+  overflow-x: auto; white-space: nowrap; }
 .stage-badge { padding: 1px 8px; border-radius: var(--r-pill); font-size: var(--fs-xs);
   border: 1px solid var(--border-color); color: var(--text-muted); }
 .st-production { color: var(--accent-gold); border-color: rgba(255, 209, 102, 0.5); }
 .st-research { color: var(--accent-blue); border-color: rgba(17, 138, 178, 0.5); }
 .st-candidate { color: var(--accent-orange); border-color: rgba(255, 159, 28, 0.5); }
 .st-retired { color: var(--text-dim); }
-.sc-summary { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.6; }
-.sc-stats { display: flex; gap: var(--sp-4); flex-wrap: wrap; }
-.metric-row { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
-.metric { display: flex; flex-direction: column; gap: 0; }
-.metric label { font-size: 10px; color: var(--text-dim); }
-.metric b { font-size: var(--fs-sm); color: var(--text-primary); }
-.metric.neg b { color: var(--accent-down); }
-.sc-stat { display: flex; flex-direction: column; gap: 1px; }
-.sc-stat label, .sc-row label { font-size: 10px; color: var(--text-dim); text-transform: uppercase;
-  letter-spacing: 0.04em; }
-.sc-row { display: flex; flex-direction: column; gap: 2px; }
-.sc-code { display: block; font-size: var(--fs-xs); background: var(--bg-input);
-  border: 1px solid var(--border-color); border-radius: var(--r-2); padding: 3px 6px;
-  overflow-x: auto; white-space: nowrap; }
-.artifact-list { display: flex; flex-wrap: wrap; gap: 4px; }
-.artifact { font-size: var(--fs-xs); font-family: var(--font-mono); background: var(--bg-input);
-  border: 1px solid var(--border-color); border-radius: var(--r-2); padding: 1px 6px; }
-.artifact.missing { border-color: rgba(239, 71, 111, 0.6); color: var(--accent-up); }
-.sc-actions { display: flex; gap: var(--sp-2); margin-top: auto; padding-top: var(--sp-2); }
-/* 状态用语义色（--state-ok 绿），涨跌用 --accent-up/down（红涨绿跌）——
-   两套令牌混用会让人把"状态正常"读成"跌"，这里刻意分开。 */
-.ok { color: var(--state-ok); }
-.bad { color: var(--state-bad); }
-.bad-pill { border-color: rgba(239, 71, 111, 0.6); color: var(--accent-up); }
-.multiline { max-width: 360px; white-space: normal; line-height: 1.5; }
-.left { text-align: left; }
-.data-table th.left { text-align: left; }
-.evidence { list-style: none; margin: 0; padding: 0; display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 4px; }
-.evidence li { display: flex; flex-direction: column; padding: 4px 6px; border-radius: var(--r-2);
-  background: var(--bg-input); border: 1px solid var(--border-color); }
+.evidence { list-style: none; margin: 0; padding: 0; }
+.evidence li { display: flex; gap: var(--sp-2); align-items: baseline; padding: 2px 0; }
 .ev-title { font-size: var(--fs-sm); }
-.ev-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mt { margin-top: var(--sp-2); }
-.empty { color: var(--text-muted); font-size: var(--fs-sm); }
+.ev-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

@@ -825,7 +825,9 @@ export interface StrategyArtifact {
 
 export interface StrategyPerformanceCurve {
   status: string
+  /** selection_tracking_gross（名单跟踪）/ research_replay（独立研究）/ shadow_account_net（模拟盘净值） */
   kind: string
+  source?: string
   reason: string
   methodology: string
   benchmark_name: string

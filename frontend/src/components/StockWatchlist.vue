@@ -11,10 +11,24 @@
     <div class="groups">
       <button class="chip" :class="{ active: group === 'local' }" @click="group = 'local'">我的自选 {{ local.length }}</button>
       <button class="chip" :class="{ active: group === 'all' }" @click="group = 'all'">全部策略 {{ allRows.length }}</button>
-      <button v-for="g in groups" :key="g.key" class="chip" :class="{ active: group === g.key }"
-              :title="g.note + (g.date ? ' · ' + g.date : '')" @click="toggleGroup(g.key)">
-        {{ g.label }}<span class="dim tiny"> {{ g.loading ? '…' : g.rows.length }}</span>
+      <button v-for="g in sortedGroups" :key="g.key" class="chip" :class="{ active: group === g.key }"
+              :title="g.note + (g.date ? ' · ' + g.date : '') + (g.verdict ? '｜' + g.verdict.detail : '')"
+              @click="toggleGroup(g.key)">
+        {{ g.label
+        }}<span v-if="g.verdict" class="g-verdict" :class="g.verdict.tone">{{ g.verdict.label }}</span
+        ><span class="dim tiny"> {{ g.loading ? '…' : g.rows.length }}</span>
       </button>
+    </div>
+    <div class="group-sort">
+      <span class="dim tiny">分组排序</span>
+      <select v-model="sortKey">
+        <option value="default">策略池顺序</option>
+        <option value="total">按累计收益</option>
+        <option value="excess">按相对中证500</option>
+        <option value="t">按日度 t</option>
+        <option value="name">按名称</option>
+      </select>
+      <span class="dim tiny" v-if="verdictNote">{{ verdictNote }}</span>
     </div>
     <p v-if="poolError" class="hint tiny">{{ poolError }}</p>
     <p v-if="activeGroup" class="hint tiny">{{ activeGroup.stage }} · 名单交易日 {{ activeGroup.date || '—' }}
@@ -54,8 +68,9 @@ import { computed, onMounted, ref } from 'vue'
 import { getPaperStatus, getSelection, getStrategyPool, searchStocks } from '@/api/client'
 import type { StockSearchHit } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
-import { groupRows, strategyGroups } from './watchlistStrategies'
-import type { WatchlistGroup, WatchlistRow } from './watchlistStrategies'
+import { groupRows, sortGroups, strategyGroups } from './watchlistStrategies'
+import type { GroupSortKey, WatchlistGroup, WatchlistRow } from './watchlistStrategies'
+import { strategyDetail } from './strategyDetail'
 
 const props = defineProps<{ modelValue: string | null }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
@@ -73,6 +88,14 @@ const activeGroup = computed(() => groups.value.find((g) => g.key === group.valu
 const allRows = computed(() => groupRows(groups.value, 'all'))
 const failedGroups = computed(() => groups.value.filter((g) => g.key !== 'paper' && g.error).map((g) => g.label))
 const query = ref('')
+const sortKey = ref<GroupSortKey>('default')
+/** 分组排序（按判定指标），默认保持策略池顺序 */
+const sortedGroups = computed(() => sortGroups(groups.value, sortKey.value))
+const verdictNote = computed(() => {
+  const positive = groups.value.filter((g) => g.verdict?.tone === 'ok').length
+  const negative = groups.value.filter((g) => g.verdict?.tone === 'bad').length
+  return positive || negative ? `正期望 ${positive} · 负期望 ${negative}` : ''
+})
 const suggestions = ref<StockSearchHit[]>([])
 let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -158,7 +181,14 @@ async function reloadGroups() {
   poolError.value = ''
   try {
     const pool = await getStrategyPool()
-    groups.value = [...strategyGroups(pool.strategies), {
+    groups.value = [...strategyGroups(pool.strategies, (entry) => {
+      const item = pool.strategies.find((x) => x.id === entry.id)
+      if (!item) return undefined
+      const detail = strategyDetail(item)
+      return { label: detail.verdict.headline.label, tone: detail.verdict.headline.tone,
+               detail: detail.verdict.headline.detail, total: detail.curve.total,
+               excess: detail.curve.excess, t: detail.curve.t }
+    }), {
       key: 'paper', label: '模拟盘持仓', note: '模拟盘当前持仓', source: '', stage: '模拟盘',
       date: null, rows: [], loading: false, error: '',
     }]
@@ -180,7 +210,16 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.watchlist .groups { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--sp-2); }
+.watchlist .group-sort { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.group-sort select { background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--r-2); color: var(--text-primary); font-size: var(--fs-xs); padding: 1px 4px; }
+.g-verdict { margin-left: 5px; font-size: 10px; padding: 0 5px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-color); }
+.g-verdict.ok { color: var(--state-ok); border-color: var(--state-ok); }
+.g-verdict.warn { color: var(--state-warn); border-color: var(--state-warn); }
+.g-verdict.bad { color: var(--state-bad); border-color: var(--state-bad); }
+.g-verdict.dim { color: var(--text-dim); }
+.groups { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--sp-2); }
 .batch-add { margin-bottom: var(--sp-2); }
 .chip { padding: 3px 8px; border-radius: var(--r-pill); border: 1px solid var(--border-color);
   background: var(--bg-input); color: var(--text-muted); font-size: var(--fs-xs); cursor: pointer; }

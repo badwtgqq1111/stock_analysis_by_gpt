@@ -183,7 +183,7 @@ notify_alert() {
 }
 
 # 预检：跑一遍与本次改动相关的回归测试（约 1 秒），把"代码级错误"挡在 70 分钟的重活之前
-PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py -q}"
+PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py test/test_xy_industry_rotation.py test/test_cn_macro_sync.py test/test_xy_daily_rotation.py test/test_rotation_arm.py test/test_strategy_pool_performance.py test/test_first_ban_lowxi.py -q}"
 if [ "${DAILY_PREFLIGHT:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
   if eval "$PREFLIGHT_CMD" > "$LOG_DIR/preflight.log" 2>&1; then
     log "preflight ok: $PREFLIGHT_CMD"
@@ -224,6 +224,13 @@ run_data_step() {
 if [ "${DAILY_DATA_REFRESH:-1}" = "1" ]; then
   if [ "${DAILY_FUNDAMENTAL:-1}" = "1" ]; then
     run_data_step fundamental uv run python scripts/run_cn_pipeline.py --stage fundamental
+  fi
+  if [ "${DAILY_MACRO:-1}" = "1" ]; then
+    # 宏观/流动性/跨市场（PMI/CPI/PPI/M0-M2/GDP/SHIBOR/美债/南华商品/USDCNH）：
+    # 此前面板里一条都没有，"论文式行业轮动"这类研究根本没法做（见
+    # output/research/industry_rotation/xy_reproduce.md §2）。
+    # 增量：已有指标只补新发布的期数；单次请求有返回上限，脚本内部按年/季切窗。
+    run_data_step macro uv run python scripts/sync_cn_macro.py
   fi
   if [ "${DAILY_FINANCIALS:-1}" = "1" ]; then
     # 增量：只重抓"最后报告期 < 应有报告期"的股票（判据见 backfill_cn_financials.refresh_pending）
@@ -355,6 +362,12 @@ if [ "${DAILY_ARM_CONCEPT:-1}" = "1" ]; then
       run_data_step industry_reversal_lab uv run python scripts/industry_reversal_lab.py --stage split
       # 行业 veto 日报（只读）：把"行业层面是反转"用在**已有生产名单**上，逐期做配对符号检验。
       run_data_step industry_veto uv run python scripts/industry_veto_report.py
+      # 兴业证券 2019《行业的重新分类以及行业轮动策略》复现（MST 聚类 + 三分位 + 因子聚类等权）：
+      # 结论随数据变化，所以按周重跑，产物 output/research/industry_rotation/xy_reproduce.{json,md}
+      run_data_step xy_industry_rotation uv run python scripts/reproduce_xy_industry_rotation.py
+      # 论文主口径（日频"不定期调仓"）vs 月频，同一 15.5bp 换手成本模型：
+      # 结论是"日频把毛收益的一半以上交给成本"（见 output/research/industry_rotation/xy_daily.md）。
+      run_data_step xy_daily_rotation uv run python scripts/xy_daily_rotation.py
     fi
   fi
 fi
@@ -461,6 +474,14 @@ fi
 if [ "${DAILY_JQ_MULTI_FACTOR:-1}" = "1" ]; then
   # 多因子每日候选名单：研究产物，不参与生产订单或权重。
   run_data_step jq_multi_factor uv run python scripts/select_jq_multi_factor.py
+fi
+
+if [ "${DAILY_ROT_ARM:-1}" = "1" ]; then
+  # 行业轮动手臂（复现落地）：板块层 = MST 大类 + 7 因子等权（复现里最优 12.38%/年，
+  # 同框架下现行 2 因子板块层 6.89%），个股层复用 arm_concept。
+  # 放在台账之前 → 当天名单当天进「选股日历」；非致命（失败只影响这一条候选名单）。
+  # 候选/研究阶段（相对大类等权 t=1.51、p=0.135，未过上线闸门），不参与生产权重。
+  run_data_step rot_arm uv run python scripts/select_rotation_arm.py
 fi
 
 if [ "${DAILY_AI_PICKS:-1}" = "1" ]; then
@@ -598,6 +619,7 @@ if [ "${DAILY_COMPLETENESS:-1}" = "1" ]; then
     log "step=promotion-check would run: scripts/promotion_check.py（上线闸门：够不够硬）"
     log "step=ths-export would run: scripts/export_ths_watchlist.py（同花顺自选股 · 五个源，含 reference 参考账户）"
     log "step=jq-multi-factor would run: scripts/select_jq_multi_factor.py（候选策略每日名单，进台账）"
+    log "step=rot-arm would run: scripts/select_rotation_arm.py（行业轮动手臂，复现落地，进台账）"
     log "step=ai-picks would run: scripts/analyze_strategy_picks_ai.py --date $TRADE_DATE --skip-existing（全部策略逐股 AI 多空分析）"
   else
     # 注意：不带 --strict 时这个脚本**退出码恒为 0**，所以不能用退出码判断"是否达标" ——

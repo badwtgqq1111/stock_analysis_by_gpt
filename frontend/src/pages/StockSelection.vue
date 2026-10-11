@@ -24,6 +24,8 @@
             @click="switchSource(opt.key)"
           >
             {{ opt.label }}<span v-if="!opt.available" class="dim">（缺）</span>
+            <span v-if="verdicts[opt.key]" class="tab-verdict" :class="verdicts[opt.key].tone"
+                  :title="verdicts[opt.key].detail">{{ verdicts[opt.key].label }}</span>
           </button>
         </div>
       </div>
@@ -197,8 +199,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { usePoolVerdicts } from '@/composables/usePoolVerdicts'
 import { getImportance, getSelection, getShap, getThsExportFiles, thsDownloadUrl } from '@/api/client'
 import { useAsync } from '@/composables/useAsync'
 import { useWatchlist } from '@/composables/useWatchlist'
@@ -214,6 +217,10 @@ const watchlist = useWatchlist()
 // 其它页面（如行业热度页的"概念/板块手臂名单 →"）可以直接把人送到这个来源上，
 // 不用再让用户自己去来源 tab 里找。
 const currentSource = ref(String(route.query.source || ''))
+// 来源 tab 的方向徽章（正期望/负期望/样本不足）：判定来自策略池，同一套规则
+const { verdicts, load: loadVerdicts } = usePoolVerdicts()
+onMounted(() => { void loadVerdicts() })
+
 const page = ref(1)
 const perPage = 20
 const sortKey = ref('')
@@ -393,6 +400,12 @@ function fmtVal(v: unknown): string {
 /* 页面专属：数据源条 + 主表/评分榜两列。其余全部走设计系统。 */
 .source-bar { display: flex; align-items: flex-start; gap: var(--sp-4); flex-wrap: wrap; }
 .source-bar .tabs { margin-bottom: 0; }
+.tab-verdict { margin-left: 5px; font-size: 10px; padding: 0 5px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-color); }
+.tab-verdict.ok { color: var(--state-ok); border-color: var(--state-ok); }
+.tab-verdict.warn { color: var(--state-warn); border-color: var(--state-warn); }
+.tab-verdict.bad { color: var(--state-bad); border-color: var(--state-bad); }
+.tab-verdict.dim { color: var(--text-dim); }
 .source-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
 .source-note { margin: var(--sp-2) 0 0; }
 .stock-select {

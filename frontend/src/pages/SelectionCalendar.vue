@@ -58,7 +58,7 @@
           <span><i class="sw gain"></i>超额 &gt; 0</span>
           <span><i class="sw loss"></i>超额 &lt; 0</span>
           <span><i class="sw none"></i>无收益数据（未来交易日不足）</span>
-          <span>来源标记：A=arm（研究手臂 base_v1） C=arm_concept（概念/板块手臂） N=notify（PK 后最终名单） P=preselected（归档候选池） J=聚宽多因子（备选） D=动态诊断候选（备选） R=survey_raw G=survey_gate</span>
+          <span>来源标记：A=arm（研究手臂 base_v1） C=arm_concept（概念/板块手臂） N=notify（PK 后最终名单） P=preselected（归档候选池） J=聚宽多因子（备选） D=动态诊断候选（备选） L=rot_arm（行业轮动手臂·复现落地） B=box_arm（箱体突破回踩·结构型候选） F=first_ban_lowxi（首板低吸·反例档案） R=survey_raw G=survey_gate</span>
         </div>
       </div>
 
@@ -480,6 +480,9 @@ function stageKey(label: string) { return STAGE_KEYS[label] || 'mid_trend' }
 const SOURCE_LABEL: Record<string, string> = {
   notify: '最终名单（notify）', preselected: '候选池（preselected）',
   arm: '研究手臂 base_v1（arm）', arm_concept: '概念/板块手臂（arm_concept）',
+  rot_arm: '行业轮动手臂 大类+7因子（rot_arm）',
+  box_arm: '箱体突破回踩（结构型候选）（box_arm）',
+  first_ban_lowxi: '首板低吸（社区策略·反例档案）（first_ban_lowxi）',
   // 备选（候选）策略也在每日自动化里跑，日历必须能查到它们当天的名单
   jq_multi_factor: '聚宽多因子 低市值+高ROE（jq_multi_factor）',
   jq_roe_roa: '动态诊断候选 ROE＋0.25×ROA（jq_roe_roa）',
@@ -487,12 +490,13 @@ const SOURCE_LABEL: Record<string, string> = {
 }
 const SOURCE_SHORT: Record<string, string> = {
   notify: '最终名单', preselected: '候选池', arm: '研究手臂',
-  arm_concept: '概念手臂', jq_multi_factor: '聚宽多因子', jq_roe_roa: '动态诊断',
+  arm_concept: '概念手臂', rot_arm: '轮动手臂', box_arm: '箱体回踩', first_ban_lowxi: '首板低吸(反例)',
+  jq_multi_factor: '聚宽多因子', jq_roe_roa: '动态诊断',
   survey_raw: '调研(原)', survey_gate: '调研(门禁)',
 }
 const SOURCE_LETTER: Record<string, string> = {
-  arm: 'A', arm_concept: 'C', notify: 'N', preselected: 'P', survey_raw: 'R', survey_gate: 'G',
-  jq_multi_factor: 'J', jq_roe_roa: 'D',
+  arm: 'A', arm_concept: 'C', rot_arm: 'L', box_arm: 'B', first_ban_lowxi: 'F', notify: 'N', preselected: 'P',
+  survey_raw: 'R', survey_gate: 'G', jq_multi_factor: 'J', jq_roe_roa: 'D',
 }
 // ── 按列筛选（2026-10-10 用户要求）────────────────────────────────────────────
 // 文本列：包含匹配，`!x` 表示排除；数值列：`>0` / `<=2` / `1~3` / `=2.5`，
@@ -592,6 +596,8 @@ function sourceLabel(src: string) { return SOURCE_LABEL[src] || src }
 const STRATEGY_LABEL: Record<string, string> = {
   notify: '模型策略（PK 后最终名单）', preselected: '模型策略（候选池）',
   arm: '小市值/研究手臂（arm_select）', arm_concept: '行业轮动（概念/板块手臂）',
+  rot_arm: '行业轮动（MST 大类 + 7 因子等权）', box_arm: '打板/低吸（箱体突破回踩）',
+  first_ban_lowxi: '打板/低吸（首板低吸·反例）',
   jq_multi_factor: '多因子策略（低市值+高ROE）', jq_roe_roa: '多因子策略（ROE＋0.25×ROA）',
   survey_raw: '调研回看（原）', survey_gate: '调研回看（门禁）',
 }
@@ -612,6 +618,7 @@ function sourceLetter(src: string) { return SOURCE_LETTER[src] || (src ? src[0].
 /** 来源 → 策略组。后端 `strategy_meta` 也带一份，这里兜底免得老缓存缺字段。 */
 const STRATEGY_GROUP: Record<string, string> = {
   notify: '模型策略', preselected: '模型策略', arm: '小市值手臂', arm_concept: '行业轮动',
+  rot_arm: '行业轮动', box_arm: '打板/低吸', first_ban_lowxi: '打板/低吸',
   jq_multi_factor: '多因子策略', jq_roe_roa: '多因子策略',
   survey_raw: '调研', survey_gate: '调研',
 }

@@ -207,24 +207,34 @@ def _selection_block(code: str, limit: int = 20) -> dict:
                          "rank": _f(r["rank"], 0), "weight": _f(r["weight"], 4),
                          "r1": _f(r["r1"], 4), "r5": _f(r["r5"], 4), "r20": _f(r["r20"], 4),
                          "excess_r5": _f(r["excess_r5"], 4)})
-    # 最新名单（含未进台账的当日）
+    # 最新名单（含未进台账的当日）：**遍历策略登记表**，所有策略（生产 + 候选）统一处理 ——
+    # 之前只硬编码了 生产名单 / 研究手臂 / 概念手臂 三条，于是 rot_arm、jq_*、box_arm 选中的票
+    # 在「个股资料 → 选股记录」里根本看不到（用户要求"把正期望的策略选股同步到其他前端部分"）。
     latest = []
-    for key, path_name in (("生产名单", RESULTS / "cn_ensemble_selected.csv"),
-                           ("研究手臂", RESULTS / "arm_latest_selection.csv"),
-                           ("概念手臂", RESULTS / "arm_concept_selection.csv")):
-        if not path_name.exists():
-            continue
-        try:
-            frame = pd.read_csv(path_name)
-        except Exception:                                      # noqa: BLE001
-            continue
-        hit = frame[frame["stock_code"].astype(str) == code]
-        if not hit.empty:
+    try:
+        registry = json.loads((ROOT / "config/strategies.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        registry = {"strategies": []}
+    for spec in registry.get("strategies", []):
+        for artifact in spec.get("artifacts", []):
+            path_name = ROOT / artifact
+            if path_name.suffix.lower() != ".csv" or not path_name.exists():
+                continue
+            try:
+                frame = pd.read_csv(path_name)
+            except Exception:                                  # noqa: BLE001
+                continue
+            if "stock_code" not in frame.columns:
+                continue
+            hit = frame[frame["stock_code"].astype(str) == code]
+            if hit.empty:
+                continue
             row = hit.iloc[0]
-            latest.append({"strategy": key,
+            latest.append({"strategy": str(spec.get("name") or spec.get("id")),
                            "trade_date": str(row.get("trade_date"))[:10],
                            "rank": _f(row.get("rank"), 0),
                            "weight": _f(row.get("target_weight", row.get("trade_weight")), 4)})
+            break                                              # 每个策略只取第一份存在的名单
     return {"available": bool(rows or latest), "rows": rows, "latest": latest,
             "n_days": len({r["decision_date"] for r in rows})}
 

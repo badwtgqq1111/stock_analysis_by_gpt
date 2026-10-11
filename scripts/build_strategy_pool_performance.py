@@ -161,10 +161,16 @@ def build() -> dict:
     bench = raw[raw.ts_code == "000905.SH"].copy()
     bench.trade_date = pd.to_datetime(bench.trade_date)
     bench = bench.set_index("trade_date").close.sort_index()
-    all_targets, errors = {}, {}
+    all_targets, errors, no_tracking = {}, {}, set()
     for spec in config["strategies"]:
         try:
-            all_targets[spec["id"]] = snapshots(ROOT / spec["history_dir"]) if spec.get("history_dir") else {}
+            if spec.get("no_tracking"):
+                # 策略语义与"持有到下一个决策日"不同（如首板低吸是**次日开盘买、当日日内卖**），
+                # 用名单跟踪口径会算出方向相反的曲线 —— 直接不算 tracking，曲线由 curve_source 给。
+                all_targets[spec["id"]] = {}
+                no_tracking.add(spec["id"])
+            else:
+                all_targets[spec["id"]] = snapshots(ROOT / spec["history_dir"]) if spec.get("history_dir") else {}
         except (ValueError, KeyError) as exc:
             all_targets[spec["id"]] = {}
             errors[spec["id"]] = str(exc)
@@ -186,6 +192,10 @@ def build() -> dict:
         if ident in errors:
             result.update(status="data_gap", reason=errors[ident])
         result["latest_signal_date"] = str(max(targets).date()) if targets else None
+        if ident in no_tracking:
+            result.update(status="insufficient_history",
+                          reason="该策略的持仓语义不是「持有到下一个决策日」，不做名单跟踪"
+                                 "（曲线见 curve_source 给出的原始口径逐笔模拟）。")
         rows[ident] = {"tracking": result}
     replay_sources = {
         'jq_multi_factor_size_roe': ROOT / 'output/research/jq_multi_factor/nav_original_size_roe.csv',
@@ -194,6 +204,77 @@ def build() -> dict:
     for ident, path in replay_sources.items():
         if ident in rows and path.exists():
             rows[ident]['research'] = replay(path, bench, strategy_id=ident)
+    # ── 模拟盘（影子组合）净值 → 长窗口对照曲线 ────────────────────────────────
+    # 为什么需要：`tracking` 要求**连续交易日**都有归档名单（见 METHOD），而按决策日归档的策略
+    # （rot_arm 这类，决策日稀疏到每周/每月）只能拿到"最近几个连续交易日"的样本
+    # —— 实测 rot_arm 只有 8 个观测，用户看到的就是"没有中证500 对比曲线"。
+    # 影子组合是同一套执行假设（T+1 开盘、佣金/印花税/滑点、整手）的模拟账户，
+    # 历史可回填到 2025-09，正好用来做**多期**的 中证500 对照；口径与 `tracking` 明确区分。
+    shadow_sources = {
+        "rot_arm": ("output/paper_trading/shadow/rot_arm/nav.csv",
+                    "output/results_cn/shadow_variants/rot_arm.csv"),
+    }
+    for ident, (nav_rel, hist_rel) in shadow_sources.items():
+        nav_path, hist_path = ROOT / nav_rel, ROOT / hist_rel
+        if ident not in rows or not nav_path.exists():
+            continue
+        frame = pd.read_csv(nav_path, parse_dates=["asof_date"]).set_index("asof_date").sort_index()
+        if "nav" not in frame.columns or frame.empty:
+            continue
+        start = frame.index[0]
+        if hist_path.exists():
+            hist = pd.read_csv(hist_path, parse_dates=["trade_date"])
+            if not hist.empty:
+                start = max(start, hist["trade_date"].min())      # 从**首个决策日**起（之前是空仓平线）
+        frame = frame[frame.index >= start]
+        window = bench.reindex(frame.index).dropna()
+        frame = frame.reindex(window.index)
+        if len(frame) < 2 or not (frame["nav"] > 0).all():
+            continue
+        nav = (frame["nav"] / frame["nav"].iloc[0]).tolist()
+        bnav = (window / window.iloc[0]).tolist()
+        rows[ident]["research"] = {
+            "status": "ok", "kind": "shadow_account_net", "strategy_id": ident,
+            "benchmark_code": "000905.SH", "benchmark_name": "中证500",
+            "start_date": str(frame.index[0].date()), "end_date": str(frame.index[-1].date()),
+            "dates": [str(d.date()) for d in frame.index], "nav": nav, "benchmark_nav": bnav,
+            "metrics": metrics(nav), "benchmark_metrics": metrics(bnav),
+            "observations": len(nav) - 1, "excess_return": nav[-1] / bnav[-1] - 1,
+            "reason": ("模拟盘净值（统一执行假设：T+1 开盘成交、含佣金/印花税/滑点、整手），"
+                       "不是名单毛收益跟踪、也不是实盘业绩。"),
+            "methodology": ("影子组合 `run_shadow_variants.py` 的日度净值（起始资金 45,000），"
+                            "中证500价格指数同期归一到 1；口径见 output/paper_trading/shadow/summary.json。"),
+            "source": nav_rel,
+        }
+    # ── curve_source：策略**原始口径**的逐笔模拟曲线（政策略语义与模拟盘引擎不同时用）──
+    for spec in config["strategies"]:
+        source = spec.get("curve_source") or {}
+        ident = spec["id"]
+        path = ROOT / str(source.get("nav_csv", "")) if source.get("nav_csv") else None
+        if ident not in rows or path is None or not path.exists():
+            continue
+        frame = pd.read_csv(path)
+        if "asof_date" not in frame.columns or "nav" not in frame.columns:
+            continue
+        frame["asof_date"] = pd.to_datetime(frame["asof_date"])
+        frame = frame.set_index("asof_date")["nav"].sort_index()
+        window = bench.reindex(frame.index).dropna()
+        frame = frame.reindex(window.index)
+        if len(frame) < 2 or not (frame > 0).all():
+            continue
+        nav = (frame / frame.iloc[0]).tolist()
+        bnav = (window / window.iloc[0]).tolist()
+        rows[ident]["research"] = {
+            "status": "ok" if len(nav) > 252 else "short_sample", "kind": str(source.get("kind", "strategy_rule_net")),
+            "strategy_id": ident, "benchmark_code": "000905.SH", "benchmark_name": "中证500",
+            "start_date": str(frame.index[0].date()), "end_date": str(frame.index[-1].date()),
+            "dates": [str(d.date()) for d in frame.index], "nav": nav, "benchmark_nav": bnav,
+            "metrics": metrics(nav), "benchmark_metrics": metrics(bnav),
+            "observations": len(nav) - 1, "excess_return": nav[-1] / bnav[-1] - 1,
+            "reason": str(source.get("reason", "策略原始口径的逐笔模拟（不是模拟盘账户）。")),
+            "methodology": str(source.get("methodology", "")), "source": str(source.get("nav_csv")),
+        }
+
     tracks = [x["tracking"] for x in rows.values()]
     # Explicit shared window, never compare annualized numbers over different spans.
     start = max((x.get("start_date", "9999") for x in tracks), default="9999")

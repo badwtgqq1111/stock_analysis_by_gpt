@@ -116,3 +116,84 @@ def test_info_panel_tabs_cover_existing_data():
     for tab in ("概况", "财务", "资金", "龙虎榜", "选股记录", "公告"):
         assert tab in text, f"资料面板缺少 {tab}"
     assert "外站" in text, "新闻没有本地源，必须标注是外站链接"
+
+
+# ─── 正期望策略的选股同步到其他前端部分（2026-10-10 第十四轮）────────────────
+def test_positive_expectancy_strategies_are_selectable_everywhere(client):
+    """用户要求："把正期望的策略选股同步到其他前端部分，包括选股，K线自选等等。"
+
+    一个策略要能在前端各处出现，靠的是这三条链接（缺一条就会"策略池里有、别处看不到"）：
+      1. `config/strategies.json` 里 `selection_source` 非空 → 选股结果页的来源 tab、K 线自选侧栏的策略分组
+         （侧栏分组由 `watchlistStrategies.strategyGroups(pool.strategies)` 按 selection_source 生成）；
+      2. `selection_sources.SOURCES` 里有对应来源且产物存在 → `/api/selection?source=...` 能出名单；
+      3. 正期望的策略还要能被"个股资料 → 选股记录"查到（台账 reader 或最新名单）。
+    """
+    import json as _json
+    from backend.services.selection_sources import SOURCES
+
+    registry = _json.loads((ROOT / "config/strategies.json").read_text(encoding="utf-8"))
+    performance_path = ROOT / "output/strategy_pool/performance.json"
+    if not performance_path.exists():
+        pytest.skip("还没有绩效快照")
+    performance = _json.loads(performance_path.read_text(encoding="utf-8"))["strategies"]
+
+    positive = []
+    for spec in registry["strategies"]:
+        row = performance.get(spec["id"]) or {}
+        curve = row.get("research") or row.get("tracking") or {}
+        # 与前端同一条口径：样本 ≥30 才判方向（1~2 个观测的"正收益"不算正期望）
+        if ((curve.get("metrics") or {}).get("total_return", 0) > 0
+                and (curve.get("observations") or 0) >= 30):
+            positive.append(spec)
+    assert positive, "至少应有一条正期望策略"
+
+    for spec in positive:
+        source = spec.get("selection_source")
+        assert source, f"正期望策略 {spec['id']} 没有 selection_source（选股/自选侧栏就看不到它）"
+        assert source in SOURCES, f"{source} 不在 selection_sources.SOURCES 里"
+        body = client.get("/api/selection", params={"source": source}).json()
+        rows = body.get("rows") or []
+        assert rows, f"/api/selection?source={source} 没有返回名单"
+        # 阶段标签要能区分"研究候选"与"最终名单"（不能都落到"候选池（preselect）"）
+        stages = {r.get("stage") for r in rows}
+        assert stages - {None}, f"{source} 的名单没有 stage 标签（阶段列会显示成空）"
+
+    # K 线自选侧栏：分组就是"带 selection_source 且未下线"的策略
+    helper = (ROOT / "frontend/src/components/watchlistStrategies.ts").read_text(encoding="utf-8")
+    assert "selection_source" in helper and "retired" in helper
+    pool = client.get("/api/strategies", params={"refresh": "false"}).json()
+    group_sources = {s.get("selection_source") for s in pool["strategies"]
+                     if s.get("selection_source") and s["stage"] != "retired"}
+    for spec in positive:
+        assert spec["selection_source"] in group_sources, f"{spec['id']} 不会出现在 K 线自选侧栏"
+
+
+def test_bundle_selection_record_covers_every_registered_strategy(client):
+    """「个股资料 → 选股记录」不能只认硬编码的三份名单：要遍历策略登记表（含 box_arm / rot_arm / jq_*）。"""
+    text = (ROOT / "backend/api/stock_info.py").read_text(encoding="utf-8")
+    assert "config/strategies.json" in text, "选股记录的最新名单要遍历策略登记表"
+    assert '"cn_ensemble_selected.csv"' not in text, "不该再硬编码名单文件名"
+
+    # 取一条 box_arm 的持仓票，核对 bundle 里能查到它
+    picks = ROOT / "output/results_cn/box_arm_selection.csv"
+    if not picks.exists():
+        pytest.skip("还没有 box_arm 名单")
+    import pandas as pd
+    code = str(pd.read_csv(picks).iloc[0]["stock_code"])
+    body = client.get(f"/api/stocks/{code}/bundle").json()
+    selections = body.get("selections") or {}
+    assert selections.get("available"), f"{code} 应能查到选股记录"
+    strategies = {x["strategy"] for x in (selections.get("latest") or [])}
+    assert any("箱体突破回踩" in s for s in strategies), f"最新名单里应有 box_arm：{strategies}"
+    sources = {r["source"] for r in (selections.get("rows") or [])}
+    assert "box_arm" in sources, f"台账来源里应有 box_arm：{sources}"
+
+
+def test_calendar_knows_the_structural_arm(client):
+    """选股日历要认得 box_arm（STRATEGY_META + 前端字母 B + 台账 reader）。"""
+    from backend.api.calendar import STRATEGY_META
+    assert "box_arm" in STRATEGY_META and STRATEGY_META["box_arm"]["group"] == "打板/低吸"
+    page = (ROOT / "frontend/src/pages/SelectionCalendar.vue").read_text(encoding="utf-8")
+    assert page.count("box_arm") >= 4 and "B=box_arm" in page
+    ledger = (ROOT / "scripts/build_selection_ledger.py").read_text(encoding="utf-8")
+    assert "read_box_arm_history" in ledger and '"box_arm"' in ledger

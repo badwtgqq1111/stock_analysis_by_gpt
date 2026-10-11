@@ -175,3 +175,18 @@ def test_industry_stocks_leader_label_survives_json(client):
         pytest.skip("本地日线不可用")
     ranks = [r.get("leader_rank") for r in body["rows"]]
     assert any(r == 1 for r in ranks) and any(r == 2 for r in ranks)
+
+
+def test_daily_bars_have_no_duplicate_symbol_days():
+    """日线窗口里不能有重复的 (trade_date, stock_code)。
+
+    2026-10-10 实测：clean/ohlcv 分区里同一代码同一天有重复行（最近 120 天 3,870 行、值完全相同），
+    下游 `set_index("stock_code")` 后再 `.map()/.reindex()` 在 pandas 3 会直接抛
+    `InvalidIndexError: Reindexing only valid with uniquely valued Index objects` ——
+    行业热度与概念手臂的一批测试同时变红，根因是数据重复而不是业务代码。
+    """
+    bars = mbs.enriched_daily(120)
+    if bars.empty:
+        pytest.skip("本地日线不可用")
+    duplicated = int(bars.duplicated(subset=["trade_date", "stock_code"]).sum())
+    assert duplicated == 0, f"日线窗口里出现了 {duplicated} 行重复的 (trade_date, stock_code)"

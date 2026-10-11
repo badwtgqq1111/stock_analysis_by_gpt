@@ -413,6 +413,113 @@ def read_arm_concept_history() -> list[dict]:
     return rows
 
 
+def read_rot_arm_history() -> list[dict]:
+    """行业轮动手臂（rot_arm）的历史快照 → 台账。
+
+    产物 `output/results_cn/rot_arm_history/<trade_date>.csv` 由 `scripts/select_rotation_arm.py` 每次运行写。
+    这是**复现结论落地**的那条链路：板块层 = MST 滚动聚类大类 + 7 个价量因子简单等权
+    （复现里最优，见 output/research/industry_rotation/xy_reproduce.md），个股层复用 arm_concept。
+    与 arm_concept 并列的独立策略项，必须进日历，否则"策略池里有、日历里没有"。
+    """
+    rows = []
+    hist = RESULTS / "rot_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            held = bool(r.get("in_portfolio"))
+            rows.append({
+                "decision_date": path.stem,
+                "source": "rot_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"{r.get('board') or ''}｜{'持仓' if held else '候选'}"
+                         f"｜个股分 {r.get('score')}｜大类分 {r.get('concept_score')}"
+                         f"｜手数 {r.get('lots_at_capital')}｜金额 {r.get('planned_amount')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"rot_arm_history/{path.name}",
+            })
+    return rows
+
+
+def read_box_arm_history() -> list[dict]:
+    """横盘箱体突破回踩手臂（box_arm）的历史快照 → 台账。
+
+    产物 `output/results_cn/box_arm_history/<决策日>.csv`（决策日 = 回踩日）由
+    `scripts/select_box_breakout_arm.py` 写。进台账后：「选股日历」能按日查到它，
+    K 线页「个股资料 → 选股记录」也能看到"这只票哪天被它选中过"。
+    """
+    rows = []
+    hist = RESULTS / "box_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "box_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"{r.get('board') or ''}｜箱体振幅 {r.get('consolidated_amp')}"
+                         f"｜回踩第 {r.get('offset')} 日｜箱体上沿 {r.get('level')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"box_arm_history/{path.name}",
+            })
+    return rows
+
+
+def read_first_ban_lowxi_history() -> list[dict]:
+    """首板低吸（社区策略）的历史快照 → 台账（**反例档案**：负期望，只为对照与追溯）。
+
+    产物 `output/results_cn/first_ban_lowxi_history/<决策日>.csv`（决策日 = T 日，
+    T+1 开盘买、当日日内卖）由 `scripts/first_ban_lowxi_curve.py` 写。
+    """
+    rows = []
+    hist = RESULTS / "first_ban_lowxi_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "first_ban_lowxi",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("entry"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"{r.get('board') or ''}｜买入基准价 {r.get('entry')}"
+                         f"｜单笔 {r.get('ret')}｜退出：{r.get('exit_reason')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"first_ban_lowxi_history/{path.name}",
+            })
+    return rows
+
+
 def read_survey() -> list[dict]:
     rows = []
     if not SURVEY.exists():
@@ -493,7 +600,9 @@ def main() -> int:
     args = ap.parse_args()
 
     ledger = pd.DataFrame(read_feishu() + read_snapshots() + read_survey() + read_arm_history()
-                          + read_arm_concept_history() + read_jq_history())
+                          + read_arm_concept_history() + read_rot_arm_history()
+                          + read_box_arm_history() + read_first_ban_lowxi_history()
+                          + read_jq_history())
     if ledger.empty:
         raise SystemExit("三个来源都没读到选股记录")
     ledger = ledger.drop_duplicates(["decision_date", "source", "stock_code"]).reset_index(drop=True)

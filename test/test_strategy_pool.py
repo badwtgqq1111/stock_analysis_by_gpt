@@ -196,3 +196,167 @@ def test_watchlist_is_shared_between_pages():
     calendar = (ROOT / "frontend/src/pages/SelectionCalendar.vue").read_text(encoding="utf-8")
     assert "只看自选" in calendar
     assert ".ok { color: var(--accent-up); }" in calendar, "A 股口径：红涨绿跌"
+
+
+# ─── 卡片折叠规则（2026-10-10 用户要求）──────────────────────────────────────
+def test_pool_collapse_rule_is_significance_gated():
+    """用户要求："策略池里的候补策略显著为负的，默认折叠，有正向收益的和中证500 对比收益曲线。"
+
+    改版后折叠逻辑抽在 `components/strategyDetail.ts`（公共显示项模块的一部分），页面只消费它：
+      * 默认折叠 = 负收益 **且样本足够（≥30 个收益观测）** 且日度 t ≤ -1.5（"显著为负"的粗口径）；
+      * 正期望 / 样本不足 → 一律展开；正期望卡片显示与中证500 的对比曲线。
+    为什么必须带样本量门槛：生产策略的"名单跟踪"常常只有 1~2 个观测（-0.46% 这种），
+    拿它当"显著为负"把生产卡也折叠掉，页面就废了（第一版实测踩到）。
+    """
+    module = (ROOT / "frontend/src/components/strategyDetail.ts").read_text(encoding="utf-8")
+    for token in ("shouldCollapse", "isThin", "minObsForJudgement", "significantT", "dailyT"):
+        assert token in module, f"折叠规则缺 {token}（应在 strategyDetail.ts 里）"
+    assert "curve.observations < RULES.minObsForJudgement" in module
+    assert "curve.t <= -RULES.significantT" in module
+    page = (ROOT / "frontend/src/pages/StrategyPool.vue").read_text(encoding="utf-8")
+    assert "shouldCollapse" in page, "列表/详情都要用同一条规则"
+    assert "curveCollapsed" in page, "详情里负期望的曲线默认折叠、可手动展开"
+    # 曲线组件仍是"有正向收益就展示曲线"的载体
+    perf = (ROOT / "frontend/src/components/StrategyPerformance.vue").read_text(encoding="utf-8")
+    assert "benchmark_name" in perf and "个收益观测" in perf
+
+
+def test_pool_api_exposes_curve_direction_for_the_collapse_rule():
+    """折叠规则吃的是 `performance.<curve>.metrics.total_return` 与 `nav` —— 接口必须给到。"""
+    path = ROOT / "output/strategy_pool/performance.json"
+    if not path.exists():
+        import pytest
+        pytest.skip("还没跑过 build_strategy_pool_performance.py")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    negative = [ident for ident, row in payload["strategies"].items()
+                if (row.get("research") or row.get("tracking") or {}).get("metrics", {}).get("total_return", 0) < 0]
+    assert "first_ban_lowxi" in negative, "负期望策略必须能被识别出来（否则不会折叠）"
+    research = payload["strategies"]["first_ban_lowxi"]["research"]
+    assert len(research["nav"]) > 100 and research["metrics"]["total_return"] < -0.5
+    rot = payload["strategies"]["rot_arm"]["research"]
+    assert rot["metrics"]["total_return"] > 0, "rot_arm 应为正期望（默认展开并画曲线）"
+
+
+# ─── 布局改版：左侧列表 + 右侧详情 / 公共显示项 / 优劣 / 对比曲线（2026-10-10 第十二轮）──
+def test_pool_page_uses_master_detail_layout():
+    """用户要求："策略池前端做成左侧策略列表，点击显示详细…整体布局再优化，层次感更分明"。"""
+    page = (ROOT / "frontend/src/pages/StrategyPool.vue").read_text(encoding="utf-8")
+    assert 'class="pool-layout"' in page, "要有左右两栏容器"
+    assert 'class="pool-side"' in page and 'class="pool-main"' in page
+    assert "strategy-item" in page and "select(s.id)" in page, "左侧列表点击切换详情"
+    assert "selectedId" in page and "current" in page, "详情由选中项驱动"
+    assert "strategy-grid" not in page, "旧的卡片网格应已被列表+详情取代"
+    # 层次：概览 → 公共指标 → 优劣 → 单策略曲线 → 多策略对比 → 配置与产物
+    for section in ("公共指标", "优劣", "与中证500 对比", "多策略对比", "配置与产物"):
+        assert section in page, f"缺分区：{section}"
+
+
+def test_common_display_fields_are_extracted_for_every_strategy():
+    """公共显示项抽在 strategyDetail.ts：身份 / 新鲜度 / 曲线 / 配置 / 优劣 五块，所有策略同一套。"""
+    module = (ROOT / "frontend/src/components/strategyDetail.ts").read_text(encoding="utf-8")
+    for block in ("identity", "freshness", "curve", "config", "verdict"):
+        assert block in module, f"公共显示项缺 {block}"
+    for rule in ("minObsForJudgement", "minObsForConfidence", "significantT", "bigDrawdown"):
+        assert rule in module, f"判定阈值缺 {rule}"
+    assert "dailyT" in module and "shouldCollapse" in module and "primaryCurve" in module
+    # 优劣必须由数据规则给出（带数字原因），不是手写文案
+    for item in ("显著负期望", "跑输中证500", "样本不足一年", "回撤偏大", "仍是候选", "样本充足"):
+        assert item in module, f"优劣规则缺 {item}"
+
+
+def test_multi_strategy_compare_aligns_to_common_window():
+    """多策略对比曲线：先取所有曲线的**日期交集**，再各自归一到窗口起点=1（否则对比是假的）。"""
+    comp = (ROOT / "frontend/src/components/StrategyCurveCompare.vue").read_text(encoding="utf-8")
+    assert "windowRange" in comp and "s.dates[0]).sort()" in comp, "要算共同窗口"
+    assert "series.nav[i] / base" in comp, "要在共同窗口内归一到 1"
+    assert "KIND_LABEL" in comp, "图例要标出每条线的口径（毛收益/含成本/逐笔模拟）"
+    assert "__benchmark__" in comp, "基准单独画，不能混进策略图例"
+    page = (ROOT / "frontend/src/pages/StrategyPool.vue").read_text(encoding="utf-8")
+    assert "StrategyCurveCompare" in page and "compareSeries" in page
+    assert "compareIds" in page and "toggleCompare" in page, "要能勾选参与对比的策略"
+
+
+def test_pool_list_marks_and_defaults_by_significance():
+    """列表标记与默认详情都按"显著性"走：负期望用同一条规则；默认详情优先"正收益且跑赢基准"。"""
+    page = (ROOT / "frontend/src/pages/StrategyPool.vue").read_text(encoding="utf-8")
+    assert "shouldCollapse(detailOf(s).curve)" in page, "列表负期望标记要用显著规则"
+    assert "tier * 10000" in page, "默认详情优先级：正收益且跑赢基准 > 正收益 > 其它"
+    assert "filterTabs" in page and "正期望" in page and "负期望" in page, "左侧要有按方向筛选"
+
+
+# ─── 结构型手臂（box_arm）进池 + 风险调整后收益规则（2026-10-10 第十三轮）──────
+def test_box_arm_registered_with_honest_sensitivity_note():
+    """用户要求："继续"（把上一轮的结构型信号接成候选）。它必须**连着参数敏感性一起**进池。"""
+    config = json.loads((ROOT / "config/strategies.json").read_text(encoding="utf-8"))
+    entry = next((s for s in config["strategies"] if s["id"] == "box_arm"), None)
+    assert entry, "config/strategies.json 必须登记 box_arm"
+    assert entry["stage"] == "candidate"
+    assert entry.get("no_tracking") is True, "语义是次日开盘买/当日卖 → 不做名单跟踪"
+    assert entry["curve_source"]["kind"] == "strategy_rule_net"
+    assert "参数极敏感" in entry["summary"] and "weekly×10" in entry["summary"], \
+        "摘要必须写明相邻口径的失败结果（否则只看最优格就是自欺）"
+    script = (ROOT / "scripts/select_box_breakout_arm.py").read_text(encoding="utf-8")
+    assert "parameter_sensitivity" in script and "sensitivity_note" in script
+    payload = json.loads((ROOT / "output/research/box_breakout/curve/curve.json").read_text(encoding="utf-8")) \
+        if (ROOT / "output/research/box_breakout/curve/curve.json").exists() else {}
+    if payload:
+        sensitivity = {(x["cadence"], x["holdings"]): x["total_return_simple"] for x in payload["parameter_sensitivity"]}
+        assert sensitivity, "敏感性表不能为空"
+        assert all(v < 0 for v in sensitivity.values()), f"相邻口径都应为负（实测）：{sensitivity}"
+
+
+def test_verdict_flags_weak_risk_adjusted_returns():
+    """卡玛与夏普都 < 0.5（且样本≥一年）→ 记「风险调整后收益偏弱」；否则会有"正期望"但风险很差的卡混过去。"""
+    module = (ROOT / "frontend/src/components/strategyDetail.ts").read_text(encoding="utf-8")
+    assert "weakRiskAdjusted" in module and "风险调整后收益偏弱" in module
+    assert "curve.calmar < RULES.weakRiskAdjusted" in module and "curve.sharpe < RULES.weakRiskAdjusted" in module
+    path = ROOT / "output/strategy_pool/performance.json"
+    if not path.exists():
+        import pytest
+        pytest.skip("还没跑过 build_strategy_pool_performance.py")
+    row = json.loads(path.read_text(encoding="utf-8"))["strategies"].get("box_arm")
+    if not row or not row.get("research"):
+        import pytest
+        pytest.skip("box_arm 还没有曲线")
+    metrics = row["research"]["metrics"]
+    assert metrics["total_return"] > 0 and metrics["max_drawdown"] <= -0.30
+    assert metrics["calmar"] is not None and metrics["calmar"] < 0.5
+
+
+# ─── 方向徽章 / 反例档案 / 侧栏排序（2026-10-10 第十五轮）──────────────────────
+def test_source_tabs_and_watchlist_groups_carry_verdict_badges():
+    """用户要求："继续"（① 正期望/负期望徽章 ② 负期望也进来源但标反例 ③ 侧栏排序）。
+
+    徽章必须由**同一套判定**驱动（`strategyDetail.ts` 的 headline），否则"策略池说正期望、
+    选股页说样本不足"这种自相矛盾迟早出现。
+    """
+    comp = (ROOT / "frontend/src/composables/usePoolVerdicts.ts").read_text(encoding="utf-8")
+    assert "strategyDetail(" in comp and "selection_source" in comp, "来源→判定映射要复用策略池判定"
+    assert "verdicts" in comp and "60_000" in comp, "要有模块级缓存，别每页各拉一次还各算一套"
+
+    selection = (ROOT / "frontend/src/pages/StockSelection.vue").read_text(encoding="utf-8")
+    assert "usePoolVerdicts" in selection and "tab-verdict" in selection
+    assert "verdicts[opt.key]" in selection, "来源 tab 要按 source 显示徽章"
+
+    helper = (ROOT / "frontend/src/components/watchlistStrategies.ts").read_text(encoding="utf-8")
+    assert "GroupVerdict" in helper and "sortGroups" in helper and "GroupSortKey" in helper
+    watchlist = (ROOT / "frontend/src/components/StockWatchlist.vue").read_text(encoding="utf-8")
+    assert "sortedGroups" in watchlist and "group-sort" in watchlist and "g-verdict" in watchlist
+    assert "按相对中证500" in watchlist and "按日度 t" in watchlist, "排序键要有累计/超额/t"
+
+
+def test_negative_card_is_kept_as_counterexample_source():
+    """负期望的策略也要能查（反例档案），但来源说明里必须写明"不要据此下单"。"""
+    config = json.loads((ROOT / "config/strategies.json").read_text(encoding="utf-8"))
+    entry = next((s for s in config["strategies"] if s["id"] == "first_ban_lowxi"), None)
+    assert entry and entry["selection_source"] == "cn_first_ban_lowxi"
+    assert entry["ledger_sources"] == ["first_ban_lowxi"]
+    from backend.services.selection_sources import SOURCES
+    spec = SOURCES["cn_first_ban_lowxi"]
+    assert "反例档案" in spec["note"] and "不要" in spec["note"]
+    from backend.api.calendar import STRATEGY_META
+    assert "first_ban_lowxi" in STRATEGY_META
+    ledger = (ROOT / "scripts/build_selection_ledger.py").read_text(encoding="utf-8")
+    assert "read_first_ban_lowxi_history" in ledger and '"first_ban_lowxi"' in ledger
+    page = (ROOT / "frontend/src/pages/SelectionCalendar.vue").read_text(encoding="utf-8")
+    assert page.count("first_ban_lowxi") >= 4 and "F=first_ban_lowxi" in page

@@ -160,6 +160,12 @@ def load_daily(days: int = 90) -> pd.DataFrame:
         )
         frame = table.to_pandas()
         frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
+        # 去重（2026-10-10 实测）：日线分区里存在**同一 (trade_date, stock_code) 重复行**
+        # （最近 120 天里有 3,870 行，value 完全相同 —— 应该是同步时重复写入）。
+        # 下游大量 `set_index("stock_code")` 后再 `.map()/.reindex()`，pandas 3 遇到非唯一索引会**直接抛**
+        # （`InvalidIndexError: Reindexing only valid with uniquely valued Index objects`），
+        # 表现为行业热度 / 概念手臂的一批回归测试同时变红 —— 根因就在这里，不在各自的业务代码。
+        frame = frame.drop_duplicates(subset=["trade_date", "stock_code"], keep="last")
         return frame.sort_values(["stock_code", "trade_date"], kind="stable").reset_index(drop=True)
 
     return _cached(("daily", int(days)), 300.0, build)

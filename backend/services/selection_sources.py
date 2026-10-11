@@ -126,6 +126,51 @@ SOURCES: dict[str, dict] = {
         ],
         "supports_shap": False,
     },
+    "cn_first_ban_lowxi": {
+        "label": "CN 首板低吸（社区策略·反例档案）",
+        "note": "⚠️ **反例档案**：聚宽社区《首板涨停+回调+企稳+低吸-年化79%》的本地复现 —— "
+                "T 日选股 → T+1 开盘买 → 当日按文章日内规则卖（5 分钟归档），645 个决策日 / 8,423 笔，"
+                "逐笔均值 -0.62%（扣双边 31bp），累计 -97.6%、夏普 -3.41。保留这条来源是为了"
+                "在日历/选股记录里能对照「什么样的规则上不了线」，**不要**据此下单；"
+                "文章口径依赖本地缺失的集合竞价数据（见 output/research/first_ban_lowxi/REPORT.md）。",
+        "files": [("research", RESULTS_CN / "first_ban_lowxi_picks.csv")],
+        "code_style": "ts_code",
+        "columns": ["rank", "stock_code", "stage", "board", "industry", "entry", "ret",
+                    "exit_reason", "boards", "circ_mktcap_yi"],
+        "supports_shap": False,
+    },
+    "cn_box_arm": {
+        "label": "CN 横盘箱体突破回踩手臂（box_arm）",
+        "note": "结构型候选（2026-10-10）：60 日窄幅横盘（振幅≤45% 且 60 日无涨停）→ 首板且收盘创 60 日新高 "
+                "→ 1~5 日内回调≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → 次日开盘买、当日收盘卖（隔夜空仓）；"
+                "每周最多 5 只等权、按箱体振幅升序。逐笔毛 +0.40%/净 +0.09%（1,949 笔），累计 +28.2%、"
+                "最大回撤 −60.5%、卡玛 0.04 —— ⚠️ 参数极敏感（weekly×10 −68.8%、daily×5 −76.6%），"
+                "只作观察候选，不参与生产权重。",
+        "files": [("research", RESULTS_CN / "box_arm_selection.csv")],
+        "code_style": "ts_code",
+        "columns": [
+            "rank", "stock_code", "stage", "board", "industry", "score", "in_portfolio",
+            "target_weight", "consolidated_amp", "offset", "level",
+        ],
+        "supports_shap": False,
+    },
+    "cn_arm_rot": {
+        "label": "CN 行业轮动手臂（rotation_arm）",
+        "note": "复现结论落地：板块层 = MST 滚动聚类（每 6 个月刷新、60 个月窗口、每个大类 ≥8 个行业）"
+                "下 7 个价量因子（1/3/6 月动量、3 月波动、成交额份额、换手份额、涨停密度）**简单等权**"
+                "→ 取 top-1 大类；个股层复用概念手臂（板块内买滞涨 + 资金流 + 流动性，每行业 ≤2）。"
+                "证据：output/research/industry_rotation/xy_reproduce.md（月频 12.38% vs 现行 2 因子 6.89%）"
+                "与 xy_daily.md（日频扣费后输给月频）。相对大类等权 t=1.51、p=0.135 —— **未过上线闸门**，"
+                "是候选/研究名单，不参与生产订单与权重。",
+        "files": [("research", RESULTS_CN / "rot_arm_selection.csv")],
+        "code_style": "ts_code",
+        "columns": [
+            "rank", "stock_code", "stage", "board", "industry", "score", "concept_score", "rev_5d",
+            "in_portfolio", "target_weight", "last_close", "lots_at_capital", "planned_amount",
+            "pit_name",
+        ],
+        "supports_shap": False,
+    },
     "cn_arm_concept": {
         "label": "CN 概念/板块手臂（concept_rotation）",
         "note": "板块层（动量0.7−涨停密度0.3，2026-10-10 去掉聚合资金流项：该项按 净流入÷成交额 "
@@ -136,7 +181,7 @@ SOURCES: dict[str, dict] = {
         "files": [("arm", RESULTS_CN / "arm_concept_selection.csv")],
         "code_style": "ts_code",
         "columns": [
-            "rank", "stock_code", "board", "industry", "score", "concept_score", "rev_5d",
+            "rank", "stock_code", "stage", "board", "industry", "score", "concept_score", "rev_5d",
             "in_portfolio", "target_weight", "last_close", "lots_at_capital", "planned_amount",
             "pit_name",
         ],

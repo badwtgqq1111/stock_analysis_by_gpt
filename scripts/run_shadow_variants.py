@@ -69,12 +69,21 @@ LABELS = {
     "pool_top5_biweekly": "池前 5 等权（每两个决策日调一次）",
     "pool_top5_monthly": "池前 5 等权（每月末决策日）",
     "pool_top5_lowvol": "池前 5 + 排底部反转 + 低波动",
+    # 复现落地（2026-10-10 第四/五轮）：板块层 = MST 大类 + 7 因子等权 → top-1 大类，
+    # 个股层复用 arm_concept。名单来自台账 source=rot_arm（每日由 select_rotation_arm.py 写）。
+    "rot_arm": "行业轮动手臂 rot_arm（名单持仓，等权；2026-10-10 起 = 候选 10 只全买）",
+    "rot_arm_top5": "行业轮动手臂 rot_arm（只买前 5 名）—— 宽度对照（旧默认，闸门 REJECT）",
+    # 口径对比（2026-10-10 第七轮 `rot_arm_variant_sweep.py`）里累计收益前二的口径，
+    # 进影子组合继续累积证据（sweep 只有 23 个决策日，排名在噪声里）。
+    "rot_arm_top2": "行业轮动手臂（7 因子等权 · k=5 · **取 top-2 大类**）—— 口径对比第一名",
+    "rot_arm_macro5": "行业轮动手臂（论文式 7 价量+25 宏观 · k=5 · top-1）—— 逐期最稳的一条",
 }
 # "买多少只 + 多久换一次" 是上一轮发现的最大正贡献（池前5低换手 +33% vs 整池 +5.7%），
 # 所以宽度（5/8/10）与节奏（每周/每两周/每月）都进影子组合，长期用真实成交数据比。
 WIDTHS = (5, 8, 10)
 ORDER = ["production", "notify_rankcap20", "notify_rankcap20_naive", "pool_top5_rank", "pool_top8_rank", "pool_top10_rank",
-         "pool_top5_biweekly", "pool_top5_monthly", "pool_top5_lowvol"]
+         "pool_top5_biweekly", "pool_top5_monthly", "pool_top5_lowvol",
+         "rot_arm", "rot_arm_top5", "rot_arm_top2", "rot_arm_macro5"]
 
 
 def _ew(frame: pd.DataFrame) -> pd.DataFrame:
@@ -162,6 +171,47 @@ def build_histories(ledger: pd.DataFrame, variants: list[str]) -> dict[str, pd.D
         keep = set(sparse(pool_dates, None, True))
         rows = [_ew(pick(g)) for d, g in pool.groupby("trade_date") if d in keep and not g.empty]
         out["pool_top5_monthly"] = pd.concat(rows, ignore_index=True)
+
+    # ── 行业轮动手臂（rot_arm）：名单直接从台账的 rot_arm 源取，历史立刻回填 ──
+    if {"rot_arm", "rot_arm_top5"} & set(variants):
+        arm_rows = ledger[ledger["source"] == "rot_arm"].copy()
+        if not arm_rows.empty:
+            arm_rows["weight_num"] = pd.to_numeric(arm_rows["weight"], errors="coerce").fillna(0.0)
+            held_rows, top_rows = [], []
+            for _, g in arm_rows.groupby("trade_date"):
+                # ① 名单口径：持仓行（2026-10-10 起 = 候选 10 只全买等权，闸门 KEEP 的那个）
+                held = g[g["weight_num"] > 0]
+                if not held.empty:
+                    held_rows.append(_ew(held))
+                # ② 宽度对照：只买前 5 名（旧默认，闸门 REJECT）
+                top5 = g.sort_values("rank").head(5)
+                if not top5.empty:
+                    top_rows.append(_ew(top5))
+            if "rot_arm" in variants and held_rows:
+                out["rot_arm"] = pd.concat(held_rows, ignore_index=True)
+            if "rot_arm_top5" in variants and top_rows:
+                out["rot_arm_top5"] = pd.concat(top_rows, ignore_index=True)
+
+    # ── 口径对比（rot_arm_variant_sweep）里的候选口径：直接读它的名单历史 ──
+    sweep_sources = {"rot_arm_top2": "repo7_k5_top2_reversal",
+                     "rot_arm_macro5": "macro_k5_top1_reversal"}
+    for name, sweep_tag in sweep_sources.items():
+        if name not in variants:
+            continue
+        folder = ROOT / "output/results_cn/rot_arm_sweep" / sweep_tag
+        if not folder.exists():
+            continue
+        sweep_rows = []
+        for path in sorted(folder.glob("????-??-??.csv")):
+            frame = pd.read_csv(path, dtype={"stock_code": str})
+            if frame.empty or "in_portfolio" not in frame.columns:
+                continue
+            held = frame[frame["in_portfolio"] == True]              # noqa: E712
+            if held.empty:
+                continue
+            sweep_rows.append(_ew(held))
+        if sweep_rows:
+            out[name] = pd.concat(sweep_rows, ignore_index=True)
 
     if "pool_top5_lowvol" in variants:
         # 待验证假设：排除「底部反转尝试」、ATR14 ≤4%、20 日波动率 ≤4%（见 P2_37 复盘 §5.B）

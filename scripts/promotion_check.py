@@ -50,6 +50,14 @@ CANDIDATES = [
     ("pool_top5_lowvol", "pool_top5_rank"),
     ("notify_rankcap20", "production"),
     ("notify_rankcap20_naive", "production"),
+    # 行业轮动手臂（复现落地）：跟生产口径比、跟同宽度的池前 10 比、再做宽度对照
+    ("rot_arm", "production"),
+    ("rot_arm", "pool_top10_rank"),
+    ("rot_arm_top5", "rot_arm"),
+    # 口径对比（sweep）里的两条候选：既要跟现行 rot_arm 比，也要跟同宽度的池前 10 比
+    ("rot_arm_top2", "rot_arm"),
+    ("rot_arm_top2", "pool_top10_rank"),
+    ("rot_arm_macro5", "rot_arm"),
 ]
 
 

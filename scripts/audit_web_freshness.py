@@ -126,6 +126,8 @@ def _freshness_checks() -> list[dict]:
         "arm_selection 阶段", "arm_latest_selection.csv")
     add("选股结果（概念/板块手臂）", "daily", _csv_max(RESULTS / "arm_concept_selection.csv", "trade_date"),
         "arm_concept 阶段", "arm_concept_selection.csv")
+    add("选股结果（行业轮动手臂 rot_arm）", "daily", _csv_max(RESULTS / "rot_arm_selection.csv", "trade_date"),
+        "select_rotation_arm（复现落地：MST 大类 + 7 因子等权）", "output/results_cn/rot_arm_selection.csv")
     add("选股日历", "daily", _parquet_max(RESULTS / "selection_ledger.parquet", "decision_date"),
         "台账（日历/收益回顾的数据底座）", "selection_ledger.parquet")
     add("选股归因", "daily", _subdir_max(RESULTS / "attribution"),

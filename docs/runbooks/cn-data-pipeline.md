@@ -1281,6 +1281,8 @@ exits → paper_account → paper_outcomes`；④ 每阶段独立日志 + 失败
 主阶段之后的**非阻塞**链路（每一步失败只记日志 + 通知，不阻塞当日生产结果与 `.done`）：
 
 ```
+数据补齐块（主阶段之前，全部非致命）：fundamental → financials → **macro**（PMI/CPI/PPI/M0-M2/GDP/
+SHIBOR/美债/南华商品/USDCNH，`scripts/sync_cn_macro.py`，开关 DAILY_MACRO）
 sleeve 面板链路 → arm_selection → boards/adj_factor/arm_concept（含回放/网格/行业研究）
 → performance → lhb → sw2021 → intraday 增量 → 两阶段报告 → notify（feishu_<date>.json）
 → archive_selection → attribution → **jq_multi_factor（备选/候选每日名单）

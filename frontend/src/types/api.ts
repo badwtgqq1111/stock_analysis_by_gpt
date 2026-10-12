@@ -287,6 +287,72 @@ export interface PaperStatus {
   guard?: GuardSnapshot
   promotion?: PromotionSnapshot
   reference?: ReferenceAccount
+  live?: LiveMirror
+}
+
+// ─── 实盘镜像（真实持仓：中泰证券账户快照 + 盯市 + 逐票建议）───
+export interface LiveMirrorPosition {
+  asof_date?: string
+  stock_code: string
+  name: string
+  shares: number
+  cost_price: number
+  last_price: number
+  price_source?: string
+  cost_basis: number
+  market_value: number
+  pnl_amount: number
+  pnl_pct: number
+  weight: number
+  // 建议列由 scripts/build_live_mirror.py 一并写进 positions.csv（前端不再二次 join）
+  action?: '买入' | '持有' | '卖出' | null
+  rule?: string
+  reason?: string
+  momentum_20d?: number | null
+  in_selected?: boolean
+  in_preselected?: boolean
+  selected_rank?: number | null
+}
+export interface LiveMirror {
+  available: boolean
+  generated_at?: string | null
+  asof?: string | null
+  broker?: string | null
+  account_masked?: string | null
+  captured_at?: string | null
+  snapshot_age_days?: number | null
+  price_source?: string | null
+  live_quotes_error?: string
+  cash?: number | null
+  market_value?: number | null
+  total_assets?: number | null
+  cost_basis?: number | null
+  unrealized_pnl?: number | null
+  realized_pnl?: number | null
+  float_pnl_incl_realized?: number | null
+  initial_capital_implied?: number | null
+  cumulative_return?: number | null
+  top1_weight?: number | null
+  top3_weight?: number | null
+  max_weight_single_allowed?: number | null
+  advice_counts?: Record<string, number>
+  advice_rules?: Record<string, string>
+  observations?: number | null
+  sample_status?: string | null
+  relative_20d?: {
+    code?: string; name?: string; window_start?: string; window_end?: string
+    return_20d?: number; portfolio_20d?: number | null; excess_20d?: number | null
+    coverage_weight?: number
+    per_position?: Record<string, { momentum_20d: number | null; excess_20d: number | null }>
+  }
+  picks_date?: string | null
+  selected_codes?: string[]
+  preselected_codes?: string[]
+  notes?: string[]
+  reconciliation?: Record<string, number | null>
+  positions: LiveMirrorPosition[]
+  cleared_positions: { stock_code: string; name: string; realized_pnl: number }[]
+  curve: { date: string; nav: number; cum_return: number; drawdown: number; price_source?: string }[]
 }
 
 // ─── 参考账户（模拟盘绑定的那条规则）───
@@ -978,4 +1044,275 @@ export interface AiPicksSummary {
   dates: string[]
   by_date: AiPicksSummaryDay[]
   hint?: string
+}
+
+// ─── 投研执行台（agent）─────────────────────────────────────────────────────
+// 数据源：backend/api/agent.py；轨迹由 scripts/agent_run.py 写 output/agent_runs/<run_id>/run.json
+export interface AgentFamilyItem {
+  id: string
+  name: string
+  stage: string
+  stage_label: string
+  group: string
+  entry: string
+  selection_source: string
+  latest_date: string | null
+  n_picks: number | null
+  fresh: boolean | null
+  health: string | null
+  summary: string
+}
+
+export interface AgentFamilyBranch {
+  key: string
+  label: string
+  note: string
+  items: AgentFamilyItem[]
+  evidence: string[]
+}
+
+export interface AgentFamily {
+  key: string
+  label: string
+  hint: string
+  branches: AgentFamilyBranch[]
+}
+
+export interface AgentGate {
+  name: string
+  label: string
+  status: string
+  detail: string
+  artifact: string | null
+}
+
+export interface AgentLayer {
+  key: string
+  label: string
+  families: string[]
+  status: string
+  detail: string
+  metric?: Record<string, unknown>
+}
+
+export interface AgentRunSummary {
+  run_id: string
+  kind: string
+  title: string
+  /** 挖掘轨迹的会话锚点（`agent_run.py from-session` 写的）；执行台据此跳回「因子挖掘」标签页 */
+  session_id?: string | null
+  status: string
+  started_at: string
+  duration_seconds: number | null
+  totals: Record<string, number>
+  gates: AgentGate[]
+  path: string
+}
+
+export interface AgentStage {
+  name: string
+  status: string
+  verdict: string
+  duration_seconds: number | null
+  artifact: string | null
+  reason: string | null
+  exit_code: number | null
+  evidence: string
+}
+
+export interface AgentRollback {
+  action: string
+  path: string
+  cmd: string
+  reversible: boolean
+  note: string
+  targets?: string[]
+}
+
+export interface AgentRunDetail {
+  run_id: string
+  kind: string
+  title: string
+  session_id?: string | null
+  factors?: { name: string; expression: string; ic_mean: number | null; icir: number | null; nw_t: number | null }[]
+  status: string
+  exit_status: number | null
+  started_at: string
+  finished_at: string
+  duration_seconds: number | null
+  command: string
+  source: Record<string, unknown>
+  budget: { seconds?: number | null; used_seconds?: number | null; over?: boolean; tokens?: unknown; requests?: unknown }
+  stages: AgentStage[]
+  gates: AgentGate[]
+  artifacts: string[]
+  totals: Record<string, number>
+  rollback: AgentRollback
+}
+
+export interface AgentProfile {
+  role: string
+  language: string
+  detail_level: string
+  system_prompt: string
+  notes: string
+  updated_at: string | null
+  is_default: boolean
+}
+
+export interface AgentOverview {
+  generated_at: string
+  families: AgentFamily[]
+  layers: AgentLayer[]
+  runs: { count: number; latest: AgentRunSummary | null; n_ok?: number; n_failed?: number }
+  gates: AgentGate[]
+  factor_library: {
+    available: boolean
+    generated_at: string | null
+    totals: { n: number; by_status?: Record<string, number>; by_kind?: Record<string, number> }
+    criteria: Record<string, number>
+  }
+  profile: { role: string; updated_at: string | null; is_default: boolean }
+}
+
+export interface AgentProfileResponse {
+  profile: AgentProfile
+  default: { role: string; system_prompt: string; language: string; detail_level: string }
+  history_count: number
+  path: string
+}
+
+export interface AgentFactorItem {
+  id: string
+  kind: string
+  source: string
+  family: string
+  status: string
+  grade: string | null
+  /** 分类：量价 / 价值 / 财务质量 / 资金流 / 波动 / 流动性 / 结构 / 学术代理 …（见 config/factor_glossary.json） */
+  category: string | null
+  category_label: string | null
+  category_core: string | null
+  /** 功能描述（来源如实标：curated 人工 / llm_reason 会话解释 / name_decoder 规则解码） */
+  description: string | null
+  description_source: string | null
+  performance_summary: string | null
+  expression: string | null
+  note: string | null
+  ic_mean: number | null
+  icir: number | null
+  nw_t: number | null
+  fdr_pass: boolean | null
+  hlz_pass: boolean | null
+  max_corr: number | null
+  months: number | null
+  cluster_size: number | null
+  representative: boolean | null
+  evidence: string[]
+}
+
+export interface AgentFactorResponse {
+  available: boolean
+  generated_at: string | null
+  criteria: Record<string, number>
+  window_months: string[]
+  delta: { newly_admitted?: string[]; admitted_previous?: number; admitted_current?: number }
+  totals: {
+    n: number
+    by_status?: Record<string, number>
+    by_kind?: Record<string, number>
+    by_family?: Record<string, number>
+    by_category?: Record<string, number>
+    n_admitted?: number
+  }
+  categories?: { key: string; label: string; core: string }[]
+  filtered: number
+  offset: number
+  limit: number
+  items: AgentFactorItem[]
+}
+
+// ─── 实盘持仓的日/周/月 收益对比（vs 中证500）+ 收益日历 ───
+export interface LiveCurveStats {
+  periods: number
+  start?: string
+  end?: string
+  total_return?: number
+  benchmark_total_return?: number
+  excess_return?: number
+  annualized_return?: number | null
+  benchmark_annualized_return?: number | null
+  max_drawdown?: number
+  win_rate?: number | null
+  best_period?: number | null
+  worst_period?: number | null
+  ann_vol?: number | null
+  mean_excess?: number | null
+}
+export interface LiveCalendarCell {
+  period: string
+  port_ret: number
+  bench_ret: number
+  excess: number
+}
+export interface LiveFrequencyBlock {
+  dates: string[]
+  port_nav: number[]
+  bench_nav: number[]
+  port_ret: number[]
+  bench_ret: number[]
+  excess_ret: number[]
+  stats: LiveCurveStats
+  calendar: LiveCalendarCell[]
+}
+export interface LivePerformance {
+  available: boolean
+  reason?: string
+  generated_at?: string
+  asof?: string
+  window?: { start?: string; end?: string; years?: number }
+  benchmark?: { code: string; name: string; source: string }
+  weight_mode?: string
+  weights?: Record<string, number>
+  coverage_weight?: number
+  notes?: string[]
+  stats_daily?: LiveCurveStats
+  windows?: Record<string, { label: string; stats: LiveCurveStats }>
+  daily?: LiveFrequencyBlock
+  weekly?: LiveFrequencyBlock
+  monthly?: LiveFrequencyBlock
+}
+
+// ─── 实盘账户的**盘中实时**视图（每 2 秒 TTL，前端 15 秒轮询）───
+export interface LiveRealtimePosition extends LiveMirrorPosition {
+  disk_price?: number
+  live_time?: string | null
+  change_pct?: number | null
+  prev_close?: number | null
+}
+export interface LiveRealtime {
+  available: boolean
+  reason?: string
+  asof?: string
+  cash?: number
+  market_value?: number
+  total_assets?: number
+  cost_basis?: number
+  unrealized_pnl?: number
+  realized_pnl?: number
+  initial_capital_implied?: number
+  cumulative_return?: number
+  top1_weight?: number
+  top3_weight?: number
+  n_positions?: number
+  priced?: number
+  unpriced?: number
+  day_pnl?: number | null
+  day_pnl_coverage?: number | null
+  session?: SessionPhase
+  price_source?: string
+  quote_error?: string
+  updated_at?: string
+  advice_source?: string
+  positions: LiveRealtimePosition[]
 }

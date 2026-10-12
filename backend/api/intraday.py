@@ -33,6 +33,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.services import live_quotes
+from backend.services.ttl_cache import ttl_cache
 from backend.services import market_board_service as mbs
 
 router = APIRouter(prefix="/api/intraday", tags=["intraday"])
@@ -234,6 +235,7 @@ def _summarize(points: list[dict], prev_close: float | None) -> dict:
 
 
 @router.get("/quotes")
+@ttl_cache(2.0, name="intraday_quotes")
 def intraday_quotes(codes: str = Query(..., description="逗号分隔的股票代码")) -> dict:
     """批量最新快照（分时页顶部的快捷条）。腾讯一次请求可带多只，比逐只快得多。"""
     wanted = [c.strip().upper() for c in str(codes).split(",") if c.strip()][:40]
@@ -303,6 +305,7 @@ def intraday_quotes(codes: str = Query(..., description="逗号分隔的股票�
 
 
 @router.get("/coverage/{code}")
+@ttl_cache(30.0, name="intraday_coverage")
 def intraday_coverage(code: str) -> dict:
     """该票的分时可用范围：本地 5 分钟归档的日期清单 + 实时源能给出的日期。
 
@@ -334,6 +337,7 @@ def intraday_coverage(code: str) -> dict:
 
 
 @router.get("/{code}")
+@ttl_cache(10.0, name="intraday_detail")
 def intraday(
     code: str,
     period: str = Query("1", pattern="^(1|5)$"),

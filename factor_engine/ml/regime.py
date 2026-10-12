@@ -90,11 +90,13 @@ def build_market_regime(
     daily["model_weight_lightgbm"] = daily["regime"].map({"bull": 0.35, "sideways": 0.55, "bear": 0.70}).fillna(1.0)
     daily["model_weight_transformer"] = daily["regime"].map({"bull": 0.40, "sideways": 0.25, "bear": 0.15}).fillna(0.0)
     daily["model_weight_cnn"] = daily["regime"].map({"bull": 0.25, "sideways": 0.20, "bear": 0.15}).fillna(0.0)
-    daily["gross_exposure_budget"] = daily["regime"].map({"bull": 0.95, "sideways": 0.75, "bear": 0.35}).fillna(0.0)
+    daily["gross_exposure_budget"] = daily["regime"].map({"bull": 0.95, "sideways": 0.95, "bear": 0.95}).fillna(0.0)
     # These caps are for the configured concentrated three-holding account.
     # A 5-10% single-name ceiling can never deploy a 75% gross budget with at
     # most three holdings, so it would leave most capital unintentionally idle.
-    daily["max_weight_budget"] = daily["regime"].map({"bull": 0.45, "sideways": 0.35, "bear": 0.15}).fillna(0.0)
+    # 2026-10-12（用户口径 A：与影子 model_topn_equal 对齐）：regime 层**不再压低总仓位**。
+    # 依据：结论台账 A17 —— 大盘防线/择时在本策略上是负贡献（30.3% → 4.2%），只保留单票上限。
+    daily["max_weight_budget"] = daily["regime"].map({"bull": 0.10, "sideways": 0.10, "bear": 0.10}).fillna(0.0)
     daily["strategy_id"] = daily["regime"].map({"bull": "trend_following", "sideways": "quality_reversion", "bear": "defensive_quality"}).fillna("insufficient_data")
     return daily
 

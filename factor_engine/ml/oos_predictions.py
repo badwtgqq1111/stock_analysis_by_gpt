@@ -119,9 +119,15 @@ def generate_lightgbm_oos_predictions(
     min_feature_coverage=0.05,
     drop_constant_features=True,
     prediction_stride=1,
+    objective="regression",
+    monotone_constraints=None,
     show_progress=False,
 ) -> dict:
-    """Fit one LightGBM per expanding fold and persist strictly OOS predictions."""
+    """Fit one LightGBM per expanding fold and persist strictly OOS predictions.
+
+    `objective="lambdarank"` 时走排序目标（P2.46-3）：每折内部同样用 `_to_ranker_frame`
+    把标签转成每日分位等级并给 `group` —— 这样"只买尾部"的交易口径与训练目标才是同一个东西。
+    """
     prepared, features, _ = _prepare_labeled_panel(
         panel, feature_columns, label_column, filter_features=False,
     )
@@ -151,6 +157,7 @@ def generate_lightgbm_oos_predictions(
             factor_set=factor_set, embargo_days=0,
             min_feature_coverage=min_feature_coverage,
             drop_constant_features=drop_constant_features,
+            objective=objective, monotone_constraints=monotone_constraints,
             show_progress=show_progress,
         )
         scores = predict_lightgbm_panel(test, model_path=artifact["artifact"]["model_path"], manifest_path=artifact["artifact"]["manifest_path"])

@@ -13,7 +13,7 @@ uv run uvicorn backend.main:app --port 8000
 
 打开：
 
-- Vue 页面：`http://127.0.0.1:8000/#/factor-mining`
+- Vue 页面：`http://127.0.0.1:8000/#/agent?tab=mining`（2026-10-11 起：因子挖掘已并入「投研执行台」；老地址 `#/factor-mining` 自动重定向）
 - 无构建依赖的单页：`http://127.0.0.1:8000/api/factor-mining/page`
 - 健康检查：`curl -s localhost:8000/health` → `{"status":"ok"}`
 

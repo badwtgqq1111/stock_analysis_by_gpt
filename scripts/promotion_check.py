@@ -44,6 +44,7 @@ MIN_NAMES = 3             # 每日至少持有几只，低于这个数视为退�
 # 是没意义的 —— 第三十四轮就踩过这个坑，这里按改动逐条指定基线）。
 CANDIDATES = [
     ("pool_top8_rank", "pool_top5_rank"),
+    ("model_topn_equal", "production"),
     ("pool_top10_rank", "pool_top5_rank"),
     ("pool_top5_biweekly", "pool_top5_rank"),
     ("pool_top5_monthly", "pool_top5_rank"),

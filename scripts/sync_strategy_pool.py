@@ -48,12 +48,14 @@ POOL_MD = POOL_DIR / "strategy_pool.md"
 CANDIDATE_DIR = POOL_DIR / "candidates"
 RESEARCH_DIR = ROOT / "output/research"
 
-# 阶段词汇（前端按这个顺序渲染）：candidate 待验证 → research 研究中 → production 生产中 → retired 已下线
-STAGES = ("nowhere", "candidate", "research", "production", "retired")
+# 阶段词汇（前端按这个顺序渲染）：candidate 待验证 → research 研究中 → production 生产中
+# → live 实盘镜像（2026-10-12 新增：真实券商持仓，不是策略、不进生产权重）→ retired 已下线
+STAGES = ("nowhere", "candidate", "research", "production", "live", "retired")
 STAGE_LABEL = {
     "candidate": "候选（待验证）",
     "research": "研究中（有名单但不进生产）",
     "production": "生产中（每日自动化在跑）",
+    "live": "实盘镜像（人工账户，不下单）",
     "retired": "已下线",
 }
 
@@ -301,6 +303,19 @@ def set_stage(ident: str, stage: str) -> tuple[Path, dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 # 组装
 # ─────────────────────────────────────────────────────────────────────────────
+def is_fresh(latest: "str | None", reference: "str | None") -> bool:
+    """产物日期是否"到最新交易日"。
+
+    判据是 `latest >= reference`，**不是 `==`**（2026-10-11 修）：
+    生产策略与基准指数不是同一批数据源 —— **落后一天是事故，超前一天不是**。
+    实测事故：2026-10-11 早上 `cn_ensemble` 最新 2026-10-10（模型策略在非交易日写出了名单），
+    而基准 `latest_trade_date()` 还停在 2026-10-09（指数侧没有 10-10 的 bar），
+    `==` 把它判成 stale ⇒ `sync_strategy_pool.py --strict` 退出码非 0 ⇒
+    预检硬门（`test_build_pool_reports_fresh_production_strategies`）变红 ⇒ 当天每日自动化被挡。
+    """
+    return bool(latest) and bool(reference) and str(latest) >= str(reference)
+
+
 def build_pool() -> dict:
     if not CONFIG_PATH.exists():
         raise SystemExit(f"缺少策略登记表：{CONFIG_PATH}")
@@ -338,7 +353,7 @@ def build_pool() -> dict:
             except Exception:                                      # noqa: BLE001
                 lag = None
         stage = item.get("stage", "research")
-        fresh = bool(latest) and latest == reference
+        fresh = is_fresh(latest, reference)
         strategies.append({
             "id": item["id"],
             "name": item.get("name", item["id"]),

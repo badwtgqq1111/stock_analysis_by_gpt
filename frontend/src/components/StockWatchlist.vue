@@ -51,10 +51,18 @@
 
     <ul class="rows">
       <li v-for="row in visibleRows" :key="row.code" :class="{ active: row.code === modelValue }"
+          v-memo="[row.code, row.name, row.tag, liveKey(row.code)]"
           @click="$emit('update:modelValue', row.code)">
         <span class="mono code">{{ row.code }}</span>
         <span class="name">{{ row.name || '—' }}</span>
         <span class="tag dim tiny" v-if="row.tag">{{ row.tag }}</span>
+        <span class="live" v-if="livePrice(row.code) !== null"
+              :title="`${liveLabel(row.code)} · ${liveQuoteTime(row.code)}`"
+              :class="liveTone(row.code)">
+          {{ livePrice(row.code)!.toFixed(2) }}
+          <span class="tiny">{{ livePct(row.code) }}</span>
+          <span class="src tiny">{{ liveLabel(row.code) }}</span>
+        </span>
         <button class="star" :title="row.local ? '从自选移除' : '加入自选'"
                 @click.stop="toggleLocal(row)">{{ row.local ? '★' : '☆' }}</button>
       </li>
@@ -68,6 +76,7 @@ import { computed, onMounted, ref } from 'vue'
 import { getPaperStatus, getSelection, getStrategyPool, searchStocks } from '@/api/client'
 import type { StockSearchHit } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
+import { useLiveQuotes, quoteLabel } from '@/composables/useLiveQuotes'
 import { groupRows, sortGroups, strategyGroups } from './watchlistStrategies'
 import type { GroupSortKey, WatchlistGroup, WatchlistRow } from './watchlistStrategies'
 import { strategyDetail } from './strategyDetail'
@@ -111,6 +120,57 @@ const emptyText = computed(() => refreshing.value || activeGroup.value?.loading 
   : activeGroup.value?.error ? '名单加载失败，点击刷新重试'
   : group.value === 'local' ? '还没有自选股：用搜索或策略分组添加'
   : '当前分组暂无每日名单')
+
+// ── 实时快照（数据驱动 UI）：只轮询**当前可见**的自选（交易时段 + 页面可见才轮询） ──
+const liveCodes = computed(() => visibleRows.value.map((row) => row.code))
+const live = useLiveQuotes(liveCodes, { intervalMs: 4000 })
+const liveUpdatedText = computed(() => (live.updatedAt.value
+  ? `更新于 ${live.updatedAt.value.toLocaleTimeString('zh-CN')}${live.polling.value ? '（轮询中）' : ''}`
+  : '尚未取到'))
+
+/**
+ * v-memo 的比较键：价格/涨跌/来源/行情时间**任一变化**才重渲染这一行（否则整行跳过）。
+ *
+ * 为什么要把 `quote.time` 也放进键里：行内 title 显示的是**行情时间**，
+ * 只比价格的话"价格没动但时间在走"的行会一直不重渲染 ⇒ 时间戳冻住在几分钟前
+ * （实测：13:43 抓到的 title 到 13:43:46 之后一直是 13:43:46）。
+ * 行情时间每 4 秒轮询都会变，所以这一项让 memo 的"值不变不重渲染"依然成立。
+ */
+function liveKey(code: string): string {
+  const quote = live.quotes.value[code]
+  if (!quote) return '-'
+  return `${quote.price ?? ''}|${quote.change_pct ?? ''}|${quote.source ?? ''}|${quote.time ?? ''}`
+}
+
+function livePrice(code: string): number | null {
+  const quote = live.quotes.value[code]
+  return quote && quote.price != null ? Number(quote.price) : null
+}
+
+function livePct(code: string): string {
+  const quote = live.quotes.value[code]
+  const pct = quote?.change_pct
+  if (pct == null) return ''
+  const value = Number(pct)
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function liveLabel(code: string): string {
+  return quoteLabel(live.quotes.value[code])
+}
+
+/** 每行的行情时间（交易所/源给出的时刻，不是页面抓取时刻）。 */
+function liveQuoteTime(code: string): string {
+  const raw = String(live.quotes.value[code]?.time || '')
+  // 源给的是 `20261012134333` 这种紧凑格式
+  const m = raw.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/)
+  return m ? `${m[4]}:${m[5]}:${m[6]}` : (raw || '时间未知')
+}
+
+function liveTone(code: string): string {
+  const pct = Number(live.quotes.value[code]?.change_pct ?? 0)
+  return pct > 0 ? 'up' : (pct < 0 ? 'down' : '')
+}
 
 function toggleLocal(row: WatchlistRow) {
   watchlist.toggle(row.code, row.name)
@@ -231,6 +291,10 @@ onMounted(async () => {
   border: 1px solid var(--border-color); border-radius: var(--r-2); max-height: 160px; overflow: auto; }
 .suggest li { padding: 4px 6px; font-size: var(--fs-xs); cursor: pointer; border-radius: var(--r-1); }
 .suggest li:hover { background: rgba(255, 209, 102, 0.1); }
+.live { margin-left: auto; display: inline-flex; align-items: baseline; gap: 4px; font-family: var(--font-mono); font-size: var(--fs-xs); }
+.live.up { color: var(--accent-up); }
+.live.down { color: var(--accent-down); }
+.live .src { color: var(--text-dim); }
 .rows { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; }
 .rows li { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: var(--r-2);
   cursor: pointer; font-size: var(--fs-sm); }

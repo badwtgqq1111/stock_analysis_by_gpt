@@ -25,6 +25,9 @@ from fastapi import APIRouter
 
 from backend.api.forward import parity_snapshot
 from factor_engine.portfolio.execution_assumptions import cost_model, load_assumptions
+from backend.services.ttl_cache import ttl_cache
+from backend.services import live_quotes
+from factor_engine.portfolio.live_mirror import realtime_view
 
 ROOT = Path(__file__).resolve().parents[2]
 ACC = ROOT / "output/paper_trading/account"
@@ -131,6 +134,149 @@ def _promotion_snapshot() -> dict:
 
 
 REF_ACC = ROOT / "output/paper_trading/account_reference"
+LIVE_MIRROR = ROOT / "output/paper_trading/live_mirror"
+
+
+def _live_mirror() -> dict:
+    """实盘镜像账户（2026-10-12 新增）：真实券商持仓的盯市 + 逐票建议。
+
+    与「生产账户」「参考账户」并列，但**不是一个东西**：
+      * 生产/参考账户 = 策略名单驱动的前向模拟（从空仓 45,000 起）；
+      * 实盘镜像 = 真实账户的持仓截面（人工录入 config/live_account_holdings.json），
+        不下单、不参与权重，只回答「我现在的持仓模型怎么看」。
+    所以这里单独返回，前端也单独一栏展示，绝不把三条曲线混在一张图里比大小。
+    """
+    summary_path = LIVE_MIRROR / "summary.json"
+    if not summary_path.exists():
+        return {"available": False}
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False}
+    positions = _records(LIVE_MIRROR / "positions.csv")
+    nav = _records(LIVE_MIRROR / "nav.csv")
+    snapshot_path = ROOT / "config/live_account_holdings.json"
+    cleared: list[dict] = []
+    if snapshot_path.exists():
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            cleared = [{"stock_code": str(x.get("stock_code")), "name": str(x.get("name") or ""),
+                        "realized_pnl": float(x.get("realized_pnl") or 0.0)}
+                       for x in (snapshot.get("cleared_positions") or [])]
+        except Exception:
+            cleared = []
+    # 快照年龄：持仓是人工维护的，长期不更新就该在页面上直接提示（而不是拿旧仓位当现状）。
+    age_days = None
+    try:
+        age_days = (datetime.now().date() - datetime.fromisoformat(str(summary["asof"])).date()).days
+    except Exception:
+        age_days = None
+    return {
+        "available": True,
+        "generated_at": summary.get("generated_at"),
+        "asof": summary.get("asof"),
+        "broker": summary.get("broker"),
+        "account_masked": summary.get("account_masked"),
+        "captured_at": summary.get("captured_at"),
+        "snapshot_age_days": age_days,
+        "price_source": summary.get("price_source"),
+        "live_quotes_error": summary.get("live_quotes_error") or "",
+        "cash": summary.get("cash"),
+        "market_value": summary.get("market_value"),
+        "total_assets": summary.get("total_assets"),
+        "cost_basis": summary.get("cost_basis"),
+        "unrealized_pnl": summary.get("unrealized_pnl"),
+        "realized_pnl": summary.get("realized_pnl"),
+        "float_pnl_incl_realized": summary.get("float_pnl_incl_realized"),
+        "initial_capital_implied": summary.get("initial_capital_implied"),
+        "cumulative_return": summary.get("cumulative_return"),
+        "n_positions": summary.get("n_positions"),
+        "top1_weight": summary.get("top1_weight"),
+        "top3_weight": summary.get("top3_weight"),
+        "max_weight_single_allowed": summary.get("max_weight_single_allowed"),
+        "advice_counts": summary.get("advice_counts") or {},
+        "advice_rules": summary.get("advice_rules") or {},
+        "observations": summary.get("observations"),
+        "sample_status": summary.get("sample_status"),
+        "relative_20d": summary.get("relative_20d") or {},
+        "picks_date": summary.get("picks_date"),
+        "selected_codes": summary.get("selected_codes") or [],
+        "preselected_codes": summary.get("preselected_codes") or [],
+        "notes": summary.get("notes") or [],
+        "reconciliation": summary.get("reconciliation") or {},
+        "positions": positions,
+        "cleared_positions": cleared,
+        "performance_available": bool(summary.get("performance_available")),
+        "performance_stats": summary.get("performance_stats") or {},
+        "curve": [{"date": r.get("asof_date"), "nav": r.get("nav"), "cum_return": r.get("cum_return"),
+                   "drawdown": r.get("drawdown"), "price_source": r.get("price_source")} for r in nav],
+    }
+
+
+@router.get("/live/realtime")
+@ttl_cache(2.0, name="live_realtime")
+def live_realtime() -> dict:
+    """**盘中实时**的实盘账户视图（用户 2026-10-12："实盘的要求每天数据都是实时更新的"）。
+
+    与 `/api/paper` 里那份的差别：那份读的是**盘后落盘**的产物（`positions.csv` / `summary.json`），
+    价格是生成时刻的价；这一份每次用**腾讯批量快照**把持仓价换成实时价，再用**同一套算术**
+    （`live_mirror.account_state`）重算市值 / 权重 / 浮盈 / 推算初始本金 / 累计 / 集中度。
+    拿不到实时价（非交易时段、源不可用）就退回盘后价并把 `price_source` 标成 `disk`，不填 0。
+
+    TTL 2 秒：一个页面 + 多个标签页共享，不会把实时源打穿；前端 15 秒一轮够用。
+    """
+    positions_path = LIVE_MIRROR / "positions.csv"
+    if not positions_path.exists():
+        return {"available": False, "reason": "还没有 positions.csv（跑 scripts/build_live_mirror.py）"}
+    positions = pd.read_csv(positions_path)
+    if positions.empty:
+        return {"available": False, "reason": "持仓为空"}
+    snapshot_path = ROOT / "config/live_account_holdings.json"
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"available": False, "reason": f"读不到持仓快照：{exc}"}
+    cleared = float(sum(float(x.get("realized_pnl") or 0.0)
+                        for x in (snapshot.get("cleared_positions") or [])))
+    codes = [str(c) for c in positions["stock_code"].tolist()]
+    session = live_quotes.trading_phase()
+    quotes: dict[str, dict] = {}
+    quote_error = ""
+    if session.get("live"):
+        quotes, quote_error = live_quotes.tencent_quotes(codes)
+    else:
+        quote_error = f"非交易时段（{session.get('phase')}），用盘后价"
+    view = realtime_view(positions, quotes, cash=float(snapshot.get("cash") or 0.0),
+                         cleared_pnl=cleared, asof=str(snapshot.get("asof") or ""))
+    view.update({
+        "available": True,
+        "session": session,
+        "price_source": "live" if quotes else "disk",
+        "quote_error": quote_error,
+        "updated_at": datetime.now().strftime("%H:%M:%S"),
+        "benchmark_code": "000905.SH",
+        # 逐股建议等"一天只变一次"的字段来自盘后产物（positions.csv），实时那部分只改价格口径。
+        "advice_source": str(positions_path.relative_to(ROOT)),
+    })
+    return view
+
+
+@router.get("/live/performance")
+@ttl_cache(30.0, name="live_performance")
+def live_performance() -> dict:
+    """实盘持仓的「日/周/月 vs 中证500」曲线 + 收益日历（`build_live_mirror.py` 预计算）。
+
+    单独一个接口而不是塞进 `/api/paper`：这份 payload 有 700+ 个日频点 + 700+ 个日历格，
+    挂在主接口上会让模拟盘页每次刷新都白带几百 KB。页面按需取，30 秒 TTL。
+    """
+    path = LIVE_MIRROR / "performance.json"
+    if not path.exists():
+        return {"available": False,
+                "reason": "还没有 performance.json；跑 uv run python scripts/build_live_mirror.py"}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"available": False, "reason": f"读取失败：{exc}"}
 
 
 def _reference_account() -> dict:
@@ -296,6 +442,8 @@ def paper_status() -> dict:
         "guard": _guard_snapshot(),
         "promotion": _promotion_snapshot(),
         "reference": _reference_account(),
+        # 实盘镜像（真实持仓）：与上面三条曲线**不可直接比大小**，见函数注释。
+        "live": _live_mirror(),
         "forward": _forward_hint(),
         # 持仓只展示**最新一天**的：原来 tail(40) 会把好几天的持仓混在一起，
         # 看起来像"同时持有 40 只"（实测第一版如此）。

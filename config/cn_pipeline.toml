@@ -659,7 +659,7 @@ mode = "orthogonalize"
 orthogonalize_exposures = ["dist_from_120d_low", "flow_z"]
 # 1.0 = 完全用残差分位；0.5 = 与原分各半（保守档，用于观察期）
 orthogonalize_blend = 1.0
-score_strength = 0.20                       # 仅 score 模式使用：model_score += 100*strength*(tilt - mean(tilt))
+score_strength = 0.0         # 不再按闸门重排模型分数（模型直出）0                       # 仅 score 模式使用：model_score += 100*strength*(tilt - mean(tilt))
 score_band_min_dist_from_120d_low = 0.05    # 启动带下沿：尚未启动不加分
 score_band_max_dist_from_120d_low = 0.30    # 启动带上沿：带内满分
 score_decay_max_dist_from_120d_low = 0.55   # 中段线性衰减到 0
@@ -735,14 +735,14 @@ price_weight_cap = 0.20
 #   small:  45000 * 0.35 / 6 / 100 = 26.25 元
 [selection.profiles.rich]
 initial_capital = 300000.0
-max_holdings = 6
+max_holdings = 10          # 模型直出：与池前 10 对齐
 model_slots = 8
 max_price = "auto"
 sleeve_slots_max = 2
 
 [selection.profiles.small]
 initial_capital = 45000.0
-max_holdings = 6
+max_holdings = 10
 model_slots = 8
 max_price = "weight_cap"
 sleeve_slots_max = 1
@@ -880,21 +880,27 @@ stop_atr = 1.5
 [selection.portfolio_constraints]
 gross_exposure = 0.95
 max_weight = 0.60
-max_holdings = 6
+max_holdings = 10            # 模型直出：与池前 10 对齐（2026-10-12 用户口径 A）
 # 持仓数区间（2026-10-01 用户口径）：最少 2 只、最多 max_holdings(=6)。
 # 组合层在"一手=最小仓位"约束下会自然收敛到能买得起的只数；这里给硬下限，
 # 避免修复循环把账塌到 1 只（少于 2 只时按模型分从被剔名字里补回，并记录 topped_up_for_min_holdings）。
-min_holdings = 2
+min_holdings = 8
 # 少数持仓时的集中度上限：当 0.35 的单名上限让 gross 用不满（例如只剩 2 只时 2×35%=70%<75%），
 # 允许单名权重放大到 min(max_weight_concentrated, gross/持仓数)。
-max_weight_concentrated = 0.45
+max_weight_concentrated = 0.12
 # 权重与模型分数挂钩（原来 inverse_volatility 完全忽略排名，导致排名 8 的票权重高于排名 2）。
 # score_inverse_vol = 归一化分数^alpha_power × 1/sqrt(特质方差)；alpha_weight_floor 保证
 # 入选最末一名也有基础权重，避免"选中但零仓"。
+# 2026-10-12（用户要求）：生产从"PK 改写模型排序"切到**模型直出** ——
+# 等权 10 只、不做评分重排。实现：rank_power + alpha_power=0（share^0≈1 全部等分）
+# + vol_exponent=0（去掉逆波动加权）⇒ 每个 active 名称权重相同。
+# 证据：影子 `model_topn_equal` = `pool_top10_rank` 含成本 +38.09% / 回撤 −13.37%（21 个决策日），
+# 而 PK 口径 `production` 7 个决策日只有 +4.05%（单票上限 0.50、每日最少 2 只）。
+# ⚠️ 闸门尚未出判决（可比期 4 < 20），这是**人工覆盖**；每日影子继续累积，到 20 期复核。
 weighting = "rank_power"
-alpha_power = 2.0        # 分数平方：排名越高权重越大
+alpha_power = 0.0        # share^0 ≈ 1 ⇒ 每个 active 名称分数相同（等权）
 alpha_weight_floor = 0.25
-vol_exponent = 0.25      # 波动只做轻微调整，让排名主导
+vol_exponent = 0.0       # 关掉逆波动加权 ⇒ 真正等权（模型直出）
 # 信号覆盖（override）的保底权重必须由分数支撑：floor × 归一化分数，并设硬上限。
 forced_floor_score_scaling = true
 forced_floor_max_weight = 0.05
@@ -942,7 +948,7 @@ model_min_share = 0.80
 # 恰好是 60 日回撤较深的强势股。所以默认只保留"仓位数学"（波动目标 + 单名风险占比），
 # 三个资格门槛默认关闭，需要时再显式打开并单独回测。
 [selection.risk_control]
-target_volatility = 0.18
+target_volatility = 0.35      # A 口径：只做上限保护（原 0.18 会把总仓位压到 35%）
 # 协方差模型：factor = 统计因子（PCA，K 个因子 + 特质风险），适合持仓数相对窗口偏多时；
 # shrinkage = 样本协方差向对角收缩。两者都做正定性兜底。
 covariance_model = "factor"
@@ -956,7 +962,7 @@ industry_block_blend = 0.0
 # （以 max_gross_exposure 与 max_weight 为硬上限）。因子协方差下 09-16 组合波动约 13.7%，
 # 距离 18% 还有约 24% 的额度。
 vol_target_mode = "cap"
-max_gross_exposure = 0.65
+max_gross_exposure = 0.95
 # 风险平价目标：把优化权重按比例向"等风险贡献"混合（0=纯 alpha，1=纯风险平价）。
 risk_parity_blend = 0.35      # 组合年化波动上限：超了就整体降杠杆、留现金（不加杠杆）
 max_name_risk_share = 0.35    # 单名占组合方差上限，超过就压权重并再分配

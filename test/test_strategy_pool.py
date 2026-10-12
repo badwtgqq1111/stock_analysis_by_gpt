@@ -60,7 +60,10 @@ def test_config_registers_three_production_strategies():
     for item in strategies:
         for field in ("id", "name", "group", "stage", "entry", "artifacts"):
             assert item.get(field), f"{item.get('id')} 缺字段 {field}"
-        assert item["stage"] in ("production", "research", "candidate", "retired")
+        # live（2026-10-12 新增）= 实盘镜像：真实券商持仓，登记在池里是为了
+        # 「选股页 / K 线自选 / 策略池」都能看到它，但它**不是策略**（`kind=live_account`），
+        # 不下单、不参与生产权重（见 test/test_live_mirror.py）。
+        assert item["stage"] in ("production", "research", "candidate", "retired", "live")
         for rel in item["artifacts"]:
             assert (ROOT / rel).exists(), f"产物路径不存在（登记错了？）：{rel}"
         if item.get("history_dir"):
@@ -82,6 +85,19 @@ def test_build_pool_reports_fresh_production_strategies(pool_module):
     assert pool["totals"]["fresh"] is True
     assert pool["totals"]["n_evidence"] > 0
     assert all(row["path"].startswith("output/research/") for row in pool["evidence"])
+
+
+def test_is_fresh_allows_leading_reference(pool_module):
+    """产物日期 `>=` 基准交易日即算新鲜（2026-10-11 修：`==` 会把"超前一天"误判成 stale）。
+
+    事故现场：2026-10-11 早上 `cn_ensemble` 最新 2026-10-10、基准 `latest_trade_date()` 停在 2026-10-09
+    —— 严格相等 ⇒ `--strict` 非 0 ⇒ 预检硬门红 ⇒ 当天每日自动化被挡（数据态问题被当成代码问题）。
+    """
+    assert pool_module.is_fresh("2026-10-10", "2026-10-09") is True    # 超前：新鲜
+    assert pool_module.is_fresh("2026-10-09", "2026-10-09") is True    # 同日：新鲜
+    assert pool_module.is_fresh("2026-10-08", "2026-10-09") is False   # 落后：不新鲜
+    assert pool_module.is_fresh(None, "2026-10-09") is False           # 没扫到日期
+    assert pool_module.is_fresh("2026-10-09", None) is False           # 取不到基准
 
 
 def test_artifact_date_comes_from_column_not_mtime(pool_module, tmp_path):
@@ -178,9 +194,14 @@ def test_frontend_wires_pool_page_and_heatmap():
 
 
 def test_factor_mining_page_can_register_candidates():
-    page = (ROOT / "frontend/src/pages/FactorMining.vue").read_text(encoding="utf-8")
-    assert "registerStrategyCandidate" in page, "因子挖掘页必须有「入池」出口"
-    assert "#/strategies" in page
+    """因子挖掘已并入「投研执行台 ?tab=mining」（2026-10-11），但「入池」出口必须还在。"""
+    panel = (ROOT / "frontend/src/components/FactorMiningPanel.vue").read_text(encoding="utf-8")
+    assert "registerStrategyCandidate" in panel, "挖掘面板必须有「入池」出口"
+    assert "#/strategies" in panel
+    console = (ROOT / "frontend/src/pages/AgentConsole.vue").read_text(encoding="utf-8")
+    assert "FactorMiningPanel" in console, "执行台里必须挂上挖掘面板"
+    router = (ROOT / "frontend/src/router/index.ts").read_text(encoding="utf-8")
+    assert "{ path: '/factor-mining', redirect: '/agent?tab=mining' }" in router, "老书签必须重定向，不能 404"
 
 
 def test_watchlist_is_shared_between_pages():

@@ -49,6 +49,8 @@ def train_lightgbm_panel(
     max_depth=8,
     min_child_samples=30,
     reg_lambda=10.0,
+    objective="regression",
+    monotone_constraints=None,
     early_stopping_rounds=0,
     min_trees=100,
     eval_metric="daily_ic",
@@ -95,19 +97,40 @@ def train_lightgbm_panel(
         progress.update(1)
     if train.empty:
         raise ValueError("not enough dates for LightGBM train/validation split")
+    objective = str(objective or "regression").strip().lower()
+    ranker = objective in {"lambdarank", "rank_xendcg"}
+    if ranker:
+        # ── 排序目标（P2.46-3）：我们只买尾部 top-N，点损失会在全截面上均摊误差，
+        # 排序目标直接优化"尾部顺序"。lambdarank 要求：
+        #   ① 行按日期连续排列；② 提供 group（每日行数）；③ 标签是**分位等级**（0..4），不是连续收益。
+        train, train_group, train_grade = _to_ranker_frame(train)
+        grade_column = "label_grade"
+        if not valid.empty:
+            valid, valid_group, _ = _to_ranker_frame(valid)
+    else:
+        grade_column = None
     params = {
         "objective": "regression", "learning_rate": float(learning_rate), "n_estimators": int(n_estimators),
         "num_leaves": int(num_leaves), "max_depth": int(max_depth), "min_child_samples": int(min_child_samples),
         "subsample": 0.9, "colsample_bytree": 0.9, "reg_lambda": float(reg_lambda),
         "random_state": 42, "n_jobs": -1, "verbosity": -1,
     }
-    model = lgb.LGBMRegressor(**params)
+    if ranker:
+        params.update({"objective": "lambdarank", "metric": "ndcg", "ndcg_eval_at": [10, 20],
+                       "lambdarank_truncation_level": 30})
+    monotone = _monotone_vector(features, monotone_constraints)
+    if monotone:
+        params["monotone_constraints"] = monotone
+        params["monotone_constraints_method"] = "advanced"
+    model = lgb.LGBMRanker(**params) if ranker else lgb.LGBMRegressor(**params)
     fit_kwargs = {}
     validation_metric = None
     metric_history = {}
     if not valid.empty:
-        fit_kwargs["eval_set"] = [(valid[features], valid["label"])]
-        validation_metric = _build_validation_metric(eval_metric, valid["trade_date"].to_numpy())
+        fit_kwargs["eval_set"] = [(valid[features], valid[grade_column or "label"])]
+        if ranker:
+            fit_kwargs["eval_group"] = [valid_group]
+        validation_metric = None if ranker else _build_validation_metric(eval_metric, valid["trade_date"].to_numpy())
         if validation_metric is not None:
             fit_kwargs["eval_metric"] = validation_metric["function"]
         # The per-iteration metric curve is always recorded: it is the only
@@ -128,7 +151,9 @@ def train_lightgbm_panel(
             fit_progress.set_postfix_str(f"valid={len(valid):,}")
         fit_kwargs.setdefault("callbacks", []).append(_fit_progress_callback)
     try:
-        model.fit(train[features], train["label"], **fit_kwargs)
+        if ranker:
+            fit_kwargs["group"] = train_group
+        model.fit(train[features], train[grade_column or "label"], **fit_kwargs)
     finally:
         if fit_progress is not None:
             fit_progress.close()
@@ -143,7 +168,7 @@ def train_lightgbm_panel(
         # predictor.  Refit deterministically at full length instead.
         for key in ("eval_set", "eval_metric", "callbacks"):
             fit_kwargs.pop(key, None)
-        model = lgb.LGBMRegressor(**params)
+        model = lgb.LGBMRanker(**params) if ranker else lgb.LGBMRegressor(**params)
         model.fit(train[features], train["label"], **fit_kwargs)
         trees_kept = int(model.booster_.num_trees())
         refit_without_early_stopping = True
@@ -178,6 +203,8 @@ def train_lightgbm_panel(
             "validation_ic": validation_ic,
             "trees_kept": trees_kept,
             "best_iteration": int(getattr(model, "best_iteration_", -1) or -1),
+            "objective": objective,
+            "monotone_constraints": (monotone_constraints or None),
             "early_stopping_rounds": int(early_stopping_rounds or 0),
             "min_trees": int(min_trees or 0),
             "refit_without_early_stopping": refit_without_early_stopping,
@@ -196,6 +223,50 @@ def train_lightgbm_panel(
         "validation_ic": validation_ic,
         "refit_without_early_stopping": refit_without_early_stopping,
     }
+
+
+def _to_ranker_frame(frame):
+    """按日期排序 + 生成 lambdarank 需要的 group 大小 + 每日分位等级（0..4）。
+
+    为什么必须换标签：lambdarank 的 gain 是**等级**（NDCG 的定义），把连续收益率当等级会退化成
+    "收益越大等级越高"，但组内梯度按等级差算 —— 实测前必须先分位离散；这里用**每日 5 档**
+    （0=最差 … 4=最好），与"只买尾部"的交易口径一致。
+    """
+    import numpy as np
+    ordered = frame.sort_values("trade_date").reset_index(drop=True).copy()
+    dates = ordered["trade_date"].to_numpy()
+    sizes = ordered.groupby("trade_date", sort=False).size().to_numpy().tolist()
+    label = ordered["label"].to_numpy(dtype=float)
+    grades = np.zeros(len(ordered), dtype=int)
+    for _, group in ordered.groupby("trade_date", sort=False):
+        values = group["label"].to_numpy(dtype=float)
+        if len(values) < 5:
+            grades[group.index.to_numpy()] = 0
+            continue
+        edges = np.quantile(values, [0.2, 0.4, 0.6, 0.8])
+        grades[group.index.to_numpy()] = np.searchsorted(edges, values, side="right")
+    ordered["label_grade"] = grades
+    return ordered, sizes, grades
+
+
+def _monotone_vector(features: list[str], spec) -> "list[int] | None":
+    """把 `{"列名": +1/-1}` 或 `{"列名": "up"/"down"}` 映射成与 features 对齐的向量。
+
+    书 Ch 12.2（p.338）：单调约束是"理论驱动的正则化"——在低信噪比区域阻止模型学到
+    "PE 越高收益越高"这类不可能重复的伪影；约束后 IC 通常持平但尾部更稳，且策略可审计。
+    """
+    if not spec:
+        return None
+    table = {}
+    for name, sign in dict(spec).items():
+        if isinstance(sign, str):
+            lowered = sign.strip().lower()
+            table[name] = 1 if lowered in {"up", "+", "+1", "pos", "positive"} else -1
+        else:
+            table[name] = 1 if int(sign) >= 0 else 0 if int(sign) == 0 else -1
+    if not table:
+        return None
+    return [int(table.get(name, 0)) for name in features]
 
 
 def _build_validation_metric(eval_metric, dates):

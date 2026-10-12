@@ -7434,7 +7434,7 @@ class MarketDataService:
         paths = write_walk_forward_report(report, summary, output_dir=output_dir, prefix=prefix)
         return {**paths, "comparison": summary}
 
-    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, label_mode="forward_return", startup_only=False, label_path_horizon=60, preserve_startup_context=False, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=12_000, transformer_max_feature_pairs=128, transformer_protected_features=(), transformer_seeds=None, transformer_checkpoint_metric="ic", transformer_seed_ensemble="average", transformer_device="auto", prediction_stride=1, industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None, show_progress=False, meta_labeling=False, meta_features=None, meta_label_column="label_tb_class", meta_candidate_quantile=0.10, meta_act_quantile=0.50, meta_min_probability=None, meta_inner_share=0.30, meta_inner_purge_days=20, meta_validation_share=0.30, meta_purge_days=20, meta_n_estimators=300, meta_learning_rate=0.05, meta_num_leaves=31, meta_max_depth=5, meta_min_child_samples=50, meta_reg_lambda=10.0, meta_random_state=42, meta_gate_mode="learned", meta_rule_column="dist_from_120d_low", meta_rule_threshold=0.15, meta_rule_direction="le", meta_top_k=20, meta_evaluation_dir="output/evaluations", meta_evaluation_prefix=None, meta_realized_return_column="forward_excess_return_20d", meta_commission_bps=5.0, meta_slippage_bps=5.0, meta_stamp_duty_bps=5.0, feature_profile="full", feature_include_patterns=(), feature_exclude_patterns=(), feature_include_families=(), feature_exclude_families=(), neutralization=None):
+    def generate_cn_oos_predictions(self, *, models=("lightgbm",), factor_set="alpha_zoo_hk", days=756, label_horizon=20, label_mode="forward_return", startup_only=False, label_path_horizon=60, preserve_startup_context=False, cleaning_version="p0.2.v1", output_dir="output/oos_predictions", n_splits=5, min_train_days=120, test_days=None, purge_days=20, embargo_days=0, transformer_lookback=60, transformer_epochs=5, transformer_batch_size=256, transformer_max_samples=12_000, transformer_max_feature_pairs=128, transformer_protected_features=(), transformer_seeds=None, transformer_checkpoint_metric="ic", transformer_seed_ensemble="average", transformer_device="auto", prediction_stride=1, industry_mapping_path=None, min_feature_coverage=0.05, drop_constant_features=True, end_date=None, show_progress=False, meta_labeling=False, meta_features=None, meta_label_column="label_tb_class", meta_candidate_quantile=0.10, meta_act_quantile=0.50, meta_min_probability=None, meta_inner_share=0.30, meta_inner_purge_days=20, meta_validation_share=0.30, meta_purge_days=20, meta_n_estimators=300, meta_learning_rate=0.05, meta_num_leaves=31, meta_max_depth=5, meta_min_child_samples=50, meta_reg_lambda=10.0, meta_random_state=42, meta_gate_mode="learned", meta_rule_column="dist_from_120d_low", meta_rule_threshold=0.15, meta_rule_direction="le", meta_top_k=20, meta_evaluation_dir="output/evaluations", meta_evaluation_prefix=None, meta_realized_return_column="forward_excess_return_20d", meta_commission_bps=5.0, meta_slippage_bps=5.0, meta_stamp_duty_bps=5.0, objective="regression", monotone_constraints=None, feature_profile="full", feature_include_patterns=(), feature_exclude_patterns=(), feature_include_families=(), feature_exclude_families=(), neutralization=None):
         """Generate historical predictions with one strictly prior model per OOS fold.
 
         With ``meta_labeling=True`` the LightGBM leg also fits the second-stage
@@ -7470,6 +7470,8 @@ class MarketDataService:
             "embargo_days": embargo_days, "cleaning_version": cleaning_version, "factor_set": factor_set,
             "min_feature_coverage": min_feature_coverage, "drop_constant_features": drop_constant_features,
             "prediction_stride": prediction_stride,
+            # 排序目标 / 单调约束（P2.46-3/4）：一路传到 train_lightgbm_panel
+            "objective": objective, "monotone_constraints": monotone_constraints,
             "show_progress": show_progress,
         }
         if "lightgbm" in requested and requested_meta:
@@ -10771,6 +10773,8 @@ class MarketDataService:
         early_stopping_rounds=0,
         min_trees=100,
         eval_metric="daily_ic",
+        objective="regression",
+        monotone_constraints=None,
         end_date=None,
         feature_admission=None,
         show_progress=False,
@@ -10801,6 +10805,7 @@ class MarketDataService:
             n_estimators=n_estimators, learning_rate=learning_rate, num_leaves=num_leaves,
             max_depth=max_depth, min_child_samples=min_child_samples, reg_lambda=reg_lambda,
             early_stopping_rounds=early_stopping_rounds, min_trees=min_trees, eval_metric=eval_metric,
+            objective=objective, monotone_constraints=monotone_constraints,
             show_progress=show_progress,
         )
 

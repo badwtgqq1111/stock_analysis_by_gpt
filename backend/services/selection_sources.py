@@ -66,6 +66,14 @@ _COLS = {
     "planned_amount": ("planned_amount", "金额", False),
     "pit_name": ("pit_name", "快照日名称(PIT)", True),
     "mktcap_rank": ("mktcap_rank", "市值分位", False),
+    # 实盘镜像（2026-10-12）：真实券商持仓接进同一条展示链路
+    "cost_price": ("cost_price", "成本价", False),
+    "pnl_amount": ("pnl_amount", "浮盈(元)", False),
+    "pnl_pct": ("pnl_pct", "浮盈(%)", False),
+    "action": ("action", "建议", True),
+    "rule": ("rule", "规则", True),
+    "note": ("note", "说明", True),
+    "price_source": ("price_source", "价源", True),
     # 港股侧（沿用原有中文表头）
     "ranking_score": ("ranking_score", "综合评分", False),
     "signal_tier": ("signal_tier", "信号等级", True),
@@ -123,6 +131,21 @@ SOURCES: dict[str, dict] = {
             "rank", "stock_code", "board", "industry", "score", "in_portfolio",
             "target_weight", "last_close", "lots_at_capital", "planned_amount",
             "pit_name", "mktcap_rank",
+        ],
+        "supports_shap": False,
+    },
+    "cn_live_holdings": {
+        "label": "实盘镜像（中泰证券真实持仓）",
+        "note": "**真实券商账户**的持仓截面（人工录入 config/live_account_holdings.json），"
+                "**不是策略名单**：它不会下单、不参与生产权重。每日由 scripts/build_live_mirror.py "
+                "按实时价/收盘价盯市，逐票给「买入 / 持有 / 卖出」建议（规则写在每行 rule 列，"
+                "可用快照复算）。与「模型选股」账户口径相同、来源不同，不要直接比大小。",
+        "files": [("live", RESULTS_CN / "cn_live_holdings.csv")],
+        "code_style": "ts_code",
+        "columns": [
+            "rank", "stock_code", "name", "stage", "industry", "shares", "cost_price",
+            "last_close", "target_weight", "pnl_amount", "pnl_pct", "action", "rule", "note",
+            "price_source", "selected_rank",
         ],
         "supports_shap": False,
     },

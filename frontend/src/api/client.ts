@@ -7,6 +7,7 @@ import type {
   LimitUpLadder, LimitUpDetail, LimitUpLive, IntradayResponse, IntradayQuote, IntradayCoverage, SessionPhase,
   IndustryOverview, IndustryHeatResponse, IndustryStocksResponse,
   IndustryHeatmapResponse,
+  LivePerformance, LiveRealtime,
 } from '@/types/api'
 
 /** 统一的接口错误：页面只认 `err.message` 与 `err.status`，不用各自解析 axios 的结构。 */
@@ -344,6 +345,20 @@ export async function getPaperStatus(): Promise<PaperStatus> {
   return (await resp.json()) as PaperStatus
 }
 
+/** 实盘账户的**盘中实时**视图（实时价重算市值/权重/浮盈/累计；TTL 2 秒，页面 15 秒轮询）。 */
+export async function getLiveRealtime(): Promise<LiveRealtime> {
+  const resp = await fetch('/api/paper/live/realtime')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as LiveRealtime
+}
+
+/** 实盘持仓的日/周/月 收益对比（vs 中证500）+ 收益日历。payload 较大，独立接口按需取。 */
+export async function getLivePerformance(): Promise<LivePerformance> {
+  const resp = await fetch('/api/paper/live/performance')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as LivePerformance
+}
+
 // ─── 前瞻收益记录（长样本口径，来自选股台账）───
 export async function getForwardValidation(): Promise<ForwardValidation> {
   const resp = await fetch('/api/forward-validation')
@@ -600,5 +615,49 @@ export async function getStockAi(code: string, limit = 20): Promise<import('@/ty
 /** AI 结论按决策日的覆盖情况（哪个交易日已经分析过、买/持/卖分布）。 */
 export async function getAiPicksSummary(): Promise<import('@/types/api').AiPicksSummary> {
   const { data } = await http.get('/ai-picks/summary')
+  return data
+}
+
+// ─── 投研执行台（agent）─────────────────────────────────────────────────────
+/** 两族 / 四层状态 + 最近一次运行 + 提示词摘要（页面首屏一次取完） */
+export async function getAgentOverview(): Promise<import('@/types/api').AgentOverview> {
+  const { data } = await http.get('/agent/overview')
+  return data
+}
+
+export async function getAgentRuns(limit = 20): Promise<{ count: number; runs: import('@/types/api').AgentRunSummary[] }> {
+  const { data } = await http.get('/agent/runs', { params: { limit } })
+  return data
+}
+
+/** 一次运行的完整轨迹（阶段表 + 门槛表 + 预算 + 回滚） */
+export async function getAgentRun(runId: string): Promise<import('@/types/api').AgentRunDetail> {
+  const { data } = await http.get(`/agent/runs/${encodeURIComponent(runId)}`)
+  return data
+}
+
+export async function getAgentProfile(): Promise<import('@/types/api').AgentProfileResponse> {
+  const { data } = await http.get('/agent/profile')
+  return data
+}
+
+/** 保存人设/提示词（先备份旧版本；角色默认「量化领域专家」，可改） */
+export async function saveAgentProfile(
+  payload: Partial<Pick<import('@/types/api').AgentProfile, 'role' | 'system_prompt' | 'detail_level' | 'language' | 'notes'>>,
+): Promise<{ saved: boolean; profile: import('@/types/api').AgentProfile; history_count: number }> {
+  const { data } = await http.put('/agent/profile', payload)
+  return data
+}
+
+export async function resetAgentProfile(): Promise<{ saved: boolean; profile: import('@/types/api').AgentProfile; history_count: number }> {
+  const { data } = await http.post('/agent/profile/reset')
+  return data
+}
+
+/** 因子库（族 B 因子 + 族 A 条件，同一张表；后台 scripts/sync_factor_library.py 生成） */
+export async function getAgentFactors(
+  params: { kind?: string; status?: string; category?: string; q?: string; limit?: number; offset?: number } = {},
+): Promise<import('@/types/api').AgentFactorResponse> {
+  const { data } = await http.get('/agent/factors', { params })
   return data
 }

@@ -106,7 +106,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ControlPanel from '@/components/ControlPanel.vue'
 import KlineChart from '@/components/KlineChart.vue'
@@ -188,11 +188,42 @@ async function loadIntraday(date: string) {
   loadingIntraday.value = true
   try {
     intraday.value = await getIntraday(selectedCode.value || '', '1', 'auto', date)
+    intradayUpdatedAt.value = new Date()
   } catch (e) {
-    intradayError.value = String(e)
+    intradayError.value = String(e)      // 保留上一次成功数据，只标错
   } finally {
     loadingIntraday.value = false
   }
+  startIntradayPoll()
+}
+
+// ── 分时"实时推进"（2026-10-12）：只在**当日/最近交易日**且**交易时段**轮询；页面隐藏即停 ──
+// 与自选侧栏的 useLiveQuotes 同一套门控口径（phase 由后端给），避免两处各写一套判断。
+const liveTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const intradayUpdatedAt = ref<Date | null>(null)
+const liveQuotesSession = ref<{ phase?: string } | null>(null)
+
+function intradayPollable(date: string): boolean {
+  const target = String(date || '')
+  // `coverage.today` 就是"最近交易日"（后端 `IntradayCoverage.today`）；看历史某天时不动它。
+  const latest = String(coverage.value?.today || '')
+  if (!target || !latest || target !== latest) return false      // 看历史某天时不动它
+  const phase = liveQuotesSession.value?.phase
+  return phase === 'am' || phase === 'pm' || phase === 'auction'
+}
+
+function stopIntradayPoll() {
+  if (liveTimer.value) clearInterval(liveTimer.value)
+  liveTimer.value = null
+}
+
+function startIntradayPoll() {
+  stopIntradayPoll()
+  const target = pickedDate.value || String(coverage.value?.today || '')
+  if (document.hidden || !intradayPollable(target)) return
+  liveTimer.value = setInterval(() => {
+    if (!document.hidden) void loadIntraday(pickedDate.value || String(coverage.value?.today || ''))
+  }, 30000)
 }
 
 function clearIntraday() {
@@ -201,10 +232,21 @@ function clearIntraday() {
   intradayError.value = ''
 }
 
+/** 默认看哪一天：**优先今天**（只要实时源今天有数据），否则退回"日线最后一根"（= 最近一个交易日）。
+
+2026-10-12 修：原来两处都默认 `data.data[last]`（日线最后一根 = 本地/前收日），于是"今天上午的分时"
+根本不显示 —— 实测后端 `mode=live` 明明有今天 121 根 1 分钟线（腾讯分时），页面却停在 10-09 的归档上。
+*/
+function preferredIntradayDate(): string {
+  const today = String(coverage.value?.today || '')
+  if (today && hasData(today)) return today
+  return String(data.value?.data?.[data.value.data.length - 1]?.time || '')
+}
+
 /** K 线区间里还没有选中日期时，默认看最近一个交易日 */
 watch(() => data.value, (d) => {
   if (d && d.data.length && !pickedDate.value) {
-    const last = d.data[d.data.length - 1].time
+    const last = preferredIntradayDate()
     pickedDate.value = last
     void loadIntraday(last)
   }
@@ -217,8 +259,8 @@ watch(selectedCode, async (code) => {
   if (!code) return
   try {
     coverage.value = await getIntradayCoverage(code)
-    // 上一次选的日期可能在新票的覆盖范围外 → 默认回到最新交易日
-    const last = data.value?.data?.[data.value.data.length - 1]?.time
+    // 上一次选的日期可能在新票的覆盖范围外 → 默认回到"今天（若有实时）或最近交易日"
+    const last = preferredIntradayDate()
     if (last) { pickedDate.value = last; void loadIntraday(last) }
   } catch { /* 覆盖范围拿不到时，点击仍会退回后端 404 文案 */ }
 })
@@ -247,6 +289,13 @@ function shares(n: number | null | undefined) {
 }
 
 // 支持从别处跳转：/#/kline?code=301230.SZ
+onMounted(async () => {
+  // 轻量拉一次"当前时段"，用于分时轮询的门控（失败不影响页面其它部分）
+  try {
+    const overview = await (await fetch('/api/rankings/overview')).json()
+    liveQuotesSession.value = { phase: overview?.session?.phase }
+  } catch { /* 忽略：拿不到时段就不轮询 */ }
+})
 onMounted(() => {
   const code = String(route.query.code || '')
   if (code) selectedCode.value = code
@@ -270,3 +319,4 @@ watch(selectedCode, (code) => {
 .close-btn { margin-left: auto; }
 .intraday-panel .stat-grid { margin-bottom: var(--sp-3); }
 </style>
+onUnmounted(() => { stopIntradayPoll() })

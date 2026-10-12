@@ -148,6 +148,24 @@ def latest_trade_date() -> "object":
     return pd.to_datetime(table["trade_date"]).max().date()
 
 
+def resolve_target_date(daily_max, now) -> "object":
+    """把"目标交易日"从"日线最大日期"升级为**日历规则**（2026-10-12 修）。
+
+    原来只读日线的最大 `trade_date` 当作"最新交易日"。后果（F6/F9 同款坑）：
+    **日线当天还没同步时，当日的分时永远不会被补** —— 实测今天 12:10 的那次 refresh 判据是
+    `最新交易日=2026-10-09`，于是今天（10-12）根本没进目标。
+
+    规则：若"今天"是工作日且已过 **15:05**（baostock 的当日分钟线收盘后才可得），
+    就把今天纳入目标；否则沿用日线最大日期。节假日会多试一次（返回空），不影响正确性。
+    """
+    if daily_max is not None and hasattr(daily_max, "date"):
+        pass
+    today = now.date() if hasattr(now, "date") else now
+    if today.weekday() < 5 and (now.hour, now.minute) >= (15, 5):
+        return today if (daily_max is None or today > daily_max) else daily_max
+    return daily_max
+
+
 def refresh_pending(freq_dir: Path, codes: list, latest) -> list:
     """返回 [(code, last_date_or_None)]，只含"没有文件"或"最后日期落后于最新交易日"的标的。
 
@@ -214,7 +232,7 @@ def main() -> int:
     latest = None
     if args.refresh:
         latest = (datetime.fromisoformat(args.latest_trade_date).date() if args.latest_trade_date
-                  else latest_trade_date())
+                  else resolve_target_date(latest_trade_date(), datetime.now()))
         log(args.log, f"=== 刷新模式启动 目标 {len(target)} 只 freq={args.freq}min 最新交易日={latest} "
                       f"batch={args.batch_size} ===")
     else:

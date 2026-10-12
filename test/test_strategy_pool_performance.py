@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 import sys
 from pathlib import Path
 
@@ -172,3 +173,99 @@ def test_frontend_prefers_long_curve_for_sparse_decision_strategies():
         "名单跟踪样本太短时要自动切到研究/模拟盘曲线"
     assert "shadow_account_net" in text, "卡片要写明当前曲线口径（模拟盘净值/含成本）"
     assert "个收益观测" in text
+
+
+# ─── 模型臂曲线（P2.45-A）：台账口径的分段持有净值 ─────────────────────────────
+def _load_perf_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "build_strategy_pool_performance_under_test", ROOT / "scripts/build_strategy_pool_performance.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_ledger_curve_segment_hold_nav():
+    """手算一个两段持有的例子：净值必须**分段持有、段末链接**，不能每天把"入场以来涨幅"再复利一次。
+
+    第一版实现把 `Σw·(close/entry)` 每天累乘到净值上，实测把 preselected 曲线跑出 +17,878% —— 这条测试就是防它复辟。
+    """
+    import pandas as pd
+    perf = _load_perf_module()
+    days = pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-12"])
+    # 行情：A/B 在 1-06 建仓（开盘 10），此后收盘 11 / 10.5；C 在 1-09 建仓（开盘 20），收盘 22
+    rows = []
+    for day in days:
+        for code, open_p, close_p in (("A.SZ", 10.0, 11.0 if day >= days[1] else 10.0),
+                                      ("B.SZ", 10.0, 10.5 if day >= days[1] else 10.0),
+                                      ("C.SZ", 20.0, 22.0 if day >= days[4] else 20.0)):
+            rows.append({"trade_date": day, "stock_code": code, "open": open_p, "close": close_p})
+    bars = pd.DataFrame(rows)
+    bench = pd.Series([100.0, 100.0, 100.0, 100.0, 100.0, 100.0], index=days)
+    targets = {
+        days[0]: pd.Series({"A.SZ": 0.5, "B.SZ": 0.5}),
+        days[3]: pd.Series({"C.SZ": 1.0}),
+    }
+    curve = perf.ledger_curve(targets, bench, bars, kind="test")
+    assert curve["status"] == "ok"
+    nav = [round(v, 6) for v in curve["nav"]]
+    # D1 空仓=1；D2 起持有 A/B：0.5×11/10 + 0.5×10.5/10 = 1.075；D5 换到 C：1.075 × 22/20 = 1.1825
+    assert nav == [1.0, 1.075, 1.075, 1.075, 1.1825, 1.1825], nav
+    assert curve["metrics"]["total_return"] == pytest.approx(0.1825, abs=1e-9)
+    assert curve["observations"] == 2
+
+
+def test_ledger_targets_uses_weights_then_equal_weight_topn(tmp_path, monkeypatch):
+    """台账两种行：有目标权重的按权重，没有权重的按 rank 取前 top_n 等权。"""
+    import pandas as pd
+    perf = _load_perf_module()
+    ledger = pd.DataFrame([
+        {"decision_date": "2026-01-05", "source": "notify", "stock_code": "A.SZ", "rank": 1, "weight": 0.6},
+        {"decision_date": "2026-01-05", "source": "notify", "stock_code": "B.SZ", "rank": 2, "weight": 0.4},
+        {"decision_date": "2026-01-06", "source": "preselected", "stock_code": "C.SZ", "rank": 2, "weight": None},
+        {"decision_date": "2026-01-06", "source": "preselected", "stock_code": "D.SZ", "rank": 1, "weight": None},
+        {"decision_date": "2026-01-06", "source": "preselected", "stock_code": "E.SZ", "rank": 3, "weight": None},
+    ])
+    path = tmp_path / "ledger.parquet"
+    ledger.to_parquet(path, index=False)
+    monkeypatch.setattr(perf, "LEDGER", path)
+
+    notify = perf.ledger_targets("notify")
+    assert list(notify[pd.Timestamp("2026-01-05")].index) == ["A.SZ", "B.SZ"]
+    assert notify[pd.Timestamp("2026-01-05")].sum() == pytest.approx(1.0)
+
+    top2 = perf.ledger_targets("preselected", top_n=2)
+    picked = top2[pd.Timestamp("2026-01-06")]
+    assert list(picked.index) == ["D.SZ", "C.SZ"], "无权重时按 rank 取前 top_n"
+    assert all(abs(w - 0.5) < 1e-9 for w in picked.to_numpy())
+    assert perf.ledger_targets("nosuch") == {}
+
+
+def test_model_topn_equal_variant_ignores_pk():
+    """P2.45-D：`model_topn_equal` = 候选池按模型 rank 取前 N **等权**，完全不掺 PK 权重。
+
+    它存在的意义：与 `production`（PK 后按权重）做同窗口配对，量化"PK 层改写模型排序"的代价。
+    """
+    import importlib.util
+    import pandas as pd
+    spec = importlib.util.spec_from_file_location("shadow_under_test", ROOT / "scripts/run_shadow_variants.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "model_topn_equal" in module.LABELS and "model_topn_equal" in module.ORDER
+    ledger = pd.DataFrame([
+        {"trade_date": "2026-01-05", "source": "preselected", "stock_code": f"{i:06d}.SZ",
+         "rank": i, "model_score": 100 - i, "weight": None} for i in range(1, 16)
+    ] + [
+        {"trade_date": "2026-01-05", "source": "notify", "stock_code": "000001.SZ",
+         "rank": 1, "model_score": 99, "weight": 0.9},
+        {"trade_date": "2026-01-05", "source": "notify", "stock_code": "000007.SZ",
+         "rank": 7, "model_score": 93, "weight": 0.1},
+    ])
+    histories = module.build_histories(ledger, ["model_topn_equal", "production"])
+    arm = histories["model_topn_equal"]
+    width = module.MODEL_WIDTH
+    assert len(arm) == width, f"必须正好取前 {width} 只（与 pool_top10_rank 同宽度；踩过 TOPN=5 的坑）"
+    assert set(arm["stock_code"]) == {f"{i:06d}.SZ" for i in range(1, width + 1)}
+    assert all(abs(w - 1.0 / width) < 1e-9 for w in arm["target_weight"]), "必须等权（不掺 PK）"
+    prod = histories["production"]
+    assert set(prod["stock_code"]) == {"000001.SZ", "000007.SZ"}, "production 仍是 PK 后的名单"

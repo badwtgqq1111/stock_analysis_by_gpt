@@ -50,7 +50,9 @@
 #          每只被选个股做多空综合分析，给出 买入/持有/卖出（DeepSeek，key 取 DEEPSEEK_API_KEY）。
 #          产物 output/results_cn/ai_pick_analysis/<date>.json 由台账合进选股日历，
 #          并作为前端 K 线页「AI 多空分析」面板的数据源（/api/stocks/<code>/ai）。
-#        开关：DAILY_JQ_MULTI_FACTOR / DAILY_AI_PICKS = 0；两者都非致命。
+#        · live_mirror —— 实盘镜像：真实券商持仓盯市 + 逐票建议（见下方 DAILY_LIVE_MIRROR 段）。
+#          必须排在 ai_picks 之前（AI 要读 output/live_holdings_history/<date>.csv）。
+#        开关：DAILY_JQ_MULTI_FACTOR / DAILY_AI_PICKS / DAILY_LIVE_MIRROR = 0；都非致命。
 #   4b. 每个阶段都带 --force-rebalance：selection.rebalance_stride_days（默认 5）本意是
 #      "再平衡节奏"，但它会在 stride 窗口内直接沿用上一版组合，导致新选出来的票几天不换。
 #      需要保留 stride 行为时用 DAILY_FORCE_REBALANCE=0 关闭。
@@ -115,6 +117,7 @@ LOCK_DIR="$ROOT/output/pipeline_reports/daily/.lock"
 STALE_LOCK_SECONDS="${DAILY_STALE_LOCK_SECONDS:-10800}"
 TRADE_DATE="${DAILY_TRADE_DATE:-$(date +%Y-%m-%d)}"
 RUN_DIR="$ROOT/output/pipeline_reports/daily"
+MODELS_DIR="${MODELS_DIR:-$ROOT/output/models/cn}"
 LOG_DIR="$RUN_DIR/$TRADE_DATE"
 MARKER="$LOG_DIR/production.done"
 mkdir -p "$LOG_DIR"
@@ -183,7 +186,7 @@ notify_alert() {
 }
 
 # 预检：跑一遍与本次改动相关的回归测试（约 1 秒），把"代码级错误"挡在 70 分钟的重活之前
-PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py test/test_xy_industry_rotation.py test/test_cn_macro_sync.py test/test_xy_daily_rotation.py test/test_rotation_arm.py test/test_strategy_pool_performance.py test/test_first_ban_lowxi.py -q}"
+PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py test/test_xy_industry_rotation.py test/test_cn_macro_sync.py test/test_xy_daily_rotation.py test/test_rotation_arm.py test/test_strategy_pool_performance.py test/test_first_ban_lowxi.py test/test_agent_run.py test/test_agent_api.py test/test_factor_library.py test/test_model_cards.py test/test_model_experiment_switches.py test/test_ttl_cache.py test/test_intraday_sync_target.py test/test_live_mirror.py -q}"
 if [ "${DAILY_PREFLIGHT:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
   if eval "$PREFLIGHT_CMD" > "$LOG_DIR/preflight.log" 2>&1; then
     log "preflight ok: $PREFLIGHT_CMD"
@@ -484,6 +487,16 @@ if [ "${DAILY_ROT_ARM:-1}" = "1" ]; then
   run_data_step rot_arm uv run python scripts/select_rotation_arm.py
 fi
 
+if [ "${DAILY_LIVE_MIRROR:-1}" = "1" ]; then
+  # 实盘镜像（2026-10-12 新增）：把真实券商持仓（人工录入 config/live_account_holdings.json）
+  # 用当日行情盯市 + 逐票建议，写 output/paper_trading/live_mirror/ 与
+  # output/results_cn/cn_live_holdings.csv（选股页/K 线自选/策略池都读它）。
+  # 位置：必须在 ai_picks **之前** —— AI 逐股分析的标的来自 output/live_holdings_history/<date>.csv，
+  # 晚于它当天就不分析实盘持仓了；也必须在 strategy-pool **之前**（策略池要读到今天的名单归档）。
+  # 它不产生订单、不参与生产权重；拿不到实时价就用快照价，失败只记一行。
+  run_data_step live_mirror uv run python scripts/build_live_mirror.py --print
+fi
+
 if [ "${DAILY_AI_PICKS:-1}" = "1" ]; then
   # 当日全部策略（生产 + 备选）逐股多空分析 → 买入/持有/卖出。
   # --skip-existing：当天 19:00/20:30/22:00 的失败重试只补"待分析"的股票，不重复烧 API。
@@ -585,6 +598,11 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${RUN_IC_PROTOCOL:-auto}" != "0" ]; then
     log "ic-protocol start（因子 IC 显著性与有效性复核）"
     if PYTHONPATH=. uv run python scripts/factor_ic_protocol.py --days 756 >> "$LOG_DIR/ic_protocol.log" 2>&1; then
       log "ic-protocol ok（准入清单与漂移记录见 output/research/factor_ic_protocol/）"
+      # 因子库注册表（P2_42 §4.2）：把"协议层 1,366 个候选 + LLM 提议 + 族 A 的条件"合成一张表。
+      # 放在准入之后：它读的就是刚生成的准入清单（`--print` 的摘要进 run.log，页面上也能看到）。
+      if [ "${DAILY_FACTOR_LIBRARY:-1}" = "1" ]; then
+        run_data_step factor_library uv run python scripts/sync_factor_library.py --print
+      fi
     else
       log "ic-protocol FAILED（见 $LOG_DIR/ic_protocol.log；不影响当日生产结果）"
     fi
@@ -696,5 +714,49 @@ elif [ "$DRY_RUN" -eq 1 ]; then
   log "dry-run finished: 上面的阶段序列 + sleeve-panel + arm_selection + 研究数据面（boards/adj_factor/arm_concept/回放/performance/lhb/sw2021）+ intraday-refresh + attribution + data-completeness + ledger + archive-selection + ths-export + forward-validation + execution-parity + shadow-variants + pk-guard + promotion-check + strategy-pool + web-freshness 即每日生产实际执行顺序（未执行任何命令）"
 else
   log "finished with failures"
+fi
+
+# ── 运行轨迹（2026-10-11 新增，P2_42 §4.1）────────────────────────────────
+# 把这一次运行变成一条可回看的轨迹：output/agent_runs/<trade_date>-daily/{run.json,run.md}
+#   run.json = 阶段表（跑了什么）+ 门槛表（过了哪一档）+ 预算 + 回滚办法；前端「投研执行台」读它。
+# 它只**解析**上面这些阶段自己打的日志行（`stage=x ok (12s) -> path` / `preflight ok:` / `x FAILED ...`），
+# **不改任何脚本的日志格式**；而且不阻塞生产（失败只记一行）。放在 `done:` 之后，
+# 这样轨迹里的 status 才能如实写成 ok（而不是"还没见到 done 行"的 partial）。
+# 模型卡（P2.42 §4.3）：把"现在用的是哪一版模型 / 什么时候训的 / 每票多少独立样本 / valid IC"
+# 写进 output/models/cn/<model>/card.json，执行台的「模型层」tile 直接读它。非致命（失败只记一行）。
+if [ "${DAILY_MODEL_CARDS:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
+  run_data_step model_cards uv run python scripts/build_model_cards.py --print
+fi
+
+# ── 每周滚动重训（P2.47-R1，2026-10-12 用户要求"每周重训进自动化"）─────────────
+# 触发：本周还没有成功重训过（幂等标记按 ISO 周）；周内第一次跑到就重训，失败第二天自动重试。
+# 关键：训练**只写候选目录**；上线由 `scripts/promote_model.py` 单独做（备份 → 校验 → 替换 → 出卡），
+# 所以"重训"和"上线"是两件事，重训再错也不会覆盖正在跑的模型（2026-10-11 事故的教训）。
+if [ "${DAILY_RETRAIN:-weekly}" != "0" ] && [ "$DRY_RUN" -eq 0 ]; then
+  week_tag="$(date '+%G-W%V')"
+  marker="$MODELS_DIR/lightgbm/_retrain/${week_tag}.done"
+  if [ -f "$marker" ]; then
+    log "retrain skipped（${week_tag} 已重训过：${marker}）"
+  elif uv run python scripts/run_cn_pipeline.py --stage lightgbm \
+         --model-dir "$MODELS_DIR/lightgbm/alpha_zoo_hk_candidate" >> "$LOG_DIR/retrain.log" 2>&1; then
+    mkdir -p "$(dirname "$marker")"
+    date '+%Y-%m-%dT%H:%M:%S%z' > "$marker"
+    uv run python scripts/build_model_cards.py --print >> "$LOG_DIR/retrain.log" 2>&1 || true
+    log "retrain ok（${week_tag}：候选 ${MODELS_DIR}/lightgbm/alpha_zoo_hk_candidate；上线用 scripts/promote_model.py）"
+  else
+    log "retrain FAILED（${week_tag}，不阻塞生产；明天自动重试）-> $LOG_DIR/retrain.log"
+  fi
+fi
+
+if [ "${DAILY_AGENT_RUN:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
+  if uv run python scripts/agent_run.py summarize --kind daily --log "$LOG_DIR/run.log" \
+       --run-dir "$LOG_DIR" --trade-date "$TRADE_DATE" \
+       --budget-seconds "${DAILY_AGENT_RUN_BUDGET_SECONDS:-25200}" >> "$LOG_DIR/run.log" 2>&1; then
+    log "agent-run trace -> output/agent_runs/$TRADE_DATE-daily/run.json"
+  else
+    log "agent-run trace FAILED（不阻塞生产）-> $LOG_DIR/run.log"
+  fi
+elif [ "$DRY_RUN" -eq 1 ]; then
+  log "step=agent-run would run: scripts/agent_run.py summarize --kind daily --log $LOG_DIR/run.log --trade-date $TRADE_DATE --run-id $TRADE_DATE-daily（运行轨迹）"
 fi
 exit "$FAILED"

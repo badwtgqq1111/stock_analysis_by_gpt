@@ -1,15 +1,13 @@
 <template>
-  <div class="page">
-    <PageHeader
-      title="因子挖掘工作台"
-      description="左=会话，中=任务与执行轨迹，右=产物与指标。<b>跑完的因子可以直接入池</b>：登记成「候选策略」进 <code>策略池</code>，验证通过再升格进生产，而不是散在 output/ 里没人知道。评估口径：月频横截面秩 IC / ICIR / Newey-West t / BH-FDR(q=0.05)；参数面板约 2GB，服务端串行执行。"
-    >
-      <template #actions>
-        <a class="btn-ghost link-btn" href="#/strategies">策略池 →</a>
-        <button class="btn-ghost" :disabled="loadingHistory" @click="refreshHistory">刷新会话</button>
-      </template>
-    </PageHeader>
-
+  <div class="mining-panel">
+    <div class="mp-toolbar">
+      <span class="dim tiny">
+        会话落盘 <code>output/factor_mining_sessions/</code>；跑完的因子可以「入池」成候选策略，
+        <b>并且会自动生成一条轨迹</b>进「投研执行台」（<code>agent_run.py from-session</code>）→ 左边每条会话都有「轨迹 →」。
+      </span>
+      <a class="btn-ghost link-btn" href="#/strategies">策略池 →</a>
+      <button class="btn-ghost" :disabled="loadingHistory" @click="refreshHistory">刷新会话</button>
+    </div>
     <div class="workbench">
       <!-- ① 会话列表（历史会话落盘持久化：output/factor_mining_sessions/） -->
       <aside class="panel wb-col wb-sessions">
@@ -23,6 +21,8 @@
               <span class="s-dir">{{ short(h.direction) }}</span>
               <span class="tiny dim">{{ (h.created_at || '').slice(5, 16) }} · {{ h.n_factors }} 因子</span>
             </span>
+            <a class="trace-link" :href="`#/agent?tab=console&run=${h.session_id}-mining`"
+               title="在「投研执行台」看这次挖掘的轨迹（阶段 / 门槛 / 回滚）">轨迹 →</a>
           </li>
           <li v-if="!history.length" class="empty tiny">还没有会话</li>
         </ul>
@@ -132,11 +132,11 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   createMiningSession, getMiningSession, listMiningSessions, registerStrategyCandidate,
   type MiningFactor, type MiningMessage, type MiningSessionSummary,
 } from '@/api/client'
-import PageHeader from '@/components/ui/PageHeader.vue'
 
 const ROOT_MARK = 'stock_analysis_by_gpt/'
 
@@ -364,11 +364,24 @@ async function poolSession() {
   poolMsg.value = `已把本轮最佳因子入池：${poolMsg.value}`
 }
 
-onMounted(refreshHistory)
+const route = useRoute()
+
+onMounted(async () => {
+  await refreshHistory()
+  // 深链 `?session=<id>`（执行台点「去会话 →」跳过来）：自动选中那条会话
+  const wanted = String(route.query.session || '')
+  if (wanted) await loadSession(wanted)
+})
 </script>
 
 <style scoped>
 /* 三栏 agent 工作台：会话 | 任务+轨迹 | 产物 */
+.mining-panel { display: block; }
+.mp-toolbar {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  margin-bottom: var(--sp-3);
+}
+.mp-toolbar .dim { margin-right: auto; }
 .workbench { display: grid; grid-template-columns: 240px minmax(0, 1fr) 380px; gap: var(--sp-3); align-items: start; }
 .wb-col { min-width: 0; }
 .wb-sessions, .wb-artifacts { position: sticky; top: var(--sp-3); }
@@ -381,6 +394,8 @@ onMounted(refreshHistory)
 .session-list li.active { background: rgba(255, 209, 102, 0.1); }
 .s-main { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 .s-dir { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-link { margin-left: auto; flex-shrink: 0; font-size: var(--fs-xs); color: var(--accent-gold); }
+.trace-link:hover { text-decoration: underline; }
 .dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; flex-shrink: 0; background: var(--text-dim); }
 .dot.ok { background: var(--accent-down); }
 .dot.busy { background: var(--accent-gold); }

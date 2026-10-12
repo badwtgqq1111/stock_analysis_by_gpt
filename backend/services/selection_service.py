@@ -25,11 +25,13 @@ class SelectionService:
         from backend.services import selection_sources as src
 
         key = source or src.DEFAULT_SOURCE
-        try:
-            payload = src.load_source(key)
-        except KeyError:
-            payload = src.load_source(src.DEFAULT_SOURCE)
-            payload["note"] = f"未知数据源 `{key}`，已回退到默认源。" + (payload.get("note") or "")
+        # 白名单校验（2026-10-12）：原来未知来源会**静默回落到默认源**返回 200，
+        # 页面上"选了一个不存在的策略"也能看到数据 ⇒ 改成 400 并列出可用来源，让错误显性化。
+        if source and source not in src.SOURCES:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400,
+                                detail=f"未知数据源 {source!r}；可用：{sorted(src.SOURCES)}")
+        payload = src.load_source(key)
         # 描述块单独嵌到 `source` 下：response_model 只放行声明的字段，
         # 不嵌套的话前端拿不到"这份名单来自哪个文件、什么时候生成的"。
         payload["source"] = {

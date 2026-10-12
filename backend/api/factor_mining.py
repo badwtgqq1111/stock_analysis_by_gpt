@@ -28,8 +28,36 @@ from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "llm_factor_mining.py"
+AGENT_RUN = ROOT / "scripts" / "agent_run.py"
 OUT_ROOT = ROOT / "output" / "research"
 SESSION_DIR = ROOT / "output" / "factor_mining_sessions"
+
+# 会话 → 执行台轨迹的适配器（`scripts/agent_run.py:from-session`）。
+# 为什么放在这里调（2026-10-11，用户问"执行台和因子挖掘 TAB 有什么关联"）：
+# 光在文档里assert"挖掘也是一种 agent run"没用 —— 会话跑完必须**真的**在执行台时间线上出现一条轨迹，
+# 两个页面才算连上。加载失败/写盘失败都不影响会话本身（只记一行日志）。
+_AGENT_MODULE = None
+
+
+def _agent_module():
+    global _AGENT_MODULE
+    if _AGENT_MODULE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("agent_run_api", AGENT_RUN)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["agent_run_api"] = module
+        spec.loader.exec_module(module)
+        _AGENT_MODULE = module
+    return _AGENT_MODULE
+
+
+def sync_run_trace(session: "Session") -> "str | None":
+    """把会话写进 `output/agent_runs/<session_id>-mining/`（幂等）。返回 run_id 或 None。"""
+    try:
+        payload = _agent_module().trace_from_session(SESSION_DIR / f"{session.id}.json")
+        return payload.get("run_id")
+    except Exception:                                     # noqa: BLE001 —— 轨迹失败绝不阻断挖掘
+        return None
 
 router = APIRouter(prefix="/api/factor-mining", tags=["factor-mining"])
 _RUN_LOCK = threading.Lock()
@@ -182,6 +210,11 @@ def _run(session: Session) -> None:
             session.error = f"{type(exc).__name__}: {exc}"
             session.add("system", f"执行失败：{session.error}")
         _persist(session)
+        # 会话落盘之后立刻生成执行台轨迹（两个页面的关联就靠这一步落地）
+        run_id = sync_run_trace(session)
+        if run_id:
+            session.add("system", f"[agent-run] 轨迹已生成：output/agent_runs/{run_id}/run.json（在「投研执行台」可见）")
+            _persist(session)
 
 
 def _summary(session: Session) -> dict:
@@ -203,6 +236,20 @@ def create_session(req: MiningRequest) -> dict:
     _persist(session)
     threading.Thread(target=_run, args=(session,), daemon=True).start()
     return {"session_id": session.id, "status": session.status}
+
+
+@router.post("/sessions/{session_id}/trace")
+def rebuild_trace(session_id: str) -> dict:
+    """手工重建某次会话的执行台轨迹（回填历史会话 / 改过适配器后重跑）。"""
+    _ensure_loaded()
+    session = SESSIONS.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    run_id = sync_run_trace(session)
+    if run_id is None:
+        raise HTTPException(status_code=500, detail="轨迹生成失败（见服务日志）")
+    return {"ok": True, "session_id": session_id, "run_id": run_id,
+            "run_path": f"output/agent_runs/{run_id}/run.json"}
 
 
 @router.get("/sessions")

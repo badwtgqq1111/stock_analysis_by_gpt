@@ -2252,3 +2252,385 @@ uv run python -m pytest test/test_strategy_pool.py -q                           
    开/高/低/收 与当天那根 K 线逐项对上（11.17/11.24/11.07/11.15 vs 11.17/11.24/11.08/11.15）。
    均价还要再折一次：baostock 的 `amount`/`volume` 是**不复权**金额与股数，直接用会画出一条
    高出当日最高价 5% 的假均价线。
+
+## 量化投研 Agent 规划：聚宽式四层 + 带判据的循环（2026-10-11）
+
+用户提问："看一下聚宽的这个设计怎么样？我想最终做成一个专业的量化投研 agent. 落一个 stock_analysis_by_gpt/docs/todo"
+（参考对象：聚宽 AI-投研页面设计图——**四层**（因子层 / 模型层 / 优化层 / 决策层）+ 每层的阶段流水线 +
+**智能体执行台**（终端命令 `jqfactor_loop run`、环形进度"迭代次数 55 / 7 步一圈"、右侧当前步骤子任务清单）；
+该图页脚自注"以上仅为示例演示"。）
+
+**规划文件**：[`docs/todo/P2_42_quant_research_agent_plan.md`](docs/todo/P2_42_quant_research_agent_plan.md)（173 行，§0 评估 → §7 参考）。
+
+### 一句话结论
+
+> **骨架值得借，判据必须自己补。** 借它的"分层 + 显式循环 + 可观测执行台"；
+> 补它的四件——**门槛 / 预算 / 可回滚 / 审计**。我们不需要重写能力，
+> 需要的是**把已有能力装进一个状态机**：一次运行 = 一条轨迹 = 一张判决书。
+
+### 两族：规则类策略 / 因子流水线（含线性与非线性组合）
+
+聚宽那张图只画了一条流水线（因子→模型→优化→决策），但仓库在册的 8 条策略有一半**不产生因子**，
+所以方案是 **两族入口 + 一条共享的优化/决策脊柱**：
+
+| 族 | 支 | 在册条目 | 核心判据 |
+|---|---|---|---|
+| **A 规则类策略** | 事件规则 | `first_ban_lowxi`（首板涨停+回调+企稳+低吸，已证伪·反例档案）、`box_arm`（横盘→首板→回调→箱体突破） | **逐笔净期望 > 0** + 按决策日聚类 NW t + 参数敏感性 + 容量 |
+| | 打分规则（公式，不训练） | `jq_multi_factor_size_roe`（低市值+高ROE）、`jq_roe_roa_diagnostic`（ROE＋0.25×ROA） | 分位单调性 + 组合级闸门 |
+| | 手臂规则（行业/概念/宽度） | `arm_concept`、`rot_arm`（MST 大类 + 7 因子等权）、`arm_select` | 同窗口逐期配对 + 集中度 + 名单宽度 |
+| **B 因子流水线** | **B1 线性组合**（现行组合的线性那半） | `base_v1`（25 列 IC 加权线性合成）、`llm_new`（符号 + ICIR 绝对值权重）、`combo_50_50`（两条 z 分等权混合） | 秩 IC / ICIR / NW t / **BH-FDR** / 与存量字段相关性 + 组合级对照 |
+| | **B2 非线性组合** | LightGBM / Transformer / CNN（`run_cn_pipeline.py --stage model_scores`）；生产 `model = "ensemble"`，实测 `ensemble_weights = {lightgbm = 1.00, transformer = 0.00}` ⇒ **今天生产跑的就是 LightGBM 这一支** | 同 B1 + 样本外 IC/夏普 + 与上一版逐项对照（模型卡） |
+| 共享脊柱 | 优化 → 决策 | 影子组合 → 上线闸门 → 模拟盘/参考账户 → 自选导出 | KEEP/PROMOTE/REJECT + 两引擎执行假设一致 |
+
+**为什么必须分开**：①判据不同——族 A 的证据单位是"一笔"（单笔毛/净期望、事件样本数、按日聚类显著性），
+族 B 是"一个截面/一个组合"（秩 IC、ICIR、逐期配对超额），拿 IC 评价"首板低吸"是错的；
+②失败模式不同——族 A 死于事件变少/成本上升/拥挤（首板低吸 8 条件全叠 8,412 笔仍单笔 **−0.265%**、扣费 **−0.575%**，
+还原日内止盈止损也还是 **−0.324%**/**−0.634%**；`box_arm` 参数即结论：weekly×5 **+28.17%** vs daily×5 **−76.6%**），
+族 B 死于过拟合/多重检验（105 个月只有 2/20 过全部门槛、PBO=0.603）；
+③回滚粒度不同——撤一条规则 vs 退回上一版模型/因子集。**唯一共用判据**是"跟自己的对照做同窗口逐期配对"（`promotion_check.py`）。
+
+### 它做对的三件 / 缺的四件
+
+| | 设计元素 | 判断 |
+|---|---|---|
+| D1 | 四层分层（因子 / 模型 / 优化 / 决策） | **借**——投研失败模式按层可归因 |
+| D2 | 每层固定阶段流水线（因子层 7 步） | **借**——研究从黑箱变成可预期过程，每步可定义判据 |
+| D3 | 执行台（命令 + 当前步骤 + 子任务 + 进度） | **借**——信任来自可观测的中间状态 |
+| G1 | 没有门槛（无 IC / FDR / 样本外 / 多重检验 / 相关性阈值） | **必须补**——跑得越多越容易"看起来显著" |
+| G2 | "迭代次数 55 + 持续运行"把**活动**当**进展** | **必须改**——改展示"过了哪一档门槛" |
+| G3 | 入库单向（因子/模型只进不出，无淘汰与回滚） | **必须补**——登记 + 淘汰原因 + 一键回滚 |
+| G4 | 决策层直连实盘，画面只有"持续运行" | **必须改**——实盘单独一阶段 + 下单前 checklist |
+
+### 四层对号入座（本仓库已有能力，带产物路径）
+
+| 层 | 聚宽画的阶段 | 已有实现 | 产物 / 证据 |
+|---|---|---|---|
+| 因子层 | 研究分析→…→因子入库（7 步） | `scripts/llm_factor_mining.py`（假设→表达式→安全求值→IC/NW t→BH-FDR→冗余→top-k 进化）、`scripts/factor_ic_protocol.py`（准入协议 + 漂移） | `output/factor_mining_sessions/*.json`、`output/research/factor_ic_protocol/{factor_ic_admitted.json,REPORT.md}` |
+| 模型层 | 模型设计 / 训练 / 评价 / 迭代 | `run_cn_pipeline.py --stage features/clean_panel/model_scores`（LightGBM / Transformer / CNN） | `output/models/cn/{lightgbm,transformer,cnn}/` |
+| 优化层 | 组合优化 / 风险归因 / 持续监控 | `promotion_check.py`（窗口可比 / 逐期配对 / 集中度 / 收益集中度）、`run_shadow_variants.py`（影子组合）、`pk_guard_report.py` | `output/results_cn/promotion_check/<ts>/{verdicts.csv,report.md}`、`output/paper_trading/shadow/summary.json`、`output/results_cn/pk_guard/latest.json` |
+| 决策层 | 获取订单 / 拆单执行 / 成交监控 | `run_cn_paper_account`（T+1 开盘 / 整手 / 涨跌停 / 停牌 / 退市显式建模）、`export_ths_watchlist.py` 四源导出 | `output/paper_trading/account*/`、`output/results_cn/ths_watchlist/` |
+
+**已经是生产行为，不是 PPT**：trade date 2026-10-10 的每日自动化在 2026-10-11 01:35:44 打出 `done`
+（`output/pipeline_reports/daily/2026-10-10/run.log`），链路里 `jq_multi_factor ok`、`rot_arm ok (33s)`、
+`ai_picks ok`、`ledger ok`、`shadow-variants ok`、`promotion-check ok` 全在。
+
+### 族 B 的带判据 7 步循环（相对聚宽那张图的两处关键改动）
+
+```
+① 研究分析 → ② 提出想法 → ③ 开发准备 → ④ 开发实现 → ⑤ 因子分析 → ⑥ 因子构建 → ⑦ 入库
+```
+* 每步都有**机器可判**的通过条件（③字段存在/覆盖率≥80%/PIT；⑤|IC|≥0.02 且 NW t≥3 且 **BH-FDR q=0.05** 且与存量字段 |ρ|≤0.7；
+  ⑥闸门四项全过；⑦升 `production` **必须人工确认**），不通过就记"未通过"（**也是产物**）并回灌给 LLM 作为进化信号。
+* **"因子入库"不是终点而是登记点**；**"迭代次数"不是指标，"过了哪一档门槛"才是**。
+
+### 族 A 的带判据 6 步事件循环
+
+```
+S1 事件定义 → S2 样本与口径 → S3 逐笔期望 → S4 稳健性 → S5 影子+闸门 → S6 登记
+```
+
+* S1 条件必须能用日线/5 分钟**复算**（禁止"看图"）且事件池落盘；S2 事件样本 ≥200 笔**或** ≥30 个决策日，
+  **T+1 价格必须用 T 日收盘为基准**（踩过坑：用前一日会把 67% 样本误判成次日涨停）；S3 看**净**期望（佣金 2.5bp + 滑点 3bp + 印花 10bp）；
+  S4 按决策日聚类 NW t ≥ 3 **且参数不能乱**（同族参数不同量级结论就翻转 ⇒ 不采信，只做观察名单）；S5 与族 B 共用闸门；S6 写 `config/strategies.json` 需人工确认。
+* 族 A 不许用 IC/FDR 给自己背书，族 B 也不许用"逐笔很赚"给自己背书（那是选样）。
+
+### 落地 TODO 与优先级（§4）
+
+| 序 | 事项 | 验收方式 |
+|---|---|---|
+| 4.1 | `agent_run` 运行轨迹：`output/agent_runs/<ts>/{run.json,run.md}`（薄壳 `scripts/agent_run.py run -- <命令>`，从既有日志抽取，不重写各脚本日志格式） | 两份 run.json 齐全；随机抽 3 条 artifacts 路径存在；rollback 在**副本**上可执行 |
+| 4.2 | 因子库注册表 `output/factor_library/factors.json`（照抄 `config/strategies.json` + `sync_strategy_pool.py` 模式） | 覆盖所有 LLM 会话里通过 FDR 的因子；页面可按 状态 / IC 绝对值 / t / 面板版本 筛选 |
+| 4.3 | 模型卡 `output/models/cn/<model>/card.json`（数据窗口 / 特征集 / 超参 / 样本外 IC / 与上一版对照 / 何时退役） | 流水线页能答"当前生产是哪一版、赢在哪" |
+| 4.4 | `scripts/promote_candidate.py <strategy_id>`：登记影子 → 跑影子 → 跑闸门 → 出 KEEP/PROMOTE/REJECT + 下一步人工动作 | 拿真实候选（如 `box_arm` 换口径）一条命令出判决；升 stage 仍人工 |
+| 4.5 | `scripts/pre_order_check.py` 下单前 checklist（数据新鲜度 / 涨跌停停牌 / 资金整手 / 单票上限 / 与参考账户一致 / 名单已归档） | 模拟盘下单前全绿；实盘另立阶段 |
+| 4.6 | 前端「投研执行台」页（左四层状态 ｜ 中运行轨迹时间线 ｜ 右当前阶段清单） | 能回答"现在在干什么 / 上次为什么失败 / 这因子过了哪几档门槛 / 怎么回滚"（Playwright 验收 + 截图） |
+
+### 明确不做（§5）
+
+1. **不做常驻后台**：一律外部调度（launchd/cron）+ 幂等 `.done`，不做"看不见地改状态"的常驻进程。
+2. **不自动下单**：决策层停在模拟盘 + 自选导出；实盘必须人工确认 + checklist 全绿。
+3. **不用"迭代次数 / 跑了多久"衡量进展**：一律用"过了哪一档门槛"。
+4. **不引入 Qlib**：理由与实测见 `P1_25 §1`。
+5. **不让 LLM 直接改生产配置**：LLM 只产出候选与证据；改 `config/strategies.json` 的 `stage` 必须人工。
+
+### 风险与不可信边界（§6）
+
+* 该设计图**页脚自写"仅为示例演示"** ⇒ 只借结构，不借数字。
+* **多重检验是这类 agent 的头号风险**：第 ⑤ 步必须固定口径 + 记录试验次数（已有 DSR / trials ledger，见台账 A6）。
+* **保命规则在本仓库多次被证伪**（止损 A15/A16、择时风控 A17、ST 过滤 A18 都是负贡献）⇒ agent 的"优化层"**禁止直接改生产规则**。
+* **短样本不许下结论**：曲线观测 <30 标"样本不足"、<252 不参与年化排名（策略池页面已落地）。
+
+## 投研执行台 `/agent`：运行轨迹 + 两族状态 + 可编辑提示词（2026-10-11）
+
+用户要求："开始实现吧，智能体 agent web 前端要好好优化一下，包括提示词，默认是我是量化领域专家，但是可以修改。"
+对应 `docs/todo/P2_42_quant_research_agent_plan.md` 的 §4.1（运行轨迹）与 §4.6（执行台页）。
+
+### 1. 运行轨迹 `scripts/agent_run.py` —— 一次运行 = 一条可回看的轨迹
+
+```
+output/agent_runs/<run_id>/
+  run.json   机器读：{run_id, kind, status, stages[], gates[], artifacts[], budget, rollback}
+  run.md     人读：门槛表（过了哪一档）+ 阶段表 + 产物 + 回滚办法
+  console.log（`run` 模式）被包住那条命令的完整输出
+```
+
+```bash
+# ① 包住任意命令（薄壳：不改各脚本自己的日志格式）
+uv run python scripts/agent_run.py run --kind mining --budget-seconds 3600 -- \
+    uv run python scripts/llm_factor_mining.py --rounds 3
+# ② 事后从既有 run.log 抽取（每日生产走这条：它的入口已经是 launchd + bash）
+uv run python scripts/agent_run.py summarize --kind daily --log output/pipeline_reports/daily/2026-10-10/run.log \
+    --run-dir output/pipeline_reports/daily/2026-10-10 --budget-seconds 25200
+# ③ 回看
+uv run python scripts/agent_run.py list --limit 10
+uv run python scripts/agent_run.py show 2026-10-10-daily
+```
+
+**四个踩过坑之后定下的取舍**（都写进了 `test/test_agent_run.py`）：
+1. **只解析最后一次真实运行**：同一个 `run.log` 里混着多次运行（实测 2026-10-10 那天有 12 段 dry-run + 2 段真实运行），
+   只认最后一条 `start daily production ... dry_run=0`；`preflight` 打在块**之前**，要单独回捞（否则门槛表永远显示 missing）。
+2. **不改别人的日志格式**：只解析已有的 `stage=x ok (12s) -> path`、`stage=x FAILED exit=1`、`<name> ok（说明）-> path`、
+   `<name> 有...`（warn）；新增格式只改 `STEP_PATTERNS` 一处。注意 `(20s)`（时长）必须排在中文备注 `（说明）` 之前，
+   否则 `[^）)]*` 会把时长当备注吞掉、`duration_seconds` 永远是 None。
+3. **阶段（stages）与门槛（gates）分开**：阶段回答"跑了什么"，门槛回答"过了哪一档"（`preflight` / `data-completeness` /
+   `strategy-pool` / `web-freshness` / `promotion-check` / `execution-parity` / `ic-protocol`）。
+4. **退出码透传**：`run` 模式返回被包命令的退出码（失败不能被当成成功）。
+
+**已接进每日生产**：`run_daily_production.sh` 末尾（`done:` 之后）自动 `summarize` 一条，
+`DAILY_AGENT_RUN=0` 可关、`DAILY_AGENT_RUN_BUDGET_SECONDS`（默认 25200s）写进 `budget.over`。实测 2026-10-10 那条轨迹：
+**52 阶段 / 47 ok / 1 failed（notify，非阻塞）/ 4 warn**，墙钟 **18,243s**（20:31:41 → 01:35:44）。
+
+### 2. 页面 `/agent`「投研执行台」
+
+| 区域 | 内容 | 数据源 |
+|---|---|---|
+| 顶部四层 | 因子层 / 模型层 / 优化层 / 决策层，每层一句可核对的话 | `factor_ic_admitted.json`、`output/models/cn/*`、`promotion_check/*/verdicts.csv`、`web_freshness.json` |
+| 左：两族树 | 族 A（事件规则 / 公式打分 / 手臂规则）+ 族 B（B1 线性组合 / B2 非线性组合），逐条带 stage 与新鲜度 | `config/strategies.json` + `strategy_pool.json` + `backend/api/agent.py:FAMILIES` |
+| 中：运行轨迹 | 时间线 → 点开看阶段表、门槛表、预算、**回滚命令** | `output/agent_runs/*/run.json` |
+| 右：提示词面板 | 角色（默认**量化领域专家**）+ 详细程度 + 系统提示词，可保存/恢复默认/复制 | `config/agent_profile.json` |
+
+### 3. 提示词 / 人设（可改）
+
+* **默认角色是「量化领域专家」**，默认提示词里写死了六条工作准则：按族给证据（族 A 逐笔净期望、族 B 秩 IC/BH-FDR）、
+  多重检验优先、短样本不下结论、**保命规则（止损/择时/ST 过滤）默认不采信**、不给下单指令、输出结构（结论→证据→缺口→下一步命令）。
+* 页面改完 **`PUT /api/agent/profile`** 立即落盘 `config/agent_profile.json`；改之前自动把旧版本存到
+  `output/agent_runs/profile_history/<ts>.json`（最多留 50 份）；`POST /api/agent/profile/reset` 恢复默认；
+  `GET /api/agent/profile/history` 看历史版本。
+
+```bash
+curl -s localhost:8000/api/agent/overview | python3 -m json.tool | head -40   # 两族/四层/最近一次运行
+curl -s localhost:8000/api/agent/runs?limit=5 | python3 -m json.tool          # 轨迹清单
+curl -s -X PUT localhost:8000/api/agent/profile -H 'Content-Type: application/json' \
+     -d '{"role":"组合经理","system_prompt":"你是组合经理视角的投研智能体。"}'  # 改人设
+curl -s -X POST localhost:8000/api/agent/profile/reset                        # 恢复默认（量化领域专家）
+```
+
+测试：`test/test_agent_run.py`（11 条：解析/门槛/退出码/预算/真实日志/每日脚本接线）、
+`test/test_agent_api.py`（12 条：**两族分类必须覆盖全部在册策略**、四层数据源、轨迹接口、提示词读写与恢复默认）。
+两个文件都已进预检清单（`run_daily_production.sh` 的 `PREFLIGHT_CMD`），预检 22 → **24 个文件、219 passed**。
+
+### 4. 两个页面合并：`/agent` = 执行台 + 因子挖掘 + 提示词（2026-10-11 第四轮）
+
+用户要求："投研执行台 和 因子挖掘两个页面应该合并吧，需要综合看看怎么设计是合理的。"
+**合并理由**：这三个问题以前分散在两个页面（`/agent` + `/factor-mining`），但其实"挖出来的因子"与"跑出来的轨迹"
+是同一件事的两端 —— **因子挖掘本身也是一种 agent run**（`kind=mining`），它的产物就是因子库的那一行。
+
+| 标签页 | 回答的问题 | 数据源 |
+|---|---|---|
+| **执行台** | 跑得怎么样：四层状态 / 两族树 / 运行轨迹（阶段 + 门槛 + 回滚） | `strategy_pool.json`、`agent_runs/*/run.json` |
+| **因子挖掘** | 挖得怎么样：挖掘会话工作台（发起 / 轨迹 / 入池）+ **因子库** | `/api/factor-mining/*`、`output/factor_library/factors.json` |
+| **提示词 / 人设** | 它怎么说话：角色（默认**量化领域专家**）+ 系统提示词，可改可恢复默认 | `config/agent_profile.json` |
+
+深链与兼容：`#/agent?tab=mining` 直达挖掘；**老书签 `#/factor-mining` 自动重定向**过去（与 `/portfolio` → `/performance` 同一处理），
+导航里的「因子挖掘」撤掉（入口在标签页上，带实时计数：`1 条轨迹` / `1431 条因子条件` / `量化领域专家`）。
+`frontend/src/pages/FactorMining.vue` 拆成三个组件：`components/{FactorMiningPanel,FactorLibraryPanel,AgentPromptPanel}.vue`
+（`test/test_strategy_pool.py` 里原来的「入池出口」断言已指向新位置，并**新增"老路由必须重定向"的断言**）。
+
+### 5. 因子库：五处来源合成一张表（`scripts/sync_factor_library.py`）
+
+```bash
+uv run python scripts/sync_factor_library.py --print
+# [factor-library] 1431 条：factor 1424 / condition 7；准入 100；状态 excluded 693、rejected 573、admitted 100、proposed 58 …
+#   -> output/factor_library/factors.json（人读版 output/factor_library/factors.md）
+```
+
+| 来源 | 进表后是什么 |
+|---|---|
+| `factor_ic_registry.csv`（1,366 个候选） | `kind=factor`，带 IC/ICIR/NW t/BH-FDR/HLZ t/簇（`代表` 还是 `冗余`）+ `status` 跟随 verdict |
+| `factor_ic_admitted.json`（准入清单） | **唯一口径**：`status=admitted` 的集合必须与它逐字一致（不平衡就报错） |
+| LLM 会话 + 逐轮提议 | `kind=factor`、`status=proposed`（带表达式与经济解释；若同时在准入清单里则升级为 `admitted`） |
+| `config/strategies.json`（族 A） | `kind=condition`，`status=in_use/candidate/retired`（与策略池同一份登记，不另存一份） |
+
+页面上的六个数（点一下就是筛选）：`100 准入` / `2 在用(族A)` / `58 提议` / `5 候选(族A)` / `693 质量列` / `573 已剔除`；
+表格列 = 因子 / kind / 状态 / 档 / 族·表达式 / IC / ICIR / NW t / 簇（`冗余/簇大小`）。
+接口：`GET /api/agent/factors?kind=&status=&q=&limit=&offset=`（1.4k 条按 mtime 缓存，页面按需分页）。
+
+每日自动化：`ic-protocol` 之后自动刷新因子库（`DAILY_FACTOR_LIBRARY=0` 可关）；预检清单 **25 个文件、229 passed**。
+
+### 6. 执行台 ↔ 因子挖掘：关联靠 run 轨迹，不靠文案（2026-10-11 第五轮）
+
+用户问："这个执行台 和 因子挖掘 TAB 有什么关联关系么？总感觉不符合预期呢。"
+根因是：两个标签页**只有文案上的关联、没有数据上的关联** —— 挖掘会话根本不出现在执行台的时间线上。
+现在做成一条真实的数据链：
+
+```
+因子挖掘（会话 output/factor_mining_sessions/*.json）
+   → 执行台（轨迹 output/agent_runs/<session_id>-mining/run.json）      ← 会话跑完自动生成
+   → 因子库（output/factor_library/factors.json）→ 候选登记（策略池）
+```
+
+```bash
+# 会话跑完由 API 自动调用；也可手工回填历史会话
+uv run python scripts/agent_run.py from-session --session 81a371312d95
+# [agent-run] 81a371312d95-mining: ok | 9/9 阶段 ok | 因子 2 个 |
+#             probe=ok propose=ok evaluate=ok fdr_screen=ok factor_library=ok
+curl -s -X POST localhost:8000/api/factor-mining/sessions/81a371312d95/trace   # 同一个适配器的 HTTP 入口
+```
+
+| 关系 | 在界面上怎么走 |
+|---|---|
+| 挖掘 → 执行台 | 执行台轨迹列表里挖掘轨迹标 `mining`，带「**去会话 →**」；`?run=<id>-mining` 深链直达 |
+| 执行台 → 挖掘 | 挖掘面板每条会话带「**轨迹 →**」（`#/agent?tab=console&run=<id>-mining`）；`?session=<id>` 深链会自动选中 |
+| 门槛口径 | **门槛表跟随当前选中的轨迹**：点挖掘轨迹看到的是挖掘五档（`probe / propose / evaluate / fdr_screen / factor_library`），每日轨迹才是那七档 |
+| 角色分工 | 「因子挖掘」= 发起与复看一次研究；「执行台」= 所有 run 的观察台（过了哪一档、怎么回滚） |
+
+界面重排（对标豆包工作台的模板 / 上下文 chips / 常驻 composer / 因子卡）见
+[`docs/todo/P2_43_factor_mining_workbench_design.md`](docs/todo/P2_43_factor_mining_workbench_design.md)，**标记为待实现**（本轮只落关联链路）。
+
+
+### 7. 因子库：分类 + 功能描述 + 性能评价（2026-10-11 第六轮）
+
+用户问："因子库 1431 条，这些因子 每个是不是都应该有 性能评价 和 功能描述 … 另外 因子是不是也应该分类，比如 量价，价值，财务，宏观？"
+
+```bash
+uv run python scripts/sync_factor_library.py --print
+# [factor-library] 1431 条：factor 1424 / condition 7；准入 100；状态 excluded 693、rejected 573、admitted 100、proposed 58 …
+```
+
+| 每个因子现在都带 | 来源（如实标，不混） |
+|---|---|
+| **分类**（10 类，每类一句话核心） | `config/factor_glossary.json` 的 `family_category`（16 家族）+ `token_category`（9 条名字兜底） |
+| **功能描述** | 人工 `overrides`（3）> LLM 会话 `reason`（58）> **规则解码**（家族口径 + 名字 token + 后缀；1,370 条）；解码不出来就写"未识别"，**绝不编公式** |
+| **性能评价** | 一行人话：`IC 均值 / ICIR / NW t / 过没过 BH-FDR / |t|≥3 吗 / 几个月 / 覆盖 / 簇内是代表还是冗余` |
+
+分类实测分布：量价 1,064 ｜ 资金流 128 ｜ 价值 58 ｜ 财务质量/成长 35 ｜ 波动/风险 34 ｜ 流动性/容量 11 ｜ 学术/宏观代理 12 ｜ 结构/路径 8 ｜ 日历/事件 8 ｜ 其它/待归类 73。
+接口：`GET /api/agent/factors?category=moneyflow&status=admitted`；页面：因子库顶部**分类 chips**（点一下即筛选）+ 表格「分类」列 + 名字下方两行（描述 / 性能）。
+家族级只给口径与出处（Alpha101 = WorldQuant arXiv:1601.00991、Alpha158 = Qlib、GTJA191 = 国泰君安 2017 研报…），**具体公式指向公开文献，本仓库不复刻**。
+
+### 8. 为什么"LightGBM 选股"看起来跑不过传统策略（2026-10-11，`docs/todo/P2_45_lightgbm_gap_analysis.md`）
+
+一句话：**"更差"目前不成立 —— 它还没被公平量过**。四处结构性削弱 + 一处不可比：
+
+1. **标签不是超额**：`[lightgbm] label_mode = "forward_return"`（原始前向收益）⇒ 学到的更可能是风格/规模 beta；
+2. **窗口太短 + 关掉早停**：`days = 365`、`validation_days = 60`、`early_stopping_rounds = 0` ⇒ 20 日前瞻下有效独立样本≈18 个，
+   而**因子筛选**反倒用 756 天；
+3. **冗余没筛**：`[model_features] admission_mode = "apply"` 只喂准入的 100 个（这步对），但 101 条"同簇冗余"还在；
+4. **决策链改写了模型排序**：`pk_guard` 实测 2026-10-10 名单 8 只**只买 1 只**、仓位 35%；P2_39 记录 6 个 notify 决策日里
+   **5 天把权重给了 rank>20 的票**（最狠 59.5% 给到 rank 4017/4055）；
+5. **不可比**：传统策略展示的是 8~10 年**回放**，模型展示的是 2 天~16 个决策日**前瞻**；而 L3 逐笔回放的臂**全是线性**，没有 LightGBM 臂。
+
+实测（`output/results_cn/forward_validation/summary.json`，5 日口径）：模型**候选池** 16 个决策日 超额 **+0.43%**、胜率 62%、链式 **+18.6%**（基准 +11.2%）；
+**PK 后名单** 4 个决策日 超额 **−1.32%**、胜率 0% ⇒ **问题更可能在下游，不在模型分数**。
+修复清单（A 先补模型臂同口径回放曲线 → B 标签改超额 → C 窗口 365→3~5 年 + 早停 → D PK 拆约束层/权重层 + `model_topn_equal` 影子变体 → E 冗余也筛）见文档。
+
+
+### 9. 参考书评审：《Machine Learning for Trading》第 2 版（2026-10-11 第七轮）
+
+用户上传 Jansen 的 827 页 / 27 章第 2 版并问"有什么参考价值"。评审落在
+[`docs/todo/P2_46_ml4t_book_review.md`](docs/todo/P2_46_ml4t_book_review.md)：**参考价值高，但不在"教怎么写模型"，
+而在评估协议 + 信号到策略的落差 + 研究/上线工程**。
+
+| 立刻可抄（8 条） | 书里依据 | 我们的现状 |
+|---|---|---|
+| 有效样本量 $N_{eff}$（重叠标签的唯一性折算） | Ch 7.2（p.196）：SPY 10 年 248,436 名义观测 → **有效 11,830**，置信区间窄了约 4.6 倍 | 缺；补进因子验收与模型卡 |
+| label buffer / feature buffer 写成**交易日** | Ch 6.5（p.180） | 只有 `embargo_days=20`，未区分两种 buffer |
+| LightGBM 用 **lambdarank（LTR/NDCG）** | Ch 12.2（p.337） | 现在用点损失；我们只买尾部，排序目标更对口 |
+| **单调约束**（theory-driven regularization） | Ch 12.2（p.338） | 未用 |
+| **条件 IC**（状态分箱）做交互诊断 | Ch 8.6（p.236） | 只有 SHAP 归因 |
+| **alpha-to-go / break-even turnover / minimum edge** | Ch 18.8（p.545-551） | 有成本假设 JSON，无这道体检 |
+| **先按 cost-feasible 筛域再比 IC** | Ch 20.3/20.4（p.594-603，NASDAQ-100：IC≈0.005 低于摩擦） | 未做 |
+| parity 扩到 feature parity / prediction consistency | Ch 25.6（p.751-754） | `execution_parity_check.py` 目前偏执行假设 |
+
+**两个最值钱的判断**：① **IC 与实测 Sharpe 的跨变体相关只有 0.34**（Ch 20.3，p.594）——"IC 好"不等于"策略好"，
+所以"谁更好"必须用成本后的组合指标判；② 书把"多个模型/多族组合"当作**同一 pipeline 的变体**，
+必须同 setup + 同评估协议比较 —— 这正是我们 `P2_45` 说的"先补模型臂同口径回放曲线"。
+
+
+### 10. LightGBM 要不要"实时训练"？因子是不是"算子的排列组合"？（2026-10-11 第八轮）
+
+详见 [`docs/todo/P2_47_lightgbm_retrain_and_factor_operators.md`](docs/todo/P2_47_lightgbm_retrain_and_factor_operators.md)。两条结论：
+
+**① 重训：先纠事实 —— 我们不是"存了模型不管"，而是真的没在重训。**
+`output/models/cn/lightgbm/alpha_zoo_hk/model.txt` mtime = **2026-09-27**，manifest `train 2025-09-29 → 2026-05-06`，
+`feature_count = 90`（准入后），`objective = regression`；而 `run_daily_production.sh` 的 `STAGES` 里**训练阶段不在**
+（每日只 `model_scores` 用保存的模型打分）。对照：规则类策略每天重算 —— 这就是"模型看起来跑不过传统策略"的结构性原因之一。
+三种"实时"的取舍：**不做**在线增量（LightGBM 无真在线学习，且没法 parity/回滚）；**要做**周期性滚动重训（周频 + 影子 + 闸门）；
+**补做**漂移触发（书 Ch 26.3）。**不日频重训**：日线 + 20 日前瞻下相邻两天样本几乎完全重叠（书 Ch 7.2 有效样本 248,436→11,830，约 4.6× 高估）。
+顺序：**先标签改超额 + 窗口 3~5 年 + 早停 → 再补模型臂同口径回放 → 最后才是重训节奏**。
+
+**② 概念纠正：LightGBM 不是"给每个因子一个动态权重"。** 那是线性融合（`base_v1` / `llm_new` / `combo_50_50`）；
+树是**分段常数 + 条件分裂**（同一因子在不同区间方向可不同），看交互要用 SHAP（书 Ch 12.2 p.337）。
+**"因子=算子的排列组合"我们已在做**：白名单 14 个算子（`abs/log/log1p/sqrt/sign/clip/where/rank/shift/rolling/mean/std/min/max/zscore`）
++ 四则运算/比较构成表达式树，产物如 `zscore(rev_1m) - zscore(vol_20)`；三条纪律（时点安全求值、BH-FDR/HLZ t≥3/DSR 多重检验预算、
+经济解释与 |ρ|≤0.7 冗余）都已落地。**边际空间不在"组合数量"**（每多搜 150 个组合期望多 7~8 个假阳性），
+而在**跨层交互（量价×资金流×财务）+ 条件化（regime 分箱）+ 新数据源**。
+
+
+### 11. 模型臂终于有了同口径曲线（P2.45-A，2026-10-11 第九轮）
+
+在此之前，"模型策略跑不过传统策略"这个判断**没有可比的尺子**：传统策略展示的是 8~10 年回放，
+而模型臂只有 2 天（策略池 tracking）到 16 个决策日（前瞻验证）的记录。现在补上**台账口径**的模型臂曲线：
+
+```bash
+uv run python scripts/build_strategy_pool_performance.py   # → output/strategy_pool/performance.json
+# 口径：决策日收盘信号 → 次日开盘建仓 → 持有到下一个决策日的次日开盘；毛收益（未计费用/涨跌停/整手）；中证500价格指数同期归一
+```
+
+| 模型臂 | 决策日 | 交易日 | 窗口 | 累计 | 中证500 | 超额 | 回撤 |
+|---|---|---|---|---|---|---|---|
+| **候选池等权 top-10**（`preselected`，上游） | 21 | 260 | 2025-09-08~2026-10-09 | **+46.61%** | +3.70% | **+42.90%** | −16.2% |
+| **PK 后名单目标权重**（`notify`，下游） | 8 | 11 | 2026-09-17~2026-10-09 | **+5.94%** | −5.28% | **+11.21%** | −1.3% |
+
+* 上游这条与影子组合 `pool_top10_rank`（+38%~+40%，**含成本**）量级一致 ⇒ 交叉印证，不是算错；
+* **下游那条只有 11 个交易日，不足以判"PK 是加分还是减分"** —— 继续按决策日累积（P2.40 闸门的同窗口配对口径）；
+* **踩坑记一笔**：第一版把 `Σw·(close/entry)` **每天累乘**到净值上，等于把累计涨幅日复利一次，跑出 `+17,878%`；
+  改成"段内以建仓开盘价为基准、段间按段末净值链接"，并补了手算用例 `test_ledger_curve_segment_hold_nav` 防它复辟。
+
+
+### 12. 模型卡：现在用的是哪一版、什么时候训的、每票多少独立样本（P2.42 §4.3，2026-10-11 第十轮）
+
+```bash
+uv run python scripts/build_model_cards.py --print
+# [model-card] output/models/cn/lightgbm/alpha_zoo_hk: 训练于 2026-09-27 09:33:56 ｜ 特征 90
+#              ｜ 训窗 2025-09-29~2026-05-06 ｜ 每票独立窗口 7.8
+```
+
+| 卡里的字段 | 内容（实测） |
+|---|---|
+| 训练时间 | **取模型文件 mtime**（2026-09-27 09:33:56），不手填 |
+| 训窗 / 切分 | 2025-09-29~2026-05-06；`purged_time_split`（validation_days 60、embargo 20） |
+| 特征 | **90 个（准入后）**；附 `admitted_count` 与 `feature_schema_hash` |
+| 标签 | `forward_return_20d`（**非超额**，卡里直接标注"P2.45-B 要改"） |
+| 性能 | valid IC（daily_ic）0.1414、best 0.1984、trees_kept 500、**early_stopping_rounds = 0** |
+| **有效样本** | **每票独立窗口 = 训窗交易日 ÷ 标签期 = 7.8**（P2.46-1 的 N_eff 口径，书 Ch 7.2 p.196） |
+| 何时退役 | 滚动 3 个月 IC 连续为负 / 特征覆盖率跌破 80% / 被影子变体在 ≥20 决策日同窗口配对显著超越 |
+
+* 重跑会把旧卡挪成 `card.prev.json`，新卡带**与上一版的逐项对照**（换模型必须先出判决，见 P2.40 闸门）；
+* 后端 `GET /api/agent/models` 列出全部卡；**执行台的「模型层」tile 改成读卡**：
+  "训练于 2026-09-27（14 天前）｜特征 90（准入后）｜每票独立窗口 7.8｜valid IC 0.1414"，**超过 30 天未重训自动转 warn**；
+* 每日自动化新增非致命步骤 `DAILY_MODEL_CARDS`；预检清单 25 → **26 个文件、241 passed**。
+
+
+### 13. LightGBM 的 A/B 实验开关（不碰生产模型文件，2026-10-11 第十一轮）
+
+```bash
+# 实验臂：超额标签 + 3~5 年窗口 + 早停；写到**独立目录**，生产 model.txt 一个字节都不动
+uv run python scripts/run_cn_pipeline.py --stage lightgbm \
+    --label-mode excess_return --lightgbm-days 1260 --early-stopping-rounds 50 \
+    --model-dir output/models/cn/lightgbm/alpha_zoo_hk_excess
+uv run python scripts/build_model_cards.py --print     # 两张卡并列，新卡带 previous 对照
+```
+
+* 数据层**本来就支持超额标签**（`forward_excess_return_<H>d`）—— P2.45-B 缺的只是"能安全做实验"；
+* 开关只覆盖 `[lightgbm]` 层、**不给开关时零副作用**；`--model-dir` 是硬前置（否则覆盖生产模型）；
+* 实验若更好，按 P2.47-R3 接进影子 → 过 `promotion_check` 才替换生产 `model.txt`。

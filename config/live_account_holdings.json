@@ -1,0 +1,39 @@
+{
+  "_note": [
+    "实盘账户快照（人工录入）。这是**真实券商账户**的一份截面，不是策略名单。",
+    "来源：中泰证券 App 持仓页截图（2026-10-12 13:23，账户 **0867），由用户提供并手工转录。",
+    "为什么单开一份配置而不是塞进 output/paper_trading/account/：那个账户是「策略从空仓 45,000 按当日名单下单」",
+    "的前向口径；真实持仓是人工决策 + 已实现亏损的混合，两者混在一起会让净值曲线出现一次无解释跳变，",
+    "之后没法再和影子变体做同窗口配对。所以实盘镜像单独一个账户（output/paper_trading/live_mirror/），",
+    "共用同一套执行假设（config/execution_assumptions_cn.json），只做「同口径可比」。",
+    "维护方式：改本文件后跑 scripts/build_live_mirror.py（每日自动化也会自动跑一次）。",
+    "数量单位是股（A 股整手 100 股）；cost_price 是券商显示的摊薄成本价；last_price 是截图时刻的现价。"
+  ],
+  "broker": "中泰证券",
+  "account_masked": "**0867",
+  "asof": "2026-10-12",
+  "captured_at": "2026-10-12 13:23",
+  "captured_by": "用户截图人工转录",
+  "currency": "CNY",
+  "cash": 40.55,
+  "reported": {
+    "total_assets": 39174.05,
+    "market_value": 39133.00,
+    "available": 40.55,
+    "withdrawable": 40.55,
+    "float_pnl": -6059.51,
+    "day_pnl": -297.11,
+    "day_pnl_pct": -0.0075
+  },
+  "positions": [
+    {"stock_code": "002966.SZ", "name": "苏州银行", "shares": 400, "cost_price": 9.513, "last_price": 9.510, "reported_market_value": 3804.00, "reported_pnl": -1.00},
+    {"stock_code": "300229.SZ", "name": "拓尔思", "shares": 1100, "cost_price": 13.145, "last_price": 13.120, "reported_market_value": 14432.00, "reported_pnl": -27.00},
+    {"stock_code": "300896.SZ", "name": "爱美客", "shares": 100, "cost_price": 94.430, "last_price": 94.290, "reported_market_value": 9429.00, "reported_pnl": -14.00},
+    {"stock_code": "605499.SH", "name": "东鹏饮料", "shares": 100, "cost_price": 115.011, "last_price": 114.720, "reported_market_value": 11472.00, "reported_pnl": -29.11}
+  ],
+  "cleared_positions": [
+    {"stock_code": "002463.SZ", "name": "沪电股份", "realized_pnl": -3183.23},
+    {"stock_code": "002831.SZ", "name": "裕同科技", "realized_pnl": -1215.23},
+    {"stock_code": "600460.SH", "name": "士兰微", "realized_pnl": -1589.94}
+  ]
+}

@@ -1,0 +1,376 @@
+{
+  "version": 1,
+  "updated_at": "2026-10-11",
+  "note": "因子库的『功能描述』词典。规则化生成：overrides（人工）> family+token 解码（规则）> 标记为未识别。绝不编造公式——家族级只给口径与出处，具体公式指向公开文献/研报，本仓库不复刻。",
+  "families": {
+    "Alpha101": {
+      "label": "WorldQuant《101 Formulaic Alphas》",
+      "source": "arXiv:1601.00991",
+      "meaning": "价量组合的短周期 alpha：排名/相关/时序运算符的变形，多为反转与量价背离"
+    },
+    "Alpha158": {
+      "label": "Qlib Alpha158（K 线形态族）",
+      "source": "微软 Qlib 因子集（开源）",
+      "meaning": "以单根 K 线的形态结构为主：影线/实体/开收盘相对位置、量价协同"
+    },
+    "GTJA191": {
+      "label": "国泰君安《191 个短周期价量因子》",
+      "source": "国泰君安 2017 金工研报",
+      "meaning": "A 股短周期价量因子：动量/反转、波动、换手与量价相关"
+    },
+    "TA-Lib": {
+      "label": "TA-Lib 技术指标",
+      "source": "TA-Lib 开源库（RSI/MACD/CCI/ATR 等）",
+      "meaning": "经典技术指标的水平值，作为趋势/超买超卖的代理"
+    },
+    "moneyflow": {
+      "label": "资金流（东财/同花顺）",
+      "source": "本仓库 data 层入库的面板字段",
+      "meaning": "主力/大单净流入的规模、持续性（3/5/10/20/60 日累计）与量价配合"
+    },
+    "valuation": {
+      "label": "估值与质量",
+      "source": "本仓库财务 PIT 面板 + 市值",
+      "meaning": "估值水平（PE/PB/EV-EBITDA/股息率/市值）与质量代理（ROE/毛利/现金流/时效）"
+    },
+    "financial": {
+      "label": "财务比率",
+      "source": "Tushare fina-indicator（PIT，ann_date 对齐）",
+      "meaning": "盈利/营运/偿债/成长四类的比率，按公告日可得"
+    },
+    "liquidity": {
+      "label": "流动性/容量",
+      "source": "本仓库量价面板",
+      "meaning": "换手率、成交额、Amihud 非流动性与容量得分——决定小账户能不能买、买多少"
+    },
+    "payoff": {
+      "label": "盈亏结构（路径特征）",
+      "source": "本仓库路径标签（P1_17）",
+      "meaning": "上行/下行空间比、ATR 止损空间、盈亏比——描述\"赚赔结构\"而非预测方向"
+    },
+    "academic": {
+      "label": "学术因子代理",
+      "source": "Fama-French / Carhart 代理构造",
+      "meaning": "市场β、规模、价值、盈利、投资、动量的简化代理（月度慢变量）"
+    },
+    "pv": {
+      "label": "价量基础量",
+      "source": "本仓库量价面板",
+      "meaning": "对数价格/成交量/成交额、日内振幅、短周期收益——多数族的基础积木"
+    },
+    "tr": {
+      "label": "换手率族",
+      "source": "本仓库量价面板",
+      "meaning": "换手率的水平、z 分、放大与价格相关性"
+    },
+    "vr": {
+      "label": "量能族（volume ratio）",
+      "source": "本仓库量价面板",
+      "meaning": "放量/缩量：放量比、放量首日、缩量天数与深度"
+    },
+    "vol": {
+      "label": "波动率族",
+      "source": "本仓库量价面板",
+      "meaning": "波动率水平（close-close / ATR% / Yang-Zhang）、波动率的波动、高阶矩（偏度/峰度）"
+    },
+    "other": {
+      "label": "其它（估值分位/日历等）",
+      "source": "本仓库面板",
+      "meaning": "行业内分位、日历项等不归属上述家族的列"
+    },
+    "llm": {
+      "label": "LLM 提议因子",
+      "source": "本仓库 scripts/llm_factor_mining.py 的会话",
+      "meaning": "由 LLM 按给定方向提议、经安全求值后入档的表达式因子"
+    }
+  },
+  "suffixes": {
+    "_is_missing": "（缺失掩码：只标记该字段当期是否缺失，不参与准入）",
+    "_is_stale": "（时效掩码：估值是否过期）",
+    "_clean": "（清洗后主列）",
+    "_ind_pct": "（行业内分位，0~1）",
+    "_age_td": "（数据年龄：距最新报告期的交易日数）"
+  },
+  "tokens": [
+    {
+      "match": "amihud_illiq",
+      "label": "Amihud 非流动性"
+    },
+    {
+      "match": "capacity",
+      "label": "容量（可买规模）"
+    },
+    {
+      "match": "turnover",
+      "label": "换手率"
+    },
+    {
+      "match": "amount",
+      "label": "成交额"
+    },
+    {
+      "match": "volume",
+      "label": "成交量"
+    },
+    {
+      "match": "log_volume|log_amount",
+      "label": "对数成交量/额"
+    },
+    {
+      "match": "net_(3|5|10|20|60)d",
+      "label": "N 日累计净流入"
+    },
+    {
+      "match": "moneyflow_dc",
+      "label": "东财主力资金"
+    },
+    {
+      "match": "moneyflow_ths",
+      "label": "同花顺资金"
+    },
+    {
+      "match": "moneyflow",
+      "label": "资金流"
+    },
+    {
+      "match": "second_wave|pullback",
+      "label": "第二波/回调"
+    },
+    {
+      "match": "dividend_yield",
+      "label": "股息率"
+    },
+    {
+      "match": "ev_ebitda",
+      "label": "EV/EBITDA"
+    },
+    {
+      "match": "market_cap",
+      "label": "总市值"
+    },
+    {
+      "match": "pe_|pb_",
+      "label": "市盈/市净"
+    },
+    {
+      "match": "roe_|gross_margin|net_margin|operating_margin",
+      "label": "盈利质量（ROE/毛利率/营业利润率）"
+    },
+    {
+      "match": "fcf_yield|ocf_to_net_income",
+      "label": "现金流质量"
+    },
+    {
+      "match": "debt_to_assets|current_ratio|interest_coverage",
+      "label": "偿债能力"
+    },
+    {
+      "match": "growth_score|coverage_score|quality_score",
+      "label": "综合打分"
+    },
+    {
+      "match": "zscore",
+      "label": "时序 z 分"
+    },
+    {
+      "match": "volatility|vol_cc|yang_zhang|atr_pct",
+      "label": "波动率"
+    },
+    {
+      "match": "atr_",
+      "label": "ATR（真实波幅）"
+    },
+    {
+      "match": "skew",
+      "label": "偏度"
+    },
+    {
+      "match": "kurt",
+      "label": "峰度"
+    },
+    {
+      "match": "of_vol",
+      "label": "波动率的波动"
+    },
+    {
+      "match": "intraday_range|intraday_share",
+      "label": "日内振幅/日内占比"
+    },
+    {
+      "match": "expansion",
+      "label": "放量/放大"
+    },
+    {
+      "match": "dryup",
+      "label": "缩量"
+    },
+    {
+      "match": "price_corr|amount_price_corr",
+      "label": "量价相关性"
+    },
+    {
+      "match": "return_(1|5|10|20|60)d",
+      "label": "N 日收益"
+    },
+    {
+      "match": "reward_risk|updown_mean_ratio",
+      "label": "盈亏比"
+    },
+    {
+      "match": "stop_room|target_room",
+      "label": "止损/止盈空间（ATR 计）"
+    },
+    {
+      "match": "beta",
+      "label": "市场β"
+    },
+    {
+      "match": "smb|size_proxy",
+      "label": "规模因子代理"
+    },
+    {
+      "match": "hml|value_proxy",
+      "label": "价值因子代理"
+    },
+    {
+      "match": "rmw|quality_proxy",
+      "label": "盈利质量代理"
+    },
+    {
+      "match": "cma|investment_proxy",
+      "label": "投资因子代理"
+    },
+    {
+      "match": "carhart_mom|mom",
+      "label": "动量"
+    },
+    {
+      "match": "calendar_weekday|calendar_month",
+      "label": "日历项"
+    },
+    {
+      "match": "dividend|ex_right",
+      "label": "分红除权"
+    }
+  ],
+  "overrides": {
+    "rev_vol": {
+      "text": "LLM 提议：短期反转且低波动（zscore(rev_1m) − zscore(vol_20)）；IC 0.0993 / ICIR 0.683 / NW t 5.00，会话里过 BH-FDR",
+      "source": "llm_reason"
+    },
+    "value_mom_combo": {
+      "text": "LLM 提议：估值分位反向 + 20 日强势排名（zscore(pe_pb_combo) × −1 + rank(rps_20)）；maxρ 0.96（与存量估值列高度重合）",
+      "source": "llm_reason"
+    },
+    "liquidity_capacity_score_clean": {
+      "text": "容量得分：把成交额/换手/价格合成\"小账户能买多少\"的可执行性打分（准入 A）",
+      "source": "curated"
+    },
+    "liquidity_amihud_illiq_20d_clean": {
+      "text": "Amihud 非流动性（20 日）：单位成交额引起的价格冲击，越大越难交易（准入 A）",
+      "source": "curated"
+    },
+    "moneyflow_amount_scale_clean": {
+      "text": "资金流规模（成交额缩放后）：区分\"大资金进场\"与\"普通放量\"（准入 A，IC 为负 ⇒ 强流入后续偏弱）",
+      "source": "curated"
+    }
+  },
+  "categories": {
+    "price_volume": {
+      "label": "量价",
+      "core": "价格与成交的形态/关系——最原始、衰减最快的短周期信息"
+    },
+    "volatility": {
+      "label": "波动/风险",
+      "core": "波动率的水平与形态——决定风险预算，不是收益来源"
+    },
+    "liquidity": {
+      "label": "流动性/容量",
+      "core": "能不能买、能买多少——小账户的硬约束"
+    },
+    "value": {
+      "label": "价值",
+      "core": "便宜还是贵——慢变量，靠估值分位与行业内比价"
+    },
+    "quality": {
+      "label": "财务质量/成长",
+      "core": "公司赚不赚钱、赚得稳不稳——PIT 财报驱动，季度更新"
+    },
+    "moneyflow": {
+      "label": "资金流/情绪",
+      "core": "谁在买——主力/大单资金的方向与持续性"
+    },
+    "structure": {
+      "label": "结构/路径",
+      "core": "赚赔结构与形态路径——描述\"怎么走\"，不预测方向"
+    },
+    "academic": {
+      "label": "学术/宏观代理",
+      "core": "因子模型与宏观慢变量——做中性化与风格暴露的基准"
+    },
+    "calendar": {
+      "label": "日历/事件",
+      "core": "时间与事件驱动的确定性项"
+    },
+    "other": {
+      "label": "其它/待归类",
+      "core": "还没归到上面几类——需要在 glossary 里补规则"
+    }
+  },
+  "family_category": {
+    "Alpha101": "price_volume",
+    "Alpha158": "price_volume",
+    "GTJA191": "price_volume",
+    "TA-Lib": "price_volume",
+    "pv": "price_volume",
+    "vr": "price_volume",
+    "tr": "price_volume",
+    "vol": "volatility",
+    "liquidity": "liquidity",
+    "valuation": "value",
+    "financial": "quality",
+    "moneyflow": "moneyflow",
+    "payoff": "structure",
+    "academic": "academic",
+    "other": "other",
+    "llm": "other"
+  },
+  "token_category": [
+    {
+      "match": "calendar_weekday|calendar_month|weekday",
+      "category": "calendar"
+    },
+    {
+      "match": "dividend_yield|ev_ebitda|market_cap|pe_|pb_|ind_pct",
+      "category": "value"
+    },
+    {
+      "match": "roe_|margin|fcf_yield|ocf_to|current_ratio|debt_to_assets|interest_coverage|growth_score|coverage_score",
+      "category": "quality"
+    },
+    {
+      "match": "moneyflow|net_(3|5|10|20|60)d",
+      "category": "moneyflow"
+    },
+    {
+      "match": "payoff|stop_room|target_room|reward_risk|updown_mean_ratio",
+      "category": "structure"
+    },
+    {
+      "match": "beta|smb|hml|rmw|cma|carhart_mom",
+      "category": "academic"
+    },
+    {
+      "match": "volatility|vol_cc|atr|yang_zhang|skew|kurt|of_vol",
+      "category": "volatility"
+    },
+    {
+      "match": "amihud|capacity|turnover|log_amount|log_volume|amount",
+      "category": "liquidity"
+    },
+    {
+      "match": "zscore|rev_|return_|momentum|rank\\(|expansion|dryup",
+      "category": "price_volume"
+    }
+  ]
+}

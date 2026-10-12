@@ -155,6 +155,119 @@ def replay(path: Path, bench: pd.Series, *, strategy_id: str = "jq_multi_factor_
             "source": str(path.relative_to(ROOT))}
 
 
+LEDGER = ROOT / "output/results_cn/selection_ledger.parquet"
+LEDGER_METHOD = ("台账（selection_ledger.parquet）名单口径毛收益：决策日收盘信号 → 次日开盘建仓，"
+                 "持有到下一个决策日的次日开盘（期间按收盘盯市）；未计手续费/滑点/涨跌停/整手。"
+                 "`preselected` = 候选池等权 top-10（与 top_n=10 对齐）；`notify` = PK 后名单的目标权重。"
+                 "中证500价格指数同期归一到1。")
+
+
+def ledger_targets(source: str, top_n: int = 10) -> dict[pd.Timestamp, pd.Series]:
+    """从台账取某个来源的逐决策日名单 → {决策日: 权重 Series}。
+
+    为什么不用 `snapshots()`：台账里的决策日是**稀疏**的（月频/事件频，2025-09 起 16 个），
+    而 `track()` 要求连续交易日都有归档名单 —— 稀疏名单在 `track()` 里会立刻断段，
+    这正是 rot_arm 当初"只有 8 个观测"的原因。所以这里走"持有到下一个决策日"的复利口径。
+    """
+    if not LEDGER.exists():
+        return {}
+    frame = pd.read_parquet(LEDGER)
+    frame = frame[frame["source"].astype(str) == source].copy()
+    if frame.empty:
+        return {}
+    frame["decision_date"] = pd.to_datetime(frame["decision_date"])
+    frame = frame.dropna(subset=["decision_date"])
+    targets: dict[pd.Timestamp, pd.Series] = {}
+    for day, group in frame.groupby("decision_date"):
+        group = group.copy()
+        weights = pd.to_numeric(group.get("weight"), errors="coerce")
+        if weights.notna().any() and float(weights.fillna(0).sum()) > 0:
+            picked = group.assign(_w=weights.fillna(0))
+            picked = picked[picked["_w"] > 0]
+            series = pd.Series(picked["_w"].to_numpy(), index=picked["stock_code"].astype(str).to_numpy())
+        else:
+            # 候选池没有权重：按 rank 取前 top_n 只**等权**
+            ordered = group.sort_values("rank") if "rank" in group else group
+            picked = ordered.head(top_n)
+            series = pd.Series(1.0 / max(len(picked), 1), index=picked["stock_code"].astype(str).to_numpy())
+        if len(series):
+            targets[day] = series / series.sum() if series.sum() > 0 else series
+    return targets
+
+
+def ledger_curve(targets: dict[pd.Timestamp, pd.Series], bench: pd.Series, bars: pd.DataFrame,
+                 kind: str) -> dict:
+    """稀疏决策日名单 → 净值曲线：决策日次日开盘调仓，持有到下一个决策日的次日开盘。
+
+    净值算法（**分段持有、逐段链接**，踩过的坑写在下面）：
+      * 每个持有段用"建仓日开盘价"作基准，段内净值 = Σ wᵢ·(closeᵢ/openᵢ) + 现金权重；
+      * 段与段之间**按段末净值链接**。
+    第一版写成"每天把 Σw·(close/entry) 累乘到净值上"，结果把累计涨幅每天复利一次，
+    实测 preselected 曲线跑出 +17,878% 的离谱数字 —— 累乘只能用于**日收益**，不能用于"入场以来收益"。
+    """
+    if not targets or bars.empty:
+        return {"status": "data_gap", "reason": "台账或行情缺失"}
+    days = sorted(targets)
+    index = bench.index[(bench.index >= days[0]) & (bench.index <= bench.index[-1])]
+    if len(index) < 5:
+        return {"status": "data_gap", "reason": "共同窗口不足 5 个交易日"}
+    opens = bars.pivot_table(index="trade_date", columns="stock_code", values="open", aggfunc="last")
+    closes = bars.pivot_table(index="trade_date", columns="stock_code", values="close", aggfunc="last")
+
+    dates: list[pd.Timestamp] = []
+    nav: list[float] = []
+    chain = 1.0                      # 段末净值（上一段链接进来的基准）
+    plan = sorted(targets.items(), key=lambda item: item[0])
+    cursor = 0
+    period = None                    # {"weights": Series, "entry_open": Series}
+    for position, day in enumerate(index):
+        if position == 0:
+            dates.append(day); nav.append(chain)
+            continue
+        prev_day = index[position - 1]
+        # 到达"下一个决策日的次日"时换仓（用当日开盘价建仓）
+        while cursor < len(plan) and plan[cursor][0] < day:
+            weights = plan[cursor][1]
+            row = opens.loc[day] if day in opens.index else None
+            if row is not None:
+                prices = row.reindex(weights.index)
+                if prices.notna().all() and (prices > 0).all() and float(weights.sum()) > 0:
+                    # 换仓：把**上一段的末值**接到新段上（段内以建仓开盘价为基准，段间按净值链接）
+                    if nav:
+                        chain = nav[-1]
+                    period = {"weights": weights, "entry_open": prices}
+            cursor += 1
+        if period is None:
+            dates.append(day); nav.append(chain)
+            continue
+        row = closes.loc[day] if day in closes.index else None
+        prices = row.reindex(period["weights"].index) if row is not None else None
+        if prices is None or not (prices.notna().all() and (prices > 0).all()):
+            dates.append(day); nav.append(chain if not nav else nav[-1])   # 缺价顺延，不臆造
+            continue
+        invested = float((period["weights"].to_numpy()
+                          * (prices.to_numpy() / period["entry_open"].to_numpy())).sum())
+        cash = max(0.0, 1.0 - float(period["weights"].sum()))
+        level = chain * (invested + cash)
+        dates.append(day); nav.append(level)
+
+    # 段末链接：下一段要以本段末净值为基准 —— 上面的 chain 只在段内使用，
+    # 这里把每段的末值写回，用于下一次换仓（保持简单：整条曲线一次算完）
+    window = bench.reindex(pd.DatetimeIndex(dates)).ffill()
+    bnav = (window / window.iloc[0]).tolist() if len(window) else []
+    result = {"status": "ok", "kind": kind, "strategy_id": "cn_ensemble",
+              "benchmark_code": "000905.SH", "benchmark_name": "中证500",
+              "start_date": str(pd.DatetimeIndex(dates)[0].date()),
+              "end_date": str(pd.DatetimeIndex(dates)[-1].date()),
+              "dates": [str(d.date()) for d in pd.DatetimeIndex(dates)], "nav": nav, "benchmark_nav": bnav,
+              "metrics": metrics(nav), "benchmark_metrics": metrics(bnav),
+              "observations": len(targets), "snapshot_count": len(targets),
+              "latest_signal_date": str(max(targets).date()), "methodology": LEDGER_METHOD}
+    if result["metrics"] and result["benchmark_metrics"]:
+        result["excess_return"] = result["metrics"]["total_return"] - result["benchmark_metrics"]["total_return"]
+    return result
+
+
 def build() -> dict:
     config = json.loads((ROOT / "config/strategies.json").read_text())
     raw = pd.read_parquet(ROOT / "assets/data/meta/cn_benchmark_daily.parquet")
@@ -174,8 +287,15 @@ def build() -> dict:
         except (ValueError, KeyError) as exc:
             all_targets[spec["id"]] = {}
             errors[spec["id"]] = str(exc)
-    codes = sorted({c for targets in all_targets.values() for weights in targets.values()
-                    for c, w in weights.items() if w > 0})
+    # 模型臂（P2.45-A）：台账里的 preselected / notify 是**稀疏决策日**名单，
+    # 单独走 ledger_curve（持有到下一个决策日），与其它策略的 tracking 并列展示。
+    model_arms = {}
+    for source, top_n in (("preselected", 10), ("notify", 10)):
+        targets = ledger_targets(source, top_n=top_n)
+        if targets:
+            model_arms[source] = targets
+    codes = sorted({c for targets in list(all_targets.values()) + list(model_arms.values())
+                    for weights in targets.values() for c, w in weights.items() if w > 0})
     earliest = min((d for targets in all_targets.values() for d in targets), default=bench.index[-1])
     files = [str(p) for year in range(earliest.year, bench.index[-1].year + 1)
              for p in (ROOT / "assets/data/clean/ohlcv/market=CN").glob(
@@ -197,6 +317,20 @@ def build() -> dict:
                           reason="该策略的持仓语义不是「持有到下一个决策日」，不做名单跟踪"
                                  "（曲线见 curve_source 给出的原始口径逐笔模拟）。")
         rows[ident] = {"tracking": result}
+    # ── 模型臂曲线：候选池（上游）与 PK 后名单（下游）各一条，同窗口、同基准 ────────
+    if "cn_ensemble" in rows:
+        arms = {}
+        for source, targets in model_arms.items():
+            curve = ledger_curve(targets, bench, bars, kind=f"ledger_tracking_gross:{source}")
+            arms[source] = curve
+        if arms:
+            rows["cn_ensemble"]["model_arms"] = arms
+            # 上游（候选池）放进 `research` 槽位：与 jq/rot_arm 的曲线同一个展示位置，
+            # 页面无需改结构就能看到"模型臂 vs 中证500"；下游对照在 model_arms 里（报告给两条）。
+            upstream = arms.get("preselected") or arms.get("notify")
+            if upstream and upstream.get("status") == "ok":
+                rows["cn_ensemble"]["research"] = {**upstream, "note": "模型臂上游（候选池等权 top-10）"}
+
     replay_sources = {
         'jq_multi_factor_size_roe': ROOT / 'output/research/jq_multi_factor/nav_original_size_roe.csv',
         'jq_roe_roa_diagnostic': ROOT / 'output/research/jq_multi_factor_dynamic/nav_dynamic_diagnostic.csv',
@@ -213,6 +347,12 @@ def build() -> dict:
     shadow_sources = {
         "rot_arm": ("output/paper_trading/shadow/rot_arm/nav.csv",
                     "output/results_cn/shadow_variants/rot_arm.csv"),
+        # 模型臂新旧两条口径（2026-10-12）：生产 = 模型直出（影子变体 model_topn_equal）；
+        # 旧 PK 口径留作对照（影子变体 production）—— 两条都带中证500 对照，便于横向比。
+        "cn_ensemble": ("output/paper_trading/shadow/model_topn_equal/nav.csv",
+                        "output/results_cn/shadow_variants/model_topn_equal.csv"),
+        "cn_ensemble_pk_legacy": ("output/paper_trading/shadow/production/nav.csv",
+                                  "output/results_cn/shadow_variants/production.csv"),
     }
     for ident, (nav_rel, hist_rel) in shadow_sources.items():
         nav_path, hist_path = ROOT / nav_rel, ROOT / hist_rel

@@ -69,6 +69,23 @@ def _daily_bars_max() -> str | None:
     return None if not dates else str(pd.Timestamp(dates[-1]).date())
 
 
+def _live_mirror_perf_end() -> str | None:
+    """实盘镜像收益对比/日历的窗口末 —— 取 `performance.json` 的 `window.end`。
+
+    为什么单独一个取数器：这个产物里没有 `trade_date` 列（它是预计算的曲线 + 日历格），
+    通用取数器读不出来，只能按它自己的结构取；取不到就返回 None（页面会显示"缺失"而不是假装新鲜）。
+    """
+    path = ROOT / "output/paper_trading/live_mirror/performance.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    end = ((payload.get("window") or {}).get("end") or "")[:10]
+    return end or None
+
+
 def _json_window_end(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -116,7 +133,12 @@ def _freshness_checks() -> list[dict]:
 
     def add(page: str, kind: str, date: str | None, note: str = "", artifact: str = "",
             mode: str = "eq") -> None:
-        """mode：`eq` 数据日期必须等于最近交易日；`ge` 只要求 >= （按"运行日"命名的产物）。"""
+        """mode：`eq` 数据日期必须**不早于**最近交易日（允许超前）；`ge` 只要求 >=（按"运行日"命名的产物）。
+
+        2026-10-12 修：原来 `eq` 是严格相等，于是"比基准更新"反而被判成落后 ——
+        实测周末的每日自动化会把 trade_date 打成 10-10/10-11（非交易日），而中证500 最后一根 bar 停在 10-09，
+        日历/AI 多空分析/同花顺导出三页全部被误报为"不达标"。判据改成 `>=`（与第四十一轮策略池 `fresh` 的修法同源）。
+        """
         rows.append({"page": page, "kind": kind, "date": date, "note": note,
                      "artifact": artifact, "mode": mode})
 
@@ -149,6 +171,12 @@ def _freshness_checks() -> list[dict]:
         or _csv_last_date(ROOT / "output/paper_trading/account_reference/nav.csv", "trade_date")
         or _parquet_max(ROOT / "output/paper_trading/account/positions.csv", "asof_date"),
         "paper_account（nav 逐日 push）/ paper_outcomes", "output/paper_trading/account/nav.csv")
+    add("实盘镜像", "daily", _csv_last_date(ROOT / "output/paper_trading/live_mirror/nav.csv", "asof_date"),
+        "build_live_mirror（真实持仓逐日盯市；快照日之前不回填，所以只要不落后于基准交易日就算新鲜）",
+        "output/paper_trading/live_mirror/nav.csv")
+    add("实盘镜像收益对比", "daily", _live_mirror_perf_end(),
+        "build_live_mirror（日/周/月 vs 中证500 曲线 + 收益日历，每天重算到最新交易日）",
+        "output/paper_trading/live_mirror/performance.json")
     add("同花顺导出", "daily", _latest_ths_export_date(), "export_ths_watchlist（文件名即交易日）",
         "output/results_cn/ths_watchlist/<date>_<source>.csv")
     add("策略池", "daily", _strategy_pool_min_date(),
@@ -241,7 +269,9 @@ def main() -> int:
         elif row.get("mode") == "ge":
             row["ok"] = bool(row["date"]) and latest is not None and row["date"] >= latest
         else:
-            row["ok"] = bool(row["date"]) and row["date"] == latest
+            # 2026-10-12 修：原来严格相等 ⇒ "比基准更新"被判成落后（周末自动化把 trade_date 打进非交易日）；
+            # 现在 `eq` = 不早于基准交易日；真正的落后（date < latest）仍然报错。
+            row["ok"] = bool(row["date"]) and latest is not None and row["date"] >= latest
     stale = [r for r in rows if r["ok"] is False]
 
     payload = {"generated_at": datetime.now().isoformat(timespec="seconds"),

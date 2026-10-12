@@ -66,6 +66,8 @@ LABELS = {
     "pool_top5_rank": "池前 5 等权（周频）",
     "pool_top8_rank": "池前 8 等权（周频）",
     "pool_top10_rank": "池前 10 等权（周频）",
+    "model_topn_equal": "模型 top-10 等权（**完全不做 PK**：模型的排序直接落地）",
+    "model_topn_gated": "模型 top-10 等权 + **状态门禁**（上行×高波动 ⇒ 空仓）",
     "pool_top5_biweekly": "池前 5 等权（每两个决策日调一次）",
     "pool_top5_monthly": "池前 5 等权（每月末决策日）",
     "pool_top5_lowvol": "池前 5 + 排底部反转 + 低波动",
@@ -81,9 +83,45 @@ LABELS = {
 # "买多少只 + 多久换一次" 是上一轮发现的最大正贡献（池前5低换手 +33% vs 整池 +5.7%），
 # 所以宽度（5/8/10）与节奏（每周/每两周/每月）都进影子组合，长期用真实成交数据比。
 WIDTHS = (5, 8, 10)
-ORDER = ["production", "notify_rankcap20", "notify_rankcap20_naive", "pool_top5_rank", "pool_top8_rank", "pool_top10_rank",
+ORDER = ["production", "notify_rankcap20", "notify_rankcap20_naive", "model_topn_equal", "model_topn_gated",
+         "pool_top5_rank", "pool_top8_rank", "pool_top10_rank",
          "pool_top5_biweekly", "pool_top5_monthly", "pool_top5_lowvol",
          "rot_arm", "rot_arm_top5", "rot_arm_top2", "rot_arm_macro5"]
+
+
+MODEL_WIDTH = 10          # 模型直出臂的宽度：与 pool_top10_rank 对齐（P2.39：宽度 10 > 8 > 5）
+
+
+def market_state_by_date(dates) -> dict:
+    """每个决策日的市场状态：`上行|下行` × `低波动|中波动|高波动`（中证500）。
+
+    与 `scripts/factor_state_ic.py` 同一口径（20 日动量符号 × 20 日已实现波动三分位），
+    保证"诊断用的状态"和"门禁用的状态"是同一个东西（否则又是两套口径）。
+    """
+    bench_path = ROOT / "assets/data/meta/cn_benchmark_daily.parquet"
+    if not bench_path.exists():
+        return {}
+    bench = pd.read_parquet(bench_path)
+    bench = bench[bench.ts_code == "000905.SH"].copy()
+    bench["trade_date"] = pd.to_datetime(bench["trade_date"])
+    bench = bench.set_index("trade_date").close.sort_index()
+    state = pd.DataFrame({
+        "mom20": bench.pct_change(20),
+        "vol20": bench.pct_change().rolling(20).std() * (252 ** 0.5),
+    }).dropna()
+    if state.empty:
+        return {}
+    edges = state["vol20"].quantile([1 / 3, 2 / 3]).to_numpy()
+
+    def bucket(value: float) -> str:
+        return "低波动" if value <= edges[0] else ("中波动" if value <= edges[1] else "高波动")
+
+    out = {}
+    wanted = {pd.Timestamp(d).normalize() for d in dates}
+    for day, row in state.iterrows():
+        if day.normalize() in wanted:
+            out[day.normalize()] = ("上行" if row["mom20"] > 0 else "下行") + "|" + bucket(float(row["vol20"]))
+    return out
 
 
 def _ew(frame: pd.DataFrame) -> pd.DataFrame:
@@ -142,6 +180,33 @@ def build_histories(ledger: pd.DataFrame, variants: list[str]) -> dict[str, pd.D
             out["notify_rankcap20"] = pd.concat(cap_rows, ignore_index=True)
         if naive_rows:
             out["notify_rankcap20_naive"] = pd.concat(naive_rows, ignore_index=True)
+
+    # ── P2.46-5：状态门禁（「上行 × 高波动」空仓）──
+    # 依据 `scripts/factor_state_ic.py` 的条件 IC 诊断：该状态下模型 IC≈0、top-10 组还跑输全截面。
+    # 门禁只影响**被判定为该状态**的决策日（空仓 = 当日不产生任何持仓，影子引擎按现金处理）。
+    if "model_topn_gated" in variants:
+        state = market_state_by_date(pool["trade_date"].dropna().unique())
+        rows = []
+        blocked = []
+        for date, g in pool.groupby("trade_date"):
+            label = state.get(pd.Timestamp(date))
+            if label == "上行|高波动":
+                blocked.append(str(pd.Timestamp(date).date()))
+                continue
+            rows.append(_ew(pick(g, MODEL_WIDTH)))
+        if rows:
+            out["model_topn_gated"] = pd.concat(rows, ignore_index=True)
+        out["_gated_dates"] = pd.DataFrame({"blocked": blocked})
+
+    # ── P2.45-D：模型直出（`model_topn_equal`）—— 检验"PK 层到底加分还是减分" ──
+    # 口径：候选池按模型 rank 取前 TOPN、**等权**、不经过 PK 的 rank_power/正交化/风控权重。
+    # 与 `production`（PK 后按权重）做同窗口逐期配对，就能把"决策链改写排序"的代价量化出来。
+    if "model_topn_equal" in variants:
+        rows = []
+        for date, g in pool.groupby("trade_date"):
+            rows.append(_ew(pick(g, MODEL_WIDTH)))
+        if rows:
+            out["model_topn_equal"] = pd.concat(rows, ignore_index=True)
 
     # ── 宽度：池前 5 / 8 / 10 等权（周频，每个决策日都调） ──
     for width in WIDTHS:

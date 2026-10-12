@@ -668,6 +668,10 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             meta_min_probability = None
         meta_features = [str(value) for value in (meta.get("features") or [])] or None
         return service.generate_cn_oos_predictions(
+            # 排序目标/单调约束：优先 [oos_predictions] 自己的声明，缺省回落到 [lightgbm]
+            objective=str(layer.get("objective", config.get("lightgbm", {}).get("objective", "regression"))),
+            monotone_constraints=(layer.get("monotone_constraints")
+                                 or config.get("lightgbm", {}).get("monotone_constraints") or None),
             models=tuple(layer.get("models", ["lightgbm"])), factor_set=p["factor_set"],
             days=int(layer.get("days", 756)), label_horizon=int(layer.get("label_horizon", 20)),
             label_mode=layer.get("label_mode", "forward_return"), startup_only=bool(layer.get("startup_only", False)),
@@ -768,6 +772,8 @@ def run_stage(name: str, config: dict, service: MarketDataService, *, force_reba
             early_stopping_rounds=int(layer.get("early_stopping_rounds", 0)),
             min_trees=int(layer.get("min_trees", 100)),
             eval_metric=str(layer.get("eval_metric", "daily_ic")),
+            objective=str(layer.get("objective", "regression")),
+            monotone_constraints=(layer.get("monotone_constraints") or None),
             show_progress=True,
         )
     if name == "transformer":
@@ -1078,6 +1084,46 @@ def write_report(report: dict, report_dir: Path) -> tuple[Path, Path]:
     return json_path, md_path
 
 
+EXPERIMENT_OVERRIDES = {
+    "--label-mode": ("label_mode", str),
+    "--lightgbm-days": ("days", int),
+    "--model-dir": ("model_dir", str),
+    "--early-stopping-rounds": ("early_stopping_rounds", int),
+    "--lightgbm-n-estimators": ("n_estimators", int),
+    "--lightgbm-objective": ("objective", str),
+}
+
+
+def apply_experiment_overrides(config: dict, args) -> dict:
+    """把命令行里的实验参数覆盖到 `[lightgbm]` 层（P2.45-B/C 的安全做法）。
+
+    为什么必须能覆盖：`[lightgbm]` 的 `model_dir / label_mode / days / early_stopping_rounds` 都写在
+    生产 TOML 里，做 A/B 若直接改配置，就会**覆盖生产模型文件**（`output/models/cn/lightgbm/alpha_zoo_hk/model.txt`）。
+    有了这几个开关，实验可以写到独立目录（例如 `alpha_zoo_hk_excess`），跑完用模型卡对照、
+    再由影子/闸门决定是否切生产（P2.47-R3）。
+    """
+    applied = {}
+    layer = config.setdefault("lightgbm", {})
+    experiment_flags = [name for name, field in
+                        (("label_mode", "label_mode"), ("lightgbm_days", "days"),
+                         ("early_stopping_rounds", "early_stopping_rounds"))
+                        if getattr(args, name, None) is not None]
+    if experiment_flags and not getattr(args, "model_dir", None):
+        raise SystemExit(
+            "实验参数（--label-mode/--lightgbm-days/--early-stopping-rounds）必须同时给 --model-dir："
+            "否则会覆盖生产模型文件 output/models/cn/lightgbm/alpha_zoo_hk/model.txt。"
+            "例：--model-dir output/models/cn/lightgbm/alpha_zoo_hk_excess")
+    for flag, (field, caster) in EXPERIMENT_OVERRIDES.items():
+        value = getattr(args, flag.replace("--", "").replace("-", "_"), None)
+        if value is None:
+            continue
+        layer[field] = caster(value)
+        applied[field] = layer[field]
+    if applied:
+        print(f"[experiment] 覆盖 [lightgbm]：{applied}", flush=True)
+    return config
+
+
 def main() -> int:
     # 非交互式调度（launchd/cron）不会读 ~/.bashrc：先把 config/scheduler_env.sh 里
     # 缺失的 ClickHouse / Tushare / 代理凭据补进环境，避免数据层静默退化成 Parquet 镜像。
@@ -1092,6 +1138,16 @@ def main() -> int:
                           "arm_selection", "arm_concept"], default="all")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "pipeline_reports")
     parser.add_argument("--force-rebalance", action="store_true", help="Ignore rebalance_stride_days and re-select now")
+    # 实验开关（P2.45-B/C）：只影响 [lightgbm] 层，且**必须配 --model-dir 指向独立目录**，否则会覆盖生产模型
+    parser.add_argument("--label-mode", default=None,
+                        help="覆盖 [lightgbm].label_mode（forward_return / excess_return）；做超额标签 A/B 用")
+    parser.add_argument("--lightgbm-days", type=int, default=None, help="覆盖 [lightgbm].days（如 365 → 1260）")
+    parser.add_argument("--model-dir", default=None,
+                        help="覆盖 [lightgbm].model_dir：实验写到独立目录，避免覆盖生产模型文件")
+    parser.add_argument("--lightgbm-objective", default=None,
+                        help="覆盖 [lightgbm].objective：regression / lambdarank（P2.46-3，只买尾部时更对口）")
+    parser.add_argument("--early-stopping-rounds", type=int, default=None,
+                        help="覆盖 [lightgbm].early_stopping_rounds（0 = 不按验证集挑轮数）")
     parser.add_argument("--trade-date", default=None,
                         help="Replay a historical decision date (YYYY-MM-DD): model cross section, regime row "
                              "and price windows are taken as of that date and outputs go to "
@@ -1122,6 +1178,13 @@ def main() -> int:
                    "arm_selection", "arm_concept"] if args.stage == "all" else [args.stage]
     last_coverage: dict | None = None
     blocked = False
+    pipeline_config = config["pipeline"]
+
+    # 实验覆盖：--label-mode / --lightgbm-days / --model-dir / --early-stopping-rounds（P2.45-B/C）
+    # 注意：覆盖作用在**顶层 config** 上 —— 目标是 [lightgbm] 层。
+    # 踩过的坑（2026-10-11）：第一版把覆盖作用到了 [pipeline] 层（传错了 dict），
+    # 于是 --model-dir 没生效，训练**直接写进了生产目录** output/models/cn/lightgbm/alpha_zoo_hk/model.txt。
+    config = apply_experiment_overrides(config, args)
     pipeline_config = config["pipeline"]
     service = MarketDataService(
         base_dir=pipeline_config.get("base_dir", "./assets/data"),

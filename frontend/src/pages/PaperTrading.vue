@@ -11,6 +11,106 @@
                 detail="先跑：uv run python scripts/run_cn_pipeline.py --stage paper_account" />
 
     <template v-else>
+      <!-- 实盘镜像放最前面：这是用户**自己账户**的钱，比模拟盘更需要第一时间看到。 -->
+      <div class="panel live" v-if="live && live.available">
+        <h6>实盘镜像：{{ live.broker }} {{ live.account_masked }}（真实持仓，不下单）</h6>
+        <p class="tiny muted">
+          这是<b>真实券商账户</b>的持仓截面（人工录入 <code>config/live_account_holdings.json</code>，
+          快照 {{ live.captured_at }}），每日由 <code>scripts/build_live_mirror.py</code> 按实时价/收盘价盯市。
+          <b>它没有并入上面的模拟盘</b>：模拟盘是"从空仓 45,000 按当日名单下单"的策略口径，
+          真实持仓是人做的决策 + 已实现亏损 —— 混在一个账户里，曲线会出现一次无解释的跳变，
+          之后再也无法和影子变体做同窗口配对。两者只共用同一份执行假设，所以能<b>并排看</b>，但不比大小。
+          <span v-if="(live.snapshot_age_days ?? 0) > 5" class="warn-text">
+            ⚠️ 快照已 {{ live.snapshot_age_days }} 天未更新，请重新录入持仓。</span>
+        </p>
+        <div class="pill-row">
+          <span class="pill">总资产 <b>{{ money(live.total_assets) }}</b></span>
+          <span class="pill">市值 <b>{{ money(live.market_value) }}</b></span>
+          <span class="pill">现金 <b>{{ money(live.cash) }}</b></span>
+          <span class="pill">价源 <b>{{ live.price_source === 'live' ? '实时' : '快照' }}</b></span>
+          <span class="pill">持仓 <b>{{ live.positions.length }}</b> 只</span>
+          <span class="pill">模型名单（{{ live.picks_date }}）<b>{{ live.selected_codes?.length ?? 0 }}</b> 只</span>
+          <span class="pill">更新 <b>{{ live.generated_at }}</b></span>
+        </div>
+        <div class="stat-grid">
+          <StatTile label="推算初始本金" :value="money(live.initial_capital_implied)"
+                    sub="持仓成本 + 现金 + |已实现亏损|" />
+          <StatTile label="账户累计" :value="pct(live.cumulative_return)" :tone="tone(live.cumulative_return ?? 0)"
+                    sub="含已实现与未实现" />
+          <StatTile label="未实现浮盈" :value="money(live.unrealized_pnl)" :tone="tone(live.unrealized_pnl ?? 0)" />
+          <StatTile label="已实现（3 笔清仓）" :value="money(live.realized_pnl)" :tone="tone(live.realized_pnl ?? 0)"
+                    sub="沪电/裕同/士兰微" />
+        </div>
+        <div class="pill-row" v-if="live.relative_20d?.return_20d !== undefined">
+          <span class="pill">
+            同窗 20 日（{{ live.relative_20d.window_start }} ~ {{ live.relative_20d.window_end }}）：
+            中证500 <b :class="tone(live.relative_20d.return_20d ?? 0)">{{ pct(live.relative_20d.return_20d) }}</b>
+          </span>
+          <span class="pill">
+            持仓组合 <b :class="tone(live.relative_20d.portfolio_20d ?? 0)">{{ pct(live.relative_20d.portfolio_20d) }}</b>
+          </span>
+          <span class="pill" :class="tone(live.relative_20d.excess_20d ?? 0)">
+            超额 <b>{{ pct(live.relative_20d.excess_20d) }}</b>
+          </span>
+          <span class="pill">覆盖权重 <b>{{ pct(live.relative_20d.coverage_weight) }}</b></span>
+        </div>
+        <h6 class="mt">持仓与建议（建议规则写死在 <code>live_mirror.ADVICE_RULES</code>，可用快照复算）</h6>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>代码</th><th>名称</th><th>股数</th><th>成本价</th><th>现价</th><th>市值</th>
+              <th>权重</th><th>浮盈</th><th>20日动量</th><th>同窗超额</th><th>建议</th><th>规则</th></tr></thead>
+            <tbody>
+              <tr v-for="p in live.positions" :key="p.stock_code">
+                <td class="mono link" @click="gotoStock(p.stock_code)">{{ p.stock_code }}</td>
+                <td>{{ p.name }}</td>
+                <td>{{ p.shares }}</td>
+                <td>{{ p.cost_price }}</td>
+                <td>{{ p.last_price }}</td>
+                <td>{{ money(p.market_value) }}</td>
+                <td :class="(p.weight ?? 0) > (live.max_weight_single_allowed ?? 0.12) ? 'down' : ''">
+                  {{ pct(p.weight) }}</td>
+                <td :class="tone(p.pnl_amount)">{{ p.pnl_amount?.toFixed?.(2) ?? p.pnl_amount }}
+                  <span class="tiny">({{ pct(p.pnl_pct) }})</span></td>
+                <td :class="tone(live.relative_20d?.per_position?.[p.stock_code]?.momentum_20d ?? 0)">
+                  {{ pct(live.relative_20d?.per_position?.[p.stock_code]?.momentum_20d) }}</td>
+                <td :class="tone(live.relative_20d?.per_position?.[p.stock_code]?.excess_20d ?? 0)">
+                  {{ pct(live.relative_20d?.per_position?.[p.stock_code]?.excess_20d) }}</td>
+                <td><b :class="p.action === '卖出' ? 'down' : (p.action === '买入' ? 'up' : '')">{{ p.action || '—' }}</b></td>
+                <td class="tiny muted" :title="p.reason || ''">
+                  {{ p.rule || '—' }}<span v-if="p.selected_rank"> rank {{ p.selected_rank }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pill-row mt">
+          <span class="pill">建议分布
+            <b>买入 {{ live.advice_counts?.买入 ?? 0 }} / 持有 {{ live.advice_counts?.持有 ?? 0 }} / 卖出 {{ live.advice_counts?.卖出 ?? 0 }}</b>
+          </span>
+          <span class="pill">与模型名单重合
+            <b>{{ overlapCount }} / {{ live.positions.length }}</b>
+          </span>
+          <span class="pill link" @click="router.push('/live')">
+            实时分时 / 日K / 日周月对比 / 收益日历 → 实盘镜像页
+          </span>
+          <span class="pill" :class="(live.top1_weight ?? 0) > (live.max_weight_single_allowed ?? 0.12) ? 'down' : ''">
+            第一重仓 <b>{{ pct(live.top1_weight) }}</b>（单票上限 {{ pct(live.max_weight_single_allowed) }}）
+          </span>
+          <span class="pill">前三合计 <b>{{ pct(live.top3_weight) }}</b></span>
+        </div>
+        <p class="tiny muted mt">
+          盯市观测 <b>{{ live.observations }}</b> 条（{{ live.sample_status === 'ok' ? '样本够' : '样本不足，别当结论' }}）——
+          快照日之前不回填：真实买入日期未知，回填等于编数据；曲线从快照日起每天累积。
+          与券商 App 对账：页面口径总资产 {{ money(live.total_assets) }} vs 截图 {{ money(live.reconciliation?.reported_total_assets) }}
+          （差 {{ money(live.reconciliation?.delta_total_assets) }}，来自盯市价与 App 的取整差）。
+        </p>
+        <div class="pill-row" v-if="live.cleared_positions?.length">
+          <span class="pill" v-for="c in live.cleared_positions" :key="c.stock_code">
+            {{ c.name }} 已清仓 <b class="down">{{ money(c.realized_pnl) }}</b>
+          </span>
+        </div>
+      </div>
+
       <!-- 这页最容易误解成"又一个回测"。把差异写在最上面。 -->
       <div class="panel explain">
         <h6>{{ data.explain.title }}</h6>
@@ -325,6 +425,12 @@ const shadow = computed(() => data.value?.shadow ?? null)
 const guard = computed(() => data.value?.guard ?? null)
 const promotion = computed(() => data.value?.promotion ?? null)
 const reference = computed(() => data.value?.reference ?? null)
+const live = computed(() => data.value?.live ?? null)
+// 与模型最新名单（selected ∪ preselected）重合的持仓只数 —— 回答"我的持仓离模型有多远"。
+const overlapCount = computed(() => {
+  const codes = new Set([...(live.value?.selected_codes ?? []), ...(live.value?.preselected_codes ?? [])])
+  return (live.value?.positions ?? []).filter((p) => codes.has(p.stock_code)).length
+})
 const referenceSeries = computed(() => [{
   name: reference.value?.label ?? '参考账户', color: '#2a9d8f',
   points: (reference.value?.curve ?? []).map((c) => Number(c.nav)),

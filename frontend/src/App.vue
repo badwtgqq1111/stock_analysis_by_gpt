@@ -62,10 +62,10 @@ const navGroups = [
   {
     label: '研究',
     links: [
+      { to: '/agent', label: '投研执行台' },
       { to: '/strategies', label: '策略池' },
       { to: '/factor-ic', label: '因子 IC' },
       { to: '/attribution', label: '选股归因' },
-      { to: '/factor-mining', label: '因子挖掘' },
     ],
   },
   {
@@ -81,6 +81,7 @@ const navGroups = [
       { to: '/kline', label: 'K 线图表' },
       { to: '/performance', label: '回测绩效' },
       { to: '/paper', label: '模拟盘' },
+      { to: '/live', label: '实盘镜像' },
     ],
   },
   // 行情：每天盯盘要看的三个入口（谁在涨跌/谁在吸金 → 连板情绪 → 个股分时）

@@ -4,6 +4,36 @@
   "updated_at": "2026-10-10",
   "strategies": [
     {
+      "id": "live_holdings",
+      "name": "实盘镜像（真实持仓）",
+      "group": "实盘",
+      "kind": "live_account",
+      "stage": "live",
+      "owner": "user",
+      "tag_class": "warn",
+      "summary": "真实券商账户的持仓截面（人工录入 config/live_account_holdings.json），**不是策略**：它不下单、不参与生产权重，也不该和策略名单比大小。每日由 scripts/build_live_mirror.py 用实时价/收盘价盯市，逐票给「买入/持有/卖出」建议（规则在每行的 rule 列，可用快照复算），并与最新生产名单（cn_ensemble_selected）做重合度对照 —— 这是回答「我的持仓和模型现在想要的票差多远」的唯一口径。账户累计收益的分母是推算初始本金（持仓成本 + 现金 + |已实现亏损|）。",
+      "entry": "uv run python scripts/build_live_mirror.py --print",
+      "schedule": "每日自动化（live-mirror 阶段，非阻塞）",
+      "artifacts": [
+        "output/paper_trading/live_mirror/summary.json",
+        "output/paper_trading/live_mirror/positions.csv",
+        "output/paper_trading/live_mirror/nav.csv",
+        "output/paper_trading/live_mirror/performance.json",
+        "output/results_cn/cn_live_holdings.csv"
+      ],
+      "history_dir": "output/live_holdings_history",
+      "no_tracking": true,
+      "curve_source": {
+        "nav_csv": "output/paper_trading/live_mirror/nav.csv",
+        "kind": "live_mirror_account_net",
+        "reason": "实盘账户的逐日盯市净值（现金 + 持仓市值）；快照日之前不回填（真实买入日期未知），所以观测数从快照日起累积，样本 <30 一律标 short_sample。",
+        "methodology": "快照价/实时价（盘中）+ 收盘价（盘后）盯市；规模不重放建仓，因此不含 T+1 成交与费用假设；基准中证500 同窗归一到 1。"
+      },
+      "selection_source": "cn_live_holdings",
+      "date_column": "trade_date",
+      "ledger_sources": []
+    },
+    {
       "id": "cn_ensemble",
       "name": "模型策略选股",
       "group": "模型策略",
@@ -11,7 +41,7 @@
       "stage": "production",
       "owner": "pipeline",
       "tag_class": "gold",
-      "summary": "LightGBM / Transformer / CNN 多模型打分 → 风控与流动性门禁 → preselect 候选池 → PK 得到最终名单。",
+      "summary": "2026-10-12 起口径 = 模型直出 top-10 等权、不做 PK 重排（旧口径见 cn_ensemble_pk_legacy）；LightGBM/Transformer/CNN 打分 → 准入特征 + 流动性/可执行性门禁 → preselect 候选池 → 取前 10 等权。",
       "entry": "uv run python scripts/run_cn_pipeline.py --stage selection",
       "schedule": "每日自动化主阶段（preselection → pk）",
       "artifacts": [
@@ -228,6 +258,25 @@
       "ledger_sources": [
         "box_arm"
       ]
+    },
+    {
+      "id": "cn_ensemble_pk_legacy",
+      "name": "模型选股·旧 PK 口径（对照）",
+      "group": "模型策略",
+      "kind": "model_legacy",
+      "stage": "research",
+      "owner": "pipeline",
+      "tag_class": "dim",
+      "summary": "2026-10-12 之前的决策链：preselect 候选池 → PK 按 rank_power 权重改写排序 → 下单名单。实测 7 个决策日仅 +4.05%、单票上限 0.50、每日最少 2 只 ⇒ 已被「模型直出」取代，留作新旧横向对比。（无每日名单 ⇒ 不注册为「来源」，只在策略池里作为对照曲线存在）",
+      "entry": "uv run python scripts/run_shadow_variants.py --variants production",
+      "schedule": "（已下线；影子仍每日并行计算）",
+      "artifacts": [
+        "output/paper_trading/shadow/production/nav.csv"
+      ],
+      "history_dir": "",
+      "date_column": "trade_date",
+      "selection_source": "",
+      "no_tracking": true
     }
   ]
 }

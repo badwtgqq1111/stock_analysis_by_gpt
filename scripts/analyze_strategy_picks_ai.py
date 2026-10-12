@@ -72,8 +72,12 @@ def collect(date: str, registry: Path = REGISTRY, results: Path = RESULTS) -> li
             # signals 只喂给模型（前端/台账都不读它），所以这里直接用中文策略名，
             # 免得模型在正文里回抄英文 id。
             signal = {"strategy": names.get(str(strategy["id"]), str(strategy["id"]))}
+            # cost_price / pnl_pct / action / rule 只有实盘镜像（live_holdings）的名单有：
+            # 带上它们，模型才知道「这只票已经拿着、浮盈多少、机械规则已经给了什么标签」，
+            # 否则它会把用户已持有的票当成新候选来评。缺列的 CSV 自动跳过（`if field in row`）。
             for field in ("rank", "score", "model_score", "roe", "roa", "market_cap",
-                          "target_weight", "trade_weight", "last_close", "industry"):
+                          "target_weight", "trade_weight", "last_close", "industry",
+                          "cost_price", "pnl_pct", "action", "rule", "rank_kind"):
                 if field in row and _value(row[field]) is not None:
                     signal[field] = _value(row[field])
             item["signals"].append(signal)

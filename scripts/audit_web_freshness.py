@@ -86,6 +86,42 @@ def _live_mirror_perf_end() -> str | None:
     return end or None
 
 
+def _strategy_lists_date() -> str | None:
+    """策略名单刷新的目标交易日；但**只看未达标项**：有 stale/failed 就返回 None（页面显示未达标并点名）。
+
+    为什么这么写：契约的重点不是"这份 json 存在"，而是"每条策略都到齐了"。
+    `no_signal`（事件/结构型当日无票）与 `skipped`（研究对照）都不算不达标。
+    """
+    path = ROOT / "output/results_cn/strategy_lists/status.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    counts = payload.get("counts") or {}
+    if counts.get("stale") or counts.get("failed") or counts.get("timeout"):
+        return None
+    return payload.get("target_date")
+
+
+def _strategy_registry_date() -> str | None:
+    """策略接线自检的目标交易日：有声明层问题或"意外的漏接线"就返回 None（页面点名）。
+
+    与「策略名单」同一套语义：`by_design`（影子对照没名单、声明 skip）不算不达标。
+    """
+    path = ROOT / "output/strategy_pool/registry_check.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("problems") or payload.get("gaps"):
+        return None
+    return str(payload.get("generated_at", ""))[:10] or None
+
+
 def _json_window_end(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -171,6 +207,12 @@ def _freshness_checks() -> list[dict]:
         or _csv_last_date(ROOT / "output/paper_trading/account_reference/nav.csv", "trade_date")
         or _parquet_max(ROOT / "output/paper_trading/account/positions.csv", "asof_date"),
         "paper_account（nav 逐日 push）/ paper_outcomes", "output/paper_trading/account/nav.csv")
+    add("策略接线（抽象层自检）", "daily", _strategy_registry_date(),
+        "strategy_registry --check（每条策略的选股源/刷新/台账/曲线是否都接上；漏接线会点名）",
+        "output/strategy_pool/registry_check.json")
+    add("策略名单（每日刷新契约）", "daily", _strategy_lists_date(),
+        "refresh_strategy_lists（每条策略 run/archive/skip + 状态；stale/failed 会在这里点名）",
+        "output/results_cn/strategy_lists/status.json")
     add("实盘镜像", "daily", _csv_last_date(ROOT / "output/paper_trading/live_mirror/nav.csv", "asof_date"),
         "build_live_mirror（真实持仓逐日盯市；快照日之前不回填，所以只要不落后于基准交易日就算新鲜）",
         "output/paper_trading/live_mirror/nav.csv")

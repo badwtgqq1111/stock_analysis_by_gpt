@@ -40,6 +40,9 @@ DATASETS = {
     "adj_factor": ("复权因子", "复权价重建", "daily"),
     "moneyflow": ("资金流", "moneyflow 特征", "daily"),
     "intraday_5min": ("分时 5min", "分时特征（一年窗口）", "daily"),
+    # 2026-10-13 新增：基准指数**此前不在任何每日清单里**（实测停在 10-09），
+    # 而多条策略/绩效页/策略池曲线都以它为「最新交易日」依据 ⇒ 必须进体检。
+    "benchmark_index": ("基准指数", "组合绩效/策略池曲线/多策略日期判定", "daily"),
     "financials": ("财务 / 财报（PIT）", "质量/估值 sleeve、financial_* 列", "report"),
     "valuation": ("估值快照（daily_basic）", "市值/PE/PB 分位", "monthly"),
     "industry": ("行业分类", "行业中性化", "event"),
@@ -218,10 +221,28 @@ def check_intraday(as_of: str) -> Check:
         lag += int(verdict == "lag")
         suspended += int(verdict == "suspended")
     checked = cur + lag
-    return Check("intraday_5min", latest=as_of, n=len(files), ok=lag == 0, self_judged=True,
-                 detail=f"已到 {as_of}: {cur}/{max(checked, 1)} 只 / 真实落后 {lag} 只；"
+    # 容忍阈值（2026-10-12）：中继源偶发 429/503 会让**个别**票当天补不上（实测 1/4523），
+    # 用 `lag == 0` 判会把整项体检卡成 ⚠️、进而在每日通知里刷"未达标"。改成"绝对 3 只或 0.1%"，
+    # 超过才判不达标；详情里把阈值写出来（不藏口径）。
+    tolerance = max(3, int(0.001 * max(checked, 1)))
+    return Check("intraday_5min", latest=as_of, n=len(files), ok=lag <= tolerance, self_judged=True,
+                 detail=f"已到 {as_of}: {cur}/{max(checked, 1)} 只 / 真实落后 {lag} 只（阈值 ≤{tolerance}）；"
                         f"{suspended} 只已停止交易（豁免）",
-                 extras={"lag": lag, "target": max(checked, 1), "suspended": suspended})
+                 extras={"lag": lag, "target": max(checked, 1), "suspended": suspended,
+                         "tolerance": tolerance})
+
+
+def check_benchmark(as_of: str) -> Check:
+    """基准指数（000905.SH 等 4 个）是否到最新交易日。"""
+    path = ROOT / "assets/data/meta/cn_benchmark_daily.parquet"
+    if not path.exists():
+        return Check("benchmark_index", detail="缺 cn_benchmark_daily.parquet（跑 scripts/backfill_cn_benchmark.py）")
+    frame = pd.read_parquet(path, columns=["ts_code", "trade_date"])
+    latest = pd.to_datetime(frame["trade_date"]).max().date()
+    want = pd.Timestamp(as_of).date()
+    return Check("benchmark_index", latest=str(latest), ok=latest >= want, self_judged=True,
+                 detail=f"最新 {latest}（{frame['ts_code'].nunique()} 个指数）"
+                        + ("" if latest >= want else f" < 基准交易日 {want} ⇒ 跑 scripts/backfill_cn_benchmark.py"))
 
 
 def check_financials(as_of: str) -> Check:

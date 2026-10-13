@@ -4,6 +4,8 @@
     <div class="two-col">
       <div class="col-side">
         <StockWatchlist v-model="selectedCode" />
+        <!-- K 线自选的分组直接取各策略最新名单：这里挂同一份刷新契约，名单停更看得见 -->
+        <StrategyListsStatusBar />
       </div>
       <div class="col-main">
     <ControlPanel
@@ -72,6 +74,23 @@
       <StateBlock v-if="loadingIntraday" state="loading" title="加载该日分时…" />
       <StateBlock v-else-if="intradayError" state="error" title="该交易日没有分时数据" :detail="intradayError" />
       <template v-else-if="intraday">
+        <!-- 标头：这是**哪只票**的分时（用户 2026-10-13："点中某只股票的时候，分时线看不到股票标头"）。
+             数据取当前 K 线标的（data）+ 分时口径的最新价/涨跌幅，滚动到面板时一眼知道看的是谁。 -->
+        <div class="intraday-head">
+          <b class="ih-code mono">{{ data?.code || selectedCode }}</b>
+          <b class="ih-name">{{ data?.name || '—' }}</b>
+          <span class="ih-px" :class="tone(intraday.latest.change_pct)">
+            {{ fmt(intraday.latest.price) }} {{ pct(intraday.latest.change_pct) }}
+          </span>
+          <span class="ih-tags tiny dim">
+            <span v-if="data?.profile?.industry">{{ data.profile.industry }} · </span>
+            <span v-if="data?.profile?.board">{{ data.profile.board }} · </span>
+            <span>分时标的</span>
+          </span>
+          <span class="ih-time tiny dim" v-if="intraday.points.length">
+            {{ intraday.points[0]?.clock }} → {{ intraday.points[intraday.points.length - 1]?.clock }}
+          </span>
+        </div>
         <div class="stat-grid">
           <StatTile label="收盘/最新" :value="fmt(intraday.latest.price)"
                     :tone="tone(intraday.latest.change_pct)"
@@ -116,6 +135,7 @@ import StatTile from '@/components/ui/StatTile.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import IntradayChart from '@/components/IntradayChart.vue'
 import StockWatchlist from '@/components/StockWatchlist.vue'
+import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
 import StockInfoPanel from '@/components/StockInfoPanel.vue'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
 import { useKlineData } from '@/composables/useKlineData'
@@ -316,6 +336,11 @@ watch(selectedCode, (code) => {
 @media (max-width: 1100px) { .col-side { position: static; } }
 .click-hint { margin-top: var(--sp-2); }
 .intraday-panel h6 { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.intraday-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; margin: 2px 0 var(--sp-2); }
+.intraday-head .ih-code { font-size: var(--fs-md); }
+.intraday-head .ih-name { font-size: var(--fs-md); color: var(--accent-gold); }
+.intraday-head .ih-px { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.intraday-head .ih-time { margin-left: auto; }
 .close-btn { margin-left: auto; }
 .intraday-panel .stat-grid { margin-bottom: var(--sp-3); }
 </style>

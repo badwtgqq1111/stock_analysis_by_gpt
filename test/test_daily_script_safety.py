@@ -27,6 +27,33 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/run_daily_production.sh"
 
 
+def _function_body(source: str, name: str) -> str:
+    """取出一个 shell 函数的**完整**定义（从 `name() {` 到第一个顶格的 `}`）。
+
+    事故（2026-10-13，我自己踩的）：这段原来写的是
+        `source[idx("run_data_step() {"): idx('if [ "${DAILY_DATA_REFRESH:-1}" = "1" ]; then')]`
+    —— 用**下一个 if 的文本**当结束标记。P2.56 在"函数"与那个 if 之间插了「基准指数同步」和
+    「当日数据就绪闸门」两段，切片于是把闸门也吞进 harness：
+      * 14:00 之后跑测试，闸门会**阻塞到 45 分钟**（等当日中继数据）→ 预检直接卡住；
+      * 若闸门判定未就绪，harness 会走 `notify_alert`（harness 里没定义）→ 退出非 0 → 测试失败
+        ⇒ **18:30 的每日生产会在预检阶段被自己的测试挡住**（比卡住更糟：它看起来像"代码坏了"）。
+    现在按**大括号匹配**取函数体，并在下面断言它不包含其它段落的关键词。
+    """
+    start = source.index(f"{name}() {{")
+    end = source.index("\n}\n", start) + 3
+    body = source[start:end]
+    for banned in ("daily_ready_gate", "DAILY_BENCHMARK", "DAILY_DATA_REFRESH", "run_data_step benchmark"):
+        assert banned not in body, f"函数体切片吞进了 {banned}（切片边界又漂了）"
+    return body
+
+
+def test_function_body_extraction_is_scoped():
+    """`_function_body` 只返回这一个函数（防止将来再漂）。"""
+    body = _function_body(SCRIPT.read_text(encoding="utf-8"), "run_data_step")
+    assert body.startswith("run_data_step() {") and body.rstrip().endswith("}")
+    assert body.count("\n}") == 1, f"函数体切片吞进了别的段落：\n{body[-300:]}"
+
+
 def test_script_is_valid_utf8():
     raw = SCRIPT.read_bytes()
     try:
@@ -55,7 +82,7 @@ def test_syntax_ok_under_c_locale():
 def test_data_step_failure_does_not_abort(tmp_path, locale):
     """数据步骤失败必须"只记日志"，不能终止整个每日生产（事故的核心）。"""
     source = SCRIPT.read_text(encoding="utf-8")
-    body = source[source.index("run_data_step() {"):source.index('if [ "${DAILY_DATA_REFRESH:-1}" = "1" ]; then')]
+    body = _function_body(source, "run_data_step")
     harness = tmp_path / "harness.sh"
     harness.write_text(textwrap.dedent(f'''
         set -uo pipefail

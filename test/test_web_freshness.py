@@ -87,8 +87,14 @@ def test_performance_chain_is_wired_and_nav_is_fresh():
         pytest.skip("回放净值缺失")
     frame = pd.read_csv(nav)
     column = next((c for c in frame.columns if "date" in c.lower()), frame.columns[1])
-    assert str(pd.to_datetime(frame[column]).max().date()) == str(pd.Timestamp(latest).date()), \
-        "回放净值必须推进到最新交易日（否则绩效页会停住）"
+    nav_last = str(pd.to_datetime(frame[column]).max().date())
+    from test._daily_state import midrun_grace, previous_trade_date
+
+    allowed = str(pd.Timestamp(latest).date())
+    if midrun_grace():
+        # 每日自动化正在跑（P2.54）：此刻当天日线已入库、绩效链还没跑到 ⇒ 允许停在上一交易日
+        allowed = previous_trade_date(allowed) or allowed
+    assert nav_last >= allowed, f"回放净值停在 {nav_last}，落后于 {allowed}（绩效页会停住）"
 
 
 def test_freshness_api_matches_artifact(client=None):

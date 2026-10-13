@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +36,11 @@ HISTORY_DIR = RUNS_DIR / "profile_history"
 PROFILE_PATH = ROOT / "config/agent_profile.json"
 CONFIG_PATH = ROOT / "config/strategies.json"
 POOL_PATH = ROOT / "output/strategy_pool/strategy_pool.json"
+CONFIG_PATH = ROOT / "config/strategies.json"
+PRE_ORDER_DIR = ROOT / "output/results_cn/pre_order_check"
+PROMOTION_DIR = ROOT / "output/results_cn/promotion_check"
+RESEARCH_SOURCES = ROOT / "config/research_sources.json"
+INSPECTOR_DIR = ROOT / "output/factor_library/inspector"
 FACTOR_ADMITTED = ROOT / "output/research/factor_ic_protocol/factor_ic_admitted.json"
 PROMOTION_DIR = ROOT / "output/results_cn/promotion_check"
 SHADOW_SUMMARY = ROOT / "output/paper_trading/shadow/summary.json"
@@ -458,6 +465,259 @@ def agent_factors(kind: str = "", status: str = "", category: str = "", q: str =
     }
 
 
+@router.get("/factors/context")
+def factors_context() -> dict:
+    """挖掘工作台的「本次上下文」chips（P2.43 §2.3）：面板规模 / 准入口径 / 上次最佳因子 / 研究工具清单。
+
+    口径只从产物里取（面板 manifest、因子库 criteria、最近一条挖掘会话的环境行），
+    不在这里另写一份 —— 页面显示的准入阈值必须与因子库、与挖掘脚本用的一致。
+    """
+    panel_manifest = sorted((ROOT / "output/data_quality").glob("clean_feature_panel_cn_*_manifest.json"))
+    panel: dict = {"available": False}
+    if panel_manifest:
+        path = panel_manifest[-1]
+        payload = _read_json(path, {})
+        panel = {
+            "available": True,
+            "version": str(payload.get("cleaning_version") or ""),
+            "stocks": payload.get("stocks"),
+            "features": payload.get("feature_count"),
+            "asof": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+            "source": _rel_path(path),
+        }
+    # 面板规模（行数/交易日）与"上次最佳因子"都从最近的挖掘会话里取（脚本自己打的 env/OK 行）
+    sessions = sorted((ROOT / "output/factor_mining_sessions").glob("*.json"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    last: dict = {"available": False}
+    if sessions:
+        payload = _read_json(sessions[0], {})
+        env_line = next((m.get("text", "") for m in payload.get("messages", [])
+                         if "面板" in str(m.get("text", ""))), "")
+        factors = payload.get("factors") or []
+        best = max(factors, key=lambda f: abs(float(f.get("icir") or 0)), default=None)
+        last = {
+            "available": bool(factors),
+            "session_id": payload.get("id"),
+            "env_line": env_line,
+            "panel_rows": (re.search(r"面板 ([\d,]+) 行", env_line).group(1) if re.search(r"面板 ([\d,]+) 行", env_line) else None),
+            "trading_days": (re.search(r"/(\s*)?(\d+) 个交易日", env_line).group(2)
+                             if re.search(r"/(\s*)?(\d+) 个交易日", env_line) else None),
+            "n_factors": len(factors),
+            "best": None if best is None else {k: best.get(k) for k in
+                                               ("name", "ic_mean", "icir", "nw_t", "fdr_pass", "expression", "reason")},
+        }
+    library = _factor_library()
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "panel": panel,
+        "criteria": library.get("criteria") or {},
+        "last_session": last,
+        "tools": [
+            {"name": "因子 IC 协议", "command": "uv run python scripts/factor_ic_protocol.py",
+             "artifact": "output/factor_ic_registry.csv", "page": "#/factor-ic"},
+            {"name": "因子库", "command": "uv run python scripts/sync_factor_library.py --print",
+             "artifact": "output/factor_library/factors.json", "page": "#/agent?tab=mining"},
+            {"name": "上线闸门", "command": "uv run python scripts/promotion_check.py",
+             "artifact": "output/results_cn/promotion_check/<ts>/verdicts.csv", "page": "#/paper"},
+            {"name": "影子组合", "command": "uv run python scripts/run_shadow_variants.py",
+             "artifact": "output/paper_trading/shadow/summary.json", "page": "#/paper"},
+            {"name": "策略池", "command": "uv run python scripts/sync_strategy_pool.py --print",
+             "artifact": "output/strategy_pool/strategy_pool.json", "page": "#/strategies"},
+            {"name": "下单前 checklist", "command": "uv run python scripts/pre_order_check.py --print",
+             "artifact": "output/results_cn/pre_order_check/<date>_<account>.md", "page": "#/agent?tab=console"},
+            {"name": "上线评估", "command": "uv run python scripts/promote_candidate.py <strategy_id>",
+             "artifact": "output/results_cn/promotion_check/<ts>/promote_<id>.md", "page": "#/agent?tab=console"},
+        ],
+        # 方向模板与灵感来源都从 config/research_sources.json 来（声明式登记，加一条不用改代码）
+        "templates": research_source_templates(),
+        "research_sources": research_sources(),
+    }
+
+
+def _research_registry() -> dict:
+    return _read_json(RESEARCH_SOURCES, {"sources": [], "templates": []})
+
+
+def research_source_templates() -> list[dict]:
+    """方向模板（label / direction / source）。前两条保持与历史口径一致，方便老书签/测试对得上。"""
+    templates = _research_registry().get("templates") or []
+    return [{"label": t.get("label"), "direction": t.get("direction"), "source": t.get("source")}
+            for t in templates if t.get("label") and t.get("direction")]
+
+
+def research_sources() -> list[dict]:
+    return list(_research_registry().get("sources") or [])
+
+
+@router.get("/research-sources")
+def agent_research_sources() -> dict:
+    """灵感来源 / 知识库注册表（P2.51）：挖因子时该去哪儿找方向、每个来源怎么用、坑在哪。
+
+    **纪律**（注册表里逐条写了 caution）：来源只提供**方向**，不提供**证据** ——
+    证据一律回到本地 IC 协议（|IC|≥0.02 / BH-FDR q=0.05 / |t|≥3 / maxρ≤0.7）与上线闸门。
+    """
+    registry = _research_registry()
+    sources = research_sources()
+    by_region: dict[str, list[dict]] = {}
+    for item in sources:
+        by_region.setdefault(str(item.get("region") or "其他"), []).append(item)
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "note": registry.get("note") or [],
+        "sources": sources,
+        "by_region": by_region,
+        "templates": research_source_templates(),
+        "counts": {"sources": len(sources), "templates": len(registry.get("templates") or [])},
+        "path": _rel_path(RESEARCH_SOURCES),
+    }
+
+
+LEDGER = ROOT / "output/results_cn/selection_ledger.parquet"
+_LEDGER_CACHE: dict = {"mtime": None, "payload": None}
+
+
+def _model_score_ic(horizon: str = "r20") -> dict | None:
+    """模型分的 IC 曲线（**台账口径**）：决策日截面秩 IC(model_score, 已实现 r20/excess_r20)。
+
+    为什么用台账而不是别的：模型分**没有逐日落盘的历史**（`output/model_scores/cn_lightgbm_scores.csv`
+    只有当天一版），所以唯一能算历史 IC 的地方是选股台账（它记录了每个决策日的 model_score 与已实现收益）。
+    口径差异必须写明：**稀疏决策日 + 已实现收益**，与面板口径的「逐日 + 自建前向收益」**不可直接比**。
+    """
+    if not LEDGER.exists():
+        return None
+    try:
+        import pandas as pd
+
+        mtime = LEDGER.stat().st_mtime
+        if _LEDGER_CACHE["mtime"] != mtime:
+            frame = pd.read_parquet(LEDGER, columns=["decision_date", "stock_code", "model_score", horizon])
+            frame = frame.dropna(subset=["model_score", horizon])
+            rows = []
+            for day, chunk in frame.groupby("decision_date"):
+                if len(chunk) < 10:
+                    continue
+                ic = float(chunk["model_score"].corr(chunk[horizon], method="spearman"))
+                rows.append({"date": str(day)[:10], "ic": ic, "names": int(len(chunk))})
+            rows.sort(key=lambda item: item["date"])
+            values = pd.Series([item["ic"] for item in rows])
+            _LEDGER_CACHE.update(mtime=mtime, payload={
+                "points": rows,
+                "periods": len(rows),
+                "mean": float(values.mean()) if len(values) else None,
+                "icir": (float(values.mean() / values.std(ddof=1)) if len(values) > 1 and values.std(ddof=1) else None),
+                "positive_share": float((values > 0).mean()) if len(values) else None,
+                "window": [rows[0]["date"], rows[-1]["date"]] if rows else None,
+            })
+        return _LEDGER_CACHE["payload"]
+    except Exception:
+        return None
+
+
+@router.get("/factors/fitness")
+def factor_fitness(profile: str = "default") -> dict:
+    """因子适应度打分（`scripts/factor_fitness.py` 产出；可切换 profile）。
+
+    纪律写在产物里：fitness **只用于排序候选**，准入仍由 IC 协议判、上线仍由闸门判。
+    """
+    path = ROOT / "output/factor_library/fitness.json"
+    if not path.exists():
+        return {"available": False, "reason": "还没有 fitness 产物",
+                "command": "uv run python scripts/factor_fitness.py --profile default --print"}
+    payload = _read_json(path, {})
+    if profile != payload.get("profile"):
+        # 请求了别的 profile → 现算一份（脚本很快：只读 factors.json + inspector 档案）
+        proc = subprocess.run([str(ROOT / ".venv/bin/python"), "scripts/factor_fitness.py",
+                               "--profile", profile], cwd=ROOT, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise HTTPException(status_code=400, detail=(proc.stderr or proc.stdout or "")[-300:])
+        payload = _read_json(path, {})
+    payload["available"] = True
+    payload["path"] = _rel_path(path)
+    return payload
+
+
+@router.get("/factors/inspector/compare")
+def factor_inspector_compare(ids: str = "", include_model: int = 0) -> dict:
+    """多条（2–5 条）因子的审查档案对比：滚动 IC 对齐叠加 + 指标表。
+
+    口径：只对齐**两边都有**的日期（不做插值、不补造）；某条没有档案就列进 `missing` 并给出命令。
+    """
+    wanted = [item.strip() for item in str(ids).split(",") if item.strip()][:5]
+    if len(wanted) < 2:
+        raise HTTPException(status_code=400, detail="至少给两条因子 id：/api/agent/factors/inspector/compare?ids=a,b")
+    series, table, missing = [], [], []
+    for factor_id in wanted:
+        path = INSPECTOR_DIR / f"{factor_id}.json"
+        payload = _read_json(path, None)
+        if not payload or payload.get("status") != "ok":
+            missing.append({"id": factor_id,
+                            "command": f"uv run python scripts/factor_inspector.py --factor {factor_id} --print"})
+            continue
+        rolling = ((payload.get("rolling_ic") or {}).get("20") or [])
+        ic = (payload.get("ic_by_horizon") or {}).get("20") or {}
+        quant = payload.get("quantiles") or {}
+        red = payload.get("redundancy") or {}
+        series.append({"id": factor_id, "points": [{"date": row.get("date"), "ic": row.get("ic")} for row in rolling]})
+        table.append({
+            "id": factor_id, "periods": ic.get("periods"), "ic_h20": ic.get("mean"), "icir_h20": ic.get("icir"),
+            "nw_t_h20": ic.get("nw_t"), "positive_share": ic.get("positive_share"),
+            "long_short_mean": quant.get("long_short_mean"), "long_short_win_rate": quant.get("long_short_win_rate"),
+            "top_turnover_mean": quant.get("top_turnover_mean"),
+            "max_abs_rho": red.get("max_abs_rho"), "max_abs_rho_peer": red.get("max_abs_rho_peer"),
+            "redundant": red.get("redundant"),
+        })
+    if include_model:
+        ledger = _model_score_ic()
+        if ledger and ledger["points"]:
+            series.append({"id": "model_score@ledger",
+                           "points": [{"date": item["date"], "ic": item["ic"]} for item in ledger["points"]]})
+            table.append({"id": "model_score@ledger", "periods": ledger["periods"], "ic_h20": ledger["mean"],
+                          "icir_h20": ledger["icir"], "nw_t_h20": None,
+                          "positive_share": ledger["positive_share"], "long_short_mean": None,
+                          "long_short_win_rate": None, "top_turnover_mean": None,
+                          "max_abs_rho": None, "max_abs_rho_peer": None, "redundant": None})
+            note_model = (f"模型分曲线来自**选股台账**（{ledger['periods']} 个决策日，"
+                          f"{ledger['window'][0]} ~ {ledger['window'][1]}）：决策日截面秩 IC(model_score, 已实现 r20)，"
+                          "稀疏且是已实现收益 —— 与面板口径的逐日 IC **不可直接比**。")
+        else:
+            missing.append({"id": "model_score@ledger", "command": "先跑 scripts/build_selection_ledger.py"})
+            note_model = ""
+    else:
+        note_model = ""
+
+    common_dates: list[str] = []
+    if len(series) >= 2:
+        sets = [{point["date"] for point in item["points"]} for item in series]
+        common_dates = sorted(set.intersection(*sets))
+    return {"available": bool(table), "ids": wanted, "common_dates": len(common_dates),
+            "window": [common_dates[0], common_dates[-1]] if common_dates else None,
+            "series": series, "table": table, "missing": missing,
+            "note": "滚动 IC 只对齐两边都有的日期（不插值）；h20 口径。" + note_model}
+
+
+@router.get("/factors/{factor_id}/inspector")
+def factor_inspector(factor_id: str) -> dict:
+    """单条因子的**审查档案**（滚动 IC / 衰减 / 分位组合 / 换手 / 冗余 / 血缘）。
+
+    参考 FactorMiner 的 Inspector 维度，但口径按本仓库（脚本 `scripts/factor_inspector.py` 产出）。
+    没有档案时**明确返回 available=false 并给出命令**，不生成占位曲线（宁可空，不造假）。
+    """
+    path = INSPECTOR_DIR / f"{factor_id}.json"
+    if not path.exists():
+        index_path = INSPECTOR_DIR / "index.json"
+        index = _read_json(index_path, {"factors": {}})
+        return {"available": False, "factor": factor_id,
+                "reason": "还没有审查档案（跑一次即可）",
+                "command": f"uv run python scripts/factor_inspector.py --factor {factor_id} --print",
+                "reviewed": sorted((index.get("factors") or {}).keys())[:40],
+                "criteria": index.get("criteria") or {}}
+    payload = _read_json(path, {})
+    payload["available"] = True
+    payload["path"] = _rel_path(path)
+    payload["markdown"] = str(_rel_path(INSPECTOR_DIR / f"{factor_id}.md"))
+    return payload
+
+
 @router.get("/overview")
 def agent_overview() -> dict:
     runs = _run_summaries()
@@ -586,6 +846,100 @@ def profile_history(limit: int = 10) -> dict:
                       "prompt_chars": len(payload.get("system_prompt") or ""),
                       "path": _rel_path(path)})
     return {"count": len(items), "items": items}
+
+
+def _latest_json(folder: Path, pattern: str) -> dict | None:
+    """取目录里最新的匹配文件内容（找不到返回 None）。"""
+    if not folder.exists():
+        return None
+    files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files:
+        payload = _read_json(path, None)
+        if payload:
+            return {**payload, "_path": _rel_path(path)}
+    return None
+
+
+@router.get("/actions")
+def agent_actions() -> dict:
+    """执行台的**可点动作**清单 + 上次结果（P2.42 §4.4 / §4.5 的人工那一步）。
+
+    动作只有两个，都跑本地脚本、都不改生产：
+      * `pre_order_check`：下单前 checklist（账户可选 paper / live）；
+      * `promote_candidate`：上线评估（参数限定为 `config/strategies.json` 里**在册**的 id，
+        否则就是任意命令注入口 —— 白名单是硬要求）。
+    """
+    registry = _read_json(CONFIG_PATH, {"strategies": []})
+    ids = [{"id": s.get("id"), "name": s.get("name"), "stage": s.get("stage")}
+           for s in registry.get("strategies", []) if s.get("id")]
+    return {
+        "actions": [
+            {"key": "pre_order_check", "label": "下单前 checklist",
+             "desc": "数据新鲜度 / 执行假设一致性 / 涨跌停停牌 / 资金整手 / 单票上限 / PK 护栏 / 参考账户一致性",
+             "command": "uv run python scripts/pre_order_check.py --account <paper|live> --print",
+             "accounts": ["paper", "live"]},
+            {"key": "factor_inspect", "label": "因子审查（Inspector）",
+             "desc": "滚动 IC / 多 horizon 衰减 / 5 档分位组合 / 换手 / 与准入因子冗余 / 数据血缘",
+             "command": "uv run python scripts/factor_inspector.py --factor <factor_id> --print",
+             "factors": [item.get("id") for item in (_factor_library().get("factors") or [])
+                         if item.get("status") in ("admitted", "in_use", "candidate")
+                         and not str(item.get("id", "")).endswith("_is_missing")][:60]},
+            {"key": "promote_candidate", "label": "上线评估",
+             "desc": "登记候选 → 影子/闸门判决 → 给人工动作（默认不改 config）",
+             "command": "uv run python scripts/promote_candidate.py <strategy_id>",
+             "strategies": ids},
+        ],
+        "pre_order": {"paper": _latest_json(PRE_ORDER_DIR, "paper_latest.json"),
+                      "live": _latest_json(PRE_ORDER_DIR, "live_latest.json")},
+        "promote": _latest_json(PROMOTION_DIR, "*/promote_*.json"),
+    }
+
+
+class ActionRequest(BaseModel):
+    action: str = Field(max_length=40)
+    account: str | None = Field(default="paper", max_length=10)
+    strategy_id: str | None = Field(default=None, max_length=60)
+    factor_id: str | None = Field(default=None, max_length=80)
+
+
+@router.post("/actions/run")
+def agent_run_action(req: ActionRequest) -> dict:
+    """跑一个动作并把结果回给页面（同步、非阻塞无关：两个脚本都是秒级）。"""
+    resolved_account = None
+    if req.action == "pre_order_check":
+        # 账户也要走白名单：非法值**回落**成 paper（不把用户输入透传给子进程），
+        # 读回结果时用的也是这个回落后的值 —— 实测踩过：用原始 req.account 去拼文件名 ⇒ 找不到产物。
+        resolved_account = req.account if req.account in ("paper", "live") else "paper"
+        cmd = [str(ROOT / ".venv/bin/python"), "scripts/pre_order_check.py",
+               "--account", resolved_account, "--print"]
+    elif req.action == "promote_candidate":
+        registry = _read_json(CONFIG_PATH, {"strategies": []})
+        allowed = {s.get("id") for s in registry.get("strategies", [])}
+        if req.strategy_id not in allowed:
+            raise HTTPException(status_code=400,
+                                detail=f"{req.strategy_id!r} 不在 config/strategies.json 里（可用：{sorted(allowed)}）")
+        cmd = [str(ROOT / ".venv/bin/python"), "scripts/promote_candidate.py", str(req.strategy_id)]
+    elif req.action == "factor_inspect":
+        library = _factor_library()
+        known = {str(item.get("id")) for item in (library.get("factors") or [])}
+        if req.factor_id not in known:
+            raise HTTPException(status_code=400,
+                                detail=f"{req.factor_id!r} 不在因子库里（可用：{sorted(known)[:8]} …共 {len(known)} 条）")
+        cmd = [str(ROOT / ".venv/bin/python"), "scripts/factor_inspector.py",
+               "--factor", str(req.factor_id), "--months", "24", "--print"]
+    else:
+        raise HTTPException(status_code=400,
+                            detail=f"未知动作 {req.action!r}；可用：pre_order_check / promote_candidate / factor_inspect")
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    payload = {"action": req.action, "command": " ".join(cmd[1:]), "exit": proc.returncode,
+               "stdout": (proc.stdout or "")[-4000:], "stderr": (proc.stderr or "")[-1000:]}
+    if req.action == "pre_order_check":
+        payload["result"] = _latest_json(PRE_ORDER_DIR, f"{resolved_account}_latest.json")
+    elif req.action == "factor_inspect":
+        payload["result"] = _read_json(INSPECTOR_DIR / f"{req.factor_id}.json", None)
+    else:
+        payload["result"] = _latest_json(PROMOTION_DIR, f"*/promote_{req.strategy_id}.json")
+    return payload
 
 
 @router.get("/health")

@@ -2,7 +2,7 @@
 """把当日选股结果推送到多个渠道（飞书 / 企业微信群机器人 / 钉钉 / 通用 webhook）。
 
     uv run python scripts/notify_selection.py [--trade-date YYYY-MM-DD] [--replay-dir DIR]
-                                              [--channels feishu,wecom] [--dry-run] [--print-payload]
+                                              [--channels email] [--dry-run] [--print-payload]
 
 渠道与凭据全部走环境变量（未配置的渠道自动跳过）：
 
@@ -80,20 +80,62 @@ def post_json(url: str, payload: dict, *, timeout: float = 10.0) -> tuple[bool, 
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def parse_cli_json(*streams: str) -> dict:
+    """从 lark-cli 的输出里挑出**结果对象**。
+
+    为什么不能直接 `json.loads(stdout)`（2026-10-12 踩的坑）：
+      ① lark-cli 把结果写到 **stderr**（stdout 常常是空的）；
+      ② stderr 里还混着"有新版本，跑 lark-cli update"的提示 JSON —— 直接解析会拿到那个提示，
+         于是报错显示成 `None: "update": {…}`，看不出真正的原因（实际是 code=230013
+         「Bot has NO availability to this user」）。
+    做法：把所有 `{…}` 平衡片段都试一遍，优先返回带 `ok` 字段的那个。
+    """
+    import re as _re
+    candidates = []
+    for stream in streams:
+        text = stream or ""
+        try:
+            candidates.append(json.loads(text))
+        except json.JSONDecodeError:
+            pass
+        for match in _re.finditer(r"\{", text):
+            start, depth = match.start(), 0
+            for index in range(start, len(text)):
+                if text[index] == "{":
+                    depth += 1
+                elif text[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            candidates.append(json.loads(text[start:index + 1]))
+                        except json.JSONDecodeError:
+                            pass
+                        break
+    for item in candidates:
+        if isinstance(item, dict) and "ok" in item:
+            return item
+    return next((item for item in candidates if isinstance(item, dict)), {})
+
+
 def send_feishu(content: str, *, identity: str, user_id: str, dry_run: bool) -> tuple[bool, str]:
     cmd = ["lark-cli", "im", "+messages-send", "--as", identity,
            "--user-id", user_id, "--markdown", content, "--format", "json"]
     if dry_run:
         return True, f"[dry-run] lark-cli im +messages-send --as {identity} --user-id {user_id}（{len(content)} 字）"
     sent = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
-    try:
-        payload = json.loads(sent.stdout or "{}")
-    except json.JSONDecodeError:
-        payload = {}
+    payload = parse_cli_json(sent.stdout, sent.stderr)
     if payload.get("ok") is True:
         return True, f"message_id={(payload.get('data') or {}).get('message_id')}"
     error = payload.get("error") or {}
-    return False, f"{error.get('subtype') or error.get('type')}: {error.get('message') or sent.stderr[-200:]}"
+    code = error.get("code")
+    message = error.get("message") or sent.stderr[-200:]
+    hints = {
+        230013: "机器人在该用户不可用（开放平台 → 应用 → 可用范围/发布状态；或改用群 chat_id / webhook 渠道）",
+        99991663: "机器人不在该会话里（先把机器人拉进群，或用 chat_id 发送）",
+        99991672: "应用缺少 im:message 权限（补 scope 后重新发布应用）",
+    }
+    hint = f"  ← {hints[code]}" if code in hints else ""
+    return False, f"{error.get('subtype') or error.get('type')}(code={code}): {message}{hint}"
 
 
 def send_wecom(content: str, url: str, *, dry_run: bool) -> tuple[bool, str]:
@@ -200,7 +242,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", default=None)
     parser.add_argument("--replay-dir", default=None)
-    parser.add_argument("--channels", default=os.environ.get("NOTIFY_CHANNELS", "feishu,email,wecom,dingtalk,generic"))
+    # 默认渠道（2026-10-12 用户要求）：**只发 email**。飞书那条渠道当前不可用
+    # （lark-cli code=230013「Bot has NO availability to this user」），继续默认带着它只会让每天多一条 FAIL。
+    # 想恢复飞书：NOTIFY_CHANNELS=feishu,email（或 --channels feishu,email），并先在开放平台把机器人可用范围加上该用户。
+    parser.add_argument("--channels", default=os.environ.get("NOTIFY_CHANNELS", "email"))
     parser.add_argument("--top", type=int, default=12)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--print-payload", action="store_true", help="打印将发送的内容后退出")
@@ -272,15 +317,29 @@ def main() -> int:
         else:
             results.append((channel, False, "未知渠道"))
 
-    failed = 0
+    succeeded = [channel for channel, ok, _ in results if ok]
+    failed_channels = [channel for channel, ok, _ in results if not ok]
     for channel, ok, detail in results:
-        print(f"{'ok  ' if ok else 'FAIL'} {channel}: {detail}")
-        failed += 0 if ok else 1
+        note = ""
+        if not ok and "lark-cli" in detail:
+            # 2026-10-12：飞书的失败原因是 lark-cli 把"有新版本"的提示混进了返回体，
+            # 这不是"没发出去"就是"要升级 CLI"——把它标出来，别让人以为是网络问题。
+            note = "  ← 疑似 lark-cli 版本提示混入返回体（跑 `lark-cli update` 后重试）"
+        print(f"{'ok  ' if ok else 'FAIL'} {channel}: {detail}{note}")
     for channel, detail in skipped:
         print(f"skip {channel}: {detail}")
     if not results and skipped:
         print("（所有渠道都未配置：只生成报告，未发送）")
-    return 0 if failed == 0 else 1
+    if not failed_channels:
+        if results:
+            print(f"OK: 全部渠道送达 {succeeded}")
+        return 0
+    if succeeded:
+        print(f"PARTIAL: 已送达 {succeeded}；失败 {failed_channels}"
+              "（至少一个渠道成功 ⇒ 视为通知成功，退出码 0；失败渠道见上）")
+        return 0
+    print(f"ALL-FAILED: 所有已配置渠道都失败：{failed_channels}")
+    return 1
 
 
 if __name__ == "__main__":

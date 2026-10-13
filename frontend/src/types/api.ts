@@ -942,6 +942,84 @@ export interface StrategyPoolEntry {
   metrics: { key: string; label: string; value: number }[]
   metrics_pct: string[]
   health: 'ok' | 'stale' | 'missing'
+  /** 这条策略今天的名单刷新结果（来自 output/results_cn/strategy_lists/status.json） */
+  refresh?: StrategyListRefresh | null
+  /** 抽象层接线表：这条策略接到了哪些页面/流程、靠什么接（新增策略自动出现） */
+  wiring?: StrategyWiring | null
+}
+
+/** 单个消费端的接线情况（`wired=False` 时看 `how` 为空 —— 多数是设计如此，见 coverage.by_design）。 */
+export interface StrategyWiringConsumer {
+  wired: boolean
+  how?: string | null
+  [key: string]: unknown
+}
+
+export type StrategyWiring = Record<string, StrategyWiringConsumer>
+
+/** 抽象层接线矩阵（/api/strategies/registry）。 */
+export interface StrategyRegistryResponse {
+  generated_at: string
+  n_strategies: number
+  consumers: Record<string, string>
+  rows: {
+    id: string
+    name: string
+    stage: string
+    stage_label: string
+    kind: string
+    group: string
+    selection_source: string | null
+    refresh: string
+    ledger_sources: string[]
+    curve: Record<string, boolean>
+    consumers: StrategyWiring
+  }[]
+  coverage: {
+    generated_at: string
+    n_strategies: number
+    consumers: Record<string, string>
+    matrix: Record<string, string[]>
+    gaps: { strategy: string; consumer: string; reason: string | null }[]
+    by_design: { strategy: string; consumer: string; reason: string | null }[]
+  }
+  problems: string[]
+  kinds: Record<string, string>
+}
+
+/** 单条策略的每日名单刷新结果。状态：updated / already_fresh / no_signal / stale / timeout / failed / skipped。 */
+export interface StrategyListRefresh {
+  id: string
+  name?: string
+  stage?: string
+  mode: string
+  status: string
+  target_date?: string | null
+  date_after?: string | null
+  history_after?: string | null
+  rows?: number | null
+  elapsed_seconds?: number
+  command?: string
+  log?: string | null
+  reason?: string
+  archive_note?: string
+}
+
+/** 每日名单刷新契约的汇总（策略池 / 选股结果 / 选股日历 / K 线自选 共用的同一份产物）。 */
+export interface StrategyListsStatus {
+  available: boolean
+  hint?: string
+  generated_at?: string
+  target_date?: string | null
+  rows?: StrategyListRefresh[]
+  counts?: Record<string, number>
+  /** 没有任何 stale / timeout / failed 时为 true（no_signal 不算问题） */
+  ok?: boolean
+  /** 需要人管的策略 id（stale / timeout / failed） */
+  attention?: string[]
+  /** 命令跑成功但当日无信号的策略 id（事件 / 结构型策略的正常态） */
+  quiet?: string[]
+  markdown_path?: string | null
 }
 
 export interface StrategyCandidate {
@@ -979,6 +1057,8 @@ export interface StrategyPoolResponse {
   stages: { key: string; label: string }[]
   strategies: StrategyPoolEntry[]
   candidates: StrategyCandidate[]
+  /** 每日名单刷新契约的汇总（与 /api/strategies/lists-status 同一份产物） */
+  lists_status?: StrategyListsStatus
   performance_generated_at?: string | null
   common_window?: { status: string; start_date?: string; end_date?: string; reason?: string }
   evidence: StrategyEvidence[]
@@ -1311,8 +1391,119 @@ export interface LiveRealtime {
   day_pnl_coverage?: number | null
   session?: SessionPhase
   price_source?: string
+  /** 报价口径的中文标签：实时 / 今日收盘 / 上一收盘 / 盘后产物 */
+  price_basis_label?: string
+  /** 报价日期（行情源时间戳里的日期，YYYY-MM-DD） */
+  price_date?: string | null
   quote_error?: string
   updated_at?: string
   advice_source?: string
   positions: LiveRealtimePosition[]
+}
+
+// ─── 执行台的「可点动作」（P2.42 §4.4 上线评估 / §4.5 下单前 checklist）───
+export interface AgentActionCheck {
+  name: string
+  category: string
+  status: 'pass' | 'warn' | 'block'
+  detail: string
+  evidence: string
+}
+export interface AgentActionResult {
+  generated_at?: string
+  account?: string
+  date?: string
+  latest_trade_date?: string | null
+  capital?: number
+  verdict?: string
+  verdict_label?: string
+  counts?: Record<string, number>
+  checks?: AgentActionCheck[]
+  next_actions?: string[]
+  id?: string
+  stage_now?: string | null
+  reason?: string
+  gate_run?: string | null
+  gate_row?: Record<string, any> | null
+  shadow?: Record<string, any> | null
+  evidence_logs?: string[]
+  _path?: string
+}
+export interface AgentActionsResponse {
+  actions: {
+    key: string
+    label: string
+    desc: string
+    command: string
+    accounts?: string[]
+    strategies?: { id: string; name: string; stage: string }[]
+  }[]
+  pre_order: { paper: AgentActionResult | null; live: AgentActionResult | null }
+  promote: AgentActionResult | null
+}
+export interface AgentActionRun {
+  action: string
+  command: string
+  exit: number
+  stdout: string
+  stderr: string
+  result: AgentActionResult | null
+}
+
+// ─── 挖掘工作台的「本次上下文」chips（P2.43 §2.3）───
+export interface MiningContextTool {
+  name: string
+  command: string
+  artifact: string
+  page: string
+}
+export interface MiningContextTemplate { label: string; direction: string; source?: string }
+export interface ResearchSource {
+  id: string
+  name: string
+  region: string
+  kind: string
+  url?: string | null
+  api?: string | null
+  cost?: string
+  what?: string
+  use?: string[]
+  caution?: string
+  entry?: string
+}
+export interface ResearchSourcesResponse {
+  generated_at?: string
+  note?: string[]
+  sources: ResearchSource[]
+  by_region: Record<string, ResearchSource[]>
+  templates: MiningContextTemplate[]
+  counts: { sources: number; templates: number }
+  path?: string | null
+}
+export interface MiningContext {
+  generated_at?: string
+  panel: {
+    available: boolean
+    version?: string
+    stocks?: number | null
+    features?: number | null
+    asof?: string
+    source?: string
+  }
+  criteria: Record<string, number>
+  last_session: {
+    available: boolean
+    session_id?: string
+    env_line?: string
+    panel_rows?: string | null
+    trading_days?: string | null
+    n_factors?: number
+    best?: {
+      name: string; ic_mean: number; icir: number; nw_t: number
+      fdr_pass: boolean; expression: string; reason?: string
+    } | null
+  }
+  tools: MiningContextTool[]
+  templates: MiningContextTemplate[]
+  research_sources?: ResearchSource[]
 }

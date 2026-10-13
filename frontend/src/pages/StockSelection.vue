@@ -10,6 +10,9 @@
       </template>
     </PageHeader>
 
+    <!-- 每日名单刷新契约：这份名单属于哪条策略、今天更新到哪个交易日，在这里点名 -->
+    <StrategyListsStatusBar />
+
     <!-- ① 来源 + 出处指纹（页面第一屏）：以前页面只读港股那份 CSV，
          用户无从知道首页名单和命令行跑出来的名单根本不是一回事。 -->
     <div class="panel source-panel">
@@ -209,6 +212,7 @@ import type { ImportanceResponse, SelectionRow, ShapFeature, ThsExportList } fro
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import BarChart, { type Bar } from '@/components/ui/BarChart.vue'
+import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
 
 const router = useRouter()
 const route = useRoute()

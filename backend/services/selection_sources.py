@@ -83,133 +83,56 @@ _COLS = {
     "backtest_return": ("backtest_return", "回测收益(%)", False),
 }
 
-SOURCES: dict[str, dict] = {
-    "cn_jq_roe_roa": {
-        "label": "动态诊断：ROE＋0.25×ROA",
-        "note": "全窗回放累计174.83%为已观察候选中最高，但2015—17半窗相对ROE-only为-2.50个百分点，"
-                "未过预设训练稳健门槛；2021—23验证累计-52.29%。这是独立候选研究名单，非生产策略。"
-                "历史沪深300成分内按rank(roe)+0.25×rank(roa)前20股等权，严格公告日PIT。",
-        "files": [("research", RESULTS_CN / "jq_roe_roa_selection.csv")],
-        "code_style": "ts_code",
-        "columns": ["rank", "stock_code", "stage", "roe", "roa", "roe_rank", "roa_rank",
-                    "score", "target_weight", "ann_date", "end_date"],
-        "supports_shap": False,
-    },
-    "cn_jq_multi_factor": {
-        "label": "聚宽多因子（低市值+高ROE）",
-        "note": "候选研究名单，历史沪深300成分内 rank(roe)−rank(market_cap) 前20股等权；"
-                "公告日严格早于信号日、当日市值、63交易日可交易过滤。每日收盘排名，"
-                "与15日调仓研究回测区分；不是ROE-only，不改变生产权重。",
-        "files": [("research", RESULTS_CN / "jq_multi_factor_selection.csv")],
-        "code_style": "ts_code",
-        "columns": ["rank", "stock_code", "stage", "roe", "market_cap", "roe_rank",
-                    "market_cap_rank", "score", "target_weight", "ann_date", "end_date"],
-        "supports_shap": False,
-    },
-    "cn_ensemble": {
-        "label": "CN 生产名单（preselect → PK）",
-        "note": "流水线 [selection] 阶段产物；preselected 与 selected 合并展示，用「阶段」列区分。",
-        "files": [
-            ("preselected", RESULTS_CN / "cn_ensemble_preselected.csv"),
-            ("selected", RESULTS_CN / "cn_ensemble_selected.csv"),
-        ],
-        "code_style": "ts_code",
-        "columns": [
-            "rank", "stock_code", "name", "stage", "model_score", "ensemble_score",
-            "lightgbm_score", "transformer_score", "target_weight", "selection_channel",
-            "selection_sleeve", "constraint_status", "industry_l1", "last_close",
-            "lots_at_target", "tradable_flag",
-        ],
-        "supports_shap": False,
-    },
-    "cn_arm": {
-        "label": "CN 研究手臂（base_v1）",
-        "note": "研究手臂名单，**不替代** preselected→pk 的生产名单；见 P1_25 §20/§21。",
-        "files": [("arm", RESULTS_CN / "arm_latest_selection.csv")],
-        "code_style": "ts_code",
-        "columns": [
-            "rank", "stock_code", "board", "industry", "score", "in_portfolio",
-            "target_weight", "last_close", "lots_at_capital", "planned_amount",
-            "pit_name", "mktcap_rank",
-        ],
-        "supports_shap": False,
-    },
-    "cn_live_holdings": {
-        "label": "实盘镜像（中泰证券真实持仓）",
-        "note": "**真实券商账户**的持仓截面（人工录入 config/live_account_holdings.json），"
-                "**不是策略名单**：它不会下单、不参与生产权重。每日由 scripts/build_live_mirror.py "
-                "按实时价/收盘价盯市，逐票给「买入 / 持有 / 卖出」建议（规则写在每行 rule 列，"
-                "可用快照复算）。与「模型选股」账户口径相同、来源不同，不要直接比大小。",
-        "files": [("live", RESULTS_CN / "cn_live_holdings.csv")],
-        "code_style": "ts_code",
-        "columns": [
-            "rank", "stock_code", "name", "stage", "industry", "shares", "cost_price",
-            "last_close", "target_weight", "pnl_amount", "pnl_pct", "action", "rule", "note",
-            "price_source", "selected_rank",
-        ],
-        "supports_shap": False,
-    },
-    "cn_first_ban_lowxi": {
-        "label": "CN 首板低吸（社区策略·反例档案）",
-        "note": "⚠️ **反例档案**：聚宽社区《首板涨停+回调+企稳+低吸-年化79%》的本地复现 —— "
-                "T 日选股 → T+1 开盘买 → 当日按文章日内规则卖（5 分钟归档），645 个决策日 / 8,423 笔，"
-                "逐笔均值 -0.62%（扣双边 31bp），累计 -97.6%、夏普 -3.41。保留这条来源是为了"
-                "在日历/选股记录里能对照「什么样的规则上不了线」，**不要**据此下单；"
-                "文章口径依赖本地缺失的集合竞价数据（见 output/research/first_ban_lowxi/REPORT.md）。",
-        "files": [("research", RESULTS_CN / "first_ban_lowxi_picks.csv")],
-        "code_style": "ts_code",
-        "columns": ["rank", "stock_code", "stage", "board", "industry", "entry", "ret",
-                    "exit_reason", "boards", "circ_mktcap_yi"],
-        "supports_shap": False,
-    },
-    "cn_box_arm": {
-        "label": "CN 横盘箱体突破回踩手臂（box_arm）",
-        "note": "结构型候选（2026-10-10）：60 日窄幅横盘（振幅≤45% 且 60 日无涨停）→ 首板且收盘创 60 日新高 "
-                "→ 1~5 日内回调≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → 次日开盘买、当日收盘卖（隔夜空仓）；"
-                "每周最多 5 只等权、按箱体振幅升序。逐笔毛 +0.40%/净 +0.09%（1,949 笔），累计 +28.2%、"
-                "最大回撤 −60.5%、卡玛 0.04 —— ⚠️ 参数极敏感（weekly×10 −68.8%、daily×5 −76.6%），"
-                "只作观察候选，不参与生产权重。",
-        "files": [("research", RESULTS_CN / "box_arm_selection.csv")],
-        "code_style": "ts_code",
-        "columns": [
-            "rank", "stock_code", "stage", "board", "industry", "score", "in_portfolio",
-            "target_weight", "consolidated_amp", "offset", "level",
-        ],
-        "supports_shap": False,
-    },
-    "cn_arm_rot": {
-        "label": "CN 行业轮动手臂（rotation_arm）",
-        "note": "复现结论落地：板块层 = MST 滚动聚类（每 6 个月刷新、60 个月窗口、每个大类 ≥8 个行业）"
-                "下 7 个价量因子（1/3/6 月动量、3 月波动、成交额份额、换手份额、涨停密度）**简单等权**"
-                "→ 取 top-1 大类；个股层复用概念手臂（板块内买滞涨 + 资金流 + 流动性，每行业 ≤2）。"
-                "证据：output/research/industry_rotation/xy_reproduce.md（月频 12.38% vs 现行 2 因子 6.89%）"
-                "与 xy_daily.md（日频扣费后输给月频）。相对大类等权 t=1.51、p=0.135 —— **未过上线闸门**，"
-                "是候选/研究名单，不参与生产订单与权重。",
-        "files": [("research", RESULTS_CN / "rot_arm_selection.csv")],
-        "code_style": "ts_code",
-        "columns": [
-            "rank", "stock_code", "stage", "board", "industry", "score", "concept_score", "rev_5d",
-            "in_portfolio", "target_weight", "last_close", "lots_at_capital", "planned_amount",
-            "pit_name",
-        ],
-        "supports_shap": False,
-    },
-    "cn_arm_concept": {
-        "label": "CN 概念/板块手臂（concept_rotation）",
-        "note": "板块层（动量0.7−涨停密度0.3，2026-10-10 去掉聚合资金流项：该项按 净流入÷成交额 "
-                "打分，体量越大越占便宜，选出来的全是银行主导的「超大盘/央企50」；12 组网格回放里"
-                "只有这一口径跑赢全市场等权）→ 个股层（板块内买滞涨 + 资金流 + 流动性；"
-                "12 组里三种「买龙头」口径全部更差）；候选每板块≤4、每行业≤2；"
-                "独立策略项，**不替代** preselection→pk 的生产名单。",
-        "files": [("arm", RESULTS_CN / "arm_concept_selection.csv")],
-        "code_style": "ts_code",
-        "columns": [
-            "rank", "stock_code", "stage", "board", "industry", "score", "concept_score", "rev_5d",
-            "in_portfolio", "target_weight", "last_close", "lots_at_capital", "planned_amount",
-            "pit_name",
-        ],
-        "supports_shap": False,
-    },
+# ── 数据源注册表 ───────────────────────────────────────────────────────────────
+# 9 条**策略**源由抽象层派生（`config/strategies.json` 的 `selection` 块 →
+# `backend/services/strategy_registry.py`）。以前它们硬编码在这里，新增一条策略必须回来改 Python，
+# 漏改的表现是"/api/selection?source=xxx 未知数据源，已回退默认源" —— 页面看不出是接线漏了。
+# 现在：**新增策略只改 config，这里不用动**。
+from backend.services import strategy_registry as registry
+
+
+def _derived_sources() -> dict[str, dict]:
+    return {**registry.selection_sources(), **LEGACY_SOURCES}
+
+
+class _SourceMap:
+    """`src.SOURCES` 的懒加载视图。
+
+    为什么要懒：web 端"新增策略自动同步"要求**改完 config 不用重启**。
+    普通 dict 是 import 时求值的，改 config 后进程内一直是旧表（实测过：加了策略页面却看不到）。
+    这个类支持 `.get / [] / in / keys / items / len / 迭代`，与 dict 用法完全一致。
+    """
+
+    def _data(self) -> dict[str, dict]:
+        return _derived_sources()
+
+    def __getitem__(self, key: str) -> dict:
+        return self._data()[key]
+
+    def get(self, key: str, default=None):
+        return self._data().get(key, default)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._data()
+
+    def __iter__(self):
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+    def keys(self):
+        return self._data().keys()
+
+    def items(self):
+        return self._data().items()
+
+    def values(self):
+        return self._data().values()
+
+
+# 不是策略、只作历史遗留展示的源（港股链路），继续留在代码里
+LEGACY_SOURCES: dict[str, dict] = {
     "hk_lightgbm": {
         "label": "港股 LightGBM Top10（历史遗留）",
         "note": "旧的港股链路产物；带 SHAP/factor_explanation，是本页「因子贡献」分析的唯一来源。",
@@ -222,6 +145,8 @@ SOURCES: dict[str, dict] = {
         "supports_shap": True,
     },
 }
+
+SOURCES = _SourceMap()
 
 DEFAULT_SOURCE = "cn_ensemble"
 

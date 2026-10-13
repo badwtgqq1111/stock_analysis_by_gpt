@@ -221,6 +221,71 @@ def parse_gates(stages: list[dict], gates_list: "list[tuple[str, str]] | None" =
     return gates
 
 
+def model_context() -> dict:
+    """P2.47-R4：把**训练口径**（窗口 + label/feature buffer，单位统一为交易日）写进运行轨迹。
+
+    为什么单独立一块而不是塞进某个 stage：`run.json` 要能回答"这次跑的是哪一版模型、训在哪段、
+    预测提前了几天的收益" —— 混在日志文本里没人能核对。字段口径：
+      * `label_buffer_days` = 标签期（`forward_return_20d` → 20 个交易日）—— 生成特征时**必须留出的未来 buffer**；
+      * `feature_buffer_days` = 特征回看窗口里最长的那根（本仓库面板按最长的 rolling 窗口取，
+        实际值写在 clean_panel 的 manifest 里；取不到就退回标签期并标注 `estimated=True`）；
+      * `train_window` = 训练起止 + 交易日天数（按自然日估算，标注口径）。
+    """
+    manifest_path = ROOT / "output/models/cn/lightgbm/alpha_zoo_hk/model_manifest.json"
+    if not manifest_path.exists():
+        return {"available": False, "reason": f"没有生产模型 manifest：{manifest_path}"}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"available": False, "reason": str(exc)}
+    import re
+    from datetime import date
+
+    label = str(manifest.get("label_column") or "")
+    match = re.search(r"(\d+)d$", label)
+    label_buffer = int(match.group(1)) if match else None
+    # 特征回看窗口：面板是按"最长的 rolling 窗口"取数的，而特征名尾部就编码了窗口
+    # （`VSUMN60_clean` / `STD10_clean` / `CORR60_clean` / `BETA10_clean`）—— 取模型 100 个特征里的最大值。
+    # 这是**从特征名推出来的**，所以显式标 `derived_from_feature_names=True`，不冒充精确值。
+    feature_buffer = None
+    derived = False
+    windows = []
+    for column in manifest.get("feature_columns") or []:
+        trailing = re.search(r"(\d+)(?:_clean)?$", str(column))
+        if trailing:
+            windows.append(int(trailing.group(1)))
+    if windows:
+        feature_buffer = max(windows)
+        derived = True
+    estimated = not derived
+    if feature_buffer is None:
+        feature_buffer = label_buffer
+    train_start, train_end = str(manifest.get("train_start") or ""), str(manifest.get("train_end") or "")
+    days = None
+    try:
+        days = (date.fromisoformat(train_end) - date.fromisoformat(train_start)).days
+    except ValueError:
+        days = None
+    split = ((manifest.get("extra") or {}).get("split") or {})
+    return {
+        "available": True,
+        "model": str(manifest.get("model_type") or ""),
+        "label": label,
+        "label_buffer_days": label_buffer,
+        "feature_buffer_days": feature_buffer,
+        "feature_buffer_estimated": estimated,
+        "feature_buffer_derived_from_feature_names": derived,
+        "feature_buffer_scan": {"n_features": len(manifest.get("feature_columns") or []),
+                                "max_window": max(windows) if windows else None},
+        "train_window": {"start": train_start, "end": train_end, "calendar_days": days,
+                         "trading_days_est": int(days * 5 / 7) if days else None},
+        "embargo_days": split.get("embargo_days"),
+        "validation_days": split.get("validation_days"),
+        "feature_count": manifest.get("feature_count"),
+        "source": str(manifest_path.relative_to(ROOT)),
+    }
+
+
 def _collect_artifacts(stages: list[dict], extra: list[str]) -> list[str]:
     found: list[str] = []
     for item in stages:
@@ -234,6 +299,9 @@ def _collect_artifacts(stages: list[dict], extra: list[str]) -> list[str]:
 
 
 def write_run(payload: dict, out_dir: Path) -> tuple[Path, Path]:
+    # P2.47-R4：轨迹里必须有训练/缓冲口径（谁在哪段数据上训的、预测提前几天）——统一在这里补，
+    # 免得"某个子命令忘了带"（run / summarize / from-session 三条路径都走 write_run）。
+    payload.setdefault("model_context", model_context())
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = out_dir / "run.json"
     md_path = out_dir / "run.md"

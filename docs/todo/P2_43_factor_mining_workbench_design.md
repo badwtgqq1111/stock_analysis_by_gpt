@@ -56,7 +56,7 @@ output/factor_mining_sessions/*.json  →  output/agent_runs/<session_id>-mining
 研究的自然顺序是"我想问什么 → 我看到了什么 → 我拿它做什么"，所以输入区必须**常驻在视线里**（composer），
 产出必须是**可点的卡**（复制表达式 / 入池 / 看产物），而不是一行 `print`。
 
-## 2. 落地要点（**工作台重排：待实现**；关联链路：已实现）
+## 2. 落地要点（工作台重排：**✅ 2026-10-12 已实现**；关联链路：✅ 已实现）
 
 1. `frontend/src/components/FactorMiningPanel.vue` 重排为：**左栏（新建 + 模板 + 会话 + 研究工具）｜ 中栏（上下文 chips + 对话流 + 常驻 composer）｜ 右栏（本轮因子 + 入池）**。
 2. 对话流的**结构化解析**（纯前端，不改后端日志格式）：把 `[llm-factor] …` 的日志行分成
@@ -65,10 +65,21 @@ output/factor_mining_sessions/*.json  →  output/agent_runs/<session_id>-mining
    这样"日志格式不变、展示升级"，与 `scripts/agent_run.py` 只解析日志的原则一致。
 3. composer 常驻（中栏 `position: sticky; bottom: 0`）+ 方向模板一键填入 + 参数 chips（轮数/候选/模型/自检）。
 4. 上下文 chips 里的**准入口径**来自 `/api/agent/factors`（因子库），与下方因子库表**同一份口径**（不另写死一份）。
-5. **状态说明**：本节 1~4 的界面重排（左栏模板 / 上下文 chips / 常驻 composer / 因子卡三操作）
-   **尚未实现** —— 本轮只落地了 §0.5 的关联链路（会话→轨迹、双向跳转、门槛跟随）。重排留给下一轮，避免"文档先于代码"。
+5. **状态说明（2026-10-12 更新）**：本节 1~4 **已全部实现**（`frontend/src/components/FactorMiningPanel.vue` 重写，
+   631 行）+ 新增后端接口 `GET /api/agent/factors/context`（面板规模 / 准入口径 / 上次最佳因子 / **研究工具清单** / **方向模板**）。
+   实测（Playwright）：深链 `?tab=mining` 落在挖掘页；左栏模板 4 个 chip、研究工具 7 条；
+   上下文 chips 4 个（面板 p0.2.v1·5224 只·683 字段 / 规模 7,058,975 行·2123 交易日 / 准入口径 |IC|≥0.02·BH-FDR q=0.05·|t|≥3 / 上次最佳 rev_vol ICIR 0.683）；
+   对话流把 `[llm-factor] OK/ERR` 行解析成**因子卡 ×2**（每张卡 3 个操作：复制表达式 / 入池成候选 / 复制产物路径）；
+   composer **常驻**（滚动轨迹后 y=864 < 视口 900）；点模板填入方向、参数 chips 可改；0 控制台报错。
+   **口径同源**：上下文 chips 的准入口径直接取 `/api/agent/factors` 的 `criteria`（有测试锁：两者必须相等）。
 6. 明确不做：不让按钮直接"运行表达式"（单表达式复算要重载 2GB 面板，应该走一次 `rounds=1 / proposals=1` 的会话，且要排队）；
    不做语音输入；不做多会话并行（服务端串行）。
+
+7. **（2026-10-12 追加，P2.51）灵感来源 / 知识库**：左栏再加一块「灵感来源 / 知识库」—— 15 个来源（含用户点名的
+   QuantPedia / Seeking Alpha / FRED 与聚宽 JoinQuant）按地区分组，点开看**怎么用 / 坑 / 入口**，
+   并带「用它的方向」把该来源的方向模板填进 composer；方向模板从 4 条扩到 12 条（每条绑一个来源）。
+   注册表在 `config/research_sources.json`（**加一条不用改代码**），接口 `GET /api/agent/research-sources`，
+   纪律见 `docs/todo/P2_51_research_sources.md`：**来源只给方向、不给证据**。
 
 ## 3. 验收方式
 

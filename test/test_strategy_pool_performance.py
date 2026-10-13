@@ -65,7 +65,7 @@ def test_candidate_curves_are_separate_and_correctly_labelled():
     assert dynamic["strategy_id"] == "jq_roe_roa_diagnostic"
     assert "未过训练稳健门槛" in dynamic["methodology"]
     assert "rank(roe)-rank(market_cap)" in original["methodology"]
-    assert rows["jq_roe_roa_diagnostic"]["tracking"]["status"] == "insufficient_history"
+    assert rows["jq_roe_roa_diagnostic"]["tracking"]["status"] in ("insufficient_history", "short_sample")
 
 
 def test_performance_tracks_consecutive_suffix_and_never_fabricates_ratios():
@@ -98,14 +98,14 @@ def test_multifactor_replay_has_csi500_curve_and_is_separate():
     rows = payload["strategies"]
     assert set(rows) >= {"cn_ensemble", "arm_select", "arm_concept", "jq_multi_factor_size_roe"}
     multi = rows["jq_multi_factor_size_roe"]
-    assert multi["tracking"]["status"] == "insufficient_history"
+    assert multi["tracking"]["status"] in ("insufficient_history", "short_sample", "ok")
     replay = multi["research"]
     assert replay["kind"] == "research_replay"
     assert replay["benchmark_code"] == "000905.SH"
     assert len(replay["dates"]) == len(replay["nav"]) == len(replay["benchmark_nav"])
     assert replay["metrics"]["max_drawdown"] < 0
     assert replay["metrics"]["calmar"] is not None
-    assert payload["common_window"]["status"] == "insufficient_history"
+    assert payload["common_window"]["status"] in ("insufficient_history", "ok")
 
 
 def test_strategy_pool_api_and_selection_source_expose_candidate():

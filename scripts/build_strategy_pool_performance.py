@@ -289,12 +289,21 @@ def build() -> dict:
             errors[spec["id"]] = str(exc)
     # 模型臂（P2.45-A）：台账里的 preselected / notify 是**稀疏决策日**名单，
     # 单独走 ledger_curve（持有到下一个决策日），与其它策略的 tracking 并列展示。
-    model_arms = {}
-    for source, top_n in (("preselected", 10), ("notify", 10)):
-        targets = ledger_targets(source, top_n=top_n)
-        if targets:
-            model_arms[source] = targets
-    codes = sorted({c for targets in list(all_targets.values()) + list(model_arms.values())
+    # 接线来自声明层 `model_arms`（以前这里硬编码 ("preselected",10)/("notify",10)）：
+    # 新增一条"模型臂"策略只要在 config/strategies.json 写 model_arms 即可。
+    model_arms: dict[str, dict[str, dict]] = {}
+    for _spec in config["strategies"]:
+        _plan = _spec.get("model_arms") or {}
+        if not _plan:
+            continue
+        _by_source = {}
+        for _source in _plan.get("ledger_sources") or []:
+            _targets = ledger_targets(_source, top_n=int(_plan.get("top_n") or 10))
+            if _targets:
+                _by_source[_source] = _targets
+        model_arms[_spec["id"]] = _by_source
+    codes = sorted({c for targets in list(all_targets.values()) +
+                    [arm for arms in model_arms.values() for arm in arms.values()]
                     for weights in targets.values() for c, w in weights.items() if w > 0})
     earliest = min((d for targets in all_targets.values() for d in targets), default=bench.index[-1])
     files = [str(p) for year in range(earliest.year, bench.index[-1].year + 1)
@@ -318,43 +327,39 @@ def build() -> dict:
                                  "（曲线见 curve_source 给出的原始口径逐笔模拟）。")
         rows[ident] = {"tracking": result}
     # ── 模型臂曲线：候选池（上游）与 PK 后名单（下游）各一条，同窗口、同基准 ────────
-    if "cn_ensemble" in rows:
-        arms = {}
-        for source, targets in model_arms.items():
-            curve = ledger_curve(targets, bench, bars, kind=f"ledger_tracking_gross:{source}")
-            arms[source] = curve
-        if arms:
-            rows["cn_ensemble"]["model_arms"] = arms
-            # 上游（候选池）放进 `research` 槽位：与 jq/rot_arm 的曲线同一个展示位置，
-            # 页面无需改结构就能看到"模型臂 vs 中证500"；下游对照在 model_arms 里（报告给两条）。
-            upstream = arms.get("preselected") or arms.get("notify")
-            if upstream and upstream.get("status") == "ok":
-                rows["cn_ensemble"]["research"] = {**upstream, "note": "模型臂上游（候选池等权 top-10）"}
+    for _ident, _sources in model_arms.items():
+        if _ident not in rows or not _sources:
+            continue
+        _arms = {_source: ledger_curve(_targets, bench, bars, kind=f"ledger_tracking_gross:{_source}")
+                 for _source, _targets in _sources.items()}
+        rows[_ident]["model_arms"] = _arms
+        # 上游（候选池）放进 `research` 槽位：与 jq/rot_arm 的曲线同一个展示位置，
+        # 页面无需改结构就能看到"模型臂 vs 中证500"；下游对照在 model_arms 里（报告给两条）。
+        _upstream = _arms.get("preselected") or _arms.get("notify")
+        if _upstream and _upstream.get("status") == "ok" and "research" not in rows[_ident]:
+            rows[_ident]["research"] = {**_upstream, "note": "模型臂上游（候选池等权 top-10）"}
 
-    replay_sources = {
-        'jq_multi_factor_size_roe': ROOT / 'output/research/jq_multi_factor/nav_original_size_roe.csv',
-        'jq_roe_roa_diagnostic': ROOT / 'output/research/jq_multi_factor_dynamic/nav_dynamic_diagnostic.csv',
-    }
-    for ident, path in replay_sources.items():
-        if ident in rows and path.exists():
-            rows[ident]['research'] = replay(path, bench, strategy_id=ident)
+    # ── 独立回放曲线（curve.replay）：策略原始口径的 nav.csv，接线写在 config 里 ──────
+    for _spec in config["strategies"]:
+        _rel = (_spec.get("curve") or {}).get("replay", {}).get("nav_csv")
+        if not _rel or _spec["id"] not in rows:
+            continue
+        _path = ROOT / str(_rel)
+        if _path.exists():
+            rows[_spec["id"]]["research"] = replay(_path, bench, strategy_id=_spec["id"])
     # ── 模拟盘（影子组合）净值 → 长窗口对照曲线 ────────────────────────────────
     # 为什么需要：`tracking` 要求**连续交易日**都有归档名单（见 METHOD），而按决策日归档的策略
     # （rot_arm 这类，决策日稀疏到每周/每月）只能拿到"最近几个连续交易日"的样本
     # —— 实测 rot_arm 只有 8 个观测，用户看到的就是"没有中证500 对比曲线"。
     # 影子组合是同一套执行假设（T+1 开盘、佣金/印花税/滑点、整手）的模拟账户，
     # 历史可回填到 2025-09，正好用来做**多期**的 中证500 对照；口径与 `tracking` 明确区分。
-    shadow_sources = {
-        "rot_arm": ("output/paper_trading/shadow/rot_arm/nav.csv",
-                    "output/results_cn/shadow_variants/rot_arm.csv"),
-        # 模型臂新旧两条口径（2026-10-12）：生产 = 模型直出（影子变体 model_topn_equal）；
-        # 旧 PK 口径留作对照（影子变体 production）—— 两条都带中证500 对照，便于横向比。
-        "cn_ensemble": ("output/paper_trading/shadow/model_topn_equal/nav.csv",
-                        "output/results_cn/shadow_variants/model_topn_equal.csv"),
-        "cn_ensemble_pk_legacy": ("output/paper_trading/shadow/production/nav.csv",
-                                  "output/results_cn/shadow_variants/production.csv"),
-    }
-    for ident, (nav_rel, hist_rel) in shadow_sources.items():
+    # 接线来自声明层 `curve.shadow`（以前这里硬编码三条）：
+    # 新增策略只要在 config 里写 curve.shadow.nav_csv / history_csv。
+    shadow_sources = [(spec["id"],
+                       (spec.get("curve") or {}).get("shadow", {}).get("nav_csv", ""),
+                       (spec.get("curve") or {}).get("shadow", {}).get("history_csv", ""))
+                      for spec in config["strategies"] if (spec.get("curve") or {}).get("shadow")]
+    for ident, nav_rel, hist_rel in shadow_sources:
         nav_path, hist_path = ROOT / nav_rel, ROOT / hist_rel
         if ident not in rows or not nav_path.exists():
             continue

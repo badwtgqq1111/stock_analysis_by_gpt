@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "updated_at": "2026-10-12",
+  "note": [
+    "因子「适应度」的可配置定义（参考 FactorMiner 的 Fitness Hook，口径按本仓库）。",
+    "**纪律**：fitness 只用来**给候选排序**，不替代两件事 —— ① 因子 IC 协议（|IC|/BH-FDR/HLZ/簇冗余，那是准入裁判）；",
+    "② 上线闸门（promotion_check：同窗口逐期配对 + 集中度）。fitness 高 ≠ 可以上线。",
+    "score = Σ 权重 × 归一化(分量) − Σ 权重 × 越界惩罚；分量目标值与惩罚阈值都在这里改，脚本不写死。",
+    "缺证据时的处理：没有 inspector 档案 ⇒ 惩罚项按 **未知** 计（不假装为 0），并在 coverage 里标注。"
+  ],
+  "targets": {
+    "abs_ic": 0.05,
+    "abs_icir": 1.0,
+    "abs_nw_t": 4.0,
+    "positive_share": 0.6,
+    "redundancy_rho": 0.7,
+    "turnover": 0.25,
+    "decay_ratio": 2.0,
+    "long_short": 0.02
+  },
+  "cap": 1.5,
+  "profiles": {
+    "default": {
+      "label": "默认（准入视角：IC/ICIR/t 为主，冗余/换手/衰减做惩罚）",
+      "components": [
+        { "key": "abs_ic", "weight": 1.0, "source": "metrics.ic_mean", "kind": "abs" },
+        { "key": "abs_icir", "weight": 0.6, "source": "metrics.icir", "kind": "abs" },
+        { "key": "abs_nw_t", "weight": 0.3, "source": "metrics.nw_t", "kind": "abs" }
+      ],
+      "penalties": [
+        { "key": "redundancy", "weight": 0.5, "source": "inspector.redundancy.max_abs_rho", "target": "redundancy_rho", "mode": "above" },
+        { "key": "turnover", "weight": 0.3, "source": "inspector.quantiles.top_turnover_mean", "target": "turnover", "mode": "above" },
+        { "key": "decay", "weight": 0.2, "source": "inspector.decay.ratio_h1_over_h20", "target": "decay_ratio", "mode": "above" }
+      ]
+    },
+    "low_turnover": {
+      "label": "低换手（换手惩罚加倍，适合资金受限/成本敏感的账户）",
+      "components": [
+        { "key": "abs_ic", "weight": 0.8, "source": "metrics.ic_mean", "kind": "abs" },
+        { "key": "abs_icir", "weight": 0.6, "source": "metrics.icir", "kind": "abs" }
+      ],
+      "penalties": [
+        { "key": "turnover", "weight": 0.8, "source": "inspector.quantiles.top_turnover_mean", "target": "turnover", "mode": "above" },
+        { "key": "redundancy", "weight": 0.5, "source": "inspector.redundancy.max_abs_rho", "target": "redundancy_rho", "mode": "above" }
+      ]
+    },
+    "long_horizon": {
+      "label": "长持有（偏好 h20 更强、衰减慢的因子）",
+      "components": [
+        { "key": "abs_ic_h20", "weight": 1.0, "source": "inspector.ic_by_horizon.20.mean", "kind": "abs", "fallback": "metrics.ic_mean" },
+        { "key": "abs_icir_h20", "weight": 0.6, "source": "inspector.ic_by_horizon.20.icir", "kind": "abs", "fallback": "metrics.icir" },
+        { "key": "long_short", "weight": 0.4, "source": "inspector.quantiles.long_short_mean", "kind": "abs" }
+      ],
+      "penalties": [
+        { "key": "decay", "weight": 0.5, "source": "inspector.decay.ratio_h1_over_h20", "target": "decay_ratio", "mode": "above" },
+        { "key": "redundancy", "weight": 0.5, "source": "inspector.redundancy.max_abs_rho", "target": "redundancy_rho", "mode": "above" }
+      ]
+    }
+  }
+}

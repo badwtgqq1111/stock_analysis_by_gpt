@@ -208,22 +208,101 @@ def write_outputs(frames: dict[str, pd.DataFrame], date: str, out_dir: Path) -> 
     return manifest
 
 
+# 传统五源的 selection_source 映射（用于判断"注册表里这条源是不是已经有专门读法了"）
+_LEGACY_COVERED = {"cn_ensemble", "cn_arm", "cn_arm_concept"}
+
+
+def _frame_from_registry(spec: dict, date: str, names, industries) -> pd.DataFrame | None:
+    """注册表派生源：按 `selection.roles` 读第一个存在的文件（新增策略自动有这个出口）。
+
+    weight 取 target_weight / weight / trade_weight（有哪个用哪个）；不写死列名，
+    因为新增策略的产物列是它自己定的。
+    """
+    for item in spec.get("roles") or []:
+        path = Path(item["file"] if isinstance(item, dict) else item[1])
+        if not path.exists():
+            continue
+        frame = pd.read_csv(path)
+        if "trade_date" in frame.columns:
+            frame = frame[frame["trade_date"].astype(str) == date]
+        if frame.empty:
+            continue
+        weight = next((frame[c] for c in ("target_weight", "weight", "trade_weight")
+                       if c in frame.columns), None)
+        rows = [{"stock_code": str(code),
+                 "weight": None if weight is None else w}
+                for code, w in zip(frame["stock_code"], weight if weight is not None else [None] * len(frame))]
+        return _frame(rows, date, spec["selection_source"], names, industries)
+    return None
+
+
+def registry_sources(date: str, names, industries, frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """注册表里"还没有专门读法"的策略来源（key = selection_source），自动成为导出源。
+
+    为什么：以前新增一条策略，同花顺导出里**永远不会出现**（源是硬编码的）。
+    现在只要声明了 selection_source，就自动有出口；不想要可以写 `"export": {"enabled": false}`。
+    """
+    out: dict[str, pd.DataFrame] = {}
+    try:
+        import sys as _sys
+
+        if str(ROOT) not in _sys.path:
+            _sys.path.insert(0, str(ROOT))
+        from backend.services import strategy_registry as reg
+
+        for spec in reg.specs():
+            key = spec.get("selection_source") or ""
+            if not key or key in frames or key in out or key in _LEGACY_COVERED:
+                continue
+            if (spec.get("export") or {}).get("enabled") is False:
+                continue
+            frame = _frame_from_registry(spec, date, names, industries)
+            if frame is not None and not frame.empty:
+                out[key] = frame
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[ths] 注册表派生源跳过：{exc}", flush=True)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="导出同花顺可导入的自选股文件（多源）")
     ap.add_argument("--date", default="", help="留空=最新交易日")
-    ap.add_argument("--sources", default="holdings,preselected,arm,arm_concept,reference,all",
-                    help="逗号分隔：holdings,preselected,arm,arm_concept,reference,all")
+    ap.add_argument("--sources", default="holdings,preselected,arm,arm_concept,reference,auto,all",
+                    help="逗号分隔：holdings,preselected,arm,arm_concept,reference,auto,all"
+                         "（auto = 注册表里新声明的策略来源，新增策略自动进来）")
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     args = ap.parse_args()
 
-    if HISTORY.exists():
-        hist = pd.read_csv(HISTORY, usecols=["trade_date"])
-        date = args.date or str(hist["trade_date"].max())
+    if args.date:
+        date = args.date
     else:
-        date = args.date or datetime.now().strftime("%Y-%m-%d")
+        # 默认 = **最新交易日**（2026-10-13 修）：原来取 paper_selection_history 的 max，
+        # 而那份历史只要落后一天，导出文件名与内容就跟着落后（web-freshness 会点名"同花顺导出"）。
+        try:
+            import sys as _sys
+
+            if str(ROOT) not in _sys.path:
+                _sys.path.insert(0, str(ROOT))
+            from backend.services.market_board_service import latest_trade_date as _ltd
+
+            day = _ltd()
+            date = str(pd.Timestamp(day).date()) if day is not None else ""
+        except Exception:
+            date = ""
+        if not date:
+            date = str(pd.read_csv(HISTORY, usecols=["trade_date"])["trade_date"].max()) if HISTORY.exists() \
+                else datetime.now().strftime("%Y-%m-%d")
 
     want = [s.strip() for s in args.sources.split(",") if s.strip()]
     frames_all = load_sources(date)
+    if "auto" in want:
+        # `auto` = 注册表派生源（新增策略自动进导出）。放在 want 里看效果，不混进 legacy 五源。
+        names, industries = _names_industries()
+        auto_frames = registry_sources(date, names, industries, frames_all)
+        for key, frame in auto_frames.items():
+            frames_all.setdefault(key, frame)
+        print(f"[ths] auto 派生源：{sorted(auto_frames) or '（注册表里没有新源）'}", flush=True)
+        want = [s for s in want if s != "auto"] + sorted(auto_frames)
     frames = {k: v for k, v in frames_all.items() if k in want}
     if not any(not v.empty for v in frames.values()):
         raise SystemExit(f"{date} 没有任何源的选股产物（可用的最近日期见 paper_selection_history.csv）")

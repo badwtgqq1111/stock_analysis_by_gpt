@@ -30,6 +30,94 @@
     <template v-else>
       <!-- ─────────────── ① 执行台：两族状态 + 运行轨迹 + 门槛 ─────────────── -->
       <template v-if="tab === 'console'">
+        <!-- 可点动作（P2.42 §4.4 / §4.5 的人工那一步）：跑本地脚本、把判决与下一步摆在页面上 -->
+        <section class="panel actions-panel">
+          <h6>
+            可点动作
+            <span class="dim tiny">跑本地脚本、不改生产；判决与"下一步人工动作"都在这里出</span>
+          </h6>
+          <div class="action-grid">
+            <div class="action-card">
+              <div class="ac-head">
+                <b>下单前 checklist</b>
+                <span class="dim tiny">数据 / 规则 / 资金 / 市场 / 一致性 五类归因</span>
+              </div>
+              <div class="ac-body">
+                <select v-model="preOrderAccount">
+                  <option value="paper">模拟盘（当日名单）</option>
+                  <option value="live">实盘镜像（真实持仓）</option>
+                </select>
+                <button class="btn-ghost" :disabled="running === 'pre_order_check'" @click="runAction('pre_order_check')">
+                  {{ running === 'pre_order_check' ? '跑…' : '跑一次' }}
+                </button>
+                <span v-if="preOrderResult" class="pill" :class="verdictTone(preOrderResult.verdict)">
+                  {{ preOrderResult.verdict_label }}
+                  <span class="dim tiny">pass {{ preOrderResult.counts?.pass }} / warn {{ preOrderResult.counts?.warn }} / block {{ preOrderResult.counts?.block }}</span>
+                </span>
+              </div>
+              <div class="table-scroll" v-if="preOrderResult?.checks?.length">
+                <table class="data-table">
+                  <thead><tr><th>检查项</th><th>类别</th><th>状态</th><th>细节</th></tr></thead>
+                  <tbody>
+                    <tr v-for="c in preOrderResult.checks" :key="c.name">
+                      <td>{{ c.name }}</td>
+                      <td class="dim tiny">{{ c.category }}</td>
+                      <td :class="c.status === 'block' ? 'down' : (c.status === 'warn' ? 'warn-text' : 'up')">
+                        {{ c.status === 'block' ? '❌ 拦截' : (c.status === 'warn' ? '⚠️ 隐患' : '✅ 通过') }}</td>
+                      <td class="tiny muted">{{ c.detail }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="tiny dim" v-if="preOrderResult?._path">产物：<code>{{ preOrderResult._path }}</code></p>
+            </div>
+
+            <div class="action-card">
+              <div class="ac-head">
+                <b>上线评估</b>
+                <span class="dim tiny">登记候选 → 影子/闸门判决 → 人工动作（默认不改 config）</span>
+              </div>
+              <div class="ac-body">
+                <select v-model="promoteId">
+                  <option v-for="s in actionStrategies" :key="s.id" :value="s.id">
+                    {{ s.id }}（{{ s.stage }}）
+                  </option>
+                </select>
+                <button class="btn-ghost" :disabled="running === 'promote_candidate'" @click="runAction('promote_candidate')">
+                  {{ running === 'promote_candidate' ? '评估…' : '评估' }}
+                </button>
+                <span v-if="promoteResult" class="pill" :class="verdictTone(promoteResult.verdict)">
+                  {{ promoteResult.verdict_label }} <span class="dim tiny">stage={{ promoteResult.stage_now || '—' }}</span>
+                </span>
+              </div>
+              <p class="tiny muted" v-if="promoteResult?.reason">{{ promoteResult.reason }}</p>
+              <ul class="tiny next-actions" v-if="promoteResult?.next_actions?.length">
+                <li v-for="(a, i) in promoteResult.next_actions" :key="i">
+                  <code>{{ a }}</code>
+                  <button class="btn-ghost tiny-btn" @click="copy(a)">复制</button>
+                </li>
+              </ul>
+              <div class="table-scroll" v-if="promoteResult?.gate_row">
+                <table class="data-table">
+                  <thead><tr><th>对照</th><th>可比期</th><th>更好/更差</th><th>中位差</th><th>p</th><th>单票上限</th><th>判定</th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td class="mono tiny">{{ promoteResult.gate_row.vs_baseline }}</td>
+                      <td>{{ promoteResult.gate_row.common_periods }}</td>
+                      <td>{{ promoteResult.gate_row.better_periods }} / {{ promoteResult.gate_row.worse_periods }}</td>
+                      <td :class="tone(promoteResult.gate_row.median_diff_vs_baseline)">{{ promoteResult.gate_row.median_diff_vs_baseline }}</td>
+                      <td>{{ promoteResult.gate_row.sign_p }}</td>
+                      <td>{{ promoteResult.gate_row.max_single_weight }}</td>
+                      <td :class="promoteResult.gate_row.verdict === 'REJECT' ? 'down' : ''">{{ promoteResult.gate_row.verdict }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="tiny dim" v-if="promoteResult?._path">产物：<code>{{ promoteResult._path }}</code></p>
+            </div>
+          </div>
+          <p class="tiny dim" v-if="actionError">动作失败：{{ actionError }}</p>
+        </section>
         <div class="layer-strip">
           <div v-for="layer in overview.layers" :key="layer.key" class="layer-tile">
             <div class="lt-head">
@@ -233,8 +321,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getAgentOverview, getAgentRun, getAgentRuns } from '@/api/client'
-import type { AgentFamilyItem, AgentOverview, AgentRunDetail, AgentRunSummary } from '@/types/api'
+import { getAgentActions, getAgentOverview, getAgentRun, getAgentRuns, runAgentAction } from '@/api/client'
+import type {
+  AgentActionResult, AgentFamilyItem, AgentOverview, AgentRunDetail, AgentRunSummary,
+} from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import StatTile from '@/components/ui/StatTile.vue'
@@ -267,6 +357,59 @@ function openMiningSession(sessionId: string | null | undefined) {
   void router.replace({ query: { tab: 'mining', session: sessionId } })
 }
 
+// ── 可点动作（下单前 checklist / 上线评估）──
+const actionStrategies = ref<{ id: string; name: string; stage: string }[]>([])
+const preOrderAccount = ref<'paper' | 'live'>('live')
+const preOrderResult = ref<AgentActionResult | null>(null)
+const promoteId = ref('')
+const promoteResult = ref<AgentActionResult | null>(null)
+const running = ref('')
+const actionError = ref('')
+
+async function loadActions() {
+  try {
+    const payload = await getAgentActions()
+    const promote = payload.actions.find((a) => a.key === 'promote_candidate')
+    actionStrategies.value = promote?.strategies ?? []
+    if (!promoteId.value && actionStrategies.value.length) promoteId.value = actionStrategies.value[0].id
+    preOrderResult.value = payload.pre_order?.live ?? payload.pre_order?.paper ?? null
+    promoteResult.value = payload.promote ?? null
+  } catch (err) {
+    actionError.value = String(err)
+  }
+}
+
+async function runAction(action: 'pre_order_check' | 'promote_candidate') {
+  running.value = action
+  actionError.value = ''
+  try {
+    const body = action === 'pre_order_check'
+      ? { action, account: preOrderAccount.value }
+      : { action, strategy_id: promoteId.value }
+    const payload = await runAgentAction(body)
+    if (action === 'pre_order_check') preOrderResult.value = payload.result
+    else promoteResult.value = payload.result
+    if (payload.exit !== 0 && !payload.result) actionError.value = payload.stderr || payload.stdout
+  } catch (err) {
+    actionError.value = String(err)
+  } finally {
+    running.value = ''
+  }
+}
+
+function verdictTone(verdict?: string) {
+  if (!verdict) return ''
+  return verdict === 'pass' || verdict === 'PROMOTE' ? 'up' : (verdict === 'block' || verdict === 'REJECT' ? 'down' : '')
+}
+
+async function copy(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    /* 剪贴板不可用就算了，命令本身就显示在页面上 */
+  }
+}
+
 const overview = ref<AgentOverview | null>(null)
 const runs = ref<AgentRunSummary[]>([])
 const current = ref<AgentRunDetail | null>(null)
@@ -276,6 +419,7 @@ const selectedId = ref('')
 
 async function reload() {
   loading.value = true
+  void loadActions()
   try {
     const [ov, runList] = await Promise.all([getAgentOverview(), getAgentRuns(20)])
     overview.value = ov
@@ -390,6 +534,19 @@ onMounted(reload)
 </script>
 
 <style scoped>
+.actions-panel { margin-bottom: var(--sp-3); }
+.action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+@media (max-width: 1100px) { .action-grid { grid-template-columns: 1fr; } }
+.action-card { border: 1px solid var(--border-color); border-radius: 8px; padding: var(--sp-2); }
+.ac-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ac-body { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.ac-body select {
+  background: var(--bg-input); color: inherit; border: 1px solid var(--border-color);
+  border-radius: 6px; padding: 3px 6px; font-size: var(--fs-xs);
+}
+.next-actions { list-style: none; padding-left: 0; margin: 6px 0 0; }
+.next-actions li { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+.tiny-btn { padding: 1px 6px; font-size: 10px; }
 .tabs {
   display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3);
   border-bottom: 1px solid var(--border-color); padding-bottom: var(--sp-2);

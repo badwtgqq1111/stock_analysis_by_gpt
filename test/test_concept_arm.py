@@ -172,8 +172,17 @@ def test_ths_export_has_concept_arm_group():
 def test_pipeline_registry_exposes_concept_arm():
     text = (ROOT / "backend/api/pipeline.py").read_text(encoding="utf-8")
     assert '"arm_concept"' in text and "arm_concept_selection.csv" in text
-    sources = (ROOT / "backend/services/selection_sources.py").read_text(encoding="utf-8")
-    assert "cn_arm_concept" in sources and "arm_concept_selection.csv" in sources
+    # 2026-10-13（P2.57 抽象层）：选股源不再硬编码在 selection_sources.py 里，
+    # 而是从 config/strategies.json 派生 —— 所以这里改成**运行时断言**（比字符串 grep 更强）：
+    # 派生出来的源必须真的存在、且指向概念手臂的名单文件。
+    sys.path.insert(0, str(ROOT))
+    from backend.services import selection_sources as src
+
+    entry = src.SOURCES.get("cn_arm_concept")
+    assert entry is not None, "派生 SOURCES 里没有 cn_arm_concept（策略手臂的选股源没接线）"
+    roles = [str(path) for _role, path in entry["files"]]
+    assert any(path.endswith("arm_concept_selection.csv") for path in roles), roles
+    assert "cn_arm_concept" in (ROOT / "config/strategies.json").read_text(encoding="utf-8")
 
 
 # ─── 选股日历与选股结果的同步（用户报：两边对不上）────────────────────────────

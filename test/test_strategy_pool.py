@@ -76,13 +76,23 @@ def test_build_pool_reports_fresh_production_strategies(pool_module):
     assert pool["reference_trade_date"], "取不到基准交易日（行情服务与基准指数都不可用）"
     production = [s for s in pool["strategies"] if s["stage"] == "production"]
     assert len(production) == 3
+    from test._daily_state import midrun_grace, previous_trade_date
+
+    reference = pool["reference_trade_date"]
+    allowed = reference
+    if midrun_grace():        # P2.54：运行中当天名单还没生成 ⇒ 退到上一交易日
+        allowed = previous_trade_date(reference) or reference
     for item in production:
         assert item["latest_date"], f"{item['id']} 没有扫到数据日期"
         assert item["n_picks"], f"{item['id']} 没有扫到名单条数"
-        assert item["fresh"], f"{item['id']} 落后于基准交易日 {pool['reference_trade_date']}"
-        assert item["health"] == "ok"
-    assert pool["totals"]["stale_production"] == []
-    assert pool["totals"]["fresh"] is True
+        assert item["latest_date"] >= allowed, \
+            f"{item['id']} 最新 {item['latest_date']} 落后于 {allowed}"
+        if not midrun_grace():
+            assert item["health"] == "ok"
+    # 运行中允许"当天还没生成名单"的中间态（否则每晚跑预检都会假红）
+    if not midrun_grace():
+        assert pool["totals"]["stale_production"] == []
+        assert pool["totals"]["fresh"] is True
     assert pool["totals"]["n_evidence"] > 0
     assert all(row["path"].startswith("output/research/") for row in pool["evidence"])
 

@@ -18,13 +18,15 @@
           <span class="pill">快照 <b>{{ live.captured_at }}</b>
             <span v-if="(live.snapshot_age_days ?? 0) > 5" class="warn-text">（{{ live.snapshot_age_days }} 天未更新）</span>
           </span>
-          <span class="pill">价源 <b>{{ live.price_source === 'live' ? '实时' : '快照' }}</b></span>
-          <span class="pill" :class="rtLive ? 'up' : ''">
-            实时更新 <b>{{ realtimeUpdated || '—' }}</b>
+          <span class="pill" :title="rt?.quote_error || ''">价源
+            <b :class="usingQuotePrice ? 'up' : 'muted'">{{ priceBasisLabel }}</b>{{ quotedAt }}</span>
+          <span class="pill" :class="usingQuotePrice ? 'up' : ''">
+            行情更新 <b>{{ realtimeUpdated || '—' }}</b>
             <span class="tiny muted" v-if="rtLive">（{{ polling ? '15 秒轮询中' : '已停' }}）</span>
-            <span class="tiny muted" v-else>（{{ rtPhase }}，用盘后价）</span>
+            <span class="tiny muted" v-else>（{{ rtPhase }} · {{ priceBasisLabel }}）</span>
           </span>
-          <span class="pill">盘后产物 <b>{{ live.generated_at }}</b> · 盯市 <b>{{ live.observations }}</b> 条</span>
+          <span class="pill">盘后产物 <b>{{ live.generated_at }}</b> · 盯市
+            <b :class="(live.realtime_priced ?? 0) > 0 ? 'up' : 'muted'">{{ live.realtime_priced ?? 0 }}</b>/{{ live.positions.length }} 条</span>
         </div>
         <div class="stat-grid">
           <StatTile label="总资产" :value="money(live.total_assets)"
@@ -35,7 +37,7 @@
           <StatTile label="未实现浮盈" :value="money(live.unrealized_pnl)" :tone="tone(live.unrealized_pnl ?? 0)"
                     sub="相对成本价" />
           <StatTile label="当日参考盈亏" :value="money(live.day_pnl ?? null)" :tone="tone(live.day_pnl ?? 0)"
-                    :sub="rtLive ? '现价 vs 昨收（券商同口径）' : '盘后口径'" />
+                    :sub="usingQuotePrice ? `现价 vs 昨收（券商同口径）· ${priceBasisLabel}` : '盘后口径'" />
           <StatTile label="已实现（清仓 3 笔）" :value="money(live.realized_pnl)" :tone="tone(live.realized_pnl ?? 0)" />
           <StatTile label="第一重仓" :value="pct(live.top1_weight)" sub="单票上限 12%" />
         </div>
@@ -83,7 +85,8 @@
         </div>
 
         <div class="pill-row mt">
-          <span class="pill">当前 <b>{{ pickedCode || '未选' }}</b></span>
+          <span class="pill">当前 <b>{{ pickedCode || '未选' }}</b>
+            <span v-if="pickedName">{{ pickedName }}</span></span>
           <button class="tab" :class="{ on: chartTab === 'intraday' }" @click="pick(pickedCode, 'intraday')">实时分时（今日）</button>
           <button class="tab" :class="{ on: chartTab === 'daily' }" @click="pick(pickedCode, 'daily')">日K（近 1 年）</button>
           <span class="pill" v-if="chartTab === 'intraday' && intraday">
@@ -171,9 +174,9 @@
             <div class="cal-grid" :class="{ days: calFreq === 'daily' }">
               <span v-for="head in (calFreq === 'daily' ? ['一', '二', '三', '四', '五', '六', '日'] : [])"
                     :key="head" class="cal-head">{{ head }}</span>
-              <span v-for="pad in block.pads" :key="'p' + pad" class="cal-pad" />
               <span v-for="cell in block.cells" :key="cell.period" class="cal-cell"
-                    :style="cellStyle(cell)" :title="cellTitle(cell)">
+                    :style="cell.col ? { ...cellStyle(cell), gridColumn: String(cell.col) } : cellStyle(cell)"
+                    :title="cellTitle(cell)">
                 <b>{{ cellLabel(cell) }}</b>
                 <i>{{ pct(cell.port_ret) }}</i>
               </span>
@@ -212,6 +215,10 @@ const ohlcv = ref<OhlcvResponse | null>(null)
 const ohlcvError = ref('')
 const ohlcvLoading = ref(false)
 const pickedCode = ref('')
+/** 当前选中票的名称（从实盘镜像持仓里取；分时/日K 的标头要显示它 ——
+    用户 2026-10-13 报："K 线选股 点中某只股票的时候，分时线看不到股票标头"。 */
+const pickedName = computed(() =>
+  (live.value?.positions || []).find((p) => String(p.stock_code) === pickedCode.value)?.name || '')
 const chartTab = ref<'intraday' | 'daily'>('intraday')
 const freq = ref<'daily' | 'weekly' | 'monthly'>('daily')
 const window = ref<'m1' | 'm3' | 'y1' | 'y3'>('y1')
@@ -230,7 +237,8 @@ const realtimeUpdated = ref('')
  * 两者拼起来才是完整视图，且数字口径只有一套（后端 `realtime_view` 复用 `account_state`）。
  */
 /** 页面视图 = 盘后产物（一天的字段）+ 实时重算（账户级数字）；`day_pnl` 只在实时口径下有意义。 */
-type LiveView = LiveMirror & { day_pnl?: number | null; realtime_priced?: number; realtime_unpriced?: number }
+type LiveView = LiveMirror & { day_pnl?: number | null; realtime_priced?: number; realtime_unpriced?: number;
+  price_basis_label?: string; price_date?: string | null }
 const live = computed<LiveView | null>(() => {
   const disk = paper.value?.live ?? null
   if (!disk) return null
@@ -249,16 +257,29 @@ const live = computed<LiveView | null>(() => {
     top1_weight: r.top1_weight ?? disk.top1_weight,
     top3_weight: r.top3_weight ?? disk.top3_weight,
     price_source: r.price_source ?? disk.price_source,
+    price_basis_label: r.price_basis_label,
+    price_date: r.price_date ?? null,
     day_pnl: r.day_pnl ?? null,
     realtime_priced: r.priced, realtime_unpriced: r.unpriced,
   }
 })
 const rtLive = computed(() => Boolean(rt.value?.session?.live))
 const rtPhase = computed(() => String(rt.value?.session?.phase || 'closed'))
+/** 报价口径：实时 / 今日收盘 / 上一收盘 / 盘后产物（用户 2026-10-13：实盘页价格不跟分时走） */
+const PRICE_BASIS: Record<string, string> = {
+  live: '实时', close: '今日收盘', prev_close: '上一收盘', disk: '盘后产物',
+}
+const priceBasis = computed(() => String(live.value?.price_source || 'disk'))
+const priceBasisLabel = computed(() =>
+  live.value?.price_basis_label || PRICE_BASIS[priceBasis.value] || '盘后产物')
+/** 用的是行情价（实时/今日收盘/上一收盘）而不是早上那份盘后产物价 */
+const usingQuotePrice = computed(() => priceBasis.value !== 'disk')
+const quotedAt = computed(() => (live.value?.price_date ? `（报价 ${live.value.price_date}）` : ''))
 function quoteTime(row: LiveMirrorPosition): string {
   const raw = String((row as { live_time?: string }).live_time || '')
   const m = raw.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/)
-  return m ? `${m[4]}:${m[5]}:${m[6]}` : '盘后'
+  // 报价时间就是行情源给的时间戳：盘中=实时、收盘后=当日收盘时刻、盘前/周末=上一交易日收盘时刻
+  return m ? `${m[4]}:${m[5]}:${m[6]}` : '盘后产物'
 }
 async function loadRealtime() {
   try {
@@ -444,17 +465,23 @@ const calendarBlocks = computed(() => {
   const recent = keys.slice(0, calFreq.value === 'monthly' ? 4 : 12)
   return recent.map((key) => {
     const cells = (groups.get(key) ?? []).slice().sort((a, b) => a.period.localeCompare(b.period))
-    let pads = 0
-    if (calFreq.value === 'daily' && cells.length) {
-      // 周一起算：周日=0 → 前面补空格
-      const first = new Date(`${cells[0].period}T00:00:00`)
-      pads = (first.getDay() + 6) % 7
-    }
     const label = calFreq.value === 'monthly' ? `${key} 年`
       : `${key.slice(0, 4)}-${key.slice(5, 7)}`
-    return { label, cells, pads }
+    // 事故（2026-10-13 用户报"2026-10-12 不是星期一么？这个日期是不是排错了"）：
+    // 原来只在月初补一次空格（pads），之后**按顺序填充** —— 而格子只有交易日，
+    // 周末/节假日缺席 ⇒ 后面的日期整体左移。实测 2026-10 的格子落点：
+    // 8(周四)✓ 9(周五)✓ 12 → 落在「六」列（正确是下一行的「一」）。
+    // 修法：每个格子按**自己那天是周几**显式占列（grid-column），缺口自然留白。
+    const placed = calFreq.value === 'daily'
+      ? cells.map((c) => ({ ...c, col: weekdayCol(c.period) }))
+      : cells.map((c) => ({ ...c, col: 0 }))
+    return { label, cells: placed, pads: 0 }
   })
 })
+/** 该日期在"周一起算"的日历里占第几列（1..7）；周日=0 → 7。 */
+function weekdayCol(period: string): number {
+  return ((new Date(`${period}T00:00:00`).getDay() + 6) % 7) + 1
+}
 function cellLabel(cell: LiveCalendarCell) {
   return calFreq.value === 'daily' ? String(Number(cell.period.slice(8, 10)))
     : (calFreq.value === 'weekly' ? cell.period.slice(5) : `${Number(cell.period.slice(5, 7))}月`)

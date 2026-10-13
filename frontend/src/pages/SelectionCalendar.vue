@@ -7,6 +7,9 @@
       收益 = 决策日后 1/5/10/20 个交易日的 qfq 收盘收益；超额 = 减去当日全市场等权平均。
     </p>
 
+    <!-- 每日名单刷新契约：日历里的每一天，都是用这些策略的当期名单算出来的 —— 名单停更，这里一眼可见 -->
+    <StrategyListsStatusBar />
+
     <div v-if="summary && !summary.built" class="panel">
       <div class="empty">台账还没建：{{ summary.hint }}</div>
     </div>
@@ -388,6 +391,7 @@ import {
   type CalendarSummary,
 } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
+import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
 
 const router = useRouter()
 const route = useRoute()

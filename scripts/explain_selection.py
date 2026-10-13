@@ -89,9 +89,15 @@ def main() -> int:
     panel, _ = svc.read_clean_feature_panel(market="CN", factor_set=manifest["factor_set"],
                                             start_date=date, end_date=date,
                                             cleaning_version=manifest["cleaning_version"])
-    panel = panel[pd.to_datetime(panel["trade_date"]).astype(str).str.startswith(date)].reset_index(drop=True)
+    # 列名兼容：clean panel 同时有 `trade_date` 与 `trade_date_clean`，但某些读取路径（例如
+    # 只给 feature_columns 的 manifest 路径）只回后者 —— 2026-10-11/12 连续两天 attribution 就死在
+    # `panel["trade_date"]` 的 KeyError 上。这里统一取存在的那个，取不到就直说。
+    date_col = next((name for name in ("trade_date", "trade_date_clean") if name in panel.columns), None)
+    if date_col is None:
+        raise SystemExit(f"[explain] 面板里没有 trade_date/trade_date_clean（列：{list(panel.columns)[:8]}…）")
+    panel = panel[pd.to_datetime(panel[date_col]).astype(str).str.startswith(date)].reset_index(drop=True)
     X = panel.reindex(columns=cols).astype(float)
-    merged = pd.concat([panel[["trade_date", "stock_code"]], X], axis=1)
+    merged = pd.concat([panel[[date_col, "stock_code"]].rename(columns={date_col: "trade_date"}), X], axis=1)
     proc_cfg = dict(manifest["preprocessing"].get("config") or {"mode": "qlib_robust"})
     mode = proc_cfg.pop("mode", "qlib_robust")
     Xp, _ = preprocess_features_by_date(merged, cols, mode=mode, **proc_cfg)

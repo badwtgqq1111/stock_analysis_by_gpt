@@ -22,6 +22,9 @@
           <span class="pill" :class="pool.totals.fresh ? '' : 'bad-pill'">
             新鲜度 <b>{{ pool.totals.fresh ? '全部达标 ✅' : '不达标 ' + pool.totals.stale_production.length + ' 项 ❌' }}</b>
           </span>
+          <span class="pill" :class="registryOk ? '' : 'bad-pill'">
+            接线 <b>{{ registryOk ? '全覆盖 ✅' : '漏接 ' + (registry?.coverage.gaps.length || 0) + ' 处 ❌' }}</b>
+          </span>
           <span class="pill" v-if="negativeCount">负期望 <b class="down">{{ negativeCount }}</b></span>
           <span class="pill dim tiny">配置更新 {{ pool.config_updated_at || '—' }} · 快照 {{ pool.generated_at }}</span>
         </div>
@@ -33,6 +36,18 @@
           左侧点策略看详情。统一对比基准：中证500（000905.SH） · 绩效快照 {{ pool.performance_generated_at || '待生成' }}。
           <b>负期望</b>（样本 ≥{{ RULES.minObsForJudgement }} 且日度 t ≤ −{{ RULES.significantT }}）的策略默认折叠曲线，
           只保留结论；<b>正期望</b>的展示与中证500 的对比。
+        </p>
+        <!-- 每日名单刷新契约：每条策略今天有没有更新名单，在这里点名（不再靠翻 output 目录） -->
+        <StrategyListsStatusBar :status="pool.lists_status" />
+        <p class="hint tiny">
+          <b>接线（抽象层）</b>：选股结果页 / 选股日历 / K 线自选 / 同花顺导出 / AI 点评 / 每日刷新 / 体检
+          <b>全部从 <code>config/strategies.json</code> 派生</b> —— 新增一条策略只写声明，这些消费端自动出现
+          （自检：<code>uv run python scripts/strategy_registry.py --check</code>）。
+          <template v-if="registry">
+            当前 {{ registry.n_strategies }} 条策略：漏接
+            <b :class="registryOk ? 'ok' : 'bad'">{{ registry.coverage.gaps.length }}</b> 处、
+            按设计未接 {{ registry.coverage.by_design.length }} 处。
+          </template>
         </p>
       </div>
 
@@ -80,6 +95,12 @@
                   <span v-if="detailOf(s).freshness.lagDays">（落后 {{ detailOf(s).freshness.lagDays }} 天）</span>
                   · 名单 {{ detailOf(s).freshness.nPicks ?? '—' }} 只
                   · 快照 {{ detailOf(s).freshness.nSnapshots }}
+                </div>
+                <div class="si-row tiny" v-if="s.refresh">
+                  <span class="tag tiny" :class="refreshTone(s.refresh.status)">
+                    {{ refreshIcon(s.refresh.status) }} 名单刷新 {{ refreshLabel(s.refresh.status) }}
+                  </span>
+                  <span class="dim">{{ s.refresh.date_after || '—' }}</span>
                 </div>
               </li>
               <li v-if="!visible.length" class="dim tiny" style="padding:8px">没有匹配的策略</li>
@@ -219,6 +240,20 @@
                   <template v-if="current.freshness.lagDays">（落后 {{ current.freshness.lagDays }} 天）</template>
                 </span>
               </div>
+              <div class="kv"><label>每日名单刷新</label>
+                <span class="tiny" v-if="refreshOf(current.identity.id)">
+                  <span class="tag tiny" :class="refreshTone(refreshOf(current.identity.id)!.status)">
+                    {{ refreshIcon(refreshOf(current.identity.id)!.status) }}
+                    {{ refreshLabel(refreshOf(current.identity.id)!.status) }}</span>
+                  · 名单 {{ refreshOf(current.identity.id)!.date_after || '—' }}
+                  · 历史 {{ refreshOf(current.identity.id)!.history_after || '—' }}
+                  · {{ refreshOf(current.identity.id)!.rows ?? '—' }} 只
+                  · {{ refreshOf(current.identity.id)!.elapsed_seconds ?? 0 }}s
+                  <span class="dim">{{ refreshOf(current.identity.id)!.reason }}</span>
+                </span>
+                <span class="tiny dim" v-else>未登记刷新状态（跑
+                  <code>uv run python scripts/refresh_strategy_lists.py --print</code>）</span>
+              </div>
             </div>
             <div class="artifact-list" style="margin-top:6px">
               <span v-for="a in current.freshness.artifacts" :key="a.path" class="artifact"
@@ -227,6 +262,28 @@
               </span>
               <span v-if="!current.freshness.artifacts.length" class="dim tiny">（未登记产物）</span>
             </div>
+          </div>
+
+          <!-- ⑦ 接线（抽象层）：这条策略接到了哪些页面/流程、靠什么接的 -->
+          <div class="panel">
+            <h6>
+              接线（抽象层）
+              <span class="dim tiny">这条策略在系统里的"行为"都在这里：声明写在 config/strategies.json，
+                消费端从注册表派生（新增策略不用改代码）</span>
+            </h6>
+            <table class="data-table">
+              <thead><tr><th class="left">消费端</th><th class="left">状态</th><th class="left">怎么接的</th></tr></thead>
+              <tbody>
+                <tr v-for="row in wiringRows" :key="row.key">
+                  <td class="left"><b>{{ row.label }}</b><div class="tiny dim mono">{{ row.key }}</div></td>
+                  <td class="left">
+                    <span class="tag tiny" :class="row.wired ? 'ok' : 'dim'">
+                      {{ row.wired ? '✅ 已接' : '➖ 未接' }}</span>
+                  </td>
+                  <td class="left tiny">{{ row.how || '（按设计不接：无独立名单 / 声明 skip / 无台账来源）' }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </section>
       </div>
@@ -305,13 +362,15 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { getStrategyPool, setStrategyStage } from '@/api/client'
-import type { StrategyPoolEntry, StrategyPoolResponse } from '@/types/api'
+import { getStrategyPool, getStrategyRegistry, setStrategyStage } from '@/api/client'
+import type { StrategyPoolEntry, StrategyPoolResponse, StrategyRegistryResponse } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import StrategyPerformance from '@/components/StrategyPerformance.vue'
 import StrategyCurveCompare from '@/components/StrategyCurveCompare.vue'
+import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
 import type { CompareSeries } from '@/components/StrategyCurveCompare.vue'
+import type { StrategyListRefresh } from '@/types/api'
 import { RULES, pctText, primaryCurve, shouldCollapse, strategyDetail, type StrategyDetail } from '@/components/strategyDetail'
 
 const pool = ref<StrategyPoolResponse | null>(null)
@@ -324,6 +383,26 @@ const query = ref('')
 const filter = ref<'all' | 'production' | 'candidate' | 'positive' | 'negative'>('all')
 const compareIds = ref<string[]>([])
 const curveCollapsed = ref(false)
+const registry = ref<StrategyRegistryResponse | null>(null)
+
+/** 接线自检：有"意外的漏接线"（gaps）或声明层问题即不达标；按设计未接不算问题。 */
+const registryOk = computed(() =>
+  !registry.value || (!registry.value.coverage.gaps.length && !registry.value.problems.length))
+
+const CONSUMER_LABEL: Record<string, string> = {
+  selection_page: '选股结果页', selection_calendar: '选股日历', kline_watchlist: 'K 线自选',
+  ths_export: '同花顺导出', ai_picks: '逐股 AI 点评', daily_refresh: '每日名单刷新',
+  web_freshness: '新鲜度体检', strategy_pool: '策略池', curve: '中证500 对比曲线',
+}
+
+/** 当前选中策略的接线行（顺序固定，便于横向对比） */
+const wiringRows = computed(() => {
+  const wiring = current.value ? entryById(current.value.identity.id)?.wiring : null
+  if (!wiring) return []
+  return Object.entries(CONSUMER_LABEL)
+    .filter(([key]) => key in wiring)
+    .map(([key, label]) => ({ key, label, wired: Boolean(wiring[key]?.wired), how: String(wiring[key]?.how ?? '') }))
+})
 
 /** 公共显示项：一套函数给所有策略算出同一份结构（身份/新鲜度/曲线/配置/优劣） */
 function detailOf(entry: StrategyPoolEntry): StrategyDetail {
@@ -378,6 +457,27 @@ const negativeCount = computed(() =>
 function entryById(id: string): StrategyPoolEntry | undefined {
   return (pool.value?.strategies || []).find((s) => s.id === id)
 }
+
+/** 这条策略今天的名单刷新结果（来自每日名单刷新契约；缺失返回 undefined） */
+function refreshOf(id: string): StrategyListRefresh | null | undefined {
+  return entryById(id)?.refresh
+}
+
+const REFRESH_LABEL: Record<string, string> = {
+  updated: '已更新', already_fresh: '已是最新', no_signal: '当日无信号', stale: '落后',
+  timeout: '超时', failed: '失败', skipped: '按需（跳过）',
+}
+const REFRESH_ICON: Record<string, string> = {
+  updated: '✅', already_fresh: '✅', no_signal: '➖', stale: '⚠️', timeout: '⏱️',
+  failed: '❌', skipped: '⏭️',
+}
+const REFRESH_TONE: Record<string, string> = {
+  updated: 'ok', already_fresh: 'ok', no_signal: 'dim', stale: 'warn', timeout: 'warn',
+  failed: 'bad', skipped: 'dim',
+}
+const refreshLabel = (status: string) => REFRESH_LABEL[status] ?? status
+const refreshIcon = (status: string) => REFRESH_ICON[status] ?? '•'
+const refreshTone = (status: string) => REFRESH_TONE[status] ?? 'dim'
 
 function select(id: string) {
   selectedId.value = id
@@ -497,7 +597,18 @@ watch([selectedId, () => pool.value], () => {
   curveCollapsed.value = entry ? strategyDetailCollapsed(detailOf(entry)) : false
 }, { immediate: true })
 
-onMounted(reload)
+async function loadRegistry() {
+  try {
+    registry.value = await getStrategyRegistry()
+  } catch {
+    registry.value = null
+  }
+}
+
+onMounted(() => {
+  loadRegistry()
+  reload()
+})
 </script>
 
 <style scoped>

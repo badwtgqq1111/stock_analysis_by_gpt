@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。",
-  "updated_at": "2026-10-10",
+  "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。 2026-10-13 追加 daily_refresh（每日名单刷新契约）与 selection/curve（抽象层的声明层，由 backend/services/strategy_registry.py 派生给选股结果页 / 曲线 / 导出 / 自选等消费端）。",
+  "updated_at": "2026-10-13",
   "strategies": [
     {
       "id": "live_holdings",
@@ -31,7 +31,41 @@
       },
       "selection_source": "cn_live_holdings",
       "date_column": "trade_date",
-      "ledger_sources": []
+      "ledger_sources": [],
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 10
+      },
+      "selection": {
+        "label": "实盘镜像（中泰证券真实持仓）",
+        "note": "**真实券商账户**的持仓截面（人工录入 config/live_account_holdings.json），**不是策略名单**：它不会下单、不参与生产权重。每日由 scripts/build_live_mirror.py 按实时价/收盘价盯市，逐票给「买入 / 持有 / 卖出」建议（规则写在每行 rule 列，可用快照复算）。与「模型选股」账户口径相同、来源不同，不要直接比大小。",
+        "roles": [
+          [
+            "live",
+            "output/results_cn/cn_live_holdings.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "stage",
+          "industry",
+          "shares",
+          "cost_price",
+          "last_close",
+          "target_weight",
+          "pnl_amount",
+          "pnl_pct",
+          "action",
+          "rule",
+          "note",
+          "price_source",
+          "selected_rank"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      }
     },
     {
       "id": "cn_ensemble",
@@ -54,7 +88,59 @@
         "preselected"
       ],
       "date_column": "trade_date",
-      "selection_source": "cn_ensemble"
+      "selection_source": "cn_ensemble",
+      "daily_refresh": {
+        "mode": "archive",
+        "reason": "名单由每日流程 preselection/pk 阶段产出，这里只校验新鲜度并归档到 selection_history/"
+      },
+      "selection": {
+        "label": "CN 生产名单（preselect → PK）",
+        "note": "流水线 [selection] 阶段产物；preselected 与 selected 合并展示，用「阶段」列区分。",
+        "roles": [
+          [
+            "preselected",
+            "output/results_cn/cn_ensemble_preselected.csv"
+          ],
+          [
+            "selected",
+            "output/results_cn/cn_ensemble_selected.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "stage",
+          "model_score",
+          "ensemble_score",
+          "lightgbm_score",
+          "transformer_score",
+          "target_weight",
+          "selection_channel",
+          "selection_sleeve",
+          "constraint_status",
+          "industry_l1",
+          "last_close",
+          "lots_at_target",
+          "tradable_flag"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "shadow": {
+          "nav_csv": "output/paper_trading/shadow/model_topn_equal/nav.csv",
+          "history_csv": "output/results_cn/shadow_variants/model_topn_equal.csv",
+          "kind": "shadow_account_net"
+        }
+      },
+      "model_arms": {
+        "ledger_sources": [
+          "preselected",
+          "notify"
+        ],
+        "top_n": 10
+      }
     },
     {
       "id": "arm_select",
@@ -76,7 +162,37 @@
         "arm"
       ],
       "date_column": "trade_date",
-      "selection_source": "cn_arm"
+      "selection_source": "cn_arm",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 20
+      },
+      "selection": {
+        "label": "CN 研究手臂（base_v1）",
+        "note": "研究手臂名单，**不替代** preselected→pk 的生产名单；见 P1_25 §20/§21。",
+        "roles": [
+          [
+            "arm",
+            "output/results_cn/arm_latest_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "board",
+          "industry",
+          "score",
+          "in_portfolio",
+          "target_weight",
+          "last_close",
+          "lots_at_capital",
+          "planned_amount",
+          "pit_name",
+          "mktcap_rank"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      }
     },
     {
       "id": "arm_concept",
@@ -128,7 +244,39 @@
         "output/results_cn/arm_concept_backtest.json",
         "output/results_cn/arm_concept_robustness.json"
       ],
-      "selection_source": "cn_arm_concept"
+      "selection_source": "cn_arm_concept",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 20
+      },
+      "selection": {
+        "label": "CN 概念/板块手臂（concept_rotation）",
+        "note": "板块层（动量0.7−涨停密度0.3，2026-10-10 去掉聚合资金流项：该项按 净流入÷成交额 打分，体量越大越占便宜，选出来的全是银行主导的「超大盘/央企50」；12 组网格回放里只有这一口径跑赢全市场等权）→ 个股层（板块内买滞涨 + 资金流 + 流动性；12 组里三种「买龙头」口径全部更差）；候选每板块≤4、每行业≤2；独立策略项，**不替代** preselection→pk 的生产名单。",
+        "roles": [
+          [
+            "arm",
+            "output/results_cn/arm_concept_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "board",
+          "industry",
+          "score",
+          "concept_score",
+          "rev_5d",
+          "in_portfolio",
+          "target_weight",
+          "last_close",
+          "lots_at_capital",
+          "planned_amount",
+          "pit_name"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      }
     },
     {
       "id": "jq_multi_factor_size_roe",
@@ -150,7 +298,42 @@
         "jq_multi_factor"
       ],
       "selection_source": "cn_jq_multi_factor",
-      "date_column": "trade_date"
+      "date_column": "trade_date",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 10
+      },
+      "selection": {
+        "label": "聚宽多因子（低市值+高ROE）",
+        "note": "候选研究名单，历史沪深300成分内 rank(roe)−rank(market_cap) 前20股等权；公告日严格早于信号日、当日市值、63交易日可交易过滤。每日收盘排名，与15日调仓研究回测区分；不是ROE-only，不改变生产权重。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/jq_multi_factor_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "roe",
+          "market_cap",
+          "roe_rank",
+          "market_cap_rank",
+          "score",
+          "target_weight",
+          "ann_date",
+          "end_date"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "replay": {
+          "nav_csv": "output/research/jq_multi_factor/nav_original_size_roe.csv",
+          "kind": "research_replay"
+        }
+      }
     },
     {
       "id": "jq_roe_roa_diagnostic",
@@ -172,7 +355,42 @@
         "jq_roe_roa"
       ],
       "selection_source": "cn_jq_roe_roa",
-      "date_column": "trade_date"
+      "date_column": "trade_date",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 10
+      },
+      "selection": {
+        "label": "动态诊断：ROE＋0.25×ROA",
+        "note": "全窗回放累计174.83%为已观察候选中最高，但2015—17半窗相对ROE-only为-2.50个百分点，未过预设训练稳健门槛；2021—23验证累计-52.29%。这是独立候选研究名单，非生产策略。历史沪深300成分内按rank(roe)+0.25×rank(roa)前20股等权，严格公告日PIT。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/jq_roe_roa_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "roe",
+          "roa",
+          "roe_rank",
+          "roa_rank",
+          "score",
+          "target_weight",
+          "ann_date",
+          "end_date"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "replay": {
+          "nav_csv": "output/research/jq_multi_factor_dynamic/nav_dynamic_diagnostic.csv",
+          "kind": "research_replay"
+        }
+      }
     },
     {
       "id": "rot_arm",
@@ -195,7 +413,46 @@
         "rot_arm"
       ],
       "selection_source": "cn_arm_rot",
-      "date_column": "trade_date"
+      "date_column": "trade_date",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 20
+      },
+      "selection": {
+        "label": "CN 行业轮动手臂（rotation_arm）",
+        "note": "复现结论落地：板块层 = MST 滚动聚类（每 6 个月刷新、60 个月窗口、每个大类 ≥8 个行业）下 7 个价量因子（1/3/6 月动量、3 月波动、成交额份额、换手份额、涨停密度）**简单等权**→ 取 top-1 大类；个股层复用概念手臂（板块内买滞涨 + 资金流 + 流动性，每行业 ≤2）。证据：output/research/industry_rotation/xy_reproduce.md（月频 12.38% vs 现行 2 因子 6.89%）与 xy_daily.md（日频扣费后输给月频）。相对大类等权 t=1.51、p=0.135 —— **未过上线闸门**，是候选/研究名单，不参与生产订单与权重。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/rot_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "board",
+          "industry",
+          "score",
+          "concept_score",
+          "rev_5d",
+          "in_portfolio",
+          "target_weight",
+          "last_close",
+          "lots_at_capital",
+          "planned_amount",
+          "pit_name"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "shadow": {
+          "nav_csv": "output/paper_trading/shadow/rot_arm/nav.csv",
+          "history_csv": "output/results_cn/shadow_variants/rot_arm.csv",
+          "kind": "shadow_account_net"
+        }
+      }
     },
     {
       "id": "first_ban_lowxi",
@@ -226,7 +483,37 @@
       "date_column": "trade_date",
       "ledger_sources": [
         "first_ban_lowxi"
-      ]
+      ],
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 30,
+        "note": "事件/结构型：当日没有信号是正常的（脚本跑成功但不产生今天的决策日）→ 状态记 no_signal，页面显示『当日无信号』而不是『没更新』。",
+        "empty_is_ok": true
+      },
+      "selection": {
+        "label": "CN 首板低吸（社区策略·反例档案）",
+        "note": "⚠️ **反例档案**：聚宽社区《首板涨停+回调+企稳+低吸-年化79%》的本地复现 —— T 日选股 → T+1 开盘买 → 当日按文章日内规则卖（5 分钟归档），645 个决策日 / 8,423 笔，逐笔均值 -0.62%（扣双边 31bp），累计 -97.6%、夏普 -3.41。保留这条来源是为了在日历/选股记录里能对照「什么样的规则上不了线」，**不要**据此下单；文章口径依赖本地缺失的集合竞价数据（见 output/research/first_ban_lowxi/REPORT.md）。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/first_ban_lowxi_picks.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "board",
+          "industry",
+          "entry",
+          "ret",
+          "exit_reason",
+          "boards",
+          "circ_mktcap_yi"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      }
     },
     {
       "id": "box_arm",
@@ -257,7 +544,38 @@
       "date_column": "trade_date",
       "ledger_sources": [
         "box_arm"
-      ]
+      ],
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 30,
+        "note": "事件/结构型：当日没有信号是正常的（脚本跑成功但不产生今天的决策日）→ 状态记 no_signal，页面显示『当日无信号』而不是『没更新』。",
+        "empty_is_ok": true
+      },
+      "selection": {
+        "label": "CN 横盘箱体突破回踩手臂（box_arm）",
+        "note": "结构型候选（2026-10-10）：60 日窄幅横盘（振幅≤45% 且 60 日无涨停）→ 首板且收盘创 60 日新高 → 1~5 日内回调≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → 次日开盘买、当日收盘卖（隔夜空仓）；每周最多 5 只等权、按箱体振幅升序。逐笔毛 +0.40%/净 +0.09%（1,949 笔），累计 +28.2%、最大回撤 −60.5%、卡玛 0.04 —— ⚠️ 参数极敏感（weekly×10 −68.8%、daily×5 −76.6%），只作观察候选，不参与生产权重。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/box_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "board",
+          "industry",
+          "score",
+          "in_portfolio",
+          "target_weight",
+          "consolidated_amp",
+          "offset",
+          "level"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      }
     },
     {
       "id": "cn_ensemble_pk_legacy",
@@ -276,7 +594,18 @@
       "history_dir": "",
       "date_column": "trade_date",
       "selection_source": "",
-      "no_tracking": true
+      "no_tracking": true,
+      "daily_refresh": {
+        "mode": "skip",
+        "reason": "影子对照变体（旧 PK 口径），没有独立名单，只有影子净值"
+      },
+      "curve": {
+        "shadow": {
+          "nav_csv": "output/paper_trading/shadow/production/nav.csv",
+          "history_csv": "output/results_cn/shadow_variants/production.csv",
+          "kind": "shadow_account_net"
+        }
+      }
     }
   ]
 }

@@ -213,6 +213,43 @@ def _live_mirror() -> dict:
     }
 
 
+def _quote_date(quotes: dict[str, dict]) -> str | None:
+    """腾讯快照里的时间戳（`YYYYMMDDHHMMSS`）→ 报价日期 `YYYY-MM-DD`（取最新的一条）。"""
+    days = [str(q.get("time") or "")[:8] for q in (quotes or {}).values()]
+    days = [d for d in days if len(d) == 8 and d.isdigit()]
+    if not days:
+        return None
+    newest = max(days)
+    return f"{newest[:4]}-{newest[4:6]}-{newest[6:]}"
+
+
+def live_price_basis(session: dict, quotes: dict | None) -> tuple[str, str]:
+    """报价口径（用户 2026-10-13："实盘镜像里的股价应该根据每日分时实时更新"）。
+
+    事故：原来非交易时段**根本不取报价**（`if session.live: quotes = ...`），直接退回盘后产物价 ——
+    而盘后产物是**当天早上**生成的（价 = 前一交易日收盘）。于是 15:00 之后打开实盘页，
+    现价还是昨天的（实测 13.13），而 K 线自选（走 `/api/intraday/quotes`，**任何时段都取**）已经是
+    今日收盘 13.23 —— 同一份持仓两个页面显示两个价。
+
+    修法：**任何时段都取一次腾讯快照**，再按"报价自带的日期 + 当前时段"给出诚实口径：
+      * 盘中（am/pm/auction）        → `live`（实时）
+      * 收盘后且报价日期=今天         → `close`（今日收盘）
+      * 报价日期 ≠ 今天（盘前/周末）   → `prev_close`（上一收盘）
+      * 一条报价都没拿到              → `disk`（盘后产物，并保留 quote_error 让人能查）
+    """
+    if not quotes:
+        return "disk", "盘后产物（实时源不可用）"
+    if session.get("live"):
+        return "live", "实时"
+    day = _quote_date(quotes)
+    today = live_quotes.now_cn().strftime("%Y-%m-%d")
+    if day == today:
+        return "close", "今日收盘"
+    if day:
+        return "prev_close", f"上一收盘（{day}）"
+    return "close", "收盘价"
+
+
 @router.get("/live/realtime")
 @ttl_cache(2.0, name="live_realtime")
 def live_realtime() -> dict:
@@ -240,19 +277,19 @@ def live_realtime() -> dict:
                         for x in (snapshot.get("cleared_positions") or [])))
     codes = [str(c) for c in positions["stock_code"].tolist()]
     session = live_quotes.trading_phase()
-    quotes: dict[str, dict] = {}
-    quote_error = ""
-    if session.get("live"):
-        quotes, quote_error = live_quotes.tencent_quotes(codes)
-    else:
-        quote_error = f"非交易时段（{session.get('phase')}），用盘后价"
+    # **任何时段都取报价**（收盘后腾讯给的就是当日收盘价）：
+    # 只在盘中取过一次，是"实盘页价格不跟分时走"的直接原因，见 live_price_basis 的说明。
+    quotes, quote_error = live_quotes.tencent_quotes(codes)
+    basis, basis_label = live_price_basis(session, quotes)
     view = realtime_view(positions, quotes, cash=float(snapshot.get("cash") or 0.0),
                          cleared_pnl=cleared, asof=str(snapshot.get("asof") or ""))
     view.update({
         "available": True,
         "session": session,
-        "price_source": "live" if quotes else "disk",
-        "quote_error": quote_error,
+        "price_source": basis,
+        "price_basis_label": basis_label,
+        "price_date": _quote_date(quotes),
+        "quote_error": quote_error or ("" if quotes else "实时源没返回任何报价，退回盘后产物价"),
         "updated_at": datetime.now().strftime("%H:%M:%S"),
         "benchmark_code": "000905.SH",
         # 逐股建议等"一天只变一次"的字段来自盘后产物（positions.csv），实时那部分只改价格口径。

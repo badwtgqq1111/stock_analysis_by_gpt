@@ -7,7 +7,8 @@ import type {
   LimitUpLadder, LimitUpDetail, LimitUpLive, IntradayResponse, IntradayQuote, IntradayCoverage, SessionPhase,
   IndustryOverview, IndustryHeatResponse, IndustryStocksResponse,
   IndustryHeatmapResponse,
-  LivePerformance, LiveRealtime,
+  LivePerformance, LiveRealtime, AgentActionsResponse, AgentActionRun, MiningContext,
+  ResearchSourcesResponse,
 } from '@/types/api'
 
 /** 统一的接口错误：页面只认 `err.message` 与 `err.status`，不用各自解析 axios 的结构。 */
@@ -359,6 +360,51 @@ export async function getLivePerformance(): Promise<LivePerformance> {
   return (await resp.json()) as LivePerformance
 }
 
+/** 挖掘工作台的上下文 chips（面板规模 / 准入口径 / 上次最佳因子 / 研究工具清单）。 */
+export async function getMiningContext(): Promise<MiningContext> {
+  const { data } = await http.get<MiningContext>('/agent/factors/context')
+  return data
+}
+
+/** 灵感来源 / 知识库注册表（P2.51）：挖因子时去哪儿找方向、每个来源怎么用、坑在哪。 */
+export async function getResearchSources(): Promise<ResearchSourcesResponse> {
+  const { data } = await http.get<ResearchSourcesResponse>('/agent/research-sources')
+  return data
+}
+
+/** 单条因子的审查档案（Inspector）：滚动 IC / 衰减 / 分位组合 / 换手 / 冗余 / 血缘。 */
+export async function getFactorInspector(factorId: string): Promise<any> {
+  const { data } = await http.get(`/agent/factors/${encodeURIComponent(factorId)}/inspector`)
+  return data
+}
+
+/** 多条因子的审查档案对比（2–5 条）：滚动 IC 对齐叠加 + 指标表。 */
+export async function getFactorInspectorCompare(ids: string[], includeModel = false): Promise<any> {
+  const { data } = await http.get('/agent/factors/inspector/compare',
+    { params: { ids: ids.join(','), include_model: includeModel ? 1 : 0 } })
+  return data
+}
+
+/** 因子适应度（可配置 Fitness Hook）打分表。 */
+export async function getFactorFitness(profile = 'default'): Promise<any> {
+  const { data } = await http.get('/agent/factors/fitness', { params: { profile } })
+  return data
+}
+
+/** 执行台可点动作清单 + 上次结果（下单前 checklist / 上线评估）。 */
+export async function getAgentActions(): Promise<AgentActionsResponse> {
+  const { data } = await http.get<AgentActionsResponse>('/agent/actions')
+  return data
+}
+
+/** 跑一个动作（白名单：pre_order_check / promote_candidate）。 */
+export async function runAgentAction(body: {
+  action: string; account?: string; strategy_id?: string; factor_id?: string
+}): Promise<AgentActionRun> {
+  const { data } = await http.post<AgentActionRun>('/agent/actions/run', body)
+  return data
+}
+
 // ─── 前瞻收益记录（长样本口径，来自选股台账）───
 export async function getForwardValidation(): Promise<ForwardValidation> {
   const resp = await fetch('/api/forward-validation')
@@ -373,7 +419,9 @@ export async function getForwardSeries(source: string): Promise<ForwardSeries> {
 
 // ─── 导出（同花顺自选股）───
 // 类型统一放 @/types/api，避免两处各写一份导致不兼容（这里再转出一次方便调用方）
-export type { ThsExportList, ThsExportSource } from '@/types/api'
+export type {
+  ThsExportList, ThsExportSource, MiningContext, ResearchSource, ResearchSourcesResponse,
+} from '@/types/api'
 export async function getThsExportFiles(): Promise<ThsExportList> {
   const resp = await fetch('/api/export/ths')
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -591,6 +639,18 @@ export interface StrategyCandidateInput {
 
 export async function getStrategyPool(refresh = true): Promise<import('@/types/api').StrategyPoolResponse> {
   const { data } = await http.get('/strategies', { params: { refresh } })
+  return data
+}
+
+/** 策略抽象层的接线矩阵（每条策略接到了哪些消费端；新增策略自动出现）。 */
+export async function getStrategyRegistry(): Promise<import('@/types/api').StrategyRegistryResponse> {
+  const { data } = await http.get('/strategies/registry')
+  return data
+}
+
+/** 每条策略的「每日名单刷新」契约状态（策略池 / 选股结果 / 选股日历 / K 线自选 共用同一份产物）。 */
+export async function getStrategyListsStatus(): Promise<import('@/types/api').StrategyListsStatus> {
+  const { data } = await http.get('/strategies/lists-status')
   return data
 }
 

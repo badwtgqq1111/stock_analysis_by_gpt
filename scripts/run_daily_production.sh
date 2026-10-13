@@ -122,6 +122,11 @@ LOG_DIR="$RUN_DIR/$TRADE_DATE"
 MARKER="$LOG_DIR/production.done"
 mkdir -p "$LOG_DIR"
 
+# ── 运行期护栏（2026-10-12）：自身快照 + 代码锚点 ──
+# 放在 log() 之前：它自己会往 $LOG_DIR/run.log 追加两行。
+. "$ROOT/scripts/daily_runner_guard.sh"
+runner_guard_boot "$0" "$LOG_DIR" "$@"
+
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_DIR/run.log"; }
 
 if [ "$FORCE" -ne 1 ]; then
@@ -186,7 +191,7 @@ notify_alert() {
 }
 
 # 预检：跑一遍与本次改动相关的回归测试（约 1 秒），把"代码级错误"挡在 70 分钟的重活之前
-PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py test/test_xy_industry_rotation.py test/test_cn_macro_sync.py test/test_xy_daily_rotation.py test/test_rotation_arm.py test/test_strategy_pool_performance.py test/test_first_ban_lowxi.py test/test_agent_run.py test/test_agent_api.py test/test_factor_library.py test/test_model_cards.py test/test_model_experiment_switches.py test/test_ttl_cache.py test/test_intraday_sync_target.py test/test_live_mirror.py -q}"
+PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py test/test_xy_industry_rotation.py test/test_cn_macro_sync.py test/test_xy_daily_rotation.py test/test_rotation_arm.py test/test_strategy_pool_performance.py test/test_first_ban_lowxi.py test/test_agent_run.py test/test_agent_api.py test/test_factor_library.py test/test_model_cards.py test/test_model_experiment_switches.py test/test_ttl_cache.py test/test_intraday_sync_target.py test/test_live_mirror.py test/test_agent_actions.py test/test_mining_workbench.py test/test_research_sources.py test/test_factor_inspector.py test/test_factor_fitness.py test/test_factor_pipeline_ops.py test/test_daily_automation_audit.py test/test_daily_schedule_and_notify.py test/test_strategy_lists_contract.py test/test_strategy_registry.py test/test_kline_watchlist_layout.py test/test_calendar_and_intraday_header.py test/test_live_price_basis.py -q}"
 if [ "${DAILY_PREFLIGHT:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
   if eval "$PREFLIGHT_CMD" > "$LOG_DIR/preflight.log" 2>&1; then
     log "preflight ok: $PREFLIGHT_CMD"
@@ -223,6 +228,25 @@ run_data_step() {
     tail -3 "$LOG_DIR/data_$name.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
   fi
 }
+
+# ── 当日数据就绪闸门（P2.55）：18:00 起跑时先确认"今天的日线到位" ──
+# 否则下游会安静地按**昨天**取数（连 web-freshness 都会全绿）。未就绪 ⇒ 中止本次，
+# 由 20:00 / 21:30 的重试触发接管；失败会走 notify_alert 发邮件。
+if [ "${DAILY_READY_GATE:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
+  if ! uv run python scripts/daily_ready_gate.py --print >> "$LOG_DIR/ready_gate.log" 2>&1; then
+    log "ready-gate FAILED：当日日线未就绪（见 $LOG_DIR/ready_gate.log）——本次中止"
+    notify_alert "CN 自动化未就绪 ${TRADE_DATE}" "$(tail -3 "$LOG_DIR/ready_gate.log")"
+    exit 1
+  fi
+fi
+
+# ── 基准指数同步（P2.56，2026-10-13 新增）────────────────────────────────────
+# 为什么要在数据面**最前面**跑：中证500/沪深300/中证全指/上证是**多条策略判定"最新交易日"的依据**
+# （jq 系列、绩效页、策略池曲线、影子里程），而它此前**不在每日流程里** → 实测停在 10-09，
+# 结果 jq 两条候选策略"看起来没更新"，其实是"它们以为最新一天还是 10-09"。
+if [ "${DAILY_BENCHMARK:-1}" = "1" ]; then
+  run_data_step benchmark uv run python scripts/backfill_cn_benchmark.py
+fi
 
 if [ "${DAILY_DATA_REFRESH:-1}" = "1" ]; then
   if [ "${DAILY_FUNDAMENTAL:-1}" = "1" ]; then
@@ -510,6 +534,19 @@ if [ "${DAILY_AI_PICKS:-1}" = "1" ]; then
   fi
 fi
 
+# ── 策略名单统一刷新（P2.56，2026-10-13 新增）────────────────────────────────
+# 用户的原始问题："为什么每日自动化后，不是所有策略的选股都更新呢？"
+# 根因是**没有统一的生产者与契约**：每条策略各写各的产物，有的在流程里、有的不在，缺了也不报错。
+# 这一步按 `config/strategies.json::daily_refresh` 声明，逐条 run/archive/skip，并写
+# `output/results_cn/strategy_lists/status.json`（updated / already_fresh / no_signal / stale / timeout / failed）。
+# 位置：必须在台账**之前**（台账要读各策略 history/<决策日>.csv）。
+# 非阻塞：失败只记一行；紧跟其后的 web-freshness 会把 stale/failed 点名。
+if [ "${DAILY_STRATEGY_LISTS:-1}" = "1" ]; then
+  run_data_step strategy_lists uv run python scripts/refresh_strategy_lists.py --print
+  # 抽象层自检：每条策略的选股源/刷新/台账/曲线/历史都接上了吗（漏接线在这里点名）
+  run_data_step strategy_registry uv run python scripts/strategy_registry.py --check --save
+fi
+
 # ── 选股台账重建（前端「选股日历」的数据源）──────────────────────────────
 # 必须放在 notify 之后：台账要从 feishu_<date>.json 读当日最终名单，那个文件是通知步骤写的。
 # 非致命：台账重建失败只影响日历展示，不影响当日生产结果与 production.done。
@@ -724,6 +761,23 @@ fi
 # 这样轨迹里的 status 才能如实写成 ok（而不是"还没见到 done 行"的 partial）。
 # 模型卡（P2.42 §4.3）：把"现在用的是哪一版模型 / 什么时候训的 / 每票多少独立样本 / valid IC"
 # 写进 output/models/cn/<model>/card.json，执行台的「模型层」tile 直接读它。非致命（失败只记一行）。
+# ── 因子审查覆盖（P2.53 §5 第 1 条，2026-10-12）────────────────────────────
+# 每晚把 |ICIR| 最强且**还没有审查档案**的 N 条因子送进 Inspector，再按 profile 打分。
+# 为什么需要：适应度里的冗余/换手/衰减惩罚只有审过才算得出来 —— 不审就永远是「待审」，
+# 推荐名单也就永远不可信（实测 107 条候选里一开始只有 4 条有档案）。
+# 非阻塞：失败只记一行；N 由 DAILY_FACTOR_INSPECTOR 控制（0 关闭，一条约 5 秒）。
+if [ "${DAILY_FACTOR_INSPECTOR:-3}" != "0" ] && [ "$DRY_RUN" -eq 0 ]; then
+  run_data_step factor_inspector uv run python scripts/factor_fitness.py \
+      --profile default --review-top "${DAILY_FACTOR_INSPECTOR:-3}" --top 10 --print
+fi
+
+# ── 候选因子值快照（P2.53 §5 第 2 条）──────────────────────────────────────
+# 给「策略池候选」里能在面板里找到同名列的因子存一份值快照（幂等：已有就跳过）。
+# 候选多数是 LLM 表达式（不是面板列）→ 脚本会记 not_a_panel_column 并给命令，不假装成功。
+if [ "${DAILY_CANDIDATE_SNAPSHOTS:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
+  run_data_step candidate_snapshots uv run python scripts/snapshot_candidates.py --print
+fi
+
 if [ "${DAILY_MODEL_CARDS:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
   run_data_step model_cards uv run python scripts/build_model_cards.py --print
 fi

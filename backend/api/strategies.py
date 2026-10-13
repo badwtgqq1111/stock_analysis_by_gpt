@@ -20,9 +20,16 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.services import strategy_registry as registry
+
 ROOT = Path(__file__).resolve().parents[2]
 POOL_PATH = ROOT / "output/strategy_pool/strategy_pool.json"
 SYNC_SCRIPT = ROOT / "scripts/sync_strategy_pool.py"
+# 每日名单刷新契约的产物（scripts/refresh_strategy_lists.py 写）。
+# 它是「所有前端消费同一份刷新状态」的单一来源：策略池 / 选股结果 / 选股日历 / K 线自选都读它。
+LISTS_STATUS = ROOT / "output/results_cn/strategy_lists/status.json"
+LISTS_STATUS_MD = ROOT / "output/results_cn/strategy_lists/STATUS.md"
+ATTENTION_STATUS = ("stale", "timeout", "failed")
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 _LOCK = threading.Lock()
@@ -53,6 +60,49 @@ def _read_pool() -> dict:
     return {}
 
 
+def read_lists_status() -> dict:
+    """每条策略「今天有没有按契约更新名单」的产物（scripts/refresh_strategy_lists.py 写）。
+
+    返回值里的 `ok` / `attention` / `quiet` 就是"哪些策略该更没更"的答案：
+      * attention = stale / timeout / failed —— 需要人管；
+      * quiet     = no_signal —— 命令跑成功但当日没有信号（事件/结构型策略的正常态）。
+    """
+    if not LISTS_STATUS.exists():
+        return {"available": False,
+                "hint": "还没有名单刷新产物：跑 uv run python scripts/refresh_strategy_lists.py --print"
+                        "（每日流程的 strategy_lists 步骤会自动跑）"}
+    try:
+        payload = json.loads(LISTS_STATUS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"available": False, "hint": f"名单刷新产物读取失败：{exc}"}
+    rows = payload.get("rows") or []
+    payload["available"] = True
+    payload["attention"] = [row.get("id") for row in rows if row.get("status") in ATTENTION_STATUS]
+    payload["quiet"] = [row.get("id") for row in rows if row.get("status") == "no_signal"]
+    payload["ok"] = not payload["attention"]
+    payload["markdown_path"] = str(LISTS_STATUS_MD.relative_to(ROOT)) if LISTS_STATUS_MD.exists() else None
+    return payload
+
+
+def merge_lists_status(payload: dict) -> dict:
+    """把名单刷新状态并入策略池快照：每条策略多一个 `refresh`，顶层多一个 `lists_status`。
+
+    加这一层，是为了让「策略池 / 选股结果 / 选股日历 / K 线自选」**消费同一份契约产物**：
+    以前每条策略各写各的产物、缺失是静默的（用户 2026-10-13 的疑问：
+    "数据太分散，还是该消费对象没有消费数据？"）—— 现在落后/超时/失败都会带着日期显示出名字。
+    """
+    status = read_lists_status()
+    if not status.get("rows"):
+        return payload
+    by_id = {row.get("id"): row for row in status["rows"]}
+    strategies = [{**item, "refresh": by_id.get(item.get("id"))} for item in payload.get("strategies") or []]
+    # 连 `rows` 一起带上：页面拿这一份就能渲染状态条（不用再打一次 /lists-status）
+    summary = {key: status[key] for key in ("available", "generated_at", "target_date", "counts",
+                                            "ok", "attention", "quiet", "markdown_path", "rows")
+               if key in status}
+    return {**payload, "strategies": strategies, "lists_status": summary}
+
+
 def _refresh() -> dict:
     """重算快照（幂等，约 0.2s：只 stat + 读小 CSV）。"""
     module = _sync_module()
@@ -60,6 +110,42 @@ def _refresh() -> dict:
         payload = module.build_pool()
         module.write_pool(payload)
     return payload
+
+
+def merge_registry_wiring(payload: dict) -> dict:
+    """给策略池每条策略补 `wiring`（抽象层的接线表：选股源/刷新/台账/曲线/消费端）。
+
+    页面靠它回答"这条策略接上了哪些地方、是怎么接的"，而不是让人去读代码。
+    注册表读的是声明层（config/strategies.json），所以**新增策略不用改后端**。
+    """
+    known = {spec["id"]: spec for spec in registry.specs()}
+    strategies = []
+    for item in payload.get("strategies") or []:
+        spec = known.get(item.get("id"))
+        strategies.append({**item, "wiring": registry.consumers(spec) if spec else None})
+    return {**payload, "strategies": strategies}
+
+
+@router.get("/registry")
+def strategy_registry_matrix() -> dict:
+    """抽象层接线矩阵：每条策略 × 每个消费端（选股结果/日历/自选/导出/AI/刷新/体检）。"""
+    payload = registry.wiring_matrix()
+    payload["coverage"] = registry.coverage()
+    payload["problems"] = registry.validate()
+    payload["kinds"] = registry.KINDS
+    return payload
+
+
+@router.get("/coverage")
+def strategy_registry_coverage() -> dict:
+    """接线覆盖自检：谁没接上、为什么（`gaps` 才是漏接线，`by_design` 是设计如此）。"""
+    return {**registry.coverage(), "problems": registry.validate()}
+
+
+@router.get("/lists-status")
+def lists_status() -> dict:
+    """每条策略的每日名单刷新状态（契约产物 `output/results_cn/strategy_lists/status.json`）。"""
+    return read_lists_status()
 
 
 @router.get("")
@@ -73,7 +159,7 @@ def strategy_pool(refresh: bool = True) -> dict:
             if not payload:
                 raise HTTPException(status_code=500, detail=f"策略池同步失败：{exc}") from exc
             payload = {**payload, "sync_error": str(exc)}
-    return payload
+    return merge_registry_wiring(merge_lists_status(payload))
 
 
 class CandidateRequest(BaseModel):

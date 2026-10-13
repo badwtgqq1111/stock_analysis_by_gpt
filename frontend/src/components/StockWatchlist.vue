@@ -12,10 +12,12 @@
       <button class="chip" :class="{ active: group === 'local' }" @click="group = 'local'">我的自选 {{ local.length }}</button>
       <button class="chip" :class="{ active: group === 'all' }" @click="group = 'all'">全部策略 {{ allRows.length }}</button>
       <button v-for="g in sortedGroups" :key="g.key" class="chip" :class="{ active: group === g.key }"
-              :title="g.note + (g.date ? ' · ' + g.date : '') + (g.verdict ? '｜' + g.verdict.detail : '')"
+              :title="g.note + (g.date ? ' · ' + g.date : '') + (g.verdict ? '｜' + g.verdict.detail : '')
+                      + (markOf(g) ? '｜' + markOf(g)!.detail : '')"
               @click="toggleGroup(g.key)">
         {{ g.label
         }}<span v-if="g.verdict" class="g-verdict" :class="g.verdict.tone">{{ g.verdict.label }}</span
+        ><span v-if="markOf(g)" class="g-refresh" :class="markOf(g)!.tone">{{ markOf(g)!.icon }}</span
         ><span class="dim tiny"> {{ g.loading ? '…' : g.rows.length }}</span>
       </button>
     </div>
@@ -32,6 +34,8 @@
     </div>
     <p v-if="poolError" class="hint tiny">{{ poolError }}</p>
     <p v-if="activeGroup" class="hint tiny">{{ activeGroup.stage }} · 名单交易日 {{ activeGroup.date || '—' }}
+      <span v-if="markOf(activeGroup)" :class="markOf(activeGroup)!.tone">
+        · 刷新 {{ activeGroup.refresh?.status }}（{{ activeGroup.refresh?.date_after || '—' }}）</span>
       <span v-if="activeGroup.loading"> · 加载中…</span>
       <span v-if="activeGroup.error"> · {{ activeGroup.error }}</span>
     </p>
@@ -52,6 +56,7 @@
     <ul class="rows">
       <li v-for="row in visibleRows" :key="row.code" :class="{ active: row.code === modelValue }"
           v-memo="[row.code, row.name, row.tag, liveKey(row.code)]"
+          :title="`${row.code} ${row.name || '（缺名称）'}${row.tag ? ' · ' + row.tag : ''}`"
           @click="$emit('update:modelValue', row.code)">
         <span class="mono code">{{ row.code }}</span>
         <span class="name">{{ row.name || '—' }}</span>
@@ -77,7 +82,7 @@ import { getPaperStatus, getSelection, getStrategyPool, searchStocks } from '@/a
 import type { StockSearchHit } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
 import { useLiveQuotes, quoteLabel } from '@/composables/useLiveQuotes'
-import { groupRows, sortGroups, strategyGroups } from './watchlistStrategies'
+import { groupRows, refreshMark, sortGroups, strategyGroups } from './watchlistStrategies'
 import type { GroupSortKey, WatchlistGroup, WatchlistRow } from './watchlistStrategies'
 import { strategyDetail } from './strategyDetail'
 
@@ -94,6 +99,8 @@ const group = ref('all')
 const refreshing = ref(false)
 const poolError = ref('')
 const activeGroup = computed(() => groups.value.find((g) => g.key === group.value))
+/** 分组上的名单刷新标记（数据来自每日名单刷新契约，与策略池同一份产物） */
+const markOf = (g: WatchlistGroup) => refreshMark(g.refresh)
 const allRows = computed(() => groupRows(groups.value, 'all'))
 const failedGroups = computed(() => groups.value.filter((g) => g.key !== 'paper' && g.error).map((g) => g.label))
 const query = ref('')
@@ -151,7 +158,10 @@ function livePct(code: string): string {
   const quote = live.quotes.value[code]
   const pct = quote?.change_pct
   if (pct == null) return ''
-  const value = Number(pct)
+  // 事故（2026-10-13）：`/api/intraday/quotes` 的 `change_pct` 是**小数**（0.0076 = 0.76%），
+  // 这里原来直接 `toFixed(2)` ⇒ 侧栏显示 "+0.01%"，而同页分时面板显示 "+0.76%"（那里有 ×100）。
+  // 与 `Intraday.vue` / `KlinePage.vue` 的 `pct()` 口径统一：小数 × 100。
+  const value = Number(pct) * 100
   return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
@@ -279,6 +289,11 @@ onMounted(async () => {
 .g-verdict.warn { color: var(--state-warn); border-color: var(--state-warn); }
 .g-verdict.bad { color: var(--state-bad); border-color: var(--state-bad); }
 .g-verdict.dim { color: var(--text-dim); }
+.g-refresh { margin-left: 4px; font-size: 10px; }
+.g-refresh.ok { color: var(--state-ok); }
+.g-refresh.warn { color: var(--state-warn); }
+.g-refresh.bad { color: var(--state-bad); }
+.g-refresh.dim { color: var(--text-dim); }
 .groups { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--sp-2); }
 .batch-add { margin-bottom: var(--sp-2); }
 .chip { padding: 3px 8px; border-radius: var(--r-pill); border: 1px solid var(--border-color);
@@ -291,18 +306,24 @@ onMounted(async () => {
   border: 1px solid var(--border-color); border-radius: var(--r-2); max-height: 160px; overflow: auto; }
 .suggest li { padding: 4px 6px; font-size: var(--fs-xs); cursor: pointer; border-radius: var(--r-1); }
 .suggest li:hover { background: rgba(255, 209, 102, 0.1); }
-.live { margin-left: auto; display: inline-flex; align-items: baseline; gap: 4px; font-family: var(--font-mono); font-size: var(--fs-xs); }
+.live { margin-left: auto; display: inline-flex; align-items: baseline; gap: 4px; font-family: var(--font-mono);
+  font-size: var(--fs-xs); flex: 0 0 auto; }
+.live .src { max-width: 3.4em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live.up { color: var(--accent-up); }
 .live.down { color: var(--accent-down); }
 .live .src { color: var(--text-dim); }
 .rows { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; }
 .rows li { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: var(--r-2);
-  cursor: pointer; font-size: var(--fs-sm); }
-.rows li:hover { background: rgba(255, 255, 255, 0.04); }
-.rows li.active { background: rgba(255, 209, 102, 0.1); color: var(--accent-gold); }
-.rows .code { color: inherit; }
-.rows .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rows .tag { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  cursor: pointer; font-size: var(--fs-sm); min-width: 0; }
+/* 事故（2026-10-13 用户报：「K 线图左侧自选股票名称看不见」）：
+   `.name` 原来写 `flex: 1`（= flex-basis:0），一行里 code + 来源标签 + 实时价 又都不可压缩，
+   于是名称成为**第一个被压到 0px** 的列 —— 实测 83 行里 42 行名称宽度 ≤1px（标签越长越惨）。
+   修法：给名称一个下限（4.6em），让**来源标签**去收缩省略；实时价那一格也不再吃满。 */
+.rows .code { color: inherit; flex: 0 0 auto; }
+.rows .name { flex: 1 1 auto; min-width: 4.6em; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.rows .tag { flex: 0 1 auto; min-width: 0; max-width: 34%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .star { background: none; border: none; color: var(--accent-gold); cursor: pointer; font-size: var(--fs-md); padding: 0 2px; }
 .add-btn { margin-left: auto; }
 </style>

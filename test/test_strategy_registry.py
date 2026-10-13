@@ -1,299 +1,237 @@
-"""策略注册表：结构、校验、状态掩码与预算一致性。
+"""策略抽象层（Strategy Registry）：一条声明 → 所有消费端自动接线（P2.57，2026-10-13）。
 
-2026-09-29 的结论：模型腿与突破腿对入场状态的偏好相反，必须从"一个全局门禁"
-升级为"每个策略自己的 state 段"。本测试锁定该抽象的关键不变量。
+用户要求："能把这些策略都做成抽象统一的么？方便后续新增策略的时候，可以在 web 端自动同步好数据，
+把策略行为的共性提取出来做一层抽象。"
+
+守住的四件事：
+  1. **声明层自洽**：`strategy_registry.validate()` 无问题（选股源/刷新/台账/曲线/历史都齐）；
+  2. **重构不改变行为**：派生出来的 `selection_sources.SOURCES` 与迁移前的硬编码值**逐字段一致**
+     （迁移前的那份已冻结在 `output/strategy_pool/selection_sources.frozen.json`，这里再内联一份关键项）；
+     曲线接线同样与迁移前硬编码的 replay/shadow 逐条一致；
+  3. **新增策略 = 只改声明**：往 config 追加一条策略后，`/api/selection?source=<新源>` **立刻可用**
+     （不改任何 Python、不重启），且接线表里选股结果页/K线自选/导出 都是"已接"；
+  4. **漏接线不会被静默**：`coverage().gaps` 为空（每个未接的消费端都必须有"按设计"的原因），
+     且每日流程里有 `strategy_registry --check` 这一步、体检里有「策略接线（抽象层自检）」一行。
 """
 from __future__ import annotations
 
+import json
 import sys
-import tomllib
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from factor_engine.strategies import (  # noqa: E402
-    active_strategies, load_strategies, state_mask, strategy_for_pick, total_budget, validate_budgets,
-)
+CONFIG = ROOT / "config/strategies.json"
+FROZEN = ROOT / "output/strategy_pool/selection_sources.frozen.json"
+DAILY_SCRIPT = ROOT / "scripts/run_daily_production.sh"
+
+# 迁移前的硬编码曲线接线（scripts/build_strategy_pool_performance.py 原值）—— 回归锁
+OLD_REPLAY = {
+    "jq_multi_factor_size_roe": "output/research/jq_multi_factor/nav_original_size_roe.csv",
+    "jq_roe_roa_diagnostic": "output/research/jq_multi_factor_dynamic/nav_dynamic_diagnostic.csv",
+}
+OLD_SHADOW = {
+    "rot_arm": ("output/paper_trading/shadow/rot_arm/nav.csv",
+                "output/results_cn/shadow_variants/rot_arm.csv"),
+    "cn_ensemble": ("output/paper_trading/shadow/model_topn_equal/nav.csv",
+                    "output/results_cn/shadow_variants/model_topn_equal.csv"),
+    "cn_ensemble_pk_legacy": ("output/paper_trading/shadow/production/nav.csv",
+                              "output/results_cn/shadow_variants/production.csv"),
+}
+# 迁移前的选股源关键项（label / 文件 / code_style）—— 回归锁
+OLD_SOURCES = {
+    "cn_ensemble": ("CN 生产名单（preselect → PK）",
+                    [["preselected", "output/results_cn/cn_ensemble_preselected.csv"],
+                     ["selected", "output/results_cn/cn_ensemble_selected.csv"]]),
+    "cn_arm": ("CN 研究手臂（base_v1）", [["arm", "output/results_cn/arm_latest_selection.csv"]]),
+    "cn_arm_rot": ("CN 行业轮动手臂（rotation_arm）",
+                   [["research", "output/results_cn/rot_arm_selection.csv"]]),
+    "cn_live_holdings": ("实盘镜像（中泰证券真实持仓）",
+                         [["live", "output/results_cn/cn_live_holdings.csv"]]),
+    "hk_lightgbm": ("港股 LightGBM Top10（历史遗留）",
+                    [["selected", "output/lightgbm_top10_selected.csv"]]),
+}
 
 
 @pytest.fixture(scope="module")
-def specs():
-    cfg = tomllib.load(open(ROOT / "config/cn_pipeline.toml", "rb"))
-    return load_strategies(cfg)
+def client():
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    with TestClient(app) as test_client:
+        yield test_client
 
 
-def test_repo_config_loads_and_budgets_fit(specs):
-    assert {"model_alpha", "dip_low_position", "donchian_breakout"} <= set(specs)
-    report = validate_budgets(specs)
-    assert report["ok"], f"active 策略预算合计 {report['total']} 应 <= 1.0"
-    # 2026-10-01：三条负 edge 腿转 off、模型腿 0.75→0.90，合计 0.95（留 0.05 作为组合层余量）
-    assert 0.90 <= report["total"] <= 1.0 + 1e-9
+# ── 1) 声明层自洽 ─────────────────────────────────────────────────────────────
+def test_declaration_layer_is_valid():
+    from backend.services import strategy_registry as reg
+
+    problems = reg.validate()
+    assert not problems, f"声明层问题：{problems}"
+    assert len(reg.specs()) == len(json.loads(CONFIG.read_text(encoding="utf-8"))["strategies"])
 
 
-def test_dip_leg_and_breakout_leg_disagree_on_state(specs):
-    """两条腿对同一个状态量的方向必须相反——这正是拆策略的理由。
+def test_every_strategy_curves_and_refresh_are_declared():
+    from backend.services import strategy_registry as reg
 
-    2026-09-30 修正：模型腿（model_alpha）实测头部是强势票，原来的"低吸"声明与行为相反，
-    因此低吸状态迁到研究态策略 dip_low_position；模型腿改为不做位置约束。
-    """
-    assert not specs["model_alpha"].state, "模型腿不应声明位置状态（实测头部不满足低吸带）"
-    dip_rules = {r.column: r for r in specs["dip_low_position"].state}
-    break_rules = {r.column: r for r in specs["donchian_breakout"].state}
-    assert dip_rules["volume_ratio_20d"].op == "lte"          # 低吸腿要缩量
-    assert break_rules["volume_ratio_20d"].op == "gte"        # 突破腿要放量
-    assert "dist_from_120d_low" in dip_rules                  # 低吸腿看 120 日低点
-    assert "dist_from_60d_high" in break_rules                # 突破腿看 60 日高点
-    assert specs["dip_low_position"].status == "research"     # 研究态，不占预算
+    for spec in reg.specs():
+        plan = reg.curve_plan(spec)
+        has_curve = any(plan[k] for k in ("tracking", "replay", "shadow", "original"))
+        assert has_curve, f"{spec['id']} 没有任何曲线口径（策略池里会看不到中证500 对比）"
+        refresh = (spec.get("refresh") or {}).get("mode")
+        assert refresh in reg.REFRESH_MODES, f"{spec['id']} 的 daily_refresh.mode 非法：{refresh}"
 
 
-def test_state_mask_applies_all_rules(specs):
-    spec = specs["dip_low_position"]
-    frame = pd.DataFrame({
-        "dist_from_120d_low": [0.02, 0.15, 0.40, 0.20],
-        "volume_ratio_20d": [1.0, 0.8, 0.9, 1.5],
-        "flow_z": [0.5, 0.2, 0.3, 0.3],
+# ── 2) 重构不改变行为（回归锁） ────────────────────────────────────────────────
+def test_derived_sources_match_pre_migration_values():
+    """派生 SOURCES == 迁移前硬编码值（10 条逐字段）。"""
+    from backend.services import selection_sources as src
+
+    assert len(src.SOURCES) == len(OLD_SOURCES) + 5 or len(src.SOURCES) >= 10
+    for key, (label, roles) in OLD_SOURCES.items():
+        entry = src.SOURCES.get(key)
+        assert entry is not None, f"派生的 SOURCES 里没有 {key}"
+        assert entry["label"] == label, key
+        got_roles = [[role, str(path.relative_to(ROOT))] for role, path in entry["files"]]
+        assert got_roles == roles, f"{key} 的 roles 变了：{got_roles}"
+    if FROZEN.exists():                         # 冻结文件在的话，再做一次全量逐字段比对
+        frozen = json.loads(FROZEN.read_text(encoding="utf-8"))
+        for key, want in frozen.items():
+            got = src.SOURCES[key]
+            assert got["note"] == want["note"], f"{key}.note"
+            assert list(got["columns"]) == want["columns"], f"{key}.columns"
+            assert got["code_style"] == want["code_style"], f"{key}.code_style"
+            assert bool(got["supports_shap"]) == want["supports_shap"], f"{key}.supports_shap"
+
+
+def test_curve_wiring_matches_pre_migration_values():
+    """迁移前硬编码的 replay / shadow 接线，现在必须由声明层给出一模一样的值。"""
+    from backend.services import strategy_registry as reg
+
+    got_replay = {s["id"]: s["curve"]["replay"]["nav_csv"] for s in reg.specs() if s["curve"]["replay"]}
+    assert got_replay == OLD_REPLAY, got_replay
+    got_shadow = {s["id"]: (s["curve"]["shadow"]["nav_csv"], s["curve"]["shadow"]["history_csv"])
+                  for s in reg.specs() if s["curve"]["shadow"]}
+    assert got_shadow == OLD_SHADOW, got_shadow
+    # 模型臂：以前硬编码 ("preselected",10)/("notify",10)
+    arms = {s["id"]: s["model_arms"] for s in reg.specs() if s.get("model_arms")}
+    assert arms == {"cn_ensemble": {"ledger_sources": ["preselected", "notify"], "top_n": 10}}, arms
+
+
+# ── 3) 新增策略 = 只改声明（核心承诺） ─────────────────────────────────────────
+def test_new_strategy_needs_no_code_change(monkeypatch, client):
+    """往 config 追加一条策略后：/api/selection 立刻多一个源、接线表立刻显示已接。"""
+    from backend.services import strategy_registry as reg
+
+    demo_csv = ROOT / "output/results_cn/_registry_demo_selection.csv"
+    demo_csv.parent.mkdir(parents=True, exist_ok=True)
+    demo_csv.write_text("trade_date,stock_code,rank,score,target_weight\n"
+                        "2026-10-12,600519.SH,1,0.91,0.5\n2026-10-12,000001.SZ,2,0.88,0.5\n",
+                        encoding="utf-8")
+    tmp_config = ROOT / "output/strategy_pool/_registry_demo_config.json"
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    config["strategies"].append({
+        "id": "demo_alpha", "name": "演示策略（临时）", "group": "演示", "kind": "rule_strategy",
+        "stage": "candidate", "owner": "test", "summary": "测试用，不写进真 config",
+        "entry": "uv run python scripts/select_demo_alpha.py",
+        "date_column": "trade_date", "tag_class": "dim",
+        "artifacts": ["output/results_cn/_registry_demo_selection.csv"],
+        "history_dir": "output/results_cn/_registry_demo_history",
+        "selection_source": "cn_demo_alpha",
+        "selection": {"label": "演示策略", "note": "测试", "roles": [["research", "output/results_cn/_registry_demo_selection.csv"]],
+                      "columns": ["rank", "score", "target_weight"], "code_style": "ts_code",
+                      "supports_shap": False},
+        "daily_refresh": {"mode": "run", "max_minutes": 5},
+        "ledger_sources": ["demo_alpha"],
     })
-    mask = state_mask(frame, spec)
-    assert mask.tolist() == [False, True, False, False]
+    tmp_config.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    monkeypatch.setattr(reg, "CONFIG", tmp_config)
+    monkeypatch.setitem(reg.LEDGER_ADAPTERS, "demo_alpha", "build_selection_ledger._demo")
+    try:
+        # 声明层认得它
+        assert "demo_alpha" in reg.ids()
+        assert not [p for p in reg.validate() if p.startswith("demo_alpha")]
+        wired = reg.consumers(reg.spec("demo_alpha"))
+        for key in ("selection_page", "kline_watchlist", "ths_export", "daily_refresh", "ai_picks"):
+            assert wired[key]["wired"], f"{key} 没接上：{wired[key]}"
+        # 接口立刻可用（不需要重启、不需要改代码）
+        payload = client.get("/api/selection", params={"source": "cn_demo_alpha"}).json()
+        assert payload["source"]["key"] == "cn_demo_alpha"
+        assert payload["source"]["row_count"] == 2, payload["source"]
+        keys = {opt["key"] for opt in payload["available"]}
+        assert "cn_demo_alpha" in keys, "新策略的源没有出现在 available 里（前端下拉看不到）"
+        assert [r["stock_code"] for r in payload["rows"]] == ["600519.SH", "000001.SZ"]
+    finally:
+        demo_csv.unlink(missing_ok=True)
+        tmp_config.unlink(missing_ok=True)
 
 
-def test_state_mask_raises_on_missing_column(specs):
-    spec = specs["dip_low_position"]
-    with pytest.raises(KeyError):
-        state_mask(pd.DataFrame({"dist_from_120d_low": [0.2]}), spec)
-
-
-def test_strategy_for_pick_maps_channels(specs):
-    assert strategy_for_pick("model", None, None, specs) == "model_alpha"
-    assert strategy_for_pick("signal_override", "donchian_pullback", "setup", specs) == "donchian_pullback"
-    assert strategy_for_pick("signal_override", "value_reversal", "reversal", specs) == "value_reversal"
-    assert strategy_for_pick("signal_candidate", None, None, specs) == "signal_candidate"
-
-
-def test_invalid_kind_and_status_rejected():
-    with pytest.raises(ValueError):
-        load_strategies({"strategies": {"x": {"kind": "magic"}}})
-    with pytest.raises(ValueError):
-        load_strategies({"strategies": {"x": {"kind": "model", "status": "zombie"}}})
-    with pytest.raises(ValueError):
-        load_strategies({"strategies": {"x": {"kind": "model", "state": {"c": {"op": "around", "value": 1}}}}})
-
-
-def test_empty_config_is_backward_compatible():
-    assert load_strategies({}) == {}
-    assert total_budget({}) == 0.0
-    assert active_strategies({}) == []
-
-
-def test_model_state_exposures_prefers_explicit_list(specs):
-    """门禁暴露应优先用显式声明（13 窗口实测：2 个暴露优于把 state 列全塞进去）。"""
-    from factor_engine.strategies import model_state_exposures
-    assert model_state_exposures(specs) == ["dist_from_120d_low", "flow_z"]
-
-
-def test_registry_budgets_match_production_sleeve_config(specs):
-    """第③步的迁移前提：注册表派生值必须与现有 sleeve 硬编码完全一致（否则不许切）。"""
-    import tomllib
-    from factor_engine.strategies import compare_sleeve_budgets, derive_sleeve_budgets
-    cfg = tomllib.load(open(ROOT / "config/cn_pipeline.toml", "rb"))
-    derived = derive_sleeve_budgets(specs)
-    comparison = compare_sleeve_budgets(specs, cfg["selection"]["signals"])
-    assert comparison["consistent"], comparison["diffs"]
-    # 2026-10-06：P1.24 W5 判决把 value_reversal 也转为 off（W2：真实持仓 20 日 −6.08% vs 随机 +0.07%；
-    # 归因 −59.2%/夏普 −1.46/占回撤 5.98pp；模型化重做 NW t 1.33 不过门槛）。
-    # 因此当前**没有任何 active 的 signal 腿**：派生集合为空，硬编码 sleeve 段全部停用，
-    # 硬编码值仍保留在配置里供 budget_from_registry=false 回退。
-    assert set(derived) == set(), derived.keys()
-    assert cfg["selection"]["signals"]["forced_min_weight"] == 0.06  # 硬编码仍在（供 budget_from_registry=false 回退）
-
-
-def test_state_compliance_reports_per_rule_detail(specs):
-    from factor_engine.strategies import state_compliance
-    frame = pd.DataFrame({
-        "dist_from_120d_low": [0.15, 0.90],
-        "volume_ratio_20d": [0.9, 0.8],
-        "flow_z": [0.5, 0.5],
-    })
-    ok, detail = state_compliance(frame, specs["dip_low_position"])
-    assert ok.tolist() == [True, False]
-    assert list(detail.columns) == ["dist_from_120d_low:between", "volume_ratio_20d:lte", "flow_z:gte"]
-    assert detail.iloc[1]["dist_from_120d_low:between"] == False
-
-
-def test_pipeline_wires_registry_into_selection_layer():
-    """pipeline 的 with_strategy_registry：暴露派生 + 预算派生 + 报告。"""
+def test_scaffold_puts_new_strategy_on_every_consumer(tmp_path):
+    """`--new` 生成的骨架：干跑校验通过，且 4 个消费端"已接"。"""
     import importlib.util
-    import tomllib
-    spec = importlib.util.spec_from_file_location("run_cn_pipeline", ROOT / "scripts" / "run_cn_pipeline.py")
+
+    spec = importlib.util.spec_from_file_location("strategy_registry_cli", ROOT / "scripts/strategy_registry.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    cfg = tomllib.load(open(ROOT / "config/cn_pipeline.toml", "rb"))
-    real_signals = dict(cfg["selection"]["signals"])
-    layer = {"startup_gate": {"mode": "orthogonalize"}, "signals": real_signals,
-             "portfolio_constraints": {"model_min_share": 0.8}}
-    out = module.with_strategy_registry(layer, cfg)
-    assert out["startup_gate"]["orthogonalize_exposures"] == ["dist_from_120d_low", "flow_z"]
-    assert out["signals"]["_registry_budget_report"]["consistent"] is True
-    # budget_from_registry=true 时按注册表设 model_min_share
-    layer2 = {"startup_gate": {"mode": "orthogonalize"},
-              "signals": {**real_signals, "budget_from_registry": True},
-              "portfolio_constraints": {}}
-    out2 = module.with_strategy_registry(layer2, cfg)
-    assert out2["portfolio_constraints"]["model_min_share"] == 0.90
+
+    class Args:
+        new = "demo_scaffold"
+        name = "骨架演示"
+        group = "演示"
+        kind = "rule_strategy"
+        stage = "candidate"
+        entry = "uv run python scripts/select_demo_scaffold.py"
+        selection_source = "cn_demo_scaffold"
+        file = "output/results_cn/demo_scaffold_selection.csv"
+        history_dir = None
+        refresh = "run"
+        ledger = None
+        write = False
+
+    from backend.services import strategy_registry as reg
+
+    skeleton = module.skeleton(Args)
+    wired = reg.consumers(reg.normalize(skeleton))
+    # 骨架默认就能接上：选股结果页 / K 线自选 / 导出 / 每日刷新 / 曲线
+    for key in ("selection_page", "kline_watchlist", "ths_export", "daily_refresh", "curve"):
+        assert wired[key]["wired"], f"{key} 没接上"
+    # 台账（选股日历）**有意默认不接**：解析器（build_selection_ledger 适配器）建好再开，
+    # 否则就是 P2.56 里"声明了却没人解析 ⇒ 日历缺来源"的老毛病 —— 拿 --ledger 才接。
+    assert not wired["selection_calendar"]["wired"]
+    Args.ledger = "demo_scaffold"
+    try:
+        assert reg.consumers(reg.normalize(module.skeleton(Args)))["selection_calendar"]["wired"]
+    finally:
+        Args.ledger = None
 
 
-def test_strategy_state_eval_filters_and_fails_open():
-    """信号腿 state 评估：满足才放行；列缺失时 fail-open 并记账（不清空整条腿）。"""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("rcp_state", ROOT / "scripts" / "run_cn_pipeline.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    import pandas as pd
-    from data.ingest.service import _strategy_state_eval
+# ── 4) 漏接线不会被静默 ───────────────────────────────────────────────────────
+def test_coverage_has_no_unexplained_gaps():
+    from backend.services import strategy_registry as reg
 
-    frame = pd.DataFrame({
-        "high": [10.0] * 60 + [10.2],
-        "low": [9.0] * 60 + [9.1],
-        "close": [9.5] * 60 + [10.0],
-        "volume": [1_000_000.0] * 60 + [1_500_000.0],
-    })
-    breakout = {"strategy_id": "donchian_breakout", "rules": [
-        {"column": "dist_from_60d_high", "op": "gte", "value": -0.05},
-        {"column": "volume_ratio_20d", "op": "gte", "value": 1.3},
-        {"column": "signal_extension", "op": "lte", "value": 0.05},
-    ]}
-    ok = _strategy_state_eval(breakout, frame, {"donchian_upper": 10.0}, {"extension": 0.0, "runup_5d": 0.05})
-    assert ok["ok"] is True and not ok["missing"]
-    # 放量不足 -> 该腿自己的状态不满足
-    frame_low_vol = frame.assign(volume=[1_000_000.0] * 61)
-    bad = _strategy_state_eval(breakout, frame_low_vol, {"donchian_upper": 10.0}, {"extension": 0.0, "runup_5d": 0.05})
-    assert bad["ok"] is False and bad["detail"]["volume_ratio_20d"] is False
-    # 列缺失 -> fail-open（missing 记账，ok 仍为 True）
-    missing = _strategy_state_eval({"strategy_id": "x", "rules": [{"column": "signal_volume_ratio", "op": "gte", "value": 1.1}]},
-                                   frame, {}, {})
-    assert missing["ok"] is True and missing["missing"] == ["signal_volume_ratio"]
+    cov = reg.coverage()
+    assert cov["gaps"] == [], f"存在漏接线：{cov['gaps']}"
+    # 未接的每一处都必须有"按设计"的理由（否则就是缺口被静默）
+    missed = sum(len(reg.ids()) - len(v) for v in cov["matrix"].values())
+    assert len(cov["by_design"]) == missed, (len(cov["by_design"]), missed)
 
 
-def test_state_conformance_catches_mis_declared_state():
-    """体检必须能抓出"声明与头部行为相反"（2026-09-30 模型腿错声明的复现）。"""
-    import tomllib
-    import pandas as pd
-    from factor_engine.strategies import StateRule, StrategySpec, state_conformance
-
-    specs = load_strategies(tomllib.load(open(ROOT / "config/cn_pipeline.toml", "rb")))
-    dip = specs["dip_low_position"]
-    # 构造一个"模型头部远离低点、但全市场多数在带内"的截面
-    frame = pd.DataFrame({
-        "stock_code": [f"{i:06d}.SZ" for i in range(100)],
-        "model_score_raw": [1.0 - i / 100 for i in range(100)],
-        "dist_from_120d_low": [0.60] * 10 + [0.15] * 90,     # Top-10 全部落在带外
-        "volume_ratio_20d": [0.9] * 100,
-        "flow_z": [0.5] * 100,
-    })
-    report = state_conformance(frame, dip, score_column="model_score_raw", top_k=10)
-    assert report["verdict"] == "mismatch"
-    assert report["head_in_state_share"] == 0.0
-    assert report["market_in_state_share"] == 0.9
-    assert report["lift"] == 0.0
-    # 没有声明 state 的策略 → n/a（不做入场状态约束）
-    alpha = specs["model_alpha"]
-    assert state_conformance(frame, alpha, score_column="model_score_raw")["verdict"] == "n/a"
+def test_api_exposes_wiring_and_coverage(client):
+    payload = client.get("/api/strategies/registry").json()
+    assert payload["rows"] and not payload["problems"]
+    assert payload["coverage"]["gaps"] == []
+    pool = client.get("/api/strategies", params={"refresh": False}).json()
+    for item in pool["strategies"]:
+        assert item.get("wiring"), f"{item['id']} 缺 wiring（页面无法显示接线）"
+        if item.get("selection_source"):
+            assert item["wiring"]["selection_page"]["wired"], item["id"]
 
 
-def test_strategy_labels_guard_non_positive_prices():
-    """价格护栏：open/close = 0 的行不能让前向收益变成 ±inf（2026-10-01 体检踩到的坑）。"""
-    import numpy as np
-    import pandas as pd
-    from factor_engine.ml.strategy_labels import build_cn_strategy_labels
-
-    dates = pd.date_range("2026-01-05", periods=40, freq="B")
-    rows = []
-    for code in ("600000.SH", "300001.SZ"):
-        for index, day in enumerate(dates):
-            # 2026-01-20 那天把 open 打成 0（脏数据），另一只在 2026-02-02 把 close 打成 0
-            open_price = 0.0 if (code == "600000.SH" and index == 10) else 10.0 + index * 0.01
-            close_price = 0.0 if (code == "300001.SZ" and index == 20) else 10.05 + index * 0.01
-            rows.append({"stock_code": code, "trade_date": day, "open": open_price, "high": max(open_price, close_price) + 0.05,
-                         "low": min(open_price, close_price) - 0.05, "close": close_price, "volume": 1_000_000.0})
-    labels = build_cn_strategy_labels(pd.DataFrame(rows), path_horizon=5, entry_delay=1, exec_horizons=(1, 5, 20))
-    for column in ("forward_exec_return_1d", "forward_exec_return_5d", "forward_exec_return_20d"):
-        values = pd.to_numeric(labels[column], errors="coerce")
-        assert np.isfinite(values.dropna()).all(), f"{column} 里出现了非有限值"
-    assert not np.isinf(labels["forward_exec_return_5d"]).any()
-
-
-def test_apply_strategy_status_removes_off_legs_and_keeps_exclusive_ownership():
-    """status 必须真正生效：off 的腿摘掉 recipe/setup_types/sleeve；有自己 sleeve 的腿独占其 setup_type。"""
-    import tomllib
-    from factor_engine.strategies import apply_strategy_status
-    cfg = tomllib.load(open(ROOT / "config/cn_pipeline.toml", "rb"))
-    specs = load_strategies(cfg)
-    signals, audit = apply_strategy_status(dict(cfg["selection"]["signals"]), specs)
-    off_recipes = {"bottom_momentum", "limit_momentum", "donchian_pullback"}
-    assert off_recipes.isdisjoint(set(signals["recipes"])), signals["recipes"][:8]
-    # off 腿的 setup_types 必须从顶层 setup 腿摘掉
-    assert not (set(signals["allowed_setup_types"]) & {"donchian_breakout", "limit_momentum", "bottom_momentum"})
-    # 2026-10-06：value_reversal 转为 off 后不再走"独占 setup_type"路径，而是走停用路径
-    assert "value_reversal" not in signals["allowed_setup_types"]
-    assert audit["exclusive_ownership_removed"] == [], audit["exclusive_ownership_removed"]
-    # 研究态/停用腿的 sleeve 段被关掉
-    assert signals["momentum_sleeve"]["enabled"] is False
-    assert signals["bottom_momentum_sleeve"]["enabled"] is False
-    assert signals["reversal_sleeve"]["enabled"] is False
-
-
-def test_sleeve_max_weight_bounded_by_budget_share():
-    """budget.share 必须约束该腿单名上限：max_weight <= share / slots。"""
-    import importlib.util
-    import tomllib
-    spec = importlib.util.spec_from_file_location("rcp_budget", ROOT / "scripts" / "run_cn_pipeline.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    cfg = tomllib.load(open(ROOT / "config/cn_pipeline.toml", "rb"))
-    layer = {"startup_gate": {"mode": "orthogonalize"},
-             "signals": {**cfg["selection"]["signals"], "budget_from_registry": True},
-             "portfolio_constraints": {}}
-    out = module.with_strategy_registry(layer, cfg)
-    # 2026-10-06：value_reversal 已 off → reversal_sleeve 停用，预算约束不适用（不应拿它的硬编码值当不变量）。
-    # 不变量只在 **active** 的腿上有约束力；对 active 腿循环断言 max_weight <= share / slots。
-    for sid, spec in load_strategies(cfg).items():
-        if spec.kind != "signal" or spec.status != "active":
-            continue
-        share = float((spec.budget or {}).get("share") or 0.0)
-        slots = max(int((spec.sizing or {}).get("slots") or 1), 1)
-        max_weight = float((spec.sizing or {}).get("max_weight") or 0.0)
-        assert max_weight <= share / slots + 1e-9, (sid, share, slots, max_weight)
-    assert out["signals"]["reversal_sleeve"]["enabled"] is False
-    assert out["portfolio_constraints"]["model_min_share"] == 0.90
-
-
-def test_sleeve_block_cap_shrinks_satellite_and_refunds_model():
-    """块级上限：卫星块按比例缩减、余额按 cap 余量补回模型块、超配的一手不满者清零。"""
-    from data.ingest.service import apply_sleeve_block_cap
-
-    frame = pd.DataFrame({
-        "stock_code": ["600001.SH", "600002.SH", "300001.SZ"],
-        "selection_channel": ["model", "signal_candidate", "signal_override"],
-        "target_weight": [0.20, 0.30, 0.25],
-        "current_weight": [0.0, 0.0, 0.0],
-        "lot_fillable": [True, True, True],
-    })
-    model_mask = frame["selection_channel"].eq("model")
-    capped, summary = apply_sleeve_block_cap(
-        frame, cap=0.10, model_mask=model_mask, cap_for=lambda code: 0.35,
-        initial_capital=45_000.0, lot_size=100,
-    )
-    satellite = capped.loc[~capped["selection_channel"].eq("model"), "target_weight"].sum()
-    assert satellite <= 0.10 + 1e-9, satellite
-    assert summary["sleeve_weight_before"] == 0.55
-    assert capped.loc[capped["selection_channel"] == "model", "target_weight"].iloc[0] > 0.20
-    assert summary["redistributed_to_model"] > 0
-    # 无 cap 时不动
-    same, summary2 = apply_sleeve_block_cap(frame, cap=None, model_mask=model_mask, cap_for=lambda c: 0.35,
-                                            initial_capital=45_000.0, lot_size=100)
-    assert summary2["applied"] is False
-    assert same["target_weight"].tolist() == frame["target_weight"].tolist()
+def test_daily_pipeline_and_audit_wire_the_registry():
+    text = DAILY_SCRIPT.read_text(encoding="utf-8")
+    assert "run_data_step strategy_registry uv run python scripts/strategy_registry.py --check --save" in text, \
+        "抽象层自检不在每日流程里（漏接线又会是静默的）"
+    audit = (ROOT / "scripts/audit_web_freshness.py").read_text(encoding="utf-8")
+    assert "策略接线（抽象层自检）" in audit

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。 2026-10-13 追加 daily_refresh（每日名单刷新契约）与 selection/curve（抽象层的声明层，由 backend/services/strategy_registry.py 派生给选股结果页 / 曲线 / 导出 / 自选等消费端）。",
-  "updated_at": "2026-10-13",
+  "updated_at": "2026-10-14",
   "strategies": [
     {
       "id": "live_holdings",
@@ -17,7 +17,6 @@
       "artifacts": [
         "output/paper_trading/live_mirror/summary.json",
         "output/paper_trading/live_mirror/positions.csv",
-        "output/paper_trading/live_mirror/nav.csv",
         "output/paper_trading/live_mirror/performance.json",
         "output/results_cn/cn_live_holdings.csv"
       ],
@@ -466,7 +465,6 @@
       "entry": "uv run python scripts/first_ban_lowxi_curve.py",
       "schedule": "按需（研究复现；不进每日自动化）",
       "artifacts": [
-        "output/research/first_ban_lowxi/curve/nav_curve.csv",
         "output/research/first_ban_lowxi/curve/curve.json",
         "output/research/first_ban_lowxi/REPORT.md",
         "output/research/zt_board/mining_first_ban_lowxi/factors_best.csv"
@@ -528,7 +526,6 @@
       "schedule": "按需（研究候选；不进每日自动化）",
       "artifacts": [
         "output/results_cn/box_arm_selection.csv",
-        "output/research/box_breakout/curve/nav_engine.csv",
         "output/research/box_breakout/curve/curve.json",
         "output/research/box_breakout/REPORT.md"
       ],
@@ -589,7 +586,7 @@
       "entry": "uv run python scripts/run_shadow_variants.py --variants production",
       "schedule": "（已下线；影子仍每日并行计算）",
       "artifacts": [
-        "output/paper_trading/shadow/production/nav.csv"
+        "output/results_cn/shadow_variants/production.csv"
       ],
       "history_dir": "",
       "date_column": "trade_date",
@@ -604,6 +601,190 @@
           "nav_csv": "output/paper_trading/shadow/production/nav.csv",
           "history_csv": "output/results_cn/shadow_variants/production.csv",
           "kind": "shadow_account_net"
+        }
+      }
+    },
+    {
+      "id": "wyckoff_arm",
+      "name": "威科夫吸筹突破（区间→spring→放量 SOS）",
+      "group": "结构形态",
+      "kind": "rule_strategy",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "warn",
+      "summary": "威科夫结构口径：前 60 日横盘区间（高度≤30%、净涨跌≤15%）→ 区间内出现过 spring（假跌破下沿后收回）→ 当日收盘放量（≥1.5×20日均量）站上区间上沿（SOS）→ 次日开盘买、跌破下沿×0.97 止损或持有 20 日。2021-01-04~2026-10-12 实测：累计 +47.8% vs 中证500 +9.4%（超额 +38.4pp），269 笔、逐笔 +1.31%、胜率 39.8%、最大回撤 −41.8%。⚠️ 参数敏感（持有 10/30/40 日分别 −60.6%/−6.3%/−59.5%；区间 90 日 −45.6%），且 2025、2026 超额转负（−28.8pp/−21.1pp）⇒ 只作观察候选，不进生产权重。",
+      "entry": "uv run python scripts/select_wyckoff_arm.py",
+      "schedule": "每日自动化非阻塞步骤（台账之前，进选股日历）",
+      "artifacts": [
+        "output/results_cn/wyckoff_arm_selection.csv",
+        "output/results_cn/wyckoff_arm_selection.json",
+        "output/research/wyckoff/curve/curve.json",
+        "output/research/wyckoff/REPORT.md"
+      ],
+      "history_dir": "output/results_cn/wyckoff_arm_history",
+      "ledger_sources": [
+        "wyckoff_arm"
+      ],
+      "selection_source": "cn_wyckoff_arm",
+      "date_column": "trade_date",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 30,
+        "empty_is_ok": true,
+        "reason": "结构型：当日没有新的 SOS 突破是正常的（脚本跑成功但不产生今天的决策日）"
+      },
+      "selection": {
+        "label": "威科夫吸筹突破（wyckoff_arm）",
+        "note": "威科夫（Wyckoff）三件套：区间（cause）= 前 60 日横盘（高度≤30%、净涨跌≤15%）；spring = 区间内假跌破下沿后收回；SOS = 放量站上区间上沿（≥1.5×20 日均量）→ 次日开盘买。退出：跌破入场时区间下沿×0.97 止损，或持有 20 个交易日（不因「收回上沿」提前走 —— 这一条是本轮 A/B 出来的关键差异）。实测 2021~2026 累计 +47.8% vs 中证500 +9.4%（超额 +38.4pp），但参数敏感、2025-2026 超额转负 ⇒ 观察候选，不进生产权重；完整口径与参数表见 output/research/wyckoff/REPORT.md。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/wyckoff_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "industry",
+          "score",
+          "target_weight",
+          "level",
+          "stop",
+          "range_pct",
+          "vol_ratio",
+          "cause_width"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "replay": {
+          "nav_csv": "output/research/wyckoff/curve/nav_engine.csv",
+          "kind": "research_replay",
+          "description": "威科夫吸筹突破独立回放（区间60日→spring→放量SOS→次日开盘买，持有20日或跌破下沿×0.97止损，双边15.5bp）"
+        }
+      }
+    },
+    {
+      "id": "moneyflow_arm",
+      "name": "主力资金流追踪（大单净流入 + 吸筹形态）",
+      "group": "资金流",
+      "kind": "rule_strategy",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "warn",
+      "summary": "主力追踪的资金流口径：5 日主力净流入 z 分数 ≥1.0 + 10 日里 ≥6 天净流入 + 近 20 日涨幅在 [-10%, +8%]（是吸筹不是追高）+ 收盘 > MA20 + 20 日均额 ≥2000 万 → 次日开盘买、每日最多 5 只（按 z 分数降序）、持有 10 日或跌破入场价 −8% 止损、双边 15.5bp。样本 2024-08-27~2026-10-12（资金流特征表只覆盖 2024-08 起）：累计 +174.1% vs 中证500 +57.8%（超额 +116.3pp），267 笔、逐笔 +2.20%、胜率 48.7%，最大回撤 −40.0%（比中证500 同期 −24.8% 更深）、夏普 1.15。参数网格 17/18 格跑赢中证500（中位 +68.5pp），默认取**高原中心**而非最高格（最好的 z=1.5/pos=5/hold=10 = +226.6pp 是孤立高点）。⚠️ 样本仅 2.1 年、未过滤 ST/停牌/涨跌停 ⇒ 只作候选，不进生产权重。",
+      "entry": "uv run python scripts/select_moneyflow_arm.py",
+      "schedule": "每日自动化非阻塞步骤（台账之前，进选股日历）",
+      "artifacts": [
+        "output/results_cn/moneyflow_arm_selection.csv",
+        "output/results_cn/moneyflow_arm_selection.json",
+        "output/research/moneyflow/curve/curve.json",
+        "output/research/moneyflow/REPORT.md"
+      ],
+      "history_dir": "output/results_cn/moneyflow_arm_history",
+      "ledger_sources": [
+        "moneyflow_arm"
+      ],
+      "selection_source": "cn_moneyflow_arm",
+      "date_column": "trade_date",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 30,
+        "reason": "每天都有主力净流入候选；若当日无票（如极端行情下无票满足），empty_is_ok 允许 no_signal"
+      },
+      "selection": {
+        "label": "主力资金流追踪（moneyflow_arm）",
+        "note": "主力追踪的**资金流口径**：5 日主力净流入 z 分数（三源资金流特征表）≥1.0、10 日净流入天数占比 ≥60%、近 20 日涨幅在 [-10%, +8%]、收盘 > MA20、20 日均额 ≥2000 万 → 次日开盘买、最多 5 只、持有 10 日或跌破入场价 −8% 止损。样本 2024-08 起（资金流数据只有这么久）：+174.1% vs 中证500 +57.8%，最大回撤 −40%（更深）。口径与 18 格参数网格见 output/research/moneyflow/REPORT.md。**候选，不进生产权重。**",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/moneyflow_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "industry",
+          "score",
+          "target_weight",
+          "stop",
+          "close",
+          "moneyflow_net_z_5d",
+          "moneyflow_positive_ratio_10d",
+          "ret20"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "replay": {
+          "nav_csv": "output/research/moneyflow/curve/nav_engine.csv",
+          "kind": "research_replay",
+          "description": "主力资金流追踪独立回放（主力净流入 z≥1.0 + 吸筹形态 → 次日开盘买、持有 10 日或 -8% 止损，双边 15.5bp，2024-08 起）"
+        }
+      }
+    },
+    {
+      "id": "mainforce_arm",
+      "name": "主力追踪（资金流 ＋ 筹码成本偏离）",
+      "group": "资金流",
+      "kind": "rule_strategy",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "warn",
+      "summary": "主力追踪的**多口径**版本：信号仍由资金流触发（5 日主力净流入 z ≥1.0 + 10 日流入天数占比 ≥60% + 近 20 日涨幅 ∈[-10%,+8%] + 收盘 >MA20 + 20 日均额 ≥2000 万），但**名额排序 = 资金流 z 排名 + 筹码成本偏离排名（各半）** —— 用 tushare 筹码分布（cyq_perf）里的「现价/平均成本−1」越小越优先（IC 检验：该因子显著为负，现价越高于主力成本未来越弱）。2024-08-27~2026-10-12：累计 +141.3% vs 中证500 +57.8%（超额 +83.5pp），264 笔；**最大回撤从基线的 −40.0% 降到 −14.6%、卡玛 1.11→2.59、夏普 0.95→1.78、胜率 48.7%→51.9%**（代价是累计收益比纯资金流基线少 33pp）。⚠️ 筹码数据只有 2024-01 起 ⇒ 样本 2.1 年；未过滤 ST/停牌。同窗口对照表见 output/research/mainforce/REPORT.md。",
+      "entry": "uv run python scripts/select_moneyflow_arm.py --variant mainforce",
+      "schedule": "每日自动化非阻塞步骤（台账之前，进选股日历）",
+      "artifacts": [
+        "output/results_cn/mainforce_arm_selection.csv",
+        "output/results_cn/mainforce_arm_selection.json",
+        "output/research/mainforce/curve/curve.json",
+        "output/research/mainforce/REPORT.md"
+      ],
+      "history_dir": "output/results_cn/mainforce_arm_history",
+      "ledger_sources": [
+        "mainforce_arm"
+      ],
+      "selection_source": "cn_mainforce_arm",
+      "date_column": "trade_date",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 30,
+        "reason": "每天都有主力净流入候选；若当日无票（极端行情）则按 empty_is_ok 记 no_signal"
+      },
+      "selection": {
+        "label": "主力追踪（资金流＋筹码成本偏离）",
+        "note": "多口径主力追踪：**资金流**负责触发（主力净流入 z ≥1.0 + 10 日流入天数 ≥60% + 涨幅带 + 站上 MA20），**筹码分布**负责排序（tushare cyq_perf 的「现价/平均成本−1」越小越优先 —— IC 检验里该因子 NW t = −3.89，现价越高于平均成本未来越弱）。实测：累计 +141.3% vs 中证500 +57.8%，回撤 −14.6%（纯资金流基线 −40.0%）、卡玛 2.59、夏普 1.78。⚠️ 反例已被证实：按「筹码越集中越好」的老口号过滤（宽度≤中位）会把累计收益打到 +19.9%、超额 −11.2pp（与 IC 结论 chip_concentration t=−5.07 一致）。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/mainforce_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "industry",
+          "score",
+          "target_weight",
+          "stop",
+          "close",
+          "moneyflow_net_z_5d",
+          "moneyflow_positive_ratio_10d",
+          "ret20"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "replay": {
+          "nav_csv": "output/research/mainforce/curve/nav_engine.csv",
+          "kind": "research_replay",
+          "description": "主力追踪（资金流＋筹码成本偏离）独立回放（资金流触发 + 筹码成本偏离排序，持有 10 日或 −8% 止损，双边 15.5bp，2024-08 起）"
         }
       }
     }

@@ -61,6 +61,13 @@ FAMILIES: list[dict] = [
         "hint": "证据单位是「一笔」：单笔净期望 + 事件样本数 + 按决策日聚类 NW t + 参数敏感性 + 容量",
         "branches": [
             {"key": "event", "label": "事件规则", "ids": ["first_ban_lowxi", "box_arm"]},
+            # 威科夫吸筹突破（2026-10-14）：结构型规则策略 —— 区间/spring/SOS 都是可复现的规则，
+            # 证据单位同样是「一笔」（269 笔、逐笔 +1.31%、按决策日聚类可检验），所以放族 A。
+            {"key": "structure", "label": "结构形态（威科夫）", "ids": ["wyckoff_arm"]},
+            # 主力追踪（2026-10-14）：资金流口径的规则策略（净流入 z 分数 + 吸筹形态），
+            # 证据单位同样是「一笔」，所以同属族 A。
+            {"key": "moneyflow", "label": "资金流（主力追踪）",
+             "ids": ["moneyflow_arm", "mainforce_arm"]},
             {"key": "formula", "label": "公式打分（不训练）", "ids": ["jq_multi_factor_size_roe", "jq_roe_roa_diagnostic"]},
             {"key": "arm", "label": "手臂规则（行业/概念/宽度）", "ids": ["arm_concept", "rot_arm", "arm_select"]},
         ],

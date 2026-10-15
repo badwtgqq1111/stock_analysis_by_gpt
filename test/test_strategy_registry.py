@@ -111,10 +111,13 @@ def test_curve_wiring_matches_pre_migration_values():
     from backend.services import strategy_registry as reg
 
     got_replay = {s["id"]: s["curve"]["replay"]["nav_csv"] for s in reg.specs() if s["curve"]["replay"]}
-    assert got_replay == OLD_REPLAY, got_replay
+    # 既有两条的**值**不许变（这是迁移回归锁）；新策略可以**新增**条目（2026-10-14 起有 wyckoff_arm）。
+    assert {k: got_replay.get(k) for k in OLD_REPLAY} == OLD_REPLAY, got_replay
+    assert set(got_replay) >= set(OLD_REPLAY), got_replay
     got_shadow = {s["id"]: (s["curve"]["shadow"]["nav_csv"], s["curve"]["shadow"]["history_csv"])
                   for s in reg.specs() if s["curve"]["shadow"]}
-    assert got_shadow == OLD_SHADOW, got_shadow
+    assert {k: got_shadow.get(k) for k in OLD_SHADOW} == OLD_SHADOW, got_shadow
+    assert set(got_shadow) >= set(OLD_SHADOW), got_shadow
     # 模型臂：以前硬编码 ("preselected",10)/("notify",10)
     arms = {s["id"]: s["model_arms"] for s in reg.specs() if s.get("model_arms")}
     assert arms == {"cn_ensemble": {"ledger_sources": ["preselected", "notify"], "top_n": 10}}, arms

@@ -81,7 +81,11 @@
                 （约 {{ etaClock }} 完成）</span>
             </div>
             <div v-if="status.today && !status.today_started" class="dim tiny">
-              今天（{{ status.today }}）的定时任务还没开始（默认 19:30 / 20:30 / 22:00 触发）；下面展示的是最近一次已完成的运行。
+              今天（{{ status.today }}）还没跑进主阶段<template v-if="status.today_attempts">：
+              已触发 {{ status.today_attempts }} 次<template v-if="status.today_last_error">，最近一次失败于
+              <b>{{ status.today_last_error }}</b></template></template>；
+              定时任务默认 18:30 / 20:00 / 21:30（当日成功后写 production.done，后续触发自动跳过）。
+              下面展示的是最近一次已完成的运行。
             </div>
             <div v-if="status.daily.failed_stage" class="warn-text tiny">
               最近一次失败在此阶段：{{ status.daily.failed_stage }}（后续触发会自动重试）

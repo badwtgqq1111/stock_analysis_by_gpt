@@ -360,12 +360,27 @@ def build_status() -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
     today_dir = DAILY_DIR / today if DAILY_DIR.exists() else None
     today_started = bool(today_dir and _has_real_run(today_dir))
+    # 今天到底触发过几次、最近一次为什么没进主阶段（2026-10-14 加）。
+    # 起因：10-13 / 10-14 三档触发（18:30 / 20:00 / 21:30）全部停在预检就 exit 2，
+    # 而页面对"今天"只说一句"定时任务还没开始"——看进度条完全没动，像"根本没跑"。
+    today_attempts, today_last_error = 0, None
+    today_run_log = today_dir / "run.log" if today_dir else None
+    if today_run_log is not None and today_run_log.exists():
+        lines = _read_tail(today_run_log).splitlines()
+        today_attempts = sum(1 for line in lines if "code-anchor:" in line)
+        for line in reversed(lines):
+            found = re.search(r"preflight FAILED|ready-gate FAILED|stage=\S+ FAILED", line)
+            if found:
+                today_last_error = found.group(0)
+                break
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "trade_date": parsed["trade_date"] or (log_dir.name if log_dir else None),
         "today": today,
         "today_started": today_started,
+        "today_attempts": today_attempts,
+        "today_last_error": today_last_error,
         "daily": {
             "log_dir": str(log_dir.relative_to(ROOT)) if log_dir else None,
             "started_at": parsed["started_at"],

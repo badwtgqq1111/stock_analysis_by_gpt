@@ -129,12 +129,20 @@ def track(targets: dict, bench: pd.Series, bars: pd.DataFrame) -> dict:
             "benchmark_metrics": metrics(bnav), "excess_return": nav[-1] / bnav[-1] - 1}
 
 
-def replay(path: Path, bench: pd.Series, *, strategy_id: str = "jq_multi_factor_size_roe") -> dict:
+def replay(path: Path, bench: pd.Series, *, strategy_id: str = "jq_multi_factor_size_roe",
+           description: str | None = None) -> dict:
+    """读独立回放的 nav.csv（列：`trade_date` + `nav`）。
+
+    `description` 优先用声明层的 `curve.replay.description`；没有就退回下面这张老表，
+    再没有就给一句通用说明 —— **不要用 `descriptions[strategy_id]` 硬取**：
+    2026-10-14 新增 wyckoff_arm 时这里直接 KeyError，整个绩效链会挂掉。
+    """
     descriptions = {
         "jq_multi_factor_size_roe": "原聚宽低市值+ROE，rank(roe)-rank(market_cap)",
         "jq_roe_roa_diagnostic": "动态诊断候选ROE＋0.25×ROA，rank(roe)+0.25*rank(roa)，未过训练稳健门槛",
     }
-    description = descriptions[strategy_id]
+    description = description or descriptions.get(strategy_id) or \
+        f"{strategy_id} 独立研究回放（口径见该策略的 curve.json / REPORT.md）"
     frame = pd.read_csv(path, parse_dates=["trade_date"]).set_index("trade_date")
     frame = frame.sort_index()
     if frame.index.duplicated().any() or not np.isfinite(frame.nav).all() or (frame.nav <= 0).any():
@@ -341,12 +349,14 @@ def build() -> dict:
 
     # ── 独立回放曲线（curve.replay）：策略原始口径的 nav.csv，接线写在 config 里 ──────
     for _spec in config["strategies"]:
-        _rel = (_spec.get("curve") or {}).get("replay", {}).get("nav_csv")
+        _replay = (_spec.get("curve") or {}).get("replay") or {}
+        _rel = _replay.get("nav_csv")
         if not _rel or _spec["id"] not in rows:
             continue
         _path = ROOT / str(_rel)
         if _path.exists():
-            rows[_spec["id"]]["research"] = replay(_path, bench, strategy_id=_spec["id"])
+            rows[_spec["id"]]["research"] = replay(_path, bench, strategy_id=_spec["id"],
+                                                   description=_replay.get("description"))
     # ── 模拟盘（影子组合）净值 → 长窗口对照曲线 ────────────────────────────────
     # 为什么需要：`tracking` 要求**连续交易日**都有归档名单（见 METHOD），而按决策日归档的策略
     # （rot_arm 这类，决策日稀疏到每周/每月）只能拿到"最近几个连续交易日"的样本

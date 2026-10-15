@@ -90,28 +90,74 @@ def test_ready_gate_verdicts(tmp_path):
     # ① 非交易日 ⇒ skip
     saturday = module.evaluate(now=__import__("datetime").datetime(2026, 10, 10, 18, 0))
     assert saturday["is_trading_weekday"] is False and saturday["verdict"] == "skip"
-    # ② 已就绪 ⇒ ready（用真实本地日线）
+    # ② 两种判据任一成立即 ready：本地日线已到当天，**或**上游（腾讯）已经有当天的 bar
     now = module.evaluate()
     assert now["verdict"] in ("ready", "not_ready")
     if now["latest"]:
-        assert (now["verdict"] == "ready") == (now["latest"] >= now["today"])
-    # ③ 未就绪 ⇒ 用临时 parquet 把"最新日期"压到过去
+        local_ok = now["latest"] >= now["today"]
+        assert (now["verdict"] == "ready") == (local_ok or now["upstream_has_today"] is True)
+        want = "local" if local_ok else ("upstream" if now["upstream_has_today"] is True else "none")
+        assert now["judged_by"] == want, "判据要写明（本地/上游/都没有）"
+    # ③ 未就绪 ⇒ 用临时 parquet 把"最新日期"压到过去；上游探针在这一步**钉成 False**（别让网络决定断言）
     import pandas as pd
 
     bench = tmp_path / "bench.parquet"
     pd.DataFrame({"ts_code": ["000905.SH"], "trade_date": [pd.Timestamp("2020-01-02")]}).to_parquet(bench)
     module.BENCH = bench
     module.CLEAN = tmp_path / "empty-clean"          # 目录不存在 ⇒ clean_latest 为 None
+    module.upstream_has_today = lambda day: False
     stale = module.evaluate()
     assert stale["bench_latest"] == "2020-01-02" and stale["latest"] == "2020-01-02"
     if stale["is_trading_weekday"]:
-        assert stale["verdict"] == "not_ready" and stale["ready"] is False
-    # ④ 入口在"未就绪 + 已过 min-hour"时必须非零退出（中止本次，交给重试触发）
+        assert stale["verdict"] == "not_ready" and stale["ready"] is False and stale["judged_by"] == "none"
+    # ④ **本地落后但上游已有今天 ⇒ ready**：闸门不能自指死锁
+    #    （clean 日线/基准指数都是流水线自己在闸门**之后**写的；只按本地判，漏跑一天就永远追不上）
+    module.upstream_has_today = lambda day: True
+    catchup = module.evaluate()
+    assert catchup["ready"] is True and catchup["judged_by"] == "upstream"
+    # ⑤ 探针取不到（None，网络/接口抽风）不许被当成"就绪"
+    module.upstream_has_today = lambda day: None
+    unseen = module.evaluate()
+    assert unseen["ready"] is False and unseen["verdict"] == "not_ready"
+    # ⑥ 入口在"未就绪 + 已过 min-hour"时必须非零退出（中止本次，交给重试触发）
     proc = subprocess.run([PY, "scripts/daily_ready_gate.py", "--check"],
                           cwd=ROOT, capture_output=True, text=True)
     assert proc.returncode in (0, 1)
     status = json.loads((ROOT / "output/data_quality/daily_ready_gate.json").read_text(encoding="utf-8"))
-    assert {"today", "latest", "ready", "verdict"} <= set(status)
+    assert {"today", "latest", "ready", "verdict", "upstream_has_today", "judged_by"} <= set(status)
+
+
+def test_runner_snapshot_keeps_repo_root(tmp_path):
+    """护栏把自身快照到 $LOG_DIR 再 exec 之后，**仓库根必须还是仓库根**。
+
+    2026-10-13 / 10-14 的事故：快照里的 `BASH_SOURCE` 指向 $LOG_DIR/runner.<sha>.sh，
+    `dirname/..` 推出来是 `output/pipeline_reports/daily` ⇒ 预检里的相对路径 `test/...` 找不到、
+    日志目录还多套一层 ⇒ 三档触发（18:30 / 20:00 / 21:30）全部在预检 exit 2，两天一次主阶段没跑。
+    这里在假根里真跑一遍（用探针冒充预检命令，故意返回非 0，停在预检），只看"此刻的 cwd 是谁"。
+    """
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("run_daily_production.sh", "daily_runner_guard.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "stub.py").write_text("", encoding="utf-8")
+    probe = tmp_path / "probe.sh"
+    probe.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "PROBE_CWD=$PWD"\nexit 7\n', encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{Path.home()}/.local/bin:" + os.environ.get("PATH", ""),
+        "DAILY_NOTIFY": "0",
+        "DAILY_READY_GATE": "0",
+        "DAILY_TRADE_DATE": "verify_root",
+        "DAILY_PREFLIGHT_CMD": f"bash {probe}",
+    }
+    proc = subprocess.run(["bash", str(scripts / "run_daily_production.sh")], cwd=tmp_path,
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 2, proc.stdout + proc.stderr     # 停在预检（探针故意失败）
+    preflight = tmp_path / "output/pipeline_reports/daily/verify_root/preflight.log"
+    assert preflight.exists(), proc.stdout + proc.stderr
+    assert f"PROBE_CWD={tmp_path}" in preflight.read_text(encoding="utf-8"), "根目录被推到了别处"
+    assert not (tmp_path / "output/pipeline_reports/daily/output").exists(), "不该出现双重嵌套的日志目录"
 
 
 def test_guard_installer_inserts_both_blocks_idempotently(tmp_path):

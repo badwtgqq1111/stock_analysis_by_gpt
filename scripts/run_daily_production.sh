@@ -66,7 +66,18 @@ export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 set -uo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+# 根目录推导（2026-10-14 修）：护栏 runner_guard_boot 会把自身**快照**到 $LOG_DIR/runner.<sha>.sh
+# 再 exec 它（免疫"改运行中的脚本"）；可那时 BASH_SOURCE 指向的是快照，`dirname/..` 推出来是
+# output/pipeline_reports/daily —— **不是仓库根** ⇒ 预检里的相对路径 `test/...` 找不到、
+# `$ROOT/scripts/notify_selection.py` 不存在、LOG_DIR 还多套一层（$RUN_DIR/output/pipeline_reports/daily）。
+# 实测：2026-10-13 与 10-14 的三档触发（18:30 / 20:00 / 21:30，共 6 次）全部卡在预检 exit 2，
+# 一次主阶段都没跑（证据 output/verification/p1_99_daily_runner_snapshot_root_20261014/EVIDENCE/）。
+# 护栏 exec 前已 export RUNNER_SOURCE_PATH（源脚本绝对路径）⇒ 有它就以它为准。
+if [ -n "${RUNNER_SOURCE_PATH:-}" ] && [ -f "${RUNNER_SOURCE_PATH:-}" ]; then
+  cd "$(dirname "$RUNNER_SOURCE_PATH")/.." || exit 1
+else
+  cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+fi
 ROOT="$(pwd)"
 
 # launchd / cron / systemd 的 PATH 很干净，这里补齐 uv 的常见安装位置
@@ -191,7 +202,7 @@ notify_alert() {
 }
 
 # 预检：跑一遍与本次改动相关的回归测试（约 1 秒），把"代码级错误"挡在 70 分钟的重活之前
-PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py test/test_xy_industry_rotation.py test/test_cn_macro_sync.py test/test_xy_daily_rotation.py test/test_rotation_arm.py test/test_strategy_pool_performance.py test/test_first_ban_lowxi.py test/test_agent_run.py test/test_agent_api.py test/test_factor_library.py test/test_model_cards.py test/test_model_experiment_switches.py test/test_ttl_cache.py test/test_intraday_sync_target.py test/test_live_mirror.py test/test_agent_actions.py test/test_mining_workbench.py test/test_research_sources.py test/test_factor_inspector.py test/test_factor_fitness.py test/test_factor_pipeline_ops.py test/test_daily_automation_audit.py test/test_daily_schedule_and_notify.py test/test_strategy_lists_contract.py test/test_strategy_registry.py test/test_kline_watchlist_layout.py test/test_calendar_and_intraday_header.py test/test_live_price_basis.py -q}"
+PREFLIGHT_CMD="${DAILY_PREFLIGHT_CMD:-uv run python -m pytest test/test_portfolio_execution_guards.py test/test_selection_notify.py test/test_volume_volatility_features.py test/test_board_sync.py test/test_data_completeness.py test/test_concept_arm.py test/test_web_cache_and_build.py test/test_stock_bundle_and_strategies.py test/test_daily_script_safety.py test/test_calendar_filters_and_fixes.py test/test_web_freshness.py test/test_strategy_pool.py test/test_industry_heat.py test/test_concept_arm.py test/test_industry_momentum.py test/test_industry_reversal.py test/test_ai_pick_analysis.py test/test_xy_industry_rotation.py test/test_cn_macro_sync.py test/test_xy_daily_rotation.py test/test_rotation_arm.py test/test_strategy_pool_performance.py test/test_first_ban_lowxi.py test/test_agent_run.py test/test_agent_api.py test/test_factor_library.py test/test_model_cards.py test/test_model_experiment_switches.py test/test_ttl_cache.py test/test_intraday_sync_target.py test/test_live_mirror.py test/test_agent_actions.py test/test_mining_workbench.py test/test_research_sources.py test/test_factor_inspector.py test/test_factor_fitness.py test/test_factor_pipeline_ops.py test/test_daily_automation_audit.py test/test_daily_schedule_and_notify.py test/test_strategy_lists_contract.py test/test_strategy_registry.py test/test_kline_watchlist_layout.py test/test_calendar_and_intraday_header.py test/test_live_price_basis.py test/test_wyckoff.py test/test_moneyflow_and_shareholders.py test/test_chip_distribution.py -q}"
 if [ "${DAILY_PREFLIGHT:-1}" = "1" ] && [ "$DRY_RUN" -eq 0 ]; then
   if eval "$PREFLIGHT_CMD" > "$LOG_DIR/preflight.log" 2>&1; then
     log "preflight ok: $PREFLIGHT_CMD"

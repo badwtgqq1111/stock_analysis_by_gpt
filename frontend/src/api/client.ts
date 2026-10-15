@@ -642,6 +642,12 @@ export async function getStrategyPool(refresh = true): Promise<import('@/types/a
   return data
 }
 
+/** 威科夫点图（P&F）+ 阶段速读（K 线页「威科夫点图」面板）。 */
+export async function getWyckoff(code: string, params: { days?: number; box_pct?: number; reversal?: number; range_days?: number } = {}): Promise<import('@/types/api').WyckoffRead> {
+  const { data } = await http.get(`/stocks/${encodeURIComponent(code)}/wyckoff`, { params })
+  return data
+}
+
 /** 策略抽象层的接线矩阵（每条策略接到了哪些消费端；新增策略自动出现）。 */
 export async function getStrategyRegistry(): Promise<import('@/types/api').StrategyRegistryResponse> {
   const { data } = await http.get('/strategies/registry')

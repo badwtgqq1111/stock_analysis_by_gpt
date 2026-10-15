@@ -76,8 +76,14 @@ def test_overview_has_two_families_and_four_layers(client):
 def test_overview_items_carry_runtime_state(client):
     payload = client.get("/api/agent/overview").json()
     items = [item for family in payload["families"] for branch in family["branches"] for item in branch["items"]]
-    # 9 = 8 条原有 + cn_ensemble_pk_legacy（2026-10-12 补进 B2 的对照臂）；live_holdings 是账户，不进树。
-    assert len(items) == 9, f"9 条在册策略都应在树里，实测 {len(items)}"
+    # 期望条数**从 config 推导**，不再写死数字：每加一条策略都要改测试的话，守卫会退化成"改完就绿"。
+    # 口径：登记表里的策略减去 `live_account`（实盘镜像是账户不是策略，不进两族树）。
+    config = json.loads((ROOT / "config/strategies.json").read_text(encoding="utf-8"))
+    expected = [s["id"] for s in config["strategies"] if s.get("kind") != "live_account"]
+    assert len(items) == len(expected), f"在册策略都应在树里：期望 {len(expected)} 条，实测 {len(items)}"
+    assert {item["id"] for item in items} == set(expected), \
+        f"树里的策略与登记表不一致：树多 {sorted({i['id'] for i in items} - set(expected))}、" \
+        f"树少 {sorted(set(expected) - {i['id'] for i in items})}"
     by_id = {item["id"]: item for item in items}
     assert by_id["cn_ensemble"]["stage"] == "production"
     assert by_id["first_ban_lowxi"]["stage"] == "candidate"

@@ -486,6 +486,97 @@ def read_box_arm_history() -> list[dict]:
     return rows
 
 
+def read_wyckoff_arm_history() -> list[dict]:
+    """威科夫吸筹突破（wyckoff_arm）的历史快照 → 台账。
+
+    产物 `output/results_cn/wyckoff_arm_history/<信号日>.csv`（决策日 = SOS 突破信号日）由
+    `scripts/select_wyckoff_arm.py` 写。进台账后：选股日历能按日查到它，
+    K 线页「个股资料 → 选股记录」也能看到"这只票哪天被威科夫口径选中过"。
+    """
+    rows = []
+    hist = RESULTS / "wyckoff_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "wyckoff_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "note": (f"区间上沿 {r.get('level')}｜止损 {r.get('stop')}｜区间宽 "
+                         f"{round(float(r.get('range_pct') or 0) * 100, 1)}%｜量能 {r.get('vol_ratio')}×"),
+                "file": f"wyckoff_arm_history/{path.name}",
+            })
+    return rows
+
+
+def read_moneyflow_arm_history() -> list[dict]:
+    """主力资金流追踪（moneyflow_arm）的历史快照 → 台账。
+
+    产物 `output/results_cn/moneyflow_arm_history/<信号日>.csv` 由 `scripts/select_moneyflow_arm.py` 写。
+    """
+    rows = []
+    hist = RESULTS / "moneyflow_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "moneyflow_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "note": (f"5日净流入 z {r.get('moneyflow_net_z_5d')}｜10日流入占比 "
+                         f"{r.get('moneyflow_positive_ratio_10d')}｜20日涨幅 "
+                         f"{round(float(r.get('ret20') or 0) * 100, 1)}%｜止损 {r.get('stop')}"),
+                "file": f"moneyflow_arm_history/{path.name}",
+            })
+    return rows
+
+
+def read_mainforce_arm_history() -> list[dict]:
+    """主力追踪·多口径（mainforce_arm）历史快照 → 台账。产物由
+    `scripts/select_moneyflow_arm.py --variant mainforce` 写。"""
+    rows = []
+    hist = RESULTS / "mainforce_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem, "source": "mainforce_arm",
+                "stock_code": _norm_code(r.get("stock_code")), "name": r.get("name"),
+                "industry": r.get("industry"), "model_score": r.get("score"),
+                "rank": r.get("rank"), "weight": r.get("target_weight"),
+                "note": (f"5日净流入 z {r.get('moneyflow_net_z_5d')}｜10日流入占比 "
+                         f"{r.get('moneyflow_positive_ratio_10d')}｜20日涨幅 "
+                         f"{round(float(r.get('ret20') or 0) * 100, 1)}%｜止损 {r.get('stop')}"),
+                "file": f"mainforce_arm_history/{path.name}",
+            })
+    return rows
+
+
 def read_first_ban_lowxi_history() -> list[dict]:
     """首板低吸（社区策略）的历史快照 → 台账（**反例档案**：负期望，只为对照与追溯）。
 
@@ -602,6 +693,8 @@ def main() -> int:
     ledger = pd.DataFrame(read_feishu() + read_snapshots() + read_survey() + read_arm_history()
                           + read_arm_concept_history() + read_rot_arm_history()
                           + read_box_arm_history() + read_first_ban_lowxi_history()
+                          + read_wyckoff_arm_history() + read_moneyflow_arm_history()
+                          + read_mainforce_arm_history()
                           + read_jq_history())
     if ledger.empty:
         raise SystemExit("三个来源都没读到选股记录")

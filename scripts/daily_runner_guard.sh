@@ -28,7 +28,27 @@ runner_guard_boot() {
     echo "runner_guard_boot: 需要 <脚本路径> <日志目录>" >&2
     return 1
   fi
-  local root; root="$(cd "$(dirname "$self")/.." && pwd)"
+  # 快照重入时**立刻返回**：锚点与快照只由外层那一次写。重入时 $0 指向 $LOG_DIR/runner.<sha>.sh，
+  # 按它推根目录会推成日志目录（里面没有 .git），再写一次锚点就把外层写好的 git_head/dirty_files
+  # 覆盖成 unknown（2026-10-14 一并修）。
+  # 判据必须是"**当前这个脚本就是那次快照**"（$self == RUNNER_SNAPSHOT_PATH），不能只看
+  # RUNNER_SNAPSHOT=1：那个变量随环境继承下去了 —— 预检（跑在快照进程里）拉起的任何脚本都会
+  # 带着它，被误判成"我自己是快照"就会连锚点都不写（实测 test_daily_automation_audit.py::
+  # test_runner_guard_snapshots_and_anchors 就是这么红的）。
+  if [ "${RUNNER_SNAPSHOT:-0}" = "1" ] && [ -n "${RUNNER_SNAPSHOT_PATH:-}" ]; then
+    local self_abs
+    self_abs="$(cd "$(dirname "$self")" 2>/dev/null && pwd)/$(basename "$self")"
+    if [ "$self_abs" = "$RUNNER_SNAPSHOT_PATH" ]; then
+      return 0
+    fi
+  fi
+  # 根目录：优先用源脚本路径（外层 export 的 RUNNER_SOURCE_PATH），否则按传入的脚本路径推。
+  local root
+  if [ -n "${RUNNER_SOURCE_PATH:-}" ] && [ -f "${RUNNER_SOURCE_PATH:-}" ]; then
+    root="$(cd "$(dirname "$RUNNER_SOURCE_PATH")/.." && pwd)"
+  else
+    root="$(cd "$(dirname "$self")/.." && pwd)"
+  fi
   mkdir -p "$log_dir"
   local digest; digest="$(runner_guard_sha8 "$self")"
   local snapshot="$log_dir/runner.${digest}.sh"
@@ -45,10 +65,7 @@ runner_guard_boot() {
   printf '%s code-anchor: head=%s dirty_files=%s runner_sha256=%s…\n' \
     "$(date '+%Y-%m-%d %H:%M:%S')" "$head" "$dirty" "$digest" >> "$log_dir/run.log"
 
-  # ② 自身快照 + exec（幂等：已经在快照里就不再递归）
-  if [ "${RUNNER_SNAPSHOT:-0}" = "1" ]; then
-    return 0
-  fi
+  # ② 自身快照 + exec（幂等：已经在快照里就不再递归 —— 见函数开头的早返回）
   cp "$self" "$snapshot"
   export RUNNER_SNAPSHOT=1 RUNNER_SNAPSHOT_PATH="$snapshot" RUNNER_SOURCE_PATH="$self"
   printf '%s runner-guard: 已快照自身 → %s（源文件之后被编辑也不影响本次运行）\n' \

@@ -204,6 +204,8 @@ export interface AutomationStatus {
   trade_date: string | null
   today?: string
   today_started?: boolean
+  today_attempts?: number
+  today_last_error?: string | null
   daily: {
     log_dir: string | null
     started_at: string | null
@@ -1506,4 +1508,71 @@ export interface MiningContext {
   tools: MiningContextTool[]
   templates: MiningContextTemplate[]
   research_sources?: ResearchSource[]
+}
+
+// ─── 威科夫点图（P&F）与阶段速读（K 线页）─────────────────────────────────────
+export interface PnFColumn {
+  kind: 'X' | 'O'
+  boxes: number[]
+  dates: string[]
+  top: number
+  bottom: number
+  n: number
+}
+export interface PnFChart {
+  available: boolean
+  reason?: string
+  box_size: number
+  box_pct: number
+  reversal: number
+  columns: PnFColumn[]
+  support: number | null
+  resistance: number | null
+  count_target: number | null
+  cause_columns?: number
+  last_column: 'X' | 'O' | null
+  bars: number
+  start: string
+  end: string
+}
+export interface WyckoffEvidence { type: string; date: string; detail: string }
+export interface WyckoffEvent { type: string; label: string; side: number; prob: number; date?: string }
+export interface WyckoffCloud {
+  available: boolean
+  reason?: string
+  date?: string
+  cloud?: WyckoffEvent[]
+  collapsed?: { type: string; label: string; side: number; prob: number } | null
+  threshold?: number
+  score?: { wso: number; n_events: number; half_life: number; mapping: string }
+  recent_collapsed?: WyckoffEvent[]
+  implemented?: string[]
+  not_implemented?: string[]
+  source?: string
+  methodology?: string
+}
+
+export interface WyckoffRead {
+  available: boolean
+  reason?: string
+  code?: string
+  phase?: string
+  phase_label?: string
+  phase_note?: string
+  support?: number | null
+  resistance?: number | null
+  spring?: { date: string; low: number; recovered_on: string } | null
+  upthrust?: { date: string; high: number; rejected_on: string } | null
+  sos?: { date: string; close: number; range_high: number; volume_ratio: number | null; volume_ok: boolean } | null
+  ret_120?: number | null
+  volume_ratio?: number | null
+  count_target?: number | null
+  cause_columns?: number
+  evidence?: WyckoffEvidence[]
+  methodology?: string
+  disclaimer?: string
+  /** 事件概率云（民生证券公式）：每根 K 线的事件似然度 → 概率坍缩 → WSO 分数 */
+  event_cloud?: WyckoffCloud
+  reference?: string
+  pnf: PnFChart
 }

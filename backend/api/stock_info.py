@@ -264,6 +264,47 @@ def _announcements(code: str, months: int = 6) -> dict:
                 "rows": [], "source": "巨潮资讯"}
 
 
+@router.get("/{code}/wyckoff")
+def stock_wyckoff(code: str, days: int = Query(250, ge=60, le=2000),
+                  box_pct: float = Query(0.02, ge=0.005, le=0.10),
+                  reversal: int = Query(3, ge=1, le=5),
+                  range_days: int = Query(60, ge=20, le=250)) -> dict:
+    """威科夫点图（P&F）+ 阶段速读（用户 2026-10-14："在 K 线图里补充一下威科夫点图"）。
+
+    * `box_pct` 箱大小（占价格百分比，默认 2%）、`reversal` 换列箱数（默认 3）；
+    * `range_days` 交易区间回看窗口（默认 60 个交易日）—— 区间是 spring/SOS 的参照物，
+      窗口长度直接决定读数是"吸筹"还是"趋势中继"，所以做成显式参数而不是藏在代码里。
+    返回 `pnf`（点数图列）+ `phase`（阶段）+ `evidence`（每条判定的证据）+ `count_target`（横向计数目标价）。
+    """
+    from backend.services import wyckoff_service
+
+    target = str(code or "").strip().upper()
+    if not target:
+        raise HTTPException(status_code=400, detail="缺少股票代码")
+    read = wyckoff_service.read_stock(target, days=days, box_pct=box_pct, reversal=reversal)
+    if read.get("available"):
+        # 区间窗口可调：read_stock 用默认 60，这里按请求重算一次（保持 chart 与读数一致）
+        from backend.services.data_service import load_stock_ohlcv
+
+        frame = load_stock_ohlcv(target, days=days)
+        if frame is not None and not frame.empty:
+            read = {**wyckoff_service.wyckoff_read(frame, box_pct=box_pct, reversal=reversal,
+                                                   range_days=range_days),
+                    "code": target, "days": days}
+    try:
+        from backend.services.data_service import load_stock_ohlcv
+
+        frame = load_stock_ohlcv(target, days=days)
+        if frame is not None and not frame.empty:
+            # 事件概率云（民生证券 2025-01 公式）：与点图/读数同一份行情，单独一个字段
+            read["event_cloud"] = wyckoff_service.event_cloud(frame)
+    except Exception as exc:                                       # noqa: BLE001
+        read["event_cloud"] = {"available": False, "reason": str(exc)}
+    read["source"] = "backend/services/wyckoff_service.py"
+    read["reference"] = "docs/reference/wyckoff/（点云 md + 事件概率云 md + 点数图 PDF）"
+    return read
+
+
 @router.get("/{code}/bundle")
 def stock_bundle(code: str, days: int = Query(60, ge=20, le=250)) -> dict:
     from backend.services import live_quotes

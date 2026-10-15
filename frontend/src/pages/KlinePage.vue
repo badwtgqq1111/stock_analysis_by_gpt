@@ -58,6 +58,73 @@
     <div v-else-if="isLoading" class="empty-state">加载中...</div>
     <div v-else class="empty-state">暂无行情数据</div>
 
+    <!-- 威科夫点图（P&F）+ 阶段速读（用户 2026-10-14 要求补在 K 线页） -->
+    <div class="panel wyckoff-panel" v-if="selectedCode">
+      <h6>
+        威科夫点图（P&amp;F）
+        <span class="tag" :class="wyckoffTone" v-if="wyckoff?.available">{{ wyckoff.phase_label }}</span>
+        <span class="dim tiny" v-if="wyckoff?.available">
+          近 {{ wyckoffRangeDays }} 日区间 {{ fmt(wyckoff.support) }} ~ {{ fmt(wyckoff.resistance) }}
+          · 横向计数目标 {{ fmt(wyckoff.count_target) }}
+          <template v-if="wyckoff.volume_ratio">· 量能 {{ wyckoff.volume_ratio }}× 20 日均量</template>
+        </span>
+        <span class="wk-controls">
+          <label class="tiny dim">箱 %<input v-model.number="wyckoffBoxPct" type="number" step="0.5" min="0.5" max="10" /></label>
+          <label class="tiny dim">反转箱<input v-model.number="wyckoffReversal" type="number" step="1" min="1" max="5" /></label>
+          <label class="tiny dim">区间天数<input v-model.number="wyckoffRangeDays" type="number" step="10" min="20" max="250" /></label>
+          <button class="btn-ghost btn-sm" :disabled="wyckoffLoading" @click="loadWyckoff">重算</button>
+        </span>
+      </h6>
+      <StateBlock v-if="wyckoffLoading" state="loading" title="算点数图…" />
+      <StateBlock v-else-if="wyckoffError" state="error" title="威科夫读数取不到" :detail="wyckoffError" />
+      <template v-else-if="wyckoff?.available">
+        <p class="tiny dim wk-note">{{ wyckoff.phase_note }}</p>
+        <WyckoffChart :read="wyckoff" :height="380" />
+        <div class="wk-evidence">
+          <div v-for="(e, i) in wyckoff.evidence || []" :key="i" class="wk-ev">
+            <span class="tag tiny" :class="evidenceTone(e.type)">{{ evidenceLabel(e.type) }}</span>
+            <span class="tiny">{{ e.detail }}</span>
+          </div>
+        </div>
+        <!-- 事件概率云（民生证券 2025-01 公式）：当前 K 线的候选事件似然度 + 概率坍缩 + WSO 分数 -->
+        <div class="wk-cloud" v-if="wyckoff.event_cloud?.available">
+          <div class="wk-cloud-head">
+            <b>事件概率云</b>
+            <span class="tag tiny" :class="cloudTone">
+              {{ wyckoff.event_cloud.collapsed
+                  ? `坍缩：${wyckoff.event_cloud.collapsed.label}（${(wyckoff.event_cloud.collapsed.prob * 100).toFixed(0)}%）`
+                  : `今日无显著形态（阈值 ${((wyckoff.event_cloud.threshold || 0.6) * 100).toFixed(0)}%）` }}
+            </span>
+            <span class="pill tiny">WSO <b :class="(wyckoff.event_cloud.score?.wso || 0) >= 0 ? 'up' : 'down'">
+              {{ (wyckoff.event_cloud.score?.wso ?? 0).toFixed(3) }}</b>
+              <span class="dim">（半衰期 {{ wyckoff.event_cloud.score?.half_life }} 日 · {{ wyckoff.event_cloud.score?.n_events }} 个坍缩事件）</span>
+            </span>
+          </div>
+          <table class="data-table tiny">
+            <thead><tr><th class="left">当前 K 线候选事件</th><th class="left">似然度</th><th class="left">方向</th></tr></thead>
+            <tbody>
+              <tr v-for="e in (wyckoff.event_cloud.cloud || [])" :key="e.type">
+                <td class="left"><b>{{ e.type }}</b> {{ e.label }}</td>
+                <td class="left">
+                  <span class="wk-bar" :style="{ width: Math.max(2, e.prob * 100) + '%' }"></span>
+                  <span class="mono">{{ (e.prob * 100).toFixed(1) }}%</span>
+                </td>
+                <td class="left" :class="e.side > 0 ? 'up' : 'down'">{{ e.side > 0 ? '偏多 +1' : '偏空 −1' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="hint tiny">
+            已实现 <b>{{ (wyckoff.event_cloud.implemented || []).length }}</b> 个公式自足的事件；
+            需要波段端点结构的
+            <span class="mono">{{ (wyckoff.event_cloud.not_implemented || []).join(' / ') }}</span>
+            <b>未实现</b>（不编数字）。来源：{{ wyckoff.event_cloud.source }}
+          </p>
+        </div>
+        <p class="hint tiny mt">{{ wyckoff.methodology }} {{ wyckoff.disclaimer }}</p>
+      </template>
+      <p v-else class="hint tiny">点数图不可用：{{ wyckoff?.reason || '—' }}</p>
+    </div>
+
     <!-- 分时面板：K 线页点选的交易日 -->
     <div class="panel intraday-panel" v-if="selectedCode && (pickedDate || intraday || intradayError)">
       <h6>
@@ -136,11 +203,12 @@ import StateBlock from '@/components/ui/StateBlock.vue'
 import IntradayChart from '@/components/IntradayChart.vue'
 import StockWatchlist from '@/components/StockWatchlist.vue'
 import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
+import WyckoffChart from '@/components/WyckoffChart.vue'
 import StockInfoPanel from '@/components/StockInfoPanel.vue'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
 import { useKlineData } from '@/composables/useKlineData'
-import { getIntraday, getIntradayCoverage } from '@/api/client'
-import type { IntradayCoverage, IntradayResponse } from '@/types/api'
+import { getIntraday, getIntradayCoverage, getWyckoff } from '@/api/client'
+import type { IntradayCoverage, IntradayResponse, WyckoffRead } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -327,6 +395,57 @@ watch(selectedCode, (code) => {
   if (!code || String(route.query.code || '') === code) return
   void router.replace({ query: { ...route.query, code } })
 })
+
+// ── 威科夫点图（P&F）：随选中标的自动算，箱 %/反转箱/区间天数可调 ───────────────
+const wyckoff = ref<WyckoffRead | null>(null)
+const wyckoffLoading = ref(false)
+const wyckoffError = ref('')
+const wyckoffBoxPct = ref(2)          // 页面用"百分比"输入，接口要小数
+const wyckoffReversal = ref(3)
+const wyckoffRangeDays = ref(60)
+const wyckoffTone = computed(() => {
+  const phase = wyckoff.value?.phase || ''
+  if (phase === 'markup') return 'ok'
+  if (phase === 'accumulation') return 'info'
+  if (phase === 'markup_watch') return 'warn'
+  if (phase === 'distribution' || phase === 'markdown') return 'bad'
+  return 'dim'
+})
+const EVIDENCE_LABEL: Record<string, string> = {
+  range: '区间', context: '位置', spring: 'Spring', upthrust: 'Upthrust', sos: 'SOS',
+}
+const EVIDENCE_TONE: Record<string, string> = {
+  range: 'dim', context: 'dim', spring: 'ok', upthrust: 'bad', sos: 'warn',
+}
+const cloudTone = computed(() => {
+  const c = wyckoff.value?.event_cloud?.collapsed
+  if (!c) return 'dim'
+  return c.side > 0 ? 'ok' : 'bad'
+})
+const evidenceLabel = (type: string) => EVIDENCE_LABEL[type] || type
+const evidenceTone = (type: string) => EVIDENCE_TONE[type] || 'dim'
+
+async function loadWyckoff() {
+  if (!selectedCode.value) return
+  wyckoffLoading.value = true
+  wyckoffError.value = ''
+  try {
+    wyckoff.value = await getWyckoff(selectedCode.value, {
+      days: 250,
+      box_pct: Math.min(Math.max(Number(wyckoffBoxPct.value) || 2, 0.5), 10) / 100,
+      reversal: Math.min(Math.max(Math.round(Number(wyckoffReversal.value) || 3), 1), 5),
+      range_days: Math.min(Math.max(Math.round(Number(wyckoffRangeDays.value) || 60), 20), 250),
+    })
+  } catch (err) {
+    wyckoffError.value = String(err)
+  } finally {
+    wyckoffLoading.value = false
+  }
+}
+watch(selectedCode, (code) => { if (code) loadWyckoff() })
+onMounted(() => { if (selectedCode.value) loadWyckoff() })
+
+onUnmounted(() => { stopIntradayPoll() })
 </script>
 
 <style scoped>
@@ -336,6 +455,17 @@ watch(selectedCode, (code) => {
 @media (max-width: 1100px) { .col-side { position: static; } }
 .click-hint { margin-top: var(--sp-2); }
 .intraday-panel h6 { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.wyckoff-panel h6 { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.wk-controls { margin-left: auto; display: inline-flex; align-items: center; gap: var(--sp-2); }
+.wk-controls input { width: 56px; margin-left: 4px; background: var(--bg-input); border: 1px solid var(--border-color);
+  color: inherit; border-radius: 4px; padding: 2px 4px; font-size: var(--fs-xs); }
+.wk-note { margin: 2px 0 var(--sp-2); }
+.wk-evidence { display: flex; flex-direction: column; gap: 3px; margin-top: var(--sp-2); }
+.wk-ev { display: flex; gap: 6px; align-items: baseline; }
+.wk-cloud { margin-top: var(--sp-3); }
+.wk-cloud-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: 4px; }
+.wk-bar { display: inline-block; height: 8px; background: var(--accent-gold); border-radius: 2px;
+  margin-right: 6px; vertical-align: middle; }
 .intraday-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; margin: 2px 0 var(--sp-2); }
 .intraday-head .ih-code { font-size: var(--fs-md); }
 .intraday-head .ih-name { font-size: var(--fs-md); color: var(--accent-gold); }
@@ -344,4 +474,3 @@ watch(selectedCode, (code) => {
 .close-btn { margin-left: auto; }
 .intraday-panel .stat-grid { margin-bottom: var(--sp-3); }
 </style>
-onUnmounted(() => { stopIntradayPoll() })

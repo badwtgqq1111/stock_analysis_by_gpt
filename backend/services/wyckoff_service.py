@@ -312,6 +312,7 @@ def read_stock(code: str, *, days: int = 250, box_pct: float = DEFAULT_BOX_PCT,
 _EVENT_SOURCE = ("docs/reference/wyckoff/wyckoff_event_probability_cloud.md"
                  "（民生证券《量化专题报告：威科夫技术分析的概率云表达，从主观到量化》2025-01-14）")
 _EVENT_META = {           # type: (side, 中文名, 方向)
+    # —— 公式自足的一批（第一版就实现；单根 K 线 + 窗口分位数）——
     "PS": (+1, "初步支撑", "跌"), "SC": (+1, "卖出高潮", "跌"),
     "SPRING": (+1, "弹簧（假跌破）", "跌"), "VDB": (+1, "放量阳线", "涨"),
     "3H": (+1, "三连走强", "涨"), "OKR_UP": (+1, "阳包阴", "涨"),
@@ -320,9 +321,38 @@ _EVENT_META = {           # type: (side, 中文名, 方向)
     "UT": (-1, "上冲回落", "涨"), "VSB": (-1, "放量阴线", "跌"),
     "3L": (-1, "三连走弱", "跌"), "OKR_DOWN": (-1, "阴包阳", "跌"),
     "OB_UP": (-1, "超买（连续抬升）", "涨"),
+    # —— 需要"波段端点结构 / 辅助线"的一批（2026-10-15 补齐；研报 §2.3 第二组 + JOC/BOI）——
+    #    方向一律按**研报 §3.1 的分组映射**：第一组（判断下跌是否终止、上涨是否到来）= 吸筹 = +1；
+    #    第二组（判断上涨是否终止、下跌是否到来）= 派发 = −1；OB(Line) = −1、OS(Line) = +1。
+    "SOT_DOWN": (+1, "三个底端点距离缩短（跌势衰竭）", "跌"),
+    "SOT_UP": (-1, "三个顶端点距离缩短（涨势衰竭）", "涨"),
+    "ASY": (+1, "上破供应线/阻力线", "涨"),
+    "AS": (-1, "下破需求线/支撑线", "跌"),
+    "ARST_DOWN": (+1, "跌势停止（AR&ST）", "跌"),
+    "ARST_UP": (-1, "涨势停止（AR&ST）", "涨"),
+    "TSO": (+1, "破全部支撑线后守住（独木难支）", "跌"),
+    "LPS": (+1, "最后支撑点", "跌"),
+    "LPSY": (-1, "最后供给点", "涨"),
+    "JOC": (+1, "跳过小溪（破关键阻力线）", "涨"),
+    "BOI": (-1, "跌破上一个底端点", "跌"),
+    "OB_LINE": (-1, "上破超买线", "涨"),
+    "OS_LINE": (+1, "下破超卖线", "跌"),
 }
-_NOT_IMPLEMENTED = ["SOT", "ASY", "AS", "AR&ST", "TSO", "LPS", "LPSY", "JOC", "BOI",
-                    "OB(Line)", "OS(Line)"]
+_NOT_IMPLEMENTED: list[str] = []          # 2026-10-15：研报 §2.3 的 25 行全部落地
+_CALIBERS = [                             # 研报**没给**构造细节、由本实现口径自定的地方（如实列，不藏）
+    "SOT：研报写「波段顶端点处」，本实现按「三个同侧端点持续同向且距离缩短 ⇒ 100%」逐根判定，"
+    "并额外给 at_endpoint 标记（那一根是否恰好落在已确认端点上）—— 限制在端点那一根会让面板几乎永远看不到它。",
+    "扩张盘整：报告该行与「收缩盘整」同文（两顶下降 + 两底上升），按定义实现为「两顶上升 + 两底下降」（发散）。",
+    "OB(Line)/OS(Line)：研报未给超买/超卖线的构造 ⇒ 口径 = max/min(最近 4 个**已确认**顶/底端点的价格)，"
+    "不含当下未确认段的极值 —— 否则「突破」恒不成立（线自己就含当根极值）。",
+    "JOC 的「关键阻力线（确认度前三）」：确认度口径 = 触及次数 × log(1+跨天数)，触及容差 0.5%，只用于排序、不代表概率。",
+    "突破类事件（ASY / AS / OB_LINE / OS_LINE / JOC / BOI）一律用**第 i 根之前**的线集判定（真的「越过」），"
+    "并要求 Close 穿越：prev_close ≤ 线 < close（下破反之）。",
+    "TSO 的「后续 K 线 Close 不低于其 Low」：末根 K 线之后还没有 K 线 ⇒ pending=true（不假装已确认）。",
+    "AR&ST / LPS / LPSY 的「连续…停止」：末两段已确认波段为 up→down（或 down→up），且当根 Close 已越过该段终点价。",
+    "端点来源：默认用研报 §2.1 的 MACD 波段端点；当端点不足（<2 顶或 <2 底，强趋势里 MACD 长期同号就会这样）"
+    "时退化为 ±5 根窗口的摆动高低点兜底，并在 structure.endpoint_source 里标明是哪一种。",
+]
 
 
 def _sig(x: float) -> float:
@@ -365,6 +395,264 @@ def _bar_stats(frame: pd.DataFrame, window: int) -> pd.DataFrame:
     return out
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 波段端点结构 + 辅助线（研报 §2.1 / §2.2）—— 11 个事件的前置
+#   · swing_legs()    → 已确认波段（端点价格/日期、累计涨跌幅、波段均量）+ 当下未确认段；
+#   · aux_structure() → 两顶两底分类（趋势/盘整）+ 辅助线集合（趋势线 / 水平线 / 超买线 / 超卖线），
+#                       每条线带"确认度"（口径自定，见 _CALIBERS）。
+# 为什么单列：这批事件要的不是"单根 K 线 + 窗口分位数"，而是**已确认的波段端点序列**。
+# ─────────────────────────────────────────────────────────────────────────────
+_SWING_FAST, _SWING_SLOW = 12, 26      # MACD(12,26)：研报 §2.1 用它确认新波段
+_ENDPOINT_KEEP = 4                     # 研报 §2.2：水平线取"最近四个已确认端点"
+_TOUCH_TOL = 0.005                     # 口径：确认度里算"触及"的容差（0.5%）
+
+
+def swing_legs(frame: pd.DataFrame) -> dict[str, Any]:
+    """物化研报 §2.1 的波段：MACD>0 且创起点以来新高 ⇒ 新上涨波段（旧段终点固定为该段极值点）。
+
+    实现备注重（2026-10-15）：第一版每根 K 线都走 pandas 标量索引（`close.iloc[i]`、`seg.max()`），
+    221 次调用占掉 event_cloud 全部耗时的 ~77%（cProfile：1.70s / 2.24s）⇒ 滚动回测跑不动。
+    改成 numpy + **增量维护区间极值**：起点只在波段确认时变，区间极值可以一路带着走 ⇒ O(n)。
+    """
+    close = frame["Close"].to_numpy(dtype=float)
+    macd = (frame["Close"].ewm(span=_SWING_FAST, adjust=False).mean()
+            - frame["Close"].ewm(span=_SWING_SLOW, adjust=False).mean()).to_numpy(dtype=float)
+    vol = (frame["Volume"].to_numpy(dtype=float) if "Volume" in frame.columns
+           else np.full(len(frame), np.nan))
+    dates = [str(d.date()) for d in frame.index]
+    n = len(close)
+    legs: list[dict[str, Any]] = []
+    direction, start = "down", 0
+    run_max, run_min = close[0], close[0]
+    run_max_i = run_min_i = 0
+    for i in range(n):
+        if close[i] > run_max:
+            run_max, run_max_i = close[i], i
+        if close[i] < run_min:
+            run_min, run_min_i = close[i], i
+        turn = None
+        if macd[i] > 0 and close[i] >= run_max:
+            turn = "up"
+        elif macd[i] < 0 and close[i] <= run_min:
+            turn = "down"
+        if turn and turn != direction:
+            end = run_max_i if direction == "up" else run_min_i
+            legs.append(_leg_np(close, vol, dates, start, end, direction, True))
+            start, direction = i, turn
+            run_max = run_min = close[i]
+            run_max_i = run_min_i = i
+    legs.append(_leg_np(close, vol, dates, start, n - 1, direction, False))
+    confirmed = [leg for leg in legs if leg["confirmed"]]
+    endpoints = [{"date": leg["end_date"], "price": leg["end_price"], "index": leg["end"],
+                  "kind": "top" if leg["kind"] == "up" else "bottom"} for leg in confirmed]
+    return {"legs": legs, "confirmed": confirmed, "endpoints": endpoints,
+            "current": legs[-1] if legs else None, "direction": direction}
+
+
+def _leg_np(close: np.ndarray, vol: np.ndarray, dates: list[str], start: int, end: int,
+            kind: str, confirmed: bool) -> dict[str, Any]:
+    seg = close[start:end + 1]
+    amp = float(seg[-1] / seg[0] - 1) if len(seg) > 1 and seg[0] else 0.0
+    vseg = vol[start:end + 1]
+    vseg = vseg[~np.isnan(vseg)]
+    return {
+        "kind": kind, "start": int(start), "end": int(end), "confirmed": bool(confirmed),
+        "start_date": dates[start], "end_date": dates[end],
+        "start_price": float(seg[0]), "end_price": float(seg[-1]),
+        "amp": round(amp, 6), "bars": int(end - start + 1),
+        "vol_mean": float(vseg.mean()) if len(vseg) else float("nan"),
+    }
+
+
+def _swing_extremes(frame: pd.DataFrame, k: int = 5) -> list[dict[str, Any]]:
+    """±k 根窗口内的局部极值（摆动高低点）。
+
+    只在 MACD 波段端点**不足**时兜底（口径自定，见 _CALIBERS）：研报 §2.1 的波段要 MACD 反向才确认，
+    强趋势里 MACD 可能长期同号 ⇒ 只有一条长波段、一个端点，两顶两底分类会退化成"样本不足"。
+    """
+    highs, lows = frame["High"].values, frame["Low"].values
+    out: list[dict[str, Any]] = []
+    for i in range(k, len(frame) - k):
+        if highs[i] == highs[i - k:i + k + 1].max():
+            out.append({"date": str(frame.index[i].date()), "price": float(highs[i]),
+                        "index": i, "kind": "top"})
+        elif lows[i] == lows[i - k:i + k + 1].min():
+            out.append({"date": str(frame.index[i].date()), "price": float(lows[i]),
+                        "index": i, "kind": "bottom"})
+    return out
+
+
+def _line_value(line: dict[str, Any], i: int) -> float:
+    return float(line["intercept"]) + float(line["slope"]) * i
+
+
+def _touch_count(frame: pd.DataFrame, a: float, b: float, tol: float = _TOUCH_TOL) -> int:
+    """触及次数（向量化：numpy 一次算完，替代原先的逐根 Python 循环）。"""
+    lows, highs = frame["Low"].to_numpy(dtype=float), frame["High"].to_numpy(dtype=float)
+    levels = a + b * np.arange(len(frame), dtype=float)
+    ok = levels > 0
+    if not ok.any():
+        return 0
+    return int(np.sum(ok & (lows <= levels * (1 + tol)) & (highs >= levels * (1 - tol))))
+
+
+def _make_line(kind: str, label: str, a: float, b: float, frame: pd.DataFrame,
+               anchors: list[dict[str, Any]] | None = None, span: int = 0) -> dict[str, Any]:
+    touches = _touch_count(frame, a, b)
+    return {"kind": kind, "label": label, "intercept": round(a, 6), "slope": round(b, 8),
+            "value_last": round(a + b * (len(frame) - 1), 6), "touches": int(touches),
+            # 确认度（口径自定）：触及次数 × log(1+跨天数)；只用于"关键阻力线"排序，不代表概率
+            "confidence": round(touches * float(np.log1p(max(span, 1))), 4),
+            "anchors": [{"date": a0.get("date"), "price": a0.get("price")} for a0 in (anchors or [])],
+            "horizontal": bool(abs(b) < 1e-12)}
+
+
+def aux_structure(frame: pd.DataFrame) -> dict[str, Any]:
+    """两顶两底分类 + 辅助线集合（研报 §2.2）。锚点只用**已确认**端点，不用"当下"未确认段。"""
+    swing = swing_legs(frame)
+    eps = swing["endpoints"]
+    tops = [e for e in eps if e["kind"] == "top"]
+    bottoms = [e for e in eps if e["kind"] == "bottom"]
+    source = "macd_legs"
+    if len(tops) < 2 or len(bottoms) < 2:          # 兜底：MACD 波段给不出两端点（强趋势里常态）
+        alt = _swing_extremes(frame)
+        alt_tops = [e for e in alt if e["kind"] == "top"]
+        alt_bottoms = [e for e in alt if e["kind"] == "bottom"]
+        if len(alt_tops) >= 2 and len(alt_bottoms) >= 2:
+            eps, tops, bottoms, source = alt, alt_tops, alt_bottoms, "swing_fallback"
+    last_tops, last_bottoms = tops[-_ENDPOINT_KEEP:], bottoms[-_ENDPOINT_KEEP:]
+    pattern = "样本不足"
+    if len(tops) >= 2 and len(bottoms) >= 2:
+        up_t, dn_t = tops[-1]["price"] > tops[-2]["price"], tops[-1]["price"] < tops[-2]["price"]
+        up_b, dn_b = bottoms[-1]["price"] > bottoms[-2]["price"], bottoms[-1]["price"] < bottoms[-2]["price"]
+        pattern = ("上涨趋势" if up_t and up_b else "下跌趋势" if dn_t and dn_b else
+                   "收缩盘整" if dn_t and up_b else "扩张盘整" if up_t and dn_b else "不明")
+    lines: list[dict[str, Any]] = []
+    for e in last_tops:
+        lines.append(_make_line("resistance", f"顶端点 {e['date']}", e["price"], 0.0, frame, [e]))
+    for e in last_bottoms:
+        lines.append(_make_line("support", f"底端点 {e['date']}", e["price"], 0.0, frame, [e]))
+    if pattern in ("上涨趋势", "下跌趋势") and len(tops) >= 2 and len(bottoms) >= 2:
+        for kind, pair in (("supply", tops[-2:]), ("demand", bottoms[-2:])):
+            p1, p2 = pair
+            span = p2["index"] - p1["index"]
+            if span <= 0:
+                continue
+            slope = (p2["price"] - p1["price"]) / span
+            lines.append(_make_line(kind, f"{'供给' if kind == 'supply' else '需求'}线 "
+                                          f"{p1['date']}→{p2['date']}",
+                                    p1["price"] - slope * p1["index"], slope, frame, [p1, p2], span))
+    ob = max([e["price"] for e in last_tops], default=float("nan"))
+    os_line = min([e["price"] for e in last_bottoms], default=float("nan"))
+    if not np.isnan(ob):
+        lines.append(_make_line("ob", "超买线", ob, 0.0, frame, last_tops))
+    if not np.isnan(os_line):
+        lines.append(_make_line("os", "超卖线", os_line, 0.0, frame, last_bottoms))
+    key = sorted([ln for ln in lines if ln["kind"] in ("resistance", "supply")],
+                 key=lambda ln: -ln["confidence"])[:3]
+    return {"pattern": pattern, "swing": swing, "endpoints": eps, "tops": tops, "bottoms": bottoms,
+            "endpoint_source": source,
+            "lines": lines,
+            "supports": [ln["value_last"] for ln in lines if ln["kind"] in ("support", "demand")],
+            "resistances": [ln["value_last"] for ln in lines if ln["kind"] in ("resistance", "supply")],
+            "ob_line": None if np.isnan(ob) else float(ob),
+            "os_line": None if np.isnan(os_line) else float(os_line),
+            "key_resistance": [ln["label"] for ln in key]}
+
+
+def _shortening(prices: list[float], *, up: bool) -> bool:
+    """SOT 的判据：临近三个同侧端点"持续同向 + 距离缩短"。
+
+    up=True ⇒ 端点价格**递增**（顶端点序列用，SOT_Up）；up=False ⇒ **递减**（底端点序列用，SOT_Down）。
+    """
+    if len(prices) < 3:
+        return False
+    p1, p2, p3 = prices[-3], prices[-2], prices[-1]
+    if up:
+        return p1 < p2 < p3 and (p3 - p2) < (p2 - p1)
+    return p1 > p2 > p3 and (p2 - p3) < (p1 - p2)
+
+
+def _structure_events(frame: pd.DataFrame, st: pd.DataFrame, i: int, struct: dict[str, Any],
+                      window: int) -> list[tuple]:
+    """11 个"需要波段端点/辅助线"的事件（研报 §2.3）。
+
+    struct 由**第 i 根之前**的帧算出 ⇒ 突破类判据不会被"线里含当根极值"自指掉。
+    """
+    out: list[tuple] = []
+    if i < 2 or not struct or struct.get("pattern") in (None, "样本不足"):
+        return out
+    r = st.iloc[i]
+    close = float(frame["Close"].iloc[i]); open_ = float(frame["Open"].iloc[i])
+    prev_close = float(frame["Close"].iloc[i - 1]); low = float(frame["Low"].iloc[i])
+    vr = float(r["vol_rank"])
+    vol_rank = vr if vr == vr else 0.5
+    resist = sorted(lv for lv in struct["resistances"] if lv == lv)
+    support = sorted((lv for lv in struct["supports"] if lv == lv), reverse=True)
+    # ① ASY：上破最近的阻力线；② JOC：上破"确认度前三"的关键阻力线
+    above = [lv for lv in resist if lv >= prev_close]
+    if above and close > min(above):
+        out.append(("ASY", 1.0, "上破供应线/阻力线"))
+    key = [ln["value_last"] for ln in struct["lines"]
+           if ln["kind"] in ("resistance", "supply") and ln["label"] in struct["key_resistance"]]
+    key_above = [lv for lv in key if lv >= prev_close]
+    if key_above and close > min(key_above):
+        out.append(("JOC", _sig((close / open_ - 1) * 10 + 0.5) * _sig(vol_rank), "跳过小溪（破关键阻力线）"))
+    # ③ AS：下破最近的支撑线
+    below = [lv for lv in support if lv <= prev_close]
+    if below and close < max(below):
+        out.append(("AS", 1.0, "下破需求线/支撑线"))
+    # ④ OB(Line) / OS(Line)：收盘穿越超买/超卖线
+    ob, os_lv = struct.get("ob_line"), struct.get("os_line")
+    if ob and prev_close <= ob < close:
+        out.append(("OB_LINE", 1.0, "上破超买线"))
+    if os_lv and close < os_lv <= prev_close:
+        out.append(("OS_LINE", 1.0, "下破超卖线"))
+    # ⑤ BOI：跌破上一个已确认底端点
+    if struct["bottoms"] and prev_close >= struct["bottoms"][-1]["price"] > close:
+        out.append(("BOI", 1.0, "跌破上一个底端点"))
+    # ⑥ SOT：三个底/顶端点持续同向且距离缩短
+    if _shortening([e["price"] for e in struct["bottoms"]], up=False):   # 底端点递减
+        last = struct["endpoints"][-1] if struct["endpoints"] else None
+        out.append(("SOT_DOWN", 1.0, "三个底端点距离缩短（跌势衰竭）",
+                    {"at_endpoint": bool(last and last["kind"] == "top" and last["index"] == i - 1)}))
+    if _shortening([e["price"] for e in struct["tops"]], up=True):       # 顶端点递增
+        last = struct["endpoints"][-1] if struct["endpoints"] else None
+        out.append(("SOT_UP", 1.0, "三个顶端点距离缩短（涨势衰竭）",
+                    {"at_endpoint": bool(last and last["kind"] == "bottom" and last["index"] == i - 1)}))
+    # ⑦ AR&ST / LPS / LPSY：连续波段停下（末两段 up→down 或 down→up + 当根 Close 越过该段终点）
+    legs = struct["swing"]["confirmed"][-2:]
+    lo_close = float(frame["Close"].iloc[max(i - window, 0):i].min()) if i else float("nan")
+    hi_close = float(frame["Close"].iloc[max(i - window, 0):i].max()) if i else float("nan")
+    if len(legs) == 2 and legs[0]["kind"] == "up" and legs[1]["kind"] == "down":
+        up_leg, dn_leg = legs
+        if dn_leg["amp"] < 0 and close > dn_leg["end_price"]:
+            ratio_amp = abs(up_leg["amp"]) / max(abs(dn_leg["amp"]), 1e-6)
+            ratio_vol = (up_leg["vol_mean"] / dn_leg["vol_mean"]) if dn_leg["vol_mean"] else float("nan")
+            if ratio_vol == ratio_vol:
+                out.append(("ARST_DOWN", _sig(ratio_amp / 10 + 0.5) * _sig(ratio_vol / 5 + 0.5), "跌势停止"))
+                if lo_close > 0:
+                    out.append(("LPS", _sig((dn_leg["end_price"] / lo_close - 1) * 10 + 0.5)
+                                * _sig(ratio_vol / 5 + 0.5), "最后支撑点"))
+    if len(legs) == 2 and legs[0]["kind"] == "down" and legs[1]["kind"] == "up":
+        dn_leg, up_leg = legs
+        if up_leg["amp"] > 0 and close < up_leg["end_price"]:
+            ratio_amp = abs(dn_leg["amp"]) / max(abs(up_leg["amp"]), 1e-6)
+            ratio_vol = (dn_leg["vol_mean"] / up_leg["vol_mean"]) if up_leg["vol_mean"] else float("nan")
+            if ratio_vol == ratio_vol:
+                out.append(("ARST_UP", _sig(ratio_amp / 10 + 0.5) * _sig(ratio_vol / 5 + 0.5), "涨势停止"))
+                if hi_close > 0:
+                    out.append(("LPSY", _sig((hi_close / up_leg["end_price"] - 1) * 10 + 0.5)
+                                * _sig(ratio_vol / 5 + 0.5), "最后供给点"))
+    # ⑧ TSO：单根 K 线破掉所有支撑线，且之后每根 Close 都不低于它那根的 Low
+    if support and low < min(support):
+        later = frame["Close"].iloc[i + 1:]
+        pending = len(later) == 0
+        if pending or bool((later.values >= low).all()):
+            out.append(("TSO", _sig(vol_rank), "破全部支撑线后守住（独木难支）", {"pending": pending}))
+    return out
+
+
 def event_cloud(bars: pd.DataFrame, *, window: int = 60, collapse_threshold: float = 0.60,
                 half_life: int = 10, recent: int = 20) -> dict[str, Any]:
     """事件概率云：逐根 K 线算事件似然度 → 概率坍缩 → WSO 分数。"""
@@ -396,6 +684,7 @@ def event_cloud(bars: pd.DataFrame, *, window: int = 60, collapse_threshold: flo
     resistance = pnf.get("resistance") or float(frame["High"].rolling(window).max().iloc[-1])
 
     events: list[dict] = []
+    _struct_cache: dict[int, dict[str, Any]] = {}
     for i in range(len(st)):
         r = st.iloc[i]
         day = str(st.index[i].date())
@@ -438,10 +727,21 @@ def event_cloud(bars: pd.DataFrame, *, window: int = 60, collapse_threshold: flo
                 row.append(("OKR_UP", 1.0, "阳包阴"))
             elif ret < 0 and float(r["Close"]) <= mid:
                 row.append(("OKR_DOWN", 1.0, "阴包阳"))
-        for etype, prob, _label in row:
+        if i >= 30:
+            struct = _struct_cache.get(i)
+            if struct is None:
+                struct = aux_structure(frame.iloc[:i])
+                _struct_cache[i] = struct
+            row.extend(_structure_events(frame, st, i, struct, window))
+        for item in row:
+            etype, prob = item[0], item[1]
+            extras = item[3] if len(item) > 3 else None
             side, label, _bias = _EVENT_META[etype]
-            events.append({"date": day, "type": etype, "label": label, "side": side,
-                           "prob": round(float(prob), 4)})
+            payload = {"date": day, "type": etype, "label": label, "side": side,
+                       "prob": round(float(prob), 4)}
+            if extras:
+                payload.update(extras)
+            events.append(payload)
 
     by_bar = pd.DataFrame(events)
     collapsed, score_series = [], []
@@ -459,6 +759,13 @@ def event_cloud(bars: pd.DataFrame, *, window: int = 60, collapse_threshold: flo
         weight *= decay
     wso = round(total / weight_sum, 4) if weight_sum else 0.0
 
+    _now = aux_structure(frame)
+    _structure_now = {"pattern": _now["pattern"], "endpoints": len(_now["endpoints"]),
+                      "lines": len(_now["lines"]), "key_resistance": _now["key_resistance"],
+                      "endpoint_source": _now["endpoint_source"],
+                      "ob_line": _now["ob_line"], "os_line": _now["os_line"],
+                      "tops": [e["price"] for e in _now["tops"][-_ENDPOINT_KEEP:]],
+                      "bottoms": [e["price"] for e in _now["bottoms"][-_ENDPOINT_KEEP:]]}
     current = [e for e in events if e["date"] == str(frame.index[-1].date())]
     current.sort(key=lambda e: -e["prob"])
     top_now = current[0] if current else None
@@ -473,9 +780,11 @@ def event_cloud(bars: pd.DataFrame, *, window: int = 60, collapse_threshold: flo
                   "mapping": "吸筹/强势SOS/超卖 = +1；派发/弱势SOW/超买 = −1（研报 §3.1）"},
         "recent_collapsed": collapsed[-recent:],
         "implemented": sorted(_EVENT_META.keys()),
-        "not_implemented": _NOT_IMPLEMENTED,
+        "not_implemented": list(_NOT_IMPLEMENTED),
+        "calibers": list(_CALIBERS),
+        "structure": _structure_now,
         "source": _EVENT_SOURCE,
-        "methodology": ("逐根 K 线用研报的 sigmoid 公式算事件似然度 → 取最高且 ≥%.0f%% 者坍缩为确定形态 → "
+        "methodology": ("逐根 K 线用研报的 sigmoid 公式算事件似然度（含需要波段端点/辅助线的 SOT/ASY/AS/AR&ST/TSO/LPS/LPSY/JOC/BOI/OB(Line)/OS(Line)） → 取最高且 ≥%.0f%% 者坍缩为确定形态 → "
                         "事件映射 ±1 分、按半衰期 %d 日指数加权得 WSO。**白盒公式，不训练、不预测价格**。"
                         % (collapse_threshold * 100, half_life)),
     }

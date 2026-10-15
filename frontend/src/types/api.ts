@@ -1536,7 +1536,25 @@ export interface PnFChart {
   end: string
 }
 export interface WyckoffEvidence { type: string; date: string; detail: string }
-export interface WyckoffEvent { type: string; label: string; side: number; prob: number; date?: string }
+export interface WyckoffEvent {
+  type: string; label: string; side: number; prob: number; date?: string
+  /** TSO 这类"需要后续 K 线确认"的事件在末根上还没确认 */
+  pending?: boolean
+  /** SOT：那一根是否恰好落在已确认端点上（研报写"端点处"，实现放宽为逐根判定） */
+  at_endpoint?: boolean
+}
+/** 结构摘要（波段端点 / 两顶两底分类 / 辅助线）—— 11 个结构类事件的前置 */
+export interface WyckoffStructure {
+  pattern: string
+  endpoints: number
+  lines: number
+  endpoint_source?: string
+  key_resistance?: string[]
+  ob_line?: number | null
+  os_line?: number | null
+  tops?: number[]
+  bottoms?: number[]
+}
 export interface WyckoffCloud {
   available: boolean
   reason?: string
@@ -1548,6 +1566,9 @@ export interface WyckoffCloud {
   recent_collapsed?: WyckoffEvent[]
   implemented?: string[]
   not_implemented?: string[]
+  /** 研报未给构造细节、由本项目口径自定的地方（如实列出） */
+  calibers?: string[]
+  structure?: WyckoffStructure
   source?: string
   methodology?: string
 }

@@ -142,3 +142,23 @@ def test_daily_pipeline_runs_benchmark_and_strategy_lists():
         "策略名单刷新不在每日流程里：缺失又会是静默的"
     audit = (ROOT / "scripts/audit_web_freshness.py").read_text(encoding="utf-8")
     assert "策略名单（每日刷新契约）" in audit, "新鲜度体检必须点名名单刷新，否则长期静默"
+
+
+def test_live_account_freshness_uses_picks_date(tmp_path):
+    """实盘镜像的「名单日期」不是人工快照日，而是 picks_date（这行建议按哪个交易日算的）。
+
+    2026-10-15 事故：10-14 的补跑把最新交易日推到 10-14，而持仓快照仍是 10-12（人工录入，
+    天然会落后）⇒ 这一条被永远判 stale ⇒ 预检里的 stale==0 变红 ⇒ 18:30 那次会被预检挡住
+    （而且是每天都红，不是一次性的）。修法：`daily_refresh.freshness_columns` 可声明优先列。
+    """
+    module = _load_refresh_module()
+    csv = tmp_path / "cn_live_holdings.csv"
+    csv.write_text("rank,trade_date,picks_date,stock_code\n1,2026-10-12,2026-10-14,300229.SZ\n",
+                   encoding="utf-8")
+    assert module.file_date(csv) == "2026-10-12", "默认仍按 DATE_COLUMNS 取（快照日）"
+    assert module.file_date(csv, ["picks_date", "trade_date"]) == "2026-10-14", "声明优先列后取 picks_date"
+    assert module.file_date(csv, ["nope", "trade_date"]) == "2026-10-12", "声明的列不存在时退回首个存在的候选"
+    spec = next(s for s in json.loads(CONFIG.read_text(encoding="utf-8"))["strategies"]
+                if s["id"] == "live_holdings")
+    cols = spec["daily_refresh"].get("freshness_columns") or []
+    assert cols[:1] == ["picks_date"], "实盘镜像必须声明 freshness_columns=…picks_date…"

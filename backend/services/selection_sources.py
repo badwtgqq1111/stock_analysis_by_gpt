@@ -196,6 +196,26 @@ def _cn_names() -> dict[str, str]:
     return dict(zip(frame["ts_code"].astype(str), frame["name"].fillna("").astype(str)))
 
 
+
+# 伪名字集合（2026-10-15 事故）：`str(np.nan or "")` 得到的是**字符串 "nan"** —— 因为 np.nan 是
+# **真值**，`nan or ""` 取的是 nan，再 str() 就成了 "nan" ⇒ 前端自选里直接显示 "nan"
+# （实测：/api/selection?source=cn_box_arm 的 stock_name 就是 "nan"，localStorage 里也被存成了 "nan"）。
+_JUNK_NAMES = {"", "nan", "none", "null", "na", "nat", "undefined"}
+
+
+def _clean_name(value) -> str:
+    """把 NaN / None / 空串 / "nan" 这类"伪名字"统一清成空串；真名字去掉首尾空白。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in _JUNK_NAMES else text
+
+
 def _file_meta(path: Path) -> dict:
     if not path.exists():
         return {"path": str(path.relative_to(ROOT)), "exists": False, "mtime": None, "rows": None}
@@ -318,10 +338,10 @@ def load_source(key: str) -> dict:
         code = str(row.get("stock_code", ""))
         if spec["code_style"] == "ts_code":
             code_display = code
-            name = str(row.get("name") or "") or names.get(code, "")
+            name = _clean_name(row.get("name")) or names.get(code, "")
         else:
             code_display = code.zfill(5)
-            name = str(row.get("stock_name") or "") or hk_names.get(code_display, "")
+            name = _clean_name(row.get("stock_name")) or hk_names.get(code_display, "")
         item = {"stock_code": code_display, "stock_name": name}
         for col in wanted:
             if col == "stock_code":
@@ -334,7 +354,8 @@ def load_source(key: str) -> dict:
             elif isinstance(val, (int, float)):
                 item[col] = round(float(val), 4)
             else:
-                item[col] = str(val)
+                text = str(val).strip()
+                item[col] = None if text.lower() in _JUNK_NAMES else text
         rows.append(item)
 
     columns = [{"key": "stock_code", "title": "代码"}]

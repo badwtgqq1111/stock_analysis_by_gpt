@@ -28,8 +28,38 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
+
+/** 伪名字（2026-10-15 事故）：接口曾把 NaN 变成字符串 "nan"（`str(np.nan or "")` —— np.nan 是真值），
+ *  再被"当前分组全部加入自选"存进本地缓存 ⇒ 自选列表里显示成 `301087.SZ nan`。
+ *  这里统一清洗；读取时顺手把历史脏数据丢掉（自愈），写入时也不许再存进去。 */
+const JUNK_NAMES = new Set(['', 'nan', 'none', 'null', 'na', 'nat', 'undefined'])
+
+export function cleanName(value: unknown): string {
+  const text = String(value ?? '').trim()
+  return JUNK_NAMES.has(text.toLowerCase()) ? '' : text
+}
+
+function readNames(): Record<string, string> {
+  const raw = readJson<Record<string, string>>(WATCHLIST_NAMES_KEY, {})
+  const next: Record<string, string> = {}
+  let dirty = false
+  for (const [code, name] of Object.entries(raw || {})) {
+    const cleaned = cleanName(name)
+    if (cleaned) next[code] = cleaned
+    else dirty = true
+  }
+  if (dirty) {
+    try {
+      localStorage.setItem(WATCHLIST_NAMES_KEY, JSON.stringify(next))
+    } catch {
+      /* 隐私模式 / 配额满：内存态继续可用 */
+    }
+  }
+  return next
+}
+
 const codes = ref<string[]>(readJson<string[]>(WATCHLIST_STORAGE_KEY, []))
-const names = ref<Record<string, string>>(readJson<Record<string, string>>(WATCHLIST_NAMES_KEY, {}))
+const names = ref<Record<string, string>>(readNames())
 
 let listening = false
 
@@ -56,12 +86,12 @@ function ensureListener() {
   listening = true
   window.addEventListener(SYNC_EVENT, () => {
     codes.value = readJson<string[]>(WATCHLIST_STORAGE_KEY, [])
-    names.value = readJson<Record<string, string>>(WATCHLIST_NAMES_KEY, {})
+    names.value = readNames()
   })
   window.addEventListener('storage', (e) => {
     if (!e.key || ![WATCHLIST_STORAGE_KEY, WATCHLIST_NAMES_KEY].includes(e.key)) return
     codes.value = readJson<string[]>(WATCHLIST_STORAGE_KEY, [])
-    names.value = readJson<Record<string, string>>(WATCHLIST_NAMES_KEY, {})
+    names.value = readNames()
   })
 }
 
@@ -101,7 +131,8 @@ export function useWatchlist() {
       return false
     }
     codes.value = [...codes.value, c]
-    if (name) names.value = { ...names.value, [c]: name }
+    const cleaned = cleanName(name)
+    if (cleaned) names.value = { ...names.value, [c]: cleaned }
     persist()
     broadcast()
     return true
@@ -125,8 +156,9 @@ export function useWatchlist() {
 
   function rememberName(code: string, name: string) {
     const c = normalizeCode(code)
-    if (!c || !name) return
-    names.value = { ...names.value, [c]: name }
+    const cleaned = cleanName(name)
+    if (!c || !cleaned) return
+    names.value = { ...names.value, [c]: cleaned }
     persist()
   }
 
@@ -136,8 +168,9 @@ export function useWatchlist() {
     const next = { ...names.value }
     for (const item of items) {
       const c = normalizeCode(item.code)
-      if (c && item.name && next[c] !== item.name) {
-        next[c] = item.name
+      const cleanedItem = cleanName(item.name)
+      if (c && cleanedItem && next[c] !== cleanedItem) {
+        next[c] = cleanedItem
         dirty = true
       }
     }

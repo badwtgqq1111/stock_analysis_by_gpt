@@ -148,6 +148,7 @@ def test_runner_snapshot_keeps_repo_root(tmp_path):
         "PATH": f"{Path.home()}/.local/bin:" + os.environ.get("PATH", ""),
         "DAILY_NOTIFY": "0",
         "DAILY_READY_GATE": "0",
+        "DAILY_EARLIEST_HOUR": "0",       # 否则上午跑预检时脚本会「skip: 早于 16:00」直接 exit 0
         "DAILY_TRADE_DATE": "verify_root",
         "DAILY_PREFLIGHT_CMD": f"bash {probe}",
     }

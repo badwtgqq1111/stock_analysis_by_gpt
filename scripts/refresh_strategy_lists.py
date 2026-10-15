@@ -75,14 +75,23 @@ def source_file(spec: dict) -> Path | None:
     return files[0][1] if files else None
 
 
-def file_date(path: Path | None) -> str | None:
+def file_date(path: Path | None, columns: list[str] | None = None) -> str | None:
+    """名单日期 = 产物里「日期列」的最大值。
+
+    默认按 DATE_COLUMNS 找；策略可在 `daily_refresh.freshness_columns` 里**声明优先列** ——
+    实盘镜像就是这种情况：`trade_date` 是**人工录入的持仓快照日**（天然会长期落后），
+    真正每天在动的是 `picks_date`（这行建议是按哪个交易日的名单/行情算出来的）。
+    2026-10-15 实测：10-14 的补跑把最新交易日推到 10-14 之后，这一条就一直被判 stale，
+    预检里的 `test_status_artifact_is_written_and_matches_config` 跟着红 ⇒ 18:30 那次会被预检挡住。
+    """
     if path is None or not path.exists():
         return None
+    wanted = tuple(columns) if columns else DATE_COLUMNS
     try:
-        frame = pd.read_csv(path, usecols=lambda c: c in DATE_COLUMNS)
+        frame = pd.read_csv(path, usecols=lambda c: c in wanted)
     except Exception:
         return None
-    column = next((c for c in DATE_COLUMNS if c in frame.columns), None)
+    column = next((c for c in wanted if c in frame.columns), None)
     if column is None or frame.empty:
         return None
     return str(pd.to_datetime(frame[column]).max().date())
@@ -161,7 +170,7 @@ def refresh_one(spec: dict, target_date: str | None, *, print_log: bool) -> dict
             return row
 
     # 校验（run 与 archive 都要过这一关）
-    date_after = file_date(top)
+    date_after = file_date(top, refresh.get("freshness_columns"))
     hist_after, _ = history_latest(spec)
     row["date_after"] = date_after
     row["history_after"] = hist_after

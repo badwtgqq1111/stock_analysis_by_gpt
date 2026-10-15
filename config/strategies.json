@@ -33,7 +33,9 @@
       "ledger_sources": [],
       "daily_refresh": {
         "mode": "run",
-        "max_minutes": 10
+        "max_minutes": 10,
+        "freshness_columns": ["picks_date", "trade_date"],
+        "reason": "持仓快照日（trade_date）是人工录入、会长期落后；判「今天刷过没有」要看 picks_date（这行建议按哪个交易日的名单/行情算出来的）"
       },
       "selection": {
         "label": "实盘镜像（中泰证券真实持仓）",

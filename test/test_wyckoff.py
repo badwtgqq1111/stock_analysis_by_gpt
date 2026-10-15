@@ -200,8 +200,11 @@ def test_event_cloud_structure_and_collapse():
     if cloud["collapsed"]:
         assert cloud["collapsed"]["prob"] >= cloud["threshold"]
         assert cloud["collapsed"]["type"] == cloud["cloud"][0]["type"]
-    assert {"SOT", "ASY", "AS", "AR&ST", "TSO", "LPS", "LPSY", "JOC", "BOI"} <= set(cloud["not_implemented"]), \
-        "未实现的公式必须如实列出，不能悄悄省略"
+    assert cloud["not_implemented"] == [], "研报 §2.3 的 25 行应全部落地（2026-10-15 补齐 11 个）"
+    assert set(cloud["implemented"]) >= {
+        "SOT_DOWN", "SOT_UP", "ASY", "AS", "ARST_DOWN", "ARST_UP", "TSO", "LPS", "LPSY",
+        "JOC", "BOI", "OB_LINE", "OS_LINE"}, "结构类事件必须在已实现清单里"
+    assert cloud["calibers"], "研报没给构造细节的地方要如实列出「口径自定」"
     assert cloud["score"]["half_life"] == 10 and "民生证券" in cloud["source"]
 
 
@@ -235,3 +238,297 @@ def test_wyckoff_api_exposes_event_cloud(client):
     assert payload.get("event_cloud", {}).get("available"), payload.get("event_cloud")
     assert payload["event_cloud"]["cloud"], "接口没有返回概率云"
     assert payload.get("reference", "").startswith("docs/reference/wyckoff/")
+
+
+# ── 6) 事件概率云：研报 §2.3 全表落地（2026-10-15 补齐 11 个「需要波段端点/辅助线」的事件）─────
+# 这一节的判据分两层：
+#   · 结构层（波段端点、两顶两底分类、辅助线与确认度）用**构造出来的锯齿行情**验证；
+#   · 事件公式层用**手搓的 struct**验证 —— 几何到事件的映射才是要锁的东西，
+#     靠"模拟行情碰巧触发"锁不住（而且研报 §2.1 的波段确认要 MACD 反向，强趋势里本来就少）。
+
+def _bars(closes, volumes=None) -> pd.DataFrame:
+    closes = np.asarray(closes, dtype=float)
+    return pd.DataFrame({
+        "Open": np.r_[closes[0], closes[:-1]], "High": closes * 1.004, "Low": closes * 0.996,
+        "Close": closes, "Volume": np.full(len(closes), 1e6) if volumes is None else np.asarray(volumes, float),
+    }, index=pd.bdate_range("2025-01-02", periods=len(closes)))
+
+
+def _zig(*legs, n: int = 20) -> list[float]:
+    out: list[float] = []
+    for a, b in legs:
+        out += list(np.linspace(a, b, n))[:-1]
+    return out
+
+
+def _ohlc(rows) -> pd.DataFrame:
+    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"],
+                        index=pd.bdate_range("2025-01-02", periods=len(rows)))
+
+
+def test_swing_legs_materializes_confirmed_endpoints():
+    """波段端点必须真的被"物化"：顶/底交替、价格等于该段的极值点（研报 §2.1）。"""
+    from backend.services import wyckoff_service as wy
+
+    swing = wy.swing_legs(_bars(_zig((10.0, 13.0), (13.0, 9.5), (9.5, 12.5), (12.5, 9.0), (9.0, 12.2))))
+    kinds = [leg["kind"] for leg in swing["legs"]]
+    assert kinds == ["down", "up", "down", "up", "down", "up"], kinds
+    assert all(leg["confirmed"] for leg in swing["legs"][:-1]) and not swing["legs"][-1]["confirmed"]
+    bottoms = [e["price"] for e in swing["endpoints"] if e["kind"] == "bottom"]
+    tops = [e["price"] for e in swing["endpoints"] if e["kind"] == "top"]
+    assert bottoms == [10.0, 9.5, 9.0], bottoms
+    assert tops == [13.0, 12.5], tops
+
+
+def test_aux_structure_classifies_four_patterns():
+    """两顶两底分类（研报 §2.2）：上涨 / 下跌 / 收缩 / 扩张，最末两顶两底的比较。"""
+    from backend.services import wyckoff_service as wy
+
+    up = wy.aux_structure(_bars(_zig((10.0, 13.0), (13.0, 11.5), (11.5, 14.5), (14.5, 12.6),
+                                     (12.6, 15.5), (15.5, 14.0))))
+    assert up["pattern"] == "上涨趋势"
+    down = wy.aux_structure(_bars(_zig((10.0, 13.0), (13.0, 9.5), (9.5, 12.5), (12.5, 9.0),
+                                       (9.0, 11.5), (11.5, 8.2))))
+    assert down["pattern"] == "下跌趋势" and down["endpoint_source"] == "macd_legs"
+    shrink = wy.aux_structure(_bars(_zig((10.6, 10.0), (10.0, 10.0), (10.0, 10.6), (10.6, 9.4),
+                                         (9.4, 10.45), (10.45, 9.55), (9.55, 10.4))))
+    assert shrink["pattern"] == "收缩盘整"
+    expand = wy.aux_structure(_bars(_zig((10.0, 11.0), (11.0, 9.5), (9.5, 12.5), (12.5, 8.5),
+                                         (8.5, 13.5), (13.5, 7.6))))
+    assert expand["pattern"] == "扩张盘整"
+    # 强趋势里 MACD 长期同号 ⇒ MACD 波段端点不够，必须**兜底**并如实标注来源
+    assert up["endpoint_source"] == "swing_fallback", "端点不足时要退化并标注，而不是判「样本不足」"
+
+
+def test_support_resistance_and_confidence():
+    """辅助线：水平线锚在已确认端点上；趋势线过两顶/两底；确认度 = 触及次数 × log(1+跨天数)。"""
+    from backend.services import wyckoff_service as wy
+
+    st = wy.aux_structure(_bars(_zig((10.6, 10.0), (10.0, 10.0), (10.0, 10.6), (10.6, 9.4),
+                                     (9.4, 10.45), (10.45, 9.55), (9.55, 10.4))))
+    kinds = {line["kind"] for line in st["lines"]}
+    assert {"resistance", "support", "ob", "os"} <= kinds, kinds
+    assert st["ob_line"] == max(e["price"] for e in st["tops"])
+    assert st["os_line"] == min(e["price"] for e in st["bottoms"])
+    assert all(line["touches"] >= 0 and line["confidence"] >= 0 for line in st["lines"])
+    assert len(st["key_resistance"]) <= 3, "JOC 的关键阻力线最多取三条"
+    assert st["supports"] and st["resistances"]
+
+
+def test_shortening_is_the_sot_condition():
+    """SOT 的判据：三个同侧端点持续同向 + 距离缩短（只测这条纯函数，几何与公式分开锁）。"""
+    from backend.services import wyckoff_service as wy
+
+    assert wy._shortening([12.0, 11.0, 10.5], up=False) is True    # 底 12→11→10.5，间隔 1.0 → 0.5
+    assert wy._shortening([12.0, 11.0, 9.5], up=False) is False    # 间隔 1.0 → 1.5：在放大，不是缩短
+    assert wy._shortening([10.0, 11.0, 11.5], up=True) is True     # 顶 10→11→11.5，间隔 1.0 → 0.5
+    assert wy._shortening([10.0, 11.0], up=True) is False
+
+
+def _fake_struct(**over):
+    """手搓结构（几何由测试给定，与行情模拟解耦）。"""
+    base = {
+        "pattern": "收缩盘整", "endpoint_source": "macd_legs",
+        "resistances": [10.5], "supports": [9.5],
+        "lines": [{"kind": "resistance", "label": "顶端点 R", "value_last": 10.5, "confidence": 3.0},
+                  {"kind": "support", "label": "底端点 S", "value_last": 9.5, "confidence": 2.0}],
+        "key_resistance": ["顶端点 R"], "ob_line": 10.5, "os_line": 9.5,
+        "tops": [{"date": "2025-04-01", "price": 10.5, "index": 3, "kind": "top"}],
+        "bottoms": [{"date": "2025-03-01", "price": 9.5, "index": 2, "kind": "bottom"}],
+        "endpoints": [{"date": "2025-04-01", "price": 10.5, "index": 3, "kind": "top"}],
+        "swing": {"confirmed": []},
+    }
+    base.update(over)
+    return base
+
+
+def _events_at_last_bar(rows, struct, window: int = 3):
+    from backend.services import wyckoff_service as wy
+
+    frame = _ohlc(rows)
+    st = wy._bar_stats(frame, window)
+    return wy._structure_events(frame, st, len(rows) - 1, struct, window)
+
+
+def test_breakout_events_fire_up_and_down():
+    """ASY/JOC/OB(Line) 上破；AS/OS(Line)/BOI 下破 —— 全部要求 Close 真的**穿越**那条线。"""
+    struct = _fake_struct()
+    up_rows = [[10.0, 10.1, 9.9, 10.0, 1e6]] * 4 + [[10.2, 10.9, 10.1, 10.8, 2e6]]
+    types = {e[0]: e for e in _events_at_last_bar(up_rows, struct)}
+    assert types["ASY"][1] == 1.0 and types["OB_LINE"][1] == 1.0
+    assert 0 < types["JOC"][1] < 1, "JOC 是 sigmoid × 量能分位，不该是 0/1"
+    down_rows = [[10.0, 10.1, 9.9, 10.0, 1e6]] * 4 + [[9.6, 9.7, 9.1, 9.2, 2e6]]
+    types = {e[0]: e for e in _events_at_last_bar(down_rows, struct)}
+    assert types["AS"][1] == 1.0 and types["OS_LINE"][1] == 1.0
+    assert types["BOI"][1] == 1.0, "跌破上一个已确认底端点 = BOI"
+    # 没有穿越（前收已经在线上方）不算突破：反例必须为空
+    above_rows = [[10.8, 10.9, 10.7, 10.8, 1e6]] * 4 + [[10.83, 10.9, 10.8, 10.85, 1e6]]
+    assert not [e for e in _events_at_last_bar(above_rows, struct) if e[0] in ("ASY", "OB_LINE", "JOC")]
+
+
+def test_sot_and_wave_stop_events():
+    """SOT（端点距离缩短）与 AR&ST / LPS / LPSY（连续波段停下）—— 按研报 §2.3 的公式。"""
+    up_then_down = _fake_struct(
+        bottoms=[{"date": "d1", "price": 12.0, "index": 1, "kind": "bottom"},
+                 {"date": "d2", "price": 11.0, "index": 2, "kind": "bottom"},
+                 {"date": "d3", "price": 10.5, "index": 3, "kind": "bottom"}],
+        tops=[{"date": "t1", "price": 10.0, "index": 1, "kind": "top"},
+              {"date": "t2", "price": 10.0, "index": 2, "kind": "top"},
+              {"date": "t3", "price": 10.0, "index": 3, "kind": "top"}],
+        swing={"confirmed": [{"kind": "up", "amp": 0.25, "end_price": 12.5, "vol_mean": 1.2e6},
+                             {"kind": "down", "amp": -0.12, "end_price": 11.0, "vol_mean": 8e5}]})
+    flat_rows = [[11.4, 11.5, 11.3, 11.4, 1e6]] * 4 + [[11.5, 11.8, 11.4, 11.6, 1.5e6]]
+    types = {e[0]: e for e in _events_at_last_bar(flat_rows, up_then_down)}
+    assert types["SOT_DOWN"][1] == 1.0 and "at_endpoint" in types["SOT_DOWN"][3]
+    assert types["ARST_DOWN"][1] > 0 and types["LPS"][1] > 0
+    down_then_up = _fake_struct(
+        tops=[{"date": "t1", "price": 10.0, "index": 1, "kind": "top"},
+              {"date": "t2", "price": 10.6, "index": 2, "kind": "top"},
+              {"date": "t3", "price": 10.9, "index": 3, "kind": "top"}],   # 间隔 0.6 → 0.3（缩短）
+        bottoms=[{"date": "b1", "price": 10.0, "index": 1, "kind": "bottom"},
+                 {"date": "b2", "price": 10.0, "index": 2, "kind": "bottom"},
+                 {"date": "b3", "price": 10.0, "index": 3, "kind": "bottom"}],
+        swing={"confirmed": [{"kind": "down", "amp": -0.15, "end_price": 9.0, "vol_mean": 1.2e6},
+                             {"kind": "up", "amp": 0.12, "end_price": 10.1, "vol_mean": 8e5}]})
+    fade_rows = [[10.0, 10.1, 9.9, 10.0, 1e6]] * 4 + [[10.0, 10.1, 9.7, 9.85, 1.5e6]]
+    types = {e[0]: e for e in _events_at_last_bar(fade_rows, down_then_up)}
+    assert types["SOT_UP"][1] == 1.0 and types["ARST_UP"][1] > 0 and types["LPSY"][1] > 0
+
+
+def test_tso_needs_follow_through_and_flags_pending():
+    """TSO：单根破掉所有支撑线 + 之后每根 Close 不低于它那根 Low；末根还没后续 ⇒ pending。"""
+    struct = _fake_struct(supports=[9.5], resistances=[],
+                          lines=[{"kind": "support", "label": "底端点 S", "value_last": 9.5, "confidence": 1.0}],
+                          key_resistance=[])
+    rows = [[10.0, 10.1, 9.9, 10.0, 1e6]] * 3 + [[9.8, 9.9, 9.35, 9.40, 1e6], [9.6, 9.7, 9.5, 9.6, 1e6]]
+    confirmed = [e for e in _events_at_last_bar(rows[:4] + rows[4:], struct) if e[0] == "TSO"]
+    assert not confirmed, "末根不是那根破位的 K 线时不该在末根报 TSO"
+    from backend.services import wyckoff_service as wy
+
+    frame = _ohlc(rows)
+    st = wy._bar_stats(frame, 3)
+    mid = [e for e in wy._structure_events(frame, st, 3, struct, 3) if e[0] == "TSO"]
+    assert mid and mid[0][3] == {"pending": False}, "后续 Close 守住 ⇒ 确认（pending=False）"
+    pending_rows = rows[:3] + [[9.8, 9.9, 9.35, 9.40, 1e6], [9.5, 9.6, 9.30, 9.40, 1e6]]
+    frame2 = _ohlc(pending_rows)
+    st2 = wy._bar_stats(frame2, 3)
+    last = [e for e in wy._structure_events(frame2, st2, 4, struct, 3) if e[0] == "TSO"]
+    assert last and last[0][3] == {"pending": True}, "末根破位但还没有后续 K 线 ⇒ pending"
+    break_rows = rows[:3] + [[9.8, 9.9, 9.35, 9.40, 1e6], [9.3, 9.4, 9.2, 9.25, 1e6]]
+    frame3 = _ohlc(break_rows)
+    st3 = wy._bar_stats(frame3, 3)
+    assert not [e for e in wy._structure_events(frame3, st3, 3, struct, 3) if e[0] == "TSO"], \
+        "后续 Close 跌破了那根 Low ⇒ 不算 TSO"
+
+
+def test_event_cloud_covers_every_documented_event(client):
+    """全表覆盖锁：研报 §2.3 的每一行都有代码、方向符合 §3.1 分组映射、口径自定项如实列出。"""
+    from backend.services import wyckoff_service as wy
+
+    report = (ROOT / "docs/reference/wyckoff/wyckoff_event_probability_cloud.md").read_text(encoding="utf-8")
+    documented = ["SOT(Down)", "SOT(Up)", "ASY", "AS", "PS", "SC", "AR&ST(Down)", "AR&ST(Up)",
+                  "TSO", "SPRING", "LPS", "LPSY", "JOC", "PSY", "BC", "UT", "BOI",
+                  "OB(Line)", "OB(Up)", "OS(Line)", "OS(Down)", "3H", "VDB", "OKR(Up)", "3L", "VSB", "OKR(Down)"]
+    for name in documented:
+        assert name in report, f"研报里应当有 {name}"
+    codes = set(wy._EVENT_META)
+    assert len(codes) >= 27 and not set(wy._NOT_IMPLEMENTED)
+    # 方向：研报 §3.1 —— 吸筹（第一组）/强势/超卖 = +1；派发（第二组）/弱势/超买 = −1
+    plus = {"PS", "SC", "SPRING", "OS_DOWN", "OS_LINE", "3H", "VDB", "OKR_UP",
+            "SOT_DOWN", "ASY", "ARST_DOWN", "TSO", "LPS", "JOC"}
+    minus = {"PSY", "BC", "UT", "OB_UP", "OB_LINE", "3L", "VSB", "OKR_DOWN",
+             "SOT_UP", "AS", "ARST_UP", "LPSY", "BOI"}
+    assert plus | minus == codes, "每个事件都要有明确方向，且按研报分组映射"
+    for code in codes:
+        side, label, _bias = wy._EVENT_META[code]
+        assert side == (+1 if code in plus else -1) and label
+    assert len(wy._CALIBERS) >= 7, "研报没给细节的地方（OB/OS 线、SOT 位置、扩张盘整、确认度、TSO pending…）都要写明"
+    # 接口与前端消费同一份
+    payload = client.get("/api/stocks/000001.SZ/wyckoff?days=250").json()
+    cloud = payload.get("event_cloud") or {}
+    assert cloud.get("available") is False or (cloud.get("calibers") and cloud.get("structure")), cloud.keys()
+
+
+# ── 7) 事件概率云择时回测（scripts/wyckoff_event_study.py）的口径锁 ──────────────
+# 研究脚本也要锁：错了不会报错，只会给出一条看着很美的曲线。
+
+def _load_study():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "wyckoff_event_study_under_test", ROOT / "scripts/wyckoff_event_study.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["wyckoff_event_study_under_test"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_event_study_weights_are_long_or_longshort():
+    """WSO 多头 = 只买正分数、等权、总仓位 ≤1；多空 = 正负各 0.5 gross（研报 §3.1 的 ±1 口径）。"""
+    study = _load_study()
+    dates = pd.bdate_range("2026-01-05", periods=3)
+    codes = ["A", "B", "C"]
+    scores = pd.DataFrame([
+        {"stock_code": "A", "trade_date": dates[0], "score": 0.6},
+        {"stock_code": "B", "trade_date": dates[0], "score": 0.2},
+        {"stock_code": "C", "trade_date": dates[0], "score": -0.4},
+        {"stock_code": "C", "trade_date": dates[1], "score": -0.4},
+        {"stock_code": "A", "trade_date": dates[1], "score": 1.2},
+    ])
+    long_w = study.weights_from_score(scores, dates, codes, "long")
+    assert abs(long_w.loc[dates[0]].sum() - 1.0) < 1e-9, "正分数等权、满仓"
+    assert long_w.loc[dates[0], "C"] == 0.0, "负分数不进多头"
+    assert abs(long_w.loc[dates[0], "A"] - 0.75) < 1e-9, "0.6 : 0.2 ⇒ 0.75 : 0.25"
+    assert abs(long_w.loc[dates[1]].sum() - 1.0) < 1e-9
+    ls_w = study.weights_from_score(scores, dates, codes, "longshort")
+    assert abs(ls_w.loc[dates[0]].sum()) < 1e-9, "多空净额 0"
+    assert abs(ls_w.loc[dates[0]].abs().sum() - 1.0) < 1e-9, "两侧各 0.5 gross"
+
+
+def test_event_study_wss_selection_thresholds():
+    """WSS 必须真的按研报门槛筛（样本 ≥100、胜率 ≥55%、赔率 ≥1.08），不是"看着选"。"""
+    study = _load_study()
+    days = pd.bdate_range("2025-01-06", periods=140)
+    rng = np.random.default_rng(7)
+    rows, fwd = [], []
+    for i, day in enumerate(days):
+        for code, evt in (("A", "PS"), ("B", "BOI")):
+            rows.append({"stock_code": code, "trade_date": day, "event": evt,
+                         "side": +1 if evt == "PS" else -1, "wso": 0.3, "prob": 0.7})
+            # PS：80% 胜率、赚 2% / 亏 1%（胜率≥55% 且赔率 2.0）⇒ 应被选中
+            # BOI：50% 胜率 ⇒ 不该被选中
+            win = rng.random() < (0.8 if evt == "PS" else 0.5)
+            ret = (0.02 if win else -0.01) if evt == "PS" else (0.03 if win else -0.02)
+            row = {"stock_code": code, "trade_date": day, "next_open": 10.0}
+            for h in study.HORIZONS:
+                row[f"close_h{h}"] = 10.0 * (1 + ret)
+            fwd.append(row)
+    table, selected = study.wss_table(pd.DataFrame(rows), pd.DataFrame(fwd), sample_end=days[-1].strftime("%Y-%m-%d"))
+    assert not table.empty and {"event", "h", "n", "win_rate", "odds"} <= set(table.columns)
+    assert all(row["n"] >= 100 for _, row in table.iterrows()), "样本少于 100 的 (形态,窗口) 不该进表"
+    picked = {e for e, _h, _wr in selected}
+    assert picked == {"PS"}, f"只有满足胜率/赔率的形态该被选中，实际 {picked}"
+    assert all(wr >= 0.55 for _e, _h, wr in selected)
+
+
+def test_event_study_replay_has_no_lookahead():
+    """回放口径：第 i 日用**第 i-1 日**的分数建仓，收益取"今开盘→次一交易日开盘"。
+
+    这里造一个"只在最后一天才出现信号"的行情：若实现偷看当天（或用了收盘价），净值会立刻变；
+    正确实现下最后一天没有持仓（信号还没到可交易日）。
+    """
+    study = _load_study()
+    days = pd.bdate_range("2026-01-05", periods=4)
+    codes = ["A"]
+    px = {
+        "opens": {("A", days[0]): 10.0, ("A", days[1]): 10.0, ("A", days[2]): 10.0, ("A", days[3]): 10.0},
+        "closes": {("A", d): 10.0 for d in days},
+        "next_open": {("A", days[0]): 10.0, ("A", days[1]): 10.0, ("A", days[2]): 20.0, ("A", days[3]): 20.0},
+        "dates": days,
+    }
+    late = pd.DataFrame([{"stock_code": "A", "trade_date": days[2], "score": 1.0}])
+    w = study.weights_from_score(late, days, codes, "long")
+    nav = study.replay_weighted(w, px)["nav"]
+    assert nav.iloc[0] == 1.0 and nav.iloc[1] == 1.0, "前两日无信号，净值必须不动"
+    assert nav.iloc[2] == 1.0, "信号当日不许建仓（当天收盘才算得出分数）"
+    assert nav.iloc[3] > 1.9, "第 3 日（信号日的下一交易日）开盘建仓，吃到 10.0 → 20.0 的翻倍"

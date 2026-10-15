@@ -1,39 +1,157 @@
 {
   "_note": [
     "实盘账户快照（人工录入）。这是**真实券商账户**的一份截面，不是策略名单。",
-    "来源：中泰证券 App 持仓页截图（2026-10-12 13:23，账户 **0867），由用户提供并手工转录。",
+    "来源：中泰证券 App 持仓页截图（2026-10-15 14:09，账户 **0867），由用户提供并手工转录。",
+    "本次变更（2026-10-15）：**苏州银行 002966.SZ 清仓**（截图 0 股 / 成本 0.000，已实现 -199.81）→ **换入中恒集团 600252.SH 5700 股 @2.351**（可用 0 股 = 当日买入）。",
     "为什么单开一份配置而不是塞进 output/paper_trading/account/：那个账户是「策略从空仓 45,000 按当日名单下单」",
     "的前向口径；真实持仓是人工决策 + 已实现亏损的混合，两者混在一起会让净值曲线出现一次无解释跳变，",
     "之后没法再和影子变体做同窗口配对。所以实盘镜像单独一个账户（output/paper_trading/live_mirror/），",
     "共用同一套执行假设（config/execution_assumptions_cn.json），只做「同口径可比」。",
     "维护方式：改本文件后跑 scripts/build_live_mirror.py（每日自动化也会自动跑一次）。",
-    "数量单位是股（A 股整手 100 股）；cost_price 是券商显示的摊薄成本价；last_price 是截图时刻的现价。"
+    "数量单位是股（A 股整手 100 股）；cost_price 是券商显示的摊薄成本价；last_price 是截图时刻的现价。",
+    "口径提醒（2026-10-15）：净值曲线从**快照日**起按当前持仓重算（快照日之前不回填：买入日期未知）。",
+    "本次快照同时有**资金进出**（总资产 39,174 → 48,481，可用 40.55 → 234.40），且旧快照已留档到",
+    "config/live_account_holdings_history/2026-10-12.json；两段**不做拼接** —— 拼接等于把入金当成收益。"
   ],
   "broker": "中泰证券",
   "account_masked": "**0867",
-  "asof": "2026-10-12",
-  "captured_at": "2026-10-12 13:23",
+  "asof": "2026-10-15",
+  "captured_at": "2026-10-15 14:09",
   "captured_by": "用户截图人工转录",
   "currency": "CNY",
-  "cash": 40.55,
+  "cash": 234.4,
   "reported": {
-    "total_assets": 39174.05,
-    "market_value": 39133.00,
-    "available": 40.55,
-    "withdrawable": 40.55,
-    "float_pnl": -6059.51,
-    "day_pnl": -297.11,
-    "day_pnl_pct": -0.0075
+    "total_assets": 48480.9,
+    "market_value": 48246.0,
+    "available": 234.4,
+    "withdrawable": 234.4,
+    "float_pnl": -757.05,
+    "day_pnl": -217.13,
+    "day_pnl_pct": -0.0045
   },
   "positions": [
-    {"stock_code": "002966.SZ", "name": "苏州银行", "shares": 400, "cost_price": 9.513, "last_price": 9.510, "reported_market_value": 3804.00, "reported_pnl": -1.00},
-    {"stock_code": "300229.SZ", "name": "拓尔思", "shares": 1100, "cost_price": 13.145, "last_price": 13.120, "reported_market_value": 14432.00, "reported_pnl": -27.00},
-    {"stock_code": "300896.SZ", "name": "爱美客", "shares": 100, "cost_price": 94.430, "last_price": 94.290, "reported_market_value": 9429.00, "reported_pnl": -14.00},
-    {"stock_code": "605499.SH", "name": "东鹏饮料", "shares": 100, "cost_price": 115.011, "last_price": 114.720, "reported_market_value": 11472.00, "reported_pnl": -29.11}
+    {
+      "stock_code": "300229.SZ",
+      "name": "拓尔思",
+      "shares": 1100,
+      "cost_price": 13.145,
+      "last_price": 12.94,
+      "reported_market_value": 14234.0,
+      "reported_pnl": -225.0
+    },
+    {
+      "stock_code": "300896.SZ",
+      "name": "爱美客",
+      "shares": 100,
+      "cost_price": 94.43,
+      "last_price": 94.25,
+      "reported_market_value": 9425.0,
+      "reported_pnl": -18.0
+    },
+    {
+      "stock_code": "600252.SH",
+      "name": "中恒集团",
+      "shares": 5700,
+      "cost_price": 2.351,
+      "last_price": 2.32,
+      "reported_market_value": 13224.0,
+      "reported_pnl": -176.13
+    },
+    {
+      "stock_code": "605499.SH",
+      "name": "东鹏饮料",
+      "shares": 100,
+      "cost_price": 115.011,
+      "last_price": 113.63,
+      "reported_market_value": 11363.0,
+      "reported_pnl": -138.11
+    }
   ],
   "cleared_positions": [
-    {"stock_code": "002463.SZ", "name": "沪电股份", "realized_pnl": -3183.23},
-    {"stock_code": "002831.SZ", "name": "裕同科技", "realized_pnl": -1215.23},
-    {"stock_code": "600460.SH", "name": "士兰微", "realized_pnl": -1589.94}
-  ]
+    {
+      "stock_code": "002463.SZ",
+      "name": "沪电股份",
+      "realized_pnl": -3183.23
+    },
+    {
+      "stock_code": "002831.SZ",
+      "name": "裕同科技",
+      "realized_pnl": -1215.23
+    },
+    {
+      "stock_code": "600460.SH",
+      "name": "士兰微",
+      "realized_pnl": -1589.94
+    },
+    {
+      "stock_code": "002966.SZ",
+      "name": "苏州银行",
+      "realized_pnl": -199.81,
+      "note": "2026-10-15 清仓换中恒集团；截图显示 0 股 / 成本 0.000 / 现价 9.030 / 盈亏 -199.81（含费）"
+    }
+  ],
+  "recent_trades": {
+    "_note": [
+      "2026-10-15 当日成交明细（人工转录用户截图「当日成交」页），用于审计这次换股；",
+      "镜像本身只吃 positions/cash/cleared_positions，这一块不参与任何计算。"
+    ],
+    "asof": "2026-10-15",
+    "trades": [
+      {
+        "time": "13:17:03",
+        "side": "卖",
+        "stock_code": "002966.SZ",
+        "name": "苏州银行",
+        "price": 9.03,
+        "shares": 100,
+        "amount": 903.0
+      },
+      {
+        "time": "13:17:03",
+        "side": "卖",
+        "stock_code": "002966.SZ",
+        "name": "苏州银行",
+        "price": 9.03,
+        "shares": 100,
+        "amount": 903.0
+      },
+      {
+        "time": "13:17:03",
+        "side": "卖",
+        "stock_code": "002966.SZ",
+        "name": "苏州银行",
+        "price": 9.03,
+        "shares": 100,
+        "amount": 903.0
+      },
+      {
+        "time": "13:17:03",
+        "side": "卖",
+        "stock_code": "002966.SZ",
+        "name": "苏州银行",
+        "price": 9.03,
+        "shares": 100,
+        "amount": 903.0
+      },
+      {
+        "time": "13:20:40",
+        "side": "买",
+        "stock_code": "600252.SH",
+        "name": "中恒集团",
+        "price": 2.35,
+        "shares": 2100,
+        "amount": 4935.0
+      },
+      {
+        "time": "13:20:40",
+        "side": "买",
+        "stock_code": "600252.SH",
+        "name": "中恒集团",
+        "price": 2.35,
+        "shares": 3600,
+        "amount": 8460.0
+      }
+    ],
+    "cash_check": "卖出 3,612.00 − 买入 13,395.00 + 期初现金 40.55 = −9,742.45 ⇒ 当日另有约 +9.99k 入金，与「总资产 39,174 → 48,481」一致 ⇒ 这解释了为什么两段净值不做拼接（拼接会把入金当收益）"
+  }
 }

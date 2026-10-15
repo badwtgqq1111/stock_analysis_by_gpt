@@ -103,8 +103,10 @@
           <table class="data-table tiny">
             <thead><tr><th class="left">当前 K 线候选事件</th><th class="left">似然度</th><th class="left">方向</th></tr></thead>
             <tbody>
-              <tr v-for="e in (wyckoff.event_cloud.cloud || [])" :key="e.type">
-                <td class="left"><b>{{ e.type }}</b> {{ e.label }}</td>
+              <tr v-for="e in cloudRows" :key="e.type">
+                <td class="left"><b>{{ e.type }}</b> {{ e.label }}
+                  <span v-if="e.pending" class="tag tiny" title="末根 K 线之后还没有 K 线 ⇒ 尚未确认">待确认</span>
+                </td>
                 <td class="left">
                   <span class="wk-bar" :style="{ width: Math.max(2, e.prob * 100) + '%' }"></span>
                   <span class="mono">{{ (e.prob * 100).toFixed(1) }}%</span>
@@ -114,11 +116,24 @@
             </tbody>
           </table>
           <p class="hint tiny">
-            已实现 <b>{{ (wyckoff.event_cloud.implemented || []).length }}</b> 个公式自足的事件；
-            需要波段端点结构的
-            <span class="mono">{{ (wyckoff.event_cloud.not_implemented || []).join(' / ') }}</span>
-            <b>未实现</b>（不编数字）。来源：{{ wyckoff.event_cloud.source }}
+            已实现 <b>{{ (wyckoff.event_cloud.implemented || []).length }}</b> 个事件代码
+            （研报 §2.3 的 25 行全部落地；SOT / AR&ST 按多空各一支）<span
+              v-if="(wyckoff.event_cloud.not_implemented || []).length">；仍未实现：
+              <span class="mono">{{ (wyckoff.event_cloud.not_implemented || []).join(' / ') }}</span></span>。
+            来源：{{ wyckoff.event_cloud.source }}
           </p>
+          <p class="hint tiny" v-if="wyckoff.event_cloud.structure">
+            结构：<b>{{ wyckoff.event_cloud.structure.pattern }}</b>
+            （端点 {{ wyckoff.event_cloud.structure.endpoints }} 个 ·
+            {{ wyckoff.event_cloud.structure.endpoint_source === 'swing_fallback' ? 'MACD 波段端点不足，用摆动高低点兜底' : '研报 §2.1 MACD 波段端点' }} ·
+            辅助线 {{ wyckoff.event_cloud.structure.lines }} 条）
+            <span v-if="wyckoff.event_cloud.structure.ob_line">· 超买线 {{ wyckoff.event_cloud.structure.ob_line }}</span>
+            <span v-if="wyckoff.event_cloud.structure.os_line">· 超卖线 {{ wyckoff.event_cloud.structure.os_line }}</span>
+          </p>
+          <details class="hint tiny" v-if="(wyckoff.event_cloud.calibers || []).length">
+            <summary>口径自定 {{ (wyckoff.event_cloud.calibers || []).length }} 处（研报没给构造细节，如实列明）</summary>
+            <ul><li v-for="(c, i) in wyckoff.event_cloud.calibers" :key="i">{{ c }}</li></ul>
+          </details>
         </div>
         <p class="hint tiny mt">{{ wyckoff.methodology }} {{ wyckoff.disclaimer }}</p>
       </template>
@@ -398,6 +413,13 @@ watch(selectedCode, (code) => {
 
 // ── 威科夫点图（P&F）：随选中标的自动算，箱 %/反转箱/区间天数可调 ───────────────
 const wyckoff = ref<WyckoffRead | null>(null)
+/** 概率云面板只渲染似然度靠前的候选（接口仍返回全部 27 个代码；一屏排不下，
+ *  低似然度的候选也不该抢视觉权重）。 */
+const cloudRows = computed(() => {
+  const rows = wyckoff.value?.event_cloud?.cloud || []
+  const shown = rows.filter((e) => e.prob >= 0.05)
+  return shown.length > 12 ? shown.slice(0, 12) : shown
+})
 const wyckoffLoading = ref(false)
 const wyckoffError = ref('')
 const wyckoffBoxPct = ref(2)          // 页面用"百分比"输入，接口要小数

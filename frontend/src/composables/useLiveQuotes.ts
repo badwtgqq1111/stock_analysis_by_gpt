@@ -24,6 +24,9 @@ export interface LiveQuotesState {
   reload: () => Promise<void>
 }
 
+/** `/api/intraday/quotes` 的硬上限（后端 `[:40]`）—— 每批不得超过它，否则末尾的票静默丢价。 */
+const MAX_CODES_PER_REQUEST = 40
+
 export function useLiveQuotes(codes: Ref<string[]>, options: { intervalMs?: number } = {}): LiveQuotesState {
   const intervalMs = options.intervalMs ?? 4000
   const quotes = ref<Record<string, IntradayQuote>>({})
@@ -42,13 +45,29 @@ export function useLiveQuotes(codes: Ref<string[]>, options: { intervalMs?: numb
     }
     loading.value = true
     try {
-      const payload = await getIntradayQuotes(wanted.slice(0, 60))   // 一次最多 60 只，避免 URL 过长
-      session.value = payload.session
+      // 事故（2026-10-15）：这里原先是"一次发完、`.slice(0, 60)`"，可 `/api/intraday/quotes`
+      // 只收前 40 个代码（`[:40]`）⇒ 分组列表一变长，**末尾那批行就永远没有实时价**
+      // （用户看到的就是 K 线页「动态诊断候选」整组空白、只有前两组有价）。
+      // 现在按 MAX_CODES_PER_REQUEST 分批**并行**发，再把结果合并；任何一批失败都不影响其它批。
+      const batches: string[][] = []
+      for (let i = 0; i < wanted.length; i += MAX_CODES_PER_REQUEST) {
+        batches.push(wanted.slice(i, i + MAX_CODES_PER_REQUEST))
+      }
+      const settled = await Promise.allSettled(batches.map((batch) => getIntradayQuotes(batch)))
+      const ok = settled.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof getIntradayQuotes>>> =>
+        r.status === 'fulfilled')
+      if (!ok.length) {
+        const first = settled[0] as PromiseRejectedResult
+        throw first?.reason ?? new Error('quotes failed')
+      }
       const next: Record<string, IntradayQuote> = { ...quotes.value }
-      for (const quote of payload.quotes || []) next[quote.stock_code] = quote
+      for (const result of ok) {
+        for (const quote of result.value.quotes || []) next[quote.stock_code] = quote
+        if (result.value.session) session.value = result.value.session
+      }
       quotes.value = next
       updatedAt.value = new Date()
-      error.value = ''
+      error.value = ok.length === settled.length ? '' : `部分批次失败（${ok.length}/${settled.length}）`
     } catch (err) {
       error.value = String(err)          // 保留上一次成功数据，只标错，不清空
     } finally {

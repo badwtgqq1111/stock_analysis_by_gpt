@@ -69,6 +69,17 @@ def build_picks(start: str, cadence: str, holdings: int,
     return merged.reset_index(drop=True)
 
 
+
+def _basic_names() -> dict[str, dict[str, str]]:
+    """`cn_stock_basic.parquet` → {ts_code: {name, industry}}（缺表时返回空映射，不阻断）。"""
+    path = ROOT / "assets/data/meta/cn_stock_basic.parquet"
+    if not path.exists():
+        return {"name": {}, "industry": {}}
+    frame = pd.read_parquet(path, columns=["ts_code", "name", "industry"]).drop_duplicates("ts_code")
+    return {"name": dict(zip(frame["ts_code"].astype(str), frame["name"].fillna("").astype(str))),
+            "industry": dict(zip(frame["ts_code"].astype(str), frame["industry"].fillna("").astype(str)))}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="横盘箱体突破回踩手臂（候选策略：名单 + 净值曲线）")
     ap.add_argument("--start", default="2016-01-01")
@@ -127,8 +138,11 @@ def main() -> int:
         table["stock_code"] = table["stock_code"]
         table["rank"] = range(1, len(table) + 1)
         table["in_portfolio"] = True
-        table["name"] = ""
-        table["industry"] = ""
+        # 名字/行业从股票基础表补（2026-10-15：原来这里是空串占位、从没填过 ⇒ 名单里没有名字，
+        # 下游（/api/selection、选股台账、K 线自选）只能显示空；补齐后前端与台账都有名字）。
+        basic = _basic_names()
+        table["name"] = table["stock_code"].map(basic["name"]).fillna("")
+        table["industry"] = table["stock_code"].map(basic["industry"]).fillna("")
         table["board"] = "箱体突破回踩"
         table["score"] = -table["consolidated_amp"]           # 箱体越窄分越高
         table["lots_at_capital"] = 0

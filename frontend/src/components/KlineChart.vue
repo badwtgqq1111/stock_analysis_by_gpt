@@ -177,6 +177,7 @@ function initChart() {
   if (!containerRef.value) return
 
   chart = createChart(containerRef.value, {
+    autoSize: true, // 侧栏、筹码开关和窄屏切换均跟随容器，不留下旧 canvas 宽度
     layout: {
       background: { type: ColorType.Solid, color: COLORS.bg },
       textColor: COLORS.text,

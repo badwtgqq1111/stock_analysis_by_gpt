@@ -1,0 +1,89 @@
+{
+  "version": "crowding.v1.2",
+  "status": "retrospective_research_only",
+  "stock_sampling": "sha256(stock_code) % 8 == 0, no list_status filter; lake availability remains selection bias",
+  "event_calendar": "last benchmark session of each COMPLETE prior month; endpoint month excluded; eligible bars only; 2017 warmup and 2018+ decisions",
+  "date_split": {
+    "development": "2018-2023",
+    "rolling_validation": "2024-2025",
+    "seen_retrospective_holdout": "2026"
+  },
+  "turnover": "positive daily float-turnover decimal, sources require >=100 same-date validation pairs and >=98% within5%; monthly shares never forward-filled",
+  "windows": {
+    "smooth": 5,
+    "bias": 20,
+    "correlation": 40,
+    "moments": 60,
+    "rank_history": 252,
+    "breadth_previous": 252
+  },
+  "thresholds": {
+    "high": 0.95,
+    "sensitivity_only": 0.99,
+    "low": 0.5
+  },
+  "rank": "(rolling253 average-rank(current)-1)/252; requires full window; current excluded, ties midrank",
+  "correlation_tails": [
+    -0.5,
+    0.5
+  ],
+  "horizons": [
+    5,
+    20
+  ],
+  "event_capital": 10000,
+  "event_min_amount20": 20000000,
+  "controls": [
+    "same decision date",
+    "momentum20 tercile",
+    "vol20 tercile",
+    "amount20 tercile"
+  ],
+  "unavailable_controls": [
+    "PIT industry",
+    "PIT daily real market cap (monthly basic insufficient)"
+  ],
+  "inference": "date-equal differences; fixed-seed circular block bootstrap, block=horizon+20, 500 repetitions; minimum20 paired dates; Holm-adjusted tests across published factor/horizon/split variants",
+  "shadow_sources": [
+    "preselected",
+    "arm"
+  ],
+  "shadow_variants": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E_volcap",
+    "E_volcap_crowding",
+    "F_dev_exposure"
+  ],
+  "shadow_high_missing": "retain original weights, audit unknown; no promotion with unknown selected exposures",
+  "D_policy": "High crowding blocks new purchases of actual shares, without label-triggered liquidation. Requires an exact execution guard; target-weight proxy is not counted as D.",
+  "F_policy": "constant scale calibrated on development-only preselected ledger; if none, no F replay, never fit on validation",
+  "gate": {
+    "min_returns": 252,
+    "min_decisions": 63,
+    "min_quarters": 3,
+    "quarter_min_returns": 40,
+    "risk_improve_quarter_fraction": 0.6666666666666666,
+    "max_ann_shortfall": 0.02,
+    "min_risk_improvement": 0.1,
+    "pit_review_required": true,
+    "no_auto_promotion": true
+  },
+  "limitations": [
+    "Current lake QFQ is retrospective; input PIT not independently audited.",
+    "Sample breadth is NOT full-market/industry breadth.",
+    "No frontend change until incremental risk evidence and PIT gates support it."
+  ],
+  "implementation_corrections": [
+    {
+      "reason": "Incomplete latest month was incorrectly treated as completed month-end in initial run. Exclude current endpoint month conservatively; no factor threshold or split tuning.",
+      "original_methodology_sha256": "c92073012033bd33ed00c2cc35b4e98bfa8f10a6f2987cd123e1203ababe1c07"
+    },
+    {
+      "reason": "Clarify D exact-share requirement instead of initial target-weight proxy. Add zero-variance guard for return/dlog(amount) correlation; research factor thresholds, splits and tests are unchanged. Previous results have already been observed.",
+      "previous_methodology_sha256": "2a2c6a53d058ea51016fa42a69d3d8ea0ae6bff2059ec13af91d3babedc91137"
+    }
+  ]
+}

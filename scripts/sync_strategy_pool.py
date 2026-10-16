@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -317,65 +318,80 @@ def is_fresh(latest: "str | None", reference: "str | None") -> bool:
 
 
 def _return_ranking(strategies: list[dict]) -> dict:
-    """策略按收益率排名（用户 2026-10-15："策略池里把策略按收益率排名"）。
+    """年化主榜（至少252个日收益）；保留累计/超额榜兼容旧消费端。
 
-    口径（写进 payload，前端与本函数的判据一致）：
-      · 用 `performance.research`（没有就退 `tracking`）的**独立回放/跟踪曲线**；
-      · 主键 = **累计收益**（`metrics.total_return`），并列时看 **相对中证500 超额**、再看年化、最后看观测数；
-      · **各策略窗口不同**（这正是"多策略对比图"用共同窗口的原因）⇒ 排名里**同时给出每个策略的窗口与观测数**，
-        并在 `caveat` 里说明；观测 < 30 的只能算"样本不足"，不给名次（放 `excluded`）。
-    返回 {by_total_return: [{id, rank, total_return, annual_return, excess_return, observations, window, kind}],
-          by_excess_return: [...], excluded: [{id, reason}], caveat: str}
+    各策略仍使用自己的研究/跟踪窗口，年化只统一计量尺度，不等同同窗回测。
+    零收益有效；缺数及非有限数值不参加对应榜单；并列按超额、观测数、id稳定排序。
     """
-    rows, excluded = [], []
+    def finite(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
+
+    rows, excluded, annual_excluded = [], [], []
     for s in strategies:
+        # 重复同步同一对象时，旧名次不得残留。
+        for field in ("return_rank", "excess_rank", "annual_rank", "annual_rank_reason"):
+            s.pop(field, None)
         perf = s.get("performance") or {}
-        curve = perf.get("research") or perf.get("tracking") or {}
+        curve = next((perf[k] for k in ("research", "tracking")
+                      if (perf.get(k) or {}).get("nav")), {})
         metrics = curve.get("metrics") or {}
-        total = metrics.get("total_return")
-        # 观测数：`research_replay` 那一类只给 dates/nav、没有 observations 字段（实测 wyckoff/moneyflow/jq_*），
-        # 用 nav 长度 − 1 兜底，否则它们会被"观测不足 30"整批排除掉。
-        obs = curve.get("observations")
+        obs = finite(curve.get("observations"))
         if obs in (None, 0):
-            obs = max(len(curve.get("nav") or []) - 1, 0) or None
-        if total is None or not curve.get("nav"):
-            excluded.append({"id": s["id"], "reason": "没有可用曲线"})
-            continue
-        if (obs or 0) < 30:
+            obs = max(len(curve.get("nav") or []) - 1, 0)
+        obs = int(obs)
+        row = {"id": s["id"], "total_return": finite(metrics.get("total_return")),
+               "annual_return": finite(metrics.get("annual_return")),
+               "max_drawdown": finite(metrics.get("max_drawdown")),
+               "sharpe": finite(metrics.get("sharpe_rf0", metrics.get("sharpe"))),
+               "excess_return": finite(curve.get("excess_return")),
+               "observations": obs, "kind": curve.get("kind"),
+               "window": f"{curve.get('start_date')} ~ {curve.get('end_date')}"}
+        if curve:
+            rows.append(row)
+        if not curve or row["total_return"] is None:
+            excluded.append({"id": s["id"], "reason": "没有可用累计收益曲线"})
+        elif obs < 30:
             excluded.append({"id": s["id"], "reason": f"观测不足 30（{obs}）⇒ 不给名次"})
-            continue
-        rows.append({"id": s["id"], "total_return": total,
-                     "annual_return": metrics.get("annual_return"),
-                     "max_drawdown": metrics.get("max_drawdown"),
-                     "sharpe": metrics.get("sharpe_rf0", metrics.get("sharpe")),
-                     "excess_return": curve.get("excess_return"),
-                     "observations": obs, "kind": curve.get("kind"),
-                     "window": f"{curve.get('start_date')} ~ {curve.get('end_date')}"})
-    def rank(key: str) -> list[dict]:
-        ordered = sorted(rows, key=lambda r: (-(r.get(key) or -9e9), -(r.get("excess_return") or -9e9),
-                                              -(r.get("observations") or 0)))
+        reason = ("没有可用曲线" if not curve else
+                  f"年化样本不足（{obs}/252 个日收益）" if obs < 252 else
+                  "缺少有效年化收益" if row["annual_return"] is None else None)
+        if reason:
+            s["annual_rank_reason"] = reason
+            annual_excluded.append({"id": s["id"], "reason": reason})
+
+    def rank(key: str, min_obs: int) -> list[dict]:
+        eligible = [r for r in rows if r[key] is not None and r["observations"] >= min_obs]
+        ordered = sorted(eligible, key=lambda r: (-r[key],
+                         -(r["excess_return"] if r["excess_return"] is not None else -math.inf),
+                         -r["observations"], r["id"]))
         return [{**r, "rank": i + 1} for i, r in enumerate(ordered)]
-    by_total = rank("total_return")
-    by_excess = rank("excess_return")
-    # 名次挂回每条策略（便于前端在卡片上显示）
-    for item in by_total:
-        for s in strategies:
-            if s["id"] == item["id"]:
-                s["return_rank"] = {"rank": item["rank"], "of": len(by_total),
-                                    "metric": "total_return", "value": item["total_return"],
-                                    "excess_return": item["excess_return"], "observations": item["observations"],
-                                    "window": item["window"], "basis": "累计收益（各策略窗口不同，见 caveat）"}
-    for item in by_excess:
-        for s in strategies:
-            if s["id"] == item["id"]:
-                s.setdefault("return_rank", {})
-                s["excess_rank"] = {"rank": item["rank"], "of": len(by_excess), "metric": "excess_return",
-                                    "value": item["excess_return"], "observations": item["observations"],
-                                    "window": item["window"], "basis": "相对中证500 超额（各策略窗口不同）"}
-    return {"by_total_return": by_total, "by_excess_return": by_excess, "excluded": excluded,
-            "basis": "累计收益为主键；并列看相对中证500 超额、再年化、最后观测数",
-            "caveat": ("各策略的回放/跟踪窗口不同（对比图另有共同窗口口径）⇒ 这份排名只做**同池横比参考**，"
-                       "跨窗口的收益率不能直接当「谁更强」的证明；窗口与观测数逐条列在下面。")}
+
+    by_annual = rank("annual_return", 252)
+    by_total = rank("total_return", 30)
+    by_excess = rank("excess_return", 30)
+    entries = {s["id"]: s for s in strategies}
+    for ranked, field, metric, basis in (
+        (by_annual, "annual_rank", "annual_return", "年化收益降序（至少252个日收益）"),
+        (by_total, "return_rank", "total_return", "累计收益（各策略窗口不同）"),
+        (by_excess, "excess_rank", "excess_return", "相对中证500 超额（各策略窗口不同）"),
+    ):
+        for item in ranked:
+            entries[item["id"]][field] = {
+                "rank": item["rank"], "of": len(ranked), "metric": metric, "value": item[metric],
+                "excess_return": item["excess_return"], "observations": item["observations"],
+                "window": item["window"], "basis": basis}
+    return {"by_annual_return": by_annual, "by_total_return": by_total,
+            "by_excess_return": by_excess, "excluded": excluded, "annual_excluded": annual_excluded,
+            "basis": "年化收益降序；至少252个日收益，缺数/短样本置后",
+            "caveat": ("年化按252个交易日折算；研究曲线优先，无可用研究曲线则使用跟踪曲线。"
+                       "各策略的窗口及成本口径仍可能不同，年化统一尺度不等于同窗比较；"
+                       "窗口与观测数逐条列示，短样本不外推年化、不混用累计收益补位。")}
 
 
 def build_pool() -> dict:

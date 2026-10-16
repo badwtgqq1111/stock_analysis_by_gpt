@@ -307,11 +307,11 @@ def test_multi_strategy_compare_aligns_to_common_window():
     assert "compareIds" in page and "toggleCompare" in page, "要能勾选参与对比的策略"
 
 
-def test_pool_list_marks_and_defaults_by_significance():
-    """列表标记与默认详情都按"显著性"走：负期望用同一条规则；默认详情优先"正收益且跑赢基准"。"""
+def test_pool_list_significance_marks_and_annual_default():
+    """列表负期望保留显著性规则；默认详情跟随年化排序第一项。"""
     page = (ROOT / "frontend/src/pages/StrategyPool.vue").read_text(encoding="utf-8")
     assert "shouldCollapse(detailOf(s).curve)" in page, "列表负期望标记要用显著规则"
-    assert "tier * 10000" in page, "默认详情优先级：正收益且跑赢基准 > 正收益 > 其它"
+    assert "const ranked = visible.value" in page, "默认详情应与年化排序后的列表第一项一致"
     assert "filterTabs" in page and "正期望" in page and "负期望" in page, "左侧要有按方向筛选"
 
 

@@ -197,8 +197,16 @@ def compute_volatility_features(frame: pd.DataFrame) -> pd.DataFrame:
     open_close = np.log(_safe_divide(close, open_))
     var_o = overnight.rolling(20, min_periods=10).var()
     var_c = open_close.rolling(20, min_periods=10).var()
-    cov_oc = overnight.rolling(20, min_periods=10).cov(open_close)
-    columns["vol_yang_zhang_20"] = np.sqrt((var_o + var_c + 2.0 * cov_oc.clip(upper=0.0)).clip(lower=0.0)) * np.sqrt(TRADING_DAYS)
+    # Yang–Zhang: overnight + k * open-to-close + (1-k) * RS.
+    # All three terms use the same valid bars, including during warm-up.
+    yz_valid = pd.concat([overnight, open_close, rs], axis=1).notna().all(axis=1)
+    yz_o = overnight.where(yz_valid).rolling(20, min_periods=10)
+    yz_c = open_close.where(yz_valid).rolling(20, min_periods=10)
+    yz_rs = rs.where(yz_valid).rolling(20, min_periods=10)
+    n = yz_valid.astype(float).rolling(20, min_periods=10).sum()
+    k = 0.34 / (1.34 + (n + 1.0) / (n - 1.0).where(n > 1.0))
+    yz_variance = yz_o.var() + k * yz_c.var() + (1.0 - k) * yz_rs.mean()
+    columns["vol_yang_zhang_20"] = np.sqrt(yz_variance.clip(lower=0.0)) * np.sqrt(TRADING_DAYS)
 
     prev_close = close.shift(1)
     tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
@@ -312,7 +320,7 @@ class VolumeVolatilityFactorSet(BaseFactorSet):
 
     name = "volume_volatility_hk"
     description = "Volume-path regime, OHLCV volatility measures and reward/risk payoff proxies"
-    version = "0.1.0"
+    version = "0.2.0"  # standard Yang–Zhang formula; historical values changed
 
     def transform(self, frame, context=None):
         if frame is None or len(frame) == 0:

@@ -36,6 +36,17 @@ _LOCK = threading.Lock()
 _MODULE = None
 
 
+@router.get("/volatility-risk")
+def volatility_risk(date: str | None = None, variant: str = "cn_ensemble_volcap"):
+    from backend.services.volatility_risk import read_risk, RiskQueryError
+    try:
+        return read_risk(date, variant)
+    except RiskQueryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, KeyError, ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=503, detail="研究风险产物不完整，请检查研究任务日志") from exc
+
+
 def _sync_module():
     """按路径加载 scripts/sync_strategy_pool.py（scripts/ 不是包，不能直接 import）。"""
     global _MODULE

@@ -941,6 +941,12 @@ export interface StrategyPoolEntry {
   ledger_sources: string[]
   selection_source: string
   performance?: StrategyPerformance
+  /** 年化主榜：至少252个日收益，短样本/缺数不授予名次。 */
+  annual_rank?: {
+    rank: number; of: number; metric: string; value: number
+    observations?: number | null; window?: string; basis?: string
+  }
+  annual_rank_reason?: string
   /** 收益率排名（后端 sync_strategy_pool 计算；各策略窗口不同 ⇒ 只做同池横比参考） */
   return_rank?: {
     rank: number; of: number; metric: string; value: number | null
@@ -1082,6 +1088,8 @@ export interface StrategyPoolResponse {
   common_window?: { status: string; start_date?: string; end_date?: string; reason?: string }
   /** 收益率排名榜（用户 2026-10-15：「策略池里把策略按收益率排名」） */
   rankings?: {
+    by_annual_return?: { id: string; rank: number; annual_return: number; observations: number; window: string }[]
+    annual_excluded?: { id: string; reason: string }[]
     by_total_return: { id: string; rank: number; total_return: number | null; annual_return: number | null
                        excess_return: number | null; observations: number | null; window: string; kind?: string }[]
     by_excess_return: { id: string; rank: number; total_return: number | null; excess_return: number | null
@@ -1634,4 +1642,18 @@ export interface RealtimeMeta {
   excluded?: number
   coverage?: number
   reason?: string | null
+}
+
+export interface VolatilityRiskResponse {
+  available: boolean
+  hint: string
+  date?: string
+  variant?: string
+  dates: string[]
+  variants: string[]
+  target_vol?: number | null
+  audit?: { status: string; error: string | null; exposure: number; predicted_annual_vol: number | null }[]
+  contributions?: { stock_code: string; weight: number; marginal_vol: number; component_vol: number; risk_share: number | null; reference_budget_share: number; budget_deviation: number | null }[]
+  correlation?: { names: string[]; rows: Record<string, string | number | null>[]; observations: number; asof: string; short_sample: boolean }
+  forward?: { status: string; captured_at?: string; eligible_decisions?: number; gates?: Record<string, { status: string; observations: number; decisions: number; checks: Record<string, boolean> }> }
 }

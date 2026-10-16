@@ -608,6 +608,15 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_SHADOW_VARIANTS:-1}
   fi
 fi
 
+# 波动率独立研究留档：240秒刷新 + 总300秒上限；失败不阻断生产，不修改生产权重。
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ] && [ "${DAILY_VOLATILITY_FORWARD:-1}" = "1" ]; then
+  if uv run python -c 'import subprocess,sys; sys.exit(subprocess.run([sys.executable,"scripts/capture_volatility_forward.py","--refresh"],timeout=300).returncode)' >> "$LOG_DIR/volatility_forward.log" 2>&1; then
+    log "volatility-forward ok -> output/research/volatility_shadow/forward/latest.json"
+  else
+    log "volatility-forward FAILED -> $LOG_DIR/volatility_forward.log"
+  fi
+fi
+
 # ── PK 护栏日报：下单之前把"不该拿到权重的票"点出来（第三十五轮，不阻塞生产）──
 # 背景：第三十四轮实测 6 个 notify 决策日里有 5 天把权重给了 rank>20 的票（最狠的一天 59.5% 的权重
 # 给了 rank 4017/4055），而 rank>20 是复盘里唯一通过按决策日符号检验的负向特征（p=0.02）。
@@ -681,6 +690,7 @@ if [ "${DAILY_COMPLETENESS:-1}" = "1" ]; then
     log "step=forward-validation would run: scripts/build_forward_validation.py（前瞻收益记录）"
     log "step=execution-parity would run: scripts/execution_parity_check.py（模拟盘 vs 回放执行假设一致性）"
     log "step=shadow-variants would run: scripts/run_shadow_variants.py（决策逻辑对照：现行 vs 池前5/8/10 vs 降频 vs rank上限）"
+    log "step=volatility-forward would run: scripts/capture_volatility_forward.py --refresh（独立研究，不晋级）"
     log "step=pk-guard would run: scripts/pk_guard_report.py（PK 护栏：不该拿到权重的票）"
     log "step=promotion-check would run: scripts/promotion_check.py（上线闸门：够不够硬）"
     log "step=ths-export would run: scripts/export_ths_watchlist.py（同花顺自选股 · 五个源，含 reference 参考账户）"

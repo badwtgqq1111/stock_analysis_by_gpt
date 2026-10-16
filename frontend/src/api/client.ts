@@ -763,3 +763,8 @@ export async function getSelectionByCode(codes: string[], limit = 3): Promise<Le
   })
   return data
 }
+
+export async function getVolatilityRisk(date?: string, variant = 'cn_ensemble_volcap'): Promise<import('@/types/api').VolatilityRiskResponse> {
+  const { data } = await http.get('/strategies/volatility-risk', { params: { date, variant } })
+  return data
+}

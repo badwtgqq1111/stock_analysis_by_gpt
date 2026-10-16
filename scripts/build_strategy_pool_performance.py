@@ -397,8 +397,11 @@ def build() -> dict:
             "observations": len(nav) - 1, "excess_return": nav[-1] / bnav[-1] - 1,
             "reason": ("模拟盘净值（统一执行假设：T+1 开盘成交、含佣金/印花税/滑点、整手），"
                        "不是名单毛收益跟踪、也不是实盘业绩。"),
-            "methodology": ("影子组合 `run_shadow_variants.py` 的日度净值（起始资金 45,000），"
-                            "中证500价格指数同期归一到 1；口径见 output/paper_trading/shadow/summary.json。"),
+            "methodology": next(((item.get("curve") or {}).get("shadow", {}).get("methodology")
+                                 for item in config["strategies"] if item["id"] == ident
+                                 and (item.get("curve") or {}).get("shadow", {}).get("methodology")), None)
+                            or ("影子组合 `run_shadow_variants.py` 的日度净值（起始资金 45,000），"
+                                "中证500价格指数同期归一到 1；口径见 output/paper_trading/shadow/summary.json。"),
             "source": nav_rel,
         }
     # ── curve_source：策略**原始口径**的逐笔模拟曲线（政策略语义与模拟盘引擎不同时用）──

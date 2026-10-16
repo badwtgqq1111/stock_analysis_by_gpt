@@ -36,12 +36,16 @@ def run_paper_account(
     lot_size=None,
     assumptions: dict | str | None = None,
     enforce_frictions: bool = True,
+    causal_execution: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Replay selection snapshots with next-session fills and daily marks.
 
     The account treats each selection date as a target-weight rebalance. Orders
     use the first later available bar, enforcing T+1 from a daily data source.
     Missing bars leave orders pending; they are never filled with future data.
+
+    ``causal_execution=True`` 把次日订单排队到次日开盘再执行，避免
+    决策日 NAV/现金/持仓提前包含未来成交。默认保留旧回放行为以免改动生产曲线。
 
     ``enforce_frictions`` 打开时额外建模（与 L3 回放同一套假设）：
       * 涨停不买（执行日涨幅达上限 → 本轮回合放弃买入，与回放一致）；
@@ -81,6 +85,7 @@ def run_paper_account(
     deferred_sells: dict[str, str] = {}      # code -> 延期原因（跌停卖不出 / 涨停不卖 / 停牌）
     stale: dict[str, int] = {}               # code -> 连续多少个交易日没有行情
     last_close: dict[str, float] = {}
+    scheduled: dict[pd.Timestamp, pd.DataFrame] = {}
     for date in dates:
         day = market[market["trade_date"] == date].set_index("stock_code")
         # ── 0a) 盯市缓存 + 退市强制清算（连续 N 日无行情） ──────────────────────
@@ -123,10 +128,16 @@ def run_paper_account(
             fills.append(_fill(run_id, account_id, strategy_version, code, None, date, "sell", shares,
                                price, fee, slippage_bps))
             deferred_sells.pop(code, None)
-        if date in by_date:
-            snapshot = by_date[date]
+        if causal_execution and date in by_date:
             next_date = _next_trade_date(dates, date)
-            nav_before = cash + sum(qty * _mark(day, last_close, code) for code, qty in quantities.items())
+            if next_date is not None:
+                scheduled[next_date] = by_date[date]
+        if (causal_execution and date in scheduled) or (not causal_execution and date in by_date):
+            snapshot = scheduled.pop(date) if causal_execution else by_date[date]
+            decision_date = pd.Timestamp(snapshot["trade_date"].iloc[0])
+            next_date = date if causal_execution else _next_trade_date(dates, date)
+            nav_before = (float(nav_rows[-1]["nav"]) if causal_execution and nav_rows else
+                          cash + sum(qty * _mark(day, last_close, code) for code, qty in quantities.items()))
             targets = {str(row.stock_code): float(row.target_weight) for row in snapshot.itertuples()}
             if next_date is None:
                 # The newest decision does not yet have a later daily bar.
@@ -136,7 +147,7 @@ def run_paper_account(
                     if target_weight > 0:
                         orders.append(
                             _order(
-                                run_id, account_id, strategy_version, code, date, None,
+                                run_id, account_id, strategy_version, code, decision_date, None,
                                 "pending", nav_before * target_weight,
                             )
                         )
@@ -145,7 +156,7 @@ def run_paper_account(
                 for code in sorted(set(quantities) | set(targets)):
                     target_value = nav_before * targets.get(code, 0.0)
                     if code not in executable.index:
-                        orders.append(_order(run_id, account_id, strategy_version, code, date, next_date,
+                        orders.append(_order(run_id, account_id, strategy_version, code, decision_date, next_date,
                                              "pending", target_value, reason="suspended"))
                         continue
                     row = executable.loc[code]
@@ -158,19 +169,19 @@ def run_paper_account(
                     side = "buy" if delta > 0 else "sell"
                     if enforce_frictions and is_limit_up(code, next_date, price, prev, cfg):
                         if side == "buy":
-                            orders.append(_order(run_id, account_id, strategy_version, code, date, next_date,
+                            orders.append(_order(run_id, account_id, strategy_version, code, decision_date, next_date,
                                                  "skipped_limit_up", target_value, side=side,
                                                  reason="limit_up_no_buy"))
                             continue
                         if no_sell_limit_up:
                             deferred_sells[code] = "limit_up_no_sell"
-                            orders.append(_order(run_id, account_id, strategy_version, code, date, next_date,
+                            orders.append(_order(run_id, account_id, strategy_version, code, decision_date, next_date,
                                                  "deferred_limit_up", target_value, side=side,
                                                  reason="limit_up_no_sell"))
                             continue
                     if enforce_frictions and side == "sell" and is_limit_down(code, next_date, price, prev, cfg):
                         deferred_sells[code] = "limit_down_no_sell"
-                        orders.append(_order(run_id, account_id, strategy_version, code, date, next_date,
+                        orders.append(_order(run_id, account_id, strategy_version, code, decision_date, next_date,
                                              "deferred_limit_down", target_value, side=side,
                                              reason="limit_down_no_sell"))
                         continue
@@ -181,7 +192,7 @@ def run_paper_account(
                         delta = int(np.floor(cash / (signed_price * (1 + commission)) / lot) * lot)
                         value = delta * signed_price
                         fee = value * commission
-                    order = _order(run_id, account_id, strategy_version, code, date, next_date,
+                    order = _order(run_id, account_id, strategy_version, code, decision_date, next_date,
                                    "filled" if delta else "rejected", target_value, side=side)
                     orders.append(order)
                     if not delta:
@@ -192,6 +203,12 @@ def run_paper_account(
                     cash += -value - fee if side == "buy" else value - fee
                     fills.append({**order, "fill_time": next_date, "quantity": abs(delta), "price": signed_price,
                                   "commission": fee, "slippage_bps": slippage_bps, "participation_rate": None})
+        if causal_execution and date in by_date and _next_trade_date(dates, date) is None:
+            pending_nav = cash + sum(qty * _mark(day, last_close, code) for code, qty in quantities.items())
+            for row in by_date[date].itertuples():
+                if row.target_weight > 0:
+                    orders.append(_order(run_id, account_id, strategy_version, str(row.stock_code), date, None,
+                                         "pending", pending_nav * float(row.target_weight)))
         value = cash
         for code, quantity in quantities.items():
             mark = _mark(day, last_close, code)

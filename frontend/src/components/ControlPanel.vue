@@ -1,6 +1,6 @@
 <template>
   <div class="control-panel">
-    <div class="ctrl-item" style="min-width:220px">
+    <div v-if="!chartOnly" class="ctrl-item" style="min-width:220px">
       <label>股票代码（★为当前持仓）</label>
       <StockSelector
         :model-value="selectedCode"
@@ -15,7 +15,7 @@
       />
     </div>
     <div class="ctrl-item" style="min-width:180px">
-      <label>手动输入代码</label>
+      <label>代码直达</label>
       <ManualStockInput @submit="onManualCode" />
     </div>
     <div class="ctrl-item">
@@ -35,6 +35,7 @@ import ManualStockInput from './ManualStockInput.vue'
 import OverlayToggles from './OverlayToggles.vue'
 
 const props = defineProps<{
+  chartOnly?: boolean
   selectedCode: string | null
   days: number
   overlays: string[]

@@ -222,6 +222,7 @@ def to_md(payload: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="统一刷新策略名单（P2.56）")
     ap.add_argument("--date", default=None, help="目标交易日（默认取最新交易日）")
+    ap.add_argument("--reconcile", action="store_true", help="保留现有运行状态，仅补齐新增 skip 声明；不运行选股")
     ap.add_argument("--only", default=None, help="只刷某条策略 id")
     ap.add_argument("--include-skipped", action="store_true", help="输出里包含 skip 的条目")
     ap.add_argument("--print", action="store_true")
@@ -232,9 +233,20 @@ def main() -> int:
         strategies = [s for s in strategies if s["id"] == args.only]
         if not strategies:
             raise SystemExit(f"没有这条策略：{args.only}")
+    existing = {}
+    if args.reconcile:
+        if args.only:
+            ap.error("--reconcile 与 --only 互斥")
+        previous = OUT / "status.json"
+        if previous.exists():
+            old = json.loads(previous.read_text(encoding="utf-8"))
+            existing = {r['id']: r for r in old.get('rows', [])}
+        missing_run = [s['id'] for s in strategies if s['id'] not in existing and s.get('daily_refresh', {}).get('mode') != 'skip']
+        if missing_run:
+            raise SystemExit(f"新增可运行策略需要实际刷新，不合成成功状态：{missing_run}")
     rows = []
     for spec in strategies:
-        row = refresh_one(spec, target, print_log=args.print)
+        row = existing[spec["id"]] if args.reconcile and spec["id"] in existing and spec.get("daily_refresh", {}).get("mode") != "skip" else refresh_one(spec, target, print_log=args.print)
         rows.append(row)
         if args.print and (row["status"] != "skipped" or args.include_skipped):
             print(f"[lists] {row['status']:<14} {row['id']:<28} date={row['date_after'] or '—'} "

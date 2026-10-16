@@ -1,5 +1,6 @@
 /** Strategy groups come from the pool, not a hard-coded subset of selection sources. */
-import type { StrategyListRefresh } from '@/types/api'
+import type { StrategyListRefresh, StrategyPoolEntry } from '@/types/api'
+import { annualRankOrder } from './strategyRanking'
 
 export interface GroupVerdict {
   /** 正期望 / 负期望 / 样本不足 …（与策略池详情同一套判定） */
@@ -22,6 +23,8 @@ export interface WatchlistGroup {
   loading: boolean
   error: string
   verdict?: GroupVerdict
+  annual_rank?: StrategyPoolEntry['annual_rank']
+  annual_rank_reason?: string
   /** 这条策略今天的名单刷新结果（每日名单刷新契约；不再是"读到旧文件也不知道"） */
   refresh?: StrategyListRefresh | null
 }
@@ -31,6 +34,7 @@ export function strategyGroups(
     id: string; name: string; selection_source?: string; stage: string
     stage_label?: string; summary?: string; latest_date?: string | null
     refresh?: StrategyListRefresh | null
+    annual_rank?: StrategyPoolEntry['annual_rank']; annual_rank_reason?: string
   }[],
   verdictOf?: (entry: { id: string }) => GroupVerdict | undefined,
 ): WatchlistGroup[] {
@@ -38,7 +42,7 @@ export function strategyGroups(
     key: s.id, label: s.name, source: s.selection_source!, stage: s.stage_label || s.stage,
     note: s.summary || s.name, date: s.latest_date || null, rows: [], loading: false, error: '',
     verdict: verdictOf ? verdictOf(s) : undefined,
-    refresh: s.refresh ?? null,
+    refresh: s.refresh ?? null, annual_rank: s.annual_rank, annual_rank_reason: s.annual_rank_reason,
   }))
 }
 
@@ -54,11 +58,23 @@ export function refreshMark(refresh?: StrategyListRefresh | null): { icon: strin
   return { icon: '✅', tone: 'ok', detail }
 }
 
-/** 侧栏分组的排序键：默认（策略池顺序）/ 累计 / 超额 / 日度 t / 名称。 */
-export type GroupSortKey = 'default' | 'total' | 'excess' | 't' | 'name'
+/** 侧栏默认按年化主榜，累计/超额等仍可手动选择。 */
+export type GroupSortKey = 'annual' | 'default' | 'total' | 'excess' | 't' | 'name'
 
+/** K线实盘固定在策略分组最前，不受年化/累计/超额/t/名称/登记顺序影响。 */
 export function sortGroups(groups: WatchlistGroup[], key: GroupSortKey): WatchlistGroup[] {
+  const sorted = sortUnpinnedGroups(groups, key)
+  return [...sorted.filter((g) => g.key === 'live_holdings'),
+          ...sorted.filter((g) => g.key !== 'live_holdings')]
+}
+
+function sortUnpinnedGroups(groups: WatchlistGroup[], key: GroupSortKey): WatchlistGroup[] {
   if (key === 'default') return groups
+  if (key === 'annual') return [...groups].sort((a, b) => {
+    // 模拟盘不是选股策略，固定在策略分组之后。
+    if ((a.key === 'paper') !== (b.key === 'paper')) return a.key === 'paper' ? 1 : -1
+    return annualRankOrder(a.annual_rank?.rank, b.annual_rank?.rank, a.key, b.key)
+  })
   const copy = [...groups]
   if (key === 'name') return copy.sort((a, b) => a.label.localeCompare(b.label, 'zh'))
   return copy.sort((a, b) => {

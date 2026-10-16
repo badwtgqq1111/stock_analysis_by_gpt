@@ -12,9 +12,11 @@
         @keydown.esc="showDropdown = false"
         placeholder="代码 / 名称 / 拼音首字母，如 600861、北京人力、bjrl"
         autocomplete="off"
+        aria-label="全市场搜索股票" role="combobox" :aria-expanded="showDropdown"
+        aria-autocomplete="list"
       />
       <span v-if="modelValue" class="code-badge">
-        ★ {{ modelValue }} <template v-if="selectedName">{{ selectedName }}</template>
+        <template v-if="holdingCodes.includes(modelValue)">★ 持仓</template><template v-else>当前</template> {{ modelValue }} <template v-if="selectedName">{{ selectedName }}</template>
       </span>
     </div>
     <div class="filters">
@@ -22,13 +24,15 @@
       <label class="chk"><input type="checkbox" v-model="includeDelisted" @change="runSearch(searchText)" /> 含退市/摘牌</label>
       <span class="count" v-if="results.length">{{ results.length }} 条</span>
     </div>
-    <ul v-if="showDropdown && (results.length > 0 || searchText.trim())" class="dropdown">
+    <ul v-if="showDropdown && (results.length > 0 || searchText.trim())" class="dropdown" role="listbox" aria-label="股票搜索结果">
       <li v-if="loading" class="dropdown-hint">搜索中…</li>
+      <li v-else-if="searchError" class="dropdown-hint search-error" role="alert">{{ searchError }}，请重新输入重试。</li>
       <li v-else-if="results.length === 0" class="dropdown-hint">
         没有匹配「{{ searchText }}」——可试 6 位代码 / 中文名 / 拼音首字母（如 bjrl）
       </li>
       <li
         v-for="(opt, i) in results"
+        role="option" :aria-selected="i === activeIndex"
         :key="opt.code"
         :class="['dropdown-item', { active: i === activeIndex, selected: opt.code === modelValue }]"
         @mousedown.prevent="select(opt)"
@@ -45,18 +49,21 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getStocks, searchStocks } from '@/api/client'
 import type { StockSearchHit } from '@/api/client'
 
 const props = defineProps<{ modelValue: string | null }>()
-const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
+const emit = defineEmits<{ 'update:modelValue': [value: string]; selected: [value: StockSearchHit] }>()
 
 const searchText = ref('')
 const showDropdown = ref(false)
 const activeIndex = ref(0)
 const results = ref<StockSearchHit[]>([])
 const loading = ref(false)
+const searchError = ref('')
+const chosenName = ref('')
+let requestId = 0
 const holdingCodes = ref<string[]>([])
 const mainBoardOnly = ref(false)      // 策略第六层过滤：只做沪深主板
 const includeDelisted = ref(false)    // 默认不把退市/摘牌代码混进来
@@ -66,7 +73,7 @@ let timer: ReturnType<typeof setTimeout> | null = null
 
 const selectedName = computed(() => {
   const hit = results.value.find((r) => r.code === props.modelValue)
-  return hit?.name || ''
+  return hit?.name || chosenName.value
 })
 
 async function loadHoldings() {
@@ -77,27 +84,33 @@ async function loadHoldings() {
 }
 
 async function runSearch(q: string) {
+  if (timer) { clearTimeout(timer); timer = null }
+  const id = ++requestId
   const query = q.trim()
-  if (!query) { results.value = []; return }
+  results.value = []; searchError.value = ''; activeIndex.value = 0
+  if (!query) { loading.value = false; return }
   loading.value = true
   try {
-    results.value = await searchStocks(query, {
+    const hits = await searchStocks(query, {
       limit: 20,
       main_board_only: mainBoardOnly.value,
       include_delisted: includeDelisted.value,
     })
-    activeIndex.value = 0
+    if (id === requestId) results.value = hits
   } catch {
-    results.value = []
+    if (id === requestId) searchError.value = '股票搜索暂时失败'
   } finally {
-    loading.value = false
+    if (id === requestId) loading.value = false
   }
 }
 
 function onInput() {
+  ++requestId // 输入改变即作废旧结果，不能在防抖期间选到旧股票
+  results.value = []; searchError.value = ''; activeIndex.value = 0
+  loading.value = !!searchText.value.trim()
   showDropdown.value = true
   if (timer) clearTimeout(timer)
-  timer = setTimeout(() => runSearch(searchText.value), 220)   // 防抖：打字停 220ms 再请求
+  timer = setTimeout(() => runSearch(searchText.value), 220)
 }
 
 function onFocus() {
@@ -127,10 +140,16 @@ function moveUp() {
   activeIndex.value = (activeIndex.value - 1 + results.value.length) % results.value.length
 }
 function selectActive() {
+  if (loading.value || searchError.value) return
   const hit = results.value[activeIndex.value]
   if (hit) select(hit)
 }
 function select(opt: StockSearchHit) {
+  ++requestId
+  if (timer) { clearTimeout(timer); timer = null }
+  loading.value = false
+  chosenName.value = opt.name || ''
+  emit('selected', opt)
   emit('update:modelValue', opt.code)
   searchText.value = `${opt.code} ${opt.name}`.trim()
   showDropdown.value = false
@@ -138,12 +157,17 @@ function select(opt: StockSearchHit) {
 
 watch(() => props.modelValue, (val) => {
   if (val && !searchText.value.startsWith(val)) {
+    ++requestId
+    if (timer) { clearTimeout(timer); timer = null }
+    loading.value = false; searchError.value = ''; showDropdown.value = false
+    chosenName.value = ''
     const hit = results.value.find((r) => r.code === val)
     searchText.value = hit ? `${hit.code} ${hit.name}` : val
   }
-})
+}, { immediate: true })
 
-onMounted(() => { loadHoldings(); runSearch('') })
+onMounted(loadHoldings)
+onUnmounted(() => { ++requestId; if (timer) clearTimeout(timer) })
 </script>
 
 <style scoped>
@@ -156,7 +180,9 @@ onMounted(() => { loadHoldings(); runSearch('') })
   border-radius: 4px;
   color: var(--text-primary);
   outline: none;
-  min-width: 260px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 .code-badge { font-size: 11px; color: var(--accent-gold); }
 .dropdown {
@@ -175,7 +201,9 @@ onMounted(() => { loadHoldings(); runSearch('') })
   border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
+.search-error { color: var(--accent-down); }
 .dropdown-item {
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 8px;

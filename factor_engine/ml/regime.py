@@ -87,6 +87,7 @@ def build_market_regime(
     daily.loc[bear, "regime"] = "bear"
     daily["regime"] = _apply_hysteresis(daily["regime"], hysteresis_days=int(hysteresis_days))
     daily["regime_version"] = version
+    daily["hysteresis_version"] = "causal.v2"
     daily["model_weight_lightgbm"] = daily["regime"].map({"bull": 0.35, "sideways": 0.55, "bear": 0.70}).fillna(1.0)
     daily["model_weight_transformer"] = daily["regime"].map({"bull": 0.40, "sideways": 0.25, "bear": 0.15}).fillna(0.0)
     daily["model_weight_cnn"] = daily["regime"].map({"bull": 0.25, "sideways": 0.20, "bear": 0.15}).fillna(0.0)
@@ -102,16 +103,25 @@ def build_market_regime(
 
 
 def _apply_hysteresis(labels: pd.Series, *, hysteresis_days: int) -> pd.Series:
+    """Confirm consecutive observations on the current day, never backfill.
+
+    Missing-data labels invalidate the active state and reset confirmation;
+    a new valid state must earn a fresh complete streak.
+    """
     if hysteresis_days <= 1:
         return labels
-    result = labels.astype(str).tolist()
+    result = []
     current = "insufficient"
     candidate = None
     count = 0
-    for index, label in enumerate(result):
-        if label in {"insufficient", current}:
-            if label == current:
-                candidate, count = None, 0
+    for label in labels.astype(str):
+        if label == "insufficient":
+            current, candidate, count = "insufficient", None, 0
+            result.append(current)
+            continue
+        if label == current:
+            candidate, count = None, 0
+            result.append(current)
             continue
         if label == candidate:
             count += 1
@@ -119,12 +129,9 @@ def _apply_hysteresis(labels: pd.Series, *, hysteresis_days: int) -> pd.Series:
             candidate, count = label, 1
         if count >= hysteresis_days:
             current = candidate
-            for prior in range(index - hysteresis_days + 1, index + 1):
-                result[prior] = current
             candidate, count = None, 0
-        elif current != "insufficient":
-            result[index] = current
-    return pd.Series(result, index=labels.index)
+        result.append(current)
+    return pd.Series(result, index=labels.index, name=labels.name, dtype=object)
 
 
 def write_market_regime_report(frame: pd.DataFrame, output_dir="output/regime", *, prefix="cn_market_regime") -> dict:

@@ -1,14 +1,14 @@
 <template>
   <div class="page">
-    <h4 class="page-title">K线图表</h4>
+    <h4 class="page-title">K线图表 <span class="workspace-caption">选股 → 看行情 → 查分析</span></h4>
     <div class="two-col">
       <div class="col-side">
         <StockWatchlist v-model="selectedCode" :month="miniMonth" />
         <!-- K 线自选的分组直接取各策略最新名单：这里挂同一份刷新契约，名单停更看得见 -->
-        <StrategyListsStatusBar />
+        <details class="lists-status"><summary>名单刷新状态</summary><StrategyListsStatusBar /></details>
       </div>
       <div class="col-main">
-    <ControlPanel
+    <ControlPanel chart-only
       :selected-code="selectedCode"
       :days="days"
       :overlays="overlays"
@@ -34,8 +34,6 @@
       <span class="stage-chip" :class="'stage-' + data.stage.stage">{{ data.stage.label }}</span>
       <span class="stage-why">{{ data.stage.evidence }}</span>
     </div>
-    <!-- 逐股 AI 多空综合分析（买入/持有/卖出）：与 K 线同页，用户要求 -->
-    <AiAnalysisPanel :code="selectedCode" />
     <!-- 迷你选股日历条（可翻月；金点 = 台账里被策略选中过；悬停看当天明细；点一下切到那天） -->
     <div class="mini-strip" v-if="barDates.length">
       <span class="ms-label tiny dim">入选日历</span>
@@ -113,10 +111,74 @@
     </div>
     <div v-else-if="!selectedCode" class="empty-state">请选择股票代码</div>
     <div v-else-if="isLoading" class="empty-state">加载中...</div>
+    <StateBlock v-else-if="error" state="error" title="行情加载失败" :detail="error" />
     <div v-else class="empty-state">暂无行情数据</div>
 
+    <!-- 分时面板：K 线页点选的交易日 -->
+    <div class="panel intraday-panel" v-if="selectedCode && (pickedDate || intraday || intradayError)">
+      <h6>
+        {{ pickedDate === cnToday() ? '当日实时分时' : '历史分时' }}
+        <b class="link" @click="focusSelected">{{ pickedDate }}</b>
+        <span class="tag" :class="intradayTagClass" v-if="intraday">{{ intraday.source_label }}</span>
+        <span class="dim tiny" v-if="intraday">
+          前收 {{ fmt(intraday.prev_close) }} · {{ intraday.points.length }} 个点 ·
+          {{ intraday.points[0]?.clock }} → {{ intraday.points[intraday.points.length - 1]?.clock }}
+        </span>
+        <button v-if="pickedDate !== cnToday()" class="btn-ghost btn-sm" @click="returnToToday">返回当日实时</button>
+        <span v-else class="dim tiny">交易时段每30秒刷新</span>
+        <button class="btn-ghost btn-sm close-btn" @click="clearIntraday">收起</button>
+      </h6>
+
+      <StateBlock v-if="loadingIntraday && !intraday" state="loading" title="加载该日分时…" />
+      <StateBlock v-else-if="intradayError" state="error" :title="pickedDate === cnToday() ? '今日暂无实时分时' : '该交易日没有分时数据'" :detail="intradayError" />
+      <template v-else-if="intraday">
+        <!-- 标头：这是**哪只票**的分时（用户 2026-10-13："点中某只股票的时候，分时线看不到股票标头"）。
+             数据取当前 K 线标的（data）+ 分时口径的最新价/涨跌幅，滚动到面板时一眼知道看的是谁。 -->
+        <div class="intraday-head">
+          <b class="ih-code mono">{{ data?.code || selectedCode }}</b>
+          <b class="ih-name">{{ data?.name || '—' }}</b>
+          <span class="ih-px" :class="tone(intraday.latest.change_pct)">
+            {{ fmt(intraday.latest.price) }} {{ pct(intraday.latest.change_pct) }}
+          </span>
+          <span class="ih-tags tiny dim">
+            <span v-if="data?.profile?.industry">{{ data.profile.industry }} · </span>
+            <span v-if="data?.profile?.board">{{ data.profile.board }} · </span>
+            <span>分时标的</span>
+          </span>
+          <span class="ih-time tiny dim" v-if="intraday.points.length">
+            {{ intraday.points[0]?.clock }} → {{ intraday.points[intraday.points.length - 1]?.clock }}
+          </span>
+        </div>
+        <div class="stat-grid">
+          <StatTile label="收盘/最新" :value="fmt(intraday.latest.price)"
+                    :tone="tone(intraday.latest.change_pct)"
+                    :sub="`前收 ${fmt(intraday.prev_close)}`" />
+          <StatTile label="涨跌幅" :value="pct(intraday.latest.change_pct)"
+                    :tone="tone(intraday.latest.change_pct)"
+                    :sub="`涨跌 ${fmt(intraday.latest.change)}`" />
+          <StatTile label="均价" :value="fmt(intraday.latest.avg)" tone="gold" sub="累计额 ÷ 累计量" />
+          <StatTile label="最高/最低" :value="`${fmt(intraday.latest.high)} / ${fmt(intraday.latest.low)}`"
+                    :sub="`开盘 ${fmt(intraday.latest.open)}`" />
+          <StatTile label="成交额" :value="money(intraday.latest.amount_yuan)"
+                    :sub="intraday.latest.amount_yuan === null ? '该源不提供' : '元 → 亿/万'" />
+          <StatTile label="成交量" :value="shares(intraday.latest.volume_shares)"
+                    :sub="`${intraday.period} 分钟`" />
+        </div>
+        <IntradayChart :code="intraday.code" :date="intraday.date" :points="intraday.points" :prev-close="intraday.prev_close" :height="300" />
+        <p class="hint tiny" v-if="!intraday.live.available && intraday.live.reason">
+          实时源不可用，用的是本地归档：<span class="dim">{{ intraday.live.reason }}</span>
+        </p>
+        <p class="hint tiny" v-if="intraday.latest.amount_yuan === null">
+          该源不给成交额（腾讯 5 分钟 K 接口限制）→ 成交额与均价线留空。
+        </p>
+      </template>
+    </div>
+
+    <AiAnalysisPanel :code="selectedCode" />
     <!-- 威科夫点图（P&F）+ 阶段速读（用户 2026-10-14 要求补在 K 线页） -->
-    <div class="panel wyckoff-panel" v-if="selectedCode">
+    <details class="panel research-panel" v-if="selectedCode" :open="researchOpen" @toggle="onResearchToggle">
+      <summary>威科夫研究 · 点数图 / 阶段 / 事件概率（展开加载）</summary>
+    <div class="wyckoff-panel" v-if="researchOpen">
       <h6>
         威科夫点图（P&amp;F）
         <span class="tag" :class="wyckoffTone" v-if="wyckoff?.available">{{ wyckoff.phase_label }}</span>
@@ -196,66 +258,7 @@
       </template>
       <p v-else class="hint tiny">点数图不可用：{{ wyckoff?.reason || '—' }}</p>
     </div>
-
-    <!-- 分时面板：K 线页点选的交易日 -->
-    <div class="panel intraday-panel" v-if="selectedCode && (pickedDate || intraday || intradayError)">
-      <h6>
-        {{ pickedDate === cnToday() ? '当日实时分时' : '历史分时' }}
-        <b class="link" @click="focusSelected">{{ pickedDate }}</b>
-        <span class="tag" :class="intradayTagClass" v-if="intraday">{{ intraday.source_label }}</span>
-        <span class="dim tiny" v-if="intraday">
-          前收 {{ fmt(intraday.prev_close) }} · {{ intraday.points.length }} 个点 ·
-          {{ intraday.points[0]?.clock }} → {{ intraday.points[intraday.points.length - 1]?.clock }}
-        </span>
-        <button v-if="pickedDate !== cnToday()" class="btn-ghost btn-sm" @click="returnToToday">返回当日实时</button>
-        <span v-else class="dim tiny">交易时段每30秒刷新</span>
-        <button class="btn-ghost btn-sm close-btn" @click="clearIntraday">收起</button>
-      </h6>
-
-      <StateBlock v-if="loadingIntraday && !intraday" state="loading" title="加载该日分时…" />
-      <StateBlock v-else-if="intradayError" state="error" :title="pickedDate === cnToday() ? '今日暂无实时分时' : '该交易日没有分时数据'" :detail="intradayError" />
-      <template v-else-if="intraday">
-        <!-- 标头：这是**哪只票**的分时（用户 2026-10-13："点中某只股票的时候，分时线看不到股票标头"）。
-             数据取当前 K 线标的（data）+ 分时口径的最新价/涨跌幅，滚动到面板时一眼知道看的是谁。 -->
-        <div class="intraday-head">
-          <b class="ih-code mono">{{ data?.code || selectedCode }}</b>
-          <b class="ih-name">{{ data?.name || '—' }}</b>
-          <span class="ih-px" :class="tone(intraday.latest.change_pct)">
-            {{ fmt(intraday.latest.price) }} {{ pct(intraday.latest.change_pct) }}
-          </span>
-          <span class="ih-tags tiny dim">
-            <span v-if="data?.profile?.industry">{{ data.profile.industry }} · </span>
-            <span v-if="data?.profile?.board">{{ data.profile.board }} · </span>
-            <span>分时标的</span>
-          </span>
-          <span class="ih-time tiny dim" v-if="intraday.points.length">
-            {{ intraday.points[0]?.clock }} → {{ intraday.points[intraday.points.length - 1]?.clock }}
-          </span>
-        </div>
-        <div class="stat-grid">
-          <StatTile label="收盘/最新" :value="fmt(intraday.latest.price)"
-                    :tone="tone(intraday.latest.change_pct)"
-                    :sub="`前收 ${fmt(intraday.prev_close)}`" />
-          <StatTile label="涨跌幅" :value="pct(intraday.latest.change_pct)"
-                    :tone="tone(intraday.latest.change_pct)"
-                    :sub="`涨跌 ${fmt(intraday.latest.change)}`" />
-          <StatTile label="均价" :value="fmt(intraday.latest.avg)" tone="gold" sub="累计额 ÷ 累计量" />
-          <StatTile label="最高/最低" :value="`${fmt(intraday.latest.high)} / ${fmt(intraday.latest.low)}`"
-                    :sub="`开盘 ${fmt(intraday.latest.open)}`" />
-          <StatTile label="成交额" :value="money(intraday.latest.amount_yuan)"
-                    :sub="intraday.latest.amount_yuan === null ? '该源不提供' : '元 → 亿/万'" />
-          <StatTile label="成交量" :value="shares(intraday.latest.volume_shares)"
-                    :sub="`${intraday.period} 分钟`" />
-        </div>
-        <IntradayChart :code="intraday.code" :date="intraday.date" :points="intraday.points" :prev-close="intraday.prev_close" :height="300" />
-        <p class="hint tiny" v-if="!intraday.live.available && intraday.live.reason">
-          实时源不可用，用的是本地归档：<span class="dim">{{ intraday.live.reason }}</span>
-        </p>
-        <p class="hint tiny" v-if="intraday.latest.amount_yuan === null">
-          该源不给成交额（腾讯 5 分钟 K 接口限制）→ 成交额与均价线留空。
-        </p>
-      </template>
-    </div>
+    </details>
 
     <SignalStats :stats="data?.signal_stats ?? null" />
     <StockInfoPanel :code="selectedCode"
@@ -661,6 +664,12 @@ onMounted(async () => {
 })
 
 // ── 威科夫点图（P&F）：随选中标的自动算，箱 %/反转箱/区间天数可调 ───────────────
+const researchOpen = ref(false)
+let wyckoffRequest = 0
+function onResearchToggle(event: Event) {
+  researchOpen.value = (event.target as HTMLDetailsElement).open
+  if (researchOpen.value && !wyckoff.value && !wyckoffLoading.value) void loadWyckoff()
+}
 const wyckoff = ref<WyckoffRead | null>(null)
 /** 概率云面板只渲染似然度靠前的候选（接口仍返回全部 27 个代码；一屏排不下，
  *  低似然度的候选也不该抢视觉权重）。 */
@@ -697,37 +706,64 @@ const evidenceLabel = (type: string) => EVIDENCE_LABEL[type] || type
 const evidenceTone = (type: string) => EVIDENCE_TONE[type] || 'dim'
 
 async function loadWyckoff() {
-  if (!selectedCode.value) return
+  const code = selectedCode.value
+  if (!code) return
+  const request = ++wyckoffRequest
   wyckoffLoading.value = true
   wyckoffError.value = ''
   try {
-    wyckoff.value = await getWyckoff(selectedCode.value, {
+    const result = await getWyckoff(code, {
       days: 250,
       box_pct: Math.min(Math.max(Number(wyckoffBoxPct.value) || 2, 0.5), 10) / 100,
       reversal: Math.min(Math.max(Math.round(Number(wyckoffReversal.value) || 3), 1), 5),
       range_days: Math.min(Math.max(Math.round(Number(wyckoffRangeDays.value) || 60), 20), 250),
     })
+    if (request === wyckoffRequest) wyckoff.value = result
   } catch (err) {
-    wyckoffError.value = String(err)
+    if (request === wyckoffRequest) wyckoffError.value = String(err)
   } finally {
-    wyckoffLoading.value = false
+    if (request === wyckoffRequest) wyckoffLoading.value = false
   }
 }
-watch(selectedCode, (code) => { if (code) loadWyckoff() })
-onMounted(() => { if (selectedCode.value) loadWyckoff() })
+watch(selectedCode, (code) => {
+  ++wyckoffRequest; wyckoff.value = null; wyckoffError.value = ''; wyckoffLoading.value = false
+  if (code && researchOpen.value) void loadWyckoff()
+})
 
 function onIntradayVisible() {
   if (!document.hidden && intradayPollable(pickedDate.value)) void loadIntraday(pickedDate.value)
 }
 onMounted(() => document.addEventListener('visibilitychange', onIntradayVisible))
 onUnmounted(() => {
-  ++intradayRequest; ++coverageRequest
+  ++wyckoffRequest; ++intradayRequest; ++coverageRequest
   stopIntradayPoll()
   document.removeEventListener('visibilitychange', onIntradayVisible)
 })
 </script>
 
 <style scoped>
+.workspace-caption { font-size: var(--fs-xs); font-weight: normal; color: var(--text-muted); margin-left: 12px; }
+.two-col { display: grid; grid-template-columns: minmax(330px, 370px) minmax(0, 1fr); gap: 16px; }
+.col-side { width: auto; min-width: 0; }
+.col-side :deep(.rows) { max-height: clamp(160px, calc(100vh - 470px), 46vh); }
+.col-side :deep(.groups) { max-height: 230px; overflow-y: auto; }
+.lists-status { margin-top: 12px; color: var(--text-muted); font-size: var(--fs-xs); }
+.lists-status > summary { cursor: pointer; }
+.col-main { min-width: 0; }
+.research-panel > summary { cursor: pointer; color: var(--text-muted); font-weight: 600; }
+.research-panel[open] > summary { margin-bottom: 12px; }
+.col-main :deep(.panel) { min-width: 0; overflow-x: auto; }
+@media (max-width: 1100px) {
+  .two-col { grid-template-columns: minmax(0, 1fr); }
+  .col-side { max-height: none; overflow: visible; }
+  .col-side :deep(.rows) { max-height: 220px; }
+}
+@media (max-width: 600px) {
+  .workspace-caption { display: block; margin: 4px 0 0; }
+  .col-main :deep(.chip-panel) { width: 64px; }
+  .wk-controls { flex-wrap: wrap; margin-left: 0; }
+}
+
 /* 迷你选股日历条（2026-10-15：把选股日历搬进 K 线页的轻量形态） */
 .mini-strip { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 6px 2px 2px; }
 .ms-label { margin-right: 2px; }

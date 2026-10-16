@@ -66,7 +66,7 @@
                 {{ f.label }} <span class="dim">{{ f.count }}</span>
               </button>
             </div>
-            <!-- 排序：默认按收益率排名（用户 2026-10-15 要求） -->
+            <!-- 两页统一默认按年化收益降序 -->
             <div class="side-sort">
               <span class="tiny dim">排序</span>
               <button v-for="m in sortTabs" :key="m.key" class="tab tiny"
@@ -80,10 +80,12 @@
                   :class="{ active: s.id === selectedId, negative: shouldCollapse(detailOf(s).curve) }"
                   @click="select(s.id)">
                 <div class="si-row">
+                  <span v-if="annualMode && s.annual_rank" class="rank-badge mono"
+                        :class="{ gold: s.annual_rank.rank === 1, silver: s.annual_rank.rank === 2, bronze: s.annual_rank.rank === 3 }"
+                        :title="`按年化收益排名：第 ${s.annual_rank.rank} / ${s.annual_rank.of} 名（${s.annual_rank.basis || ''}）｜窗口 ${s.annual_rank.window || '—'}`">
+                    #{{ s.annual_rank.rank }}</span>
                   <span v-if="rankMode && s.return_rank" class="rank-badge mono"
-                        :class="{ gold: s.return_rank.rank === 1, silver: s.return_rank.rank === 2, bronze: s.return_rank.rank === 3 }"
-                        :title="`按收益率排名：第 ${s.return_rank.rank} / ${s.return_rank.of} 名（${s.return_rank.basis || ''}）｜窗口 ${s.return_rank.window || '—'}`">
-                    #{{ s.return_rank.rank }}</span>
+                        :title="`按累计收益排名：第 ${s.return_rank.rank} / ${s.return_rank.of} 名｜窗口 ${s.return_rank.window || '—'}`">#{{ s.return_rank.rank }}</span>
                   <span v-if="excessMode && s.excess_rank" class="rank-badge mono"
                         :title="`按相对中证500 排名：第 ${s.excess_rank.rank} / ${s.excess_rank.of} 名｜窗口 ${s.excess_rank.window || '—'}`">
                     #{{ s.excess_rank.rank }}</span>
@@ -99,13 +101,16 @@
                     {{ detailOf(s).curve.observations }} 观测</span>
                 </div>
                 <div class="si-metric mono tiny" v-if="detailOf(s).curve.available">
-                  累计 <b :class="(detailOf(s).curve.total ?? 0) < 0 ? 'down' : 'up'">
+                  年化 <b :class="(s.annual_rank?.value ?? 0) < 0 ? 'down' : 'up'" :title="s.annual_rank_reason || s.annual_rank?.window">
+                    {{ pctText(s.annual_rank?.value ?? null) }}</b>
+                  <span class="dim">·</span> 累计 <b :class="(detailOf(s).curve.total ?? 0) < 0 ? 'down' : 'up'">
                     {{ pctText(detailOf(s).curve.total) }}</b>
                   <span class="dim">·</span> 相对中证500
                   <b :class="(detailOf(s).curve.excess ?? 0) < 0 ? 'down' : 'up'">
                     {{ pctText(detailOf(s).curve.excess) }}</b>
                 </div>
                 <div class="si-metric tiny dim" v-else>暂无曲线</div>
+                <div class="si-row tiny dim" v-if="s.annual_rank_reason">{{ s.annual_rank_reason }}</div>
                 <div class="si-row tiny dim">
                   最新 {{ detailOf(s).freshness.latestDate || '—' }}
                   <span v-if="detailOf(s).freshness.lagDays">（落后 {{ detailOf(s).freshness.lagDays }} 天）</span>
@@ -347,6 +352,9 @@
         <p class="hint tiny mt" v-if="stageHint">{{ stageHint }}</p>
       </div>
 
+      <!-- 风险研究是策略的辅助信息，放在策略主区与对比之后。 -->
+      <VolatilityRiskPanel />
+
       <!-- ── 研究证据 ──────────────────────────────────────────────── -->
       <div class="panel">
         <h6>
@@ -385,6 +393,8 @@ import StateBlock from '@/components/ui/StateBlock.vue'
 import StrategyPerformance from '@/components/StrategyPerformance.vue'
 import StrategyCurveCompare from '@/components/StrategyCurveCompare.vue'
 import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
+import VolatilityRiskPanel from '@/components/VolatilityRiskPanel.vue'
+import { annualRankOrder } from '@/components/strategyRanking'
 import type { CompareSeries } from '@/components/StrategyCurveCompare.vue'
 import type { StrategyListRefresh } from '@/types/api'
 import { RULES, pctText, primaryCurve, shouldCollapse, strategyDetail, type StrategyDetail } from '@/components/strategyDetail'
@@ -453,16 +463,23 @@ const filterTabs = computed(() => {
   ]
 })
 
-// 排序模式：默认「收益率排名」（用户 2026-10-15 要求把策略按收益率排名）
-const sortMode = ref<'return' | 'excess' | 'pool'>('return')
+// 与 K 线自选策略分组保持一致：年化主榜为默认。
+const sortMode = ref<'annual' | 'return' | 'excess' | 'pool'>('annual')
 const sortTabs = [
-  { key: 'return' as const, label: '收益率排名' },
+  { key: 'annual' as const, label: '年化收益排名' },
+  { key: 'return' as const, label: '累计收益排名' },
   { key: 'excess' as const, label: '相对中证500' },
   { key: 'pool' as const, label: '池内顺序' },
 ]
+const annualMode = computed(() => sortMode.value === 'annual')
 const rankMode = computed(() => sortMode.value === 'return')
 const excessMode = computed(() => sortMode.value === 'excess')
-const rankBasis = computed(() => (pool.value?.rankings?.basis ? `（${pool.value.rankings.basis}）` : ''))
+const rankBasis = computed(() => {
+  if (sortMode.value === 'annual') return pool.value?.rankings?.basis || '年化收益降序（至少252个日收益）'
+  if (sortMode.value === 'return') return '累计收益降序（各策略窗口不同）'
+  if (sortMode.value === 'excess') return '相对中证500超额降序（各策略窗口不同）'
+  return '登记表顺序'
+})
 const rankingsCaveat = computed(() => pool.value?.rankings?.caveat || '')
 
 const visible = computed(() => {
@@ -476,6 +493,9 @@ const visible = computed(() => {
     if (!q) return true
     return `${s.name} ${s.id} ${s.group}`.toLowerCase().includes(q)
   })
+  if (sortMode.value === 'annual') {
+    return [...rows].sort((a, b) => annualRankOrder(a.annual_rank?.rank, b.annual_rank?.rank, a.id, b.id))
+  }
   if (sortMode.value === 'return') {
     return [...rows].sort((a, b) => (a.return_rank?.rank ?? 999) - (b.return_rank?.rank ?? 999))
   }
@@ -595,19 +615,8 @@ async function reload() {
     error.value = ''
     const items = pool.value.strategies
     if (!selectedId.value || !items.some((s) => s.id === selectedId.value)) {
-      // 默认选中"最值得看"的那条：先正期望、再样本多
-      const ranked = [...items].sort((a, b) => {
-        const da = details.value[a.id] || detailOf(a)
-        const db = details.value[b.id] || detailOf(b)
-        // 默认详情优先给"既正收益、又跑赢中证500"的策略；其次正收益；再用观测数兜底
-        const score = (d: StrategyDetail) => {
-          const total = d.curve.total ?? -1
-          const excess = d.curve.excess ?? -1
-          const tier = total > 0 && excess > 0 ? 2 : total > 0 ? 1 : 0
-          return tier * 10000 + d.curve.observations
-        }
-        return score(db) - score(da)
-      })
+      // 默认详情与当前列表第一项一致，刷新时保留用户的已有选择。
+      const ranked = visible.value
       selectedId.value = ranked[0]?.id || ''
     }
     if (!compareIds.value.length) {

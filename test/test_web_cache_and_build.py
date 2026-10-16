@@ -11,7 +11,9 @@
 """
 from __future__ import annotations
 
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -69,3 +71,31 @@ def test_selection_page_supports_source_deeplink():
     assert "router.replace" in text, "切换来源后要同步到 URL，刷新/分享仍停在同一来源"
     industry = (ROOT / "frontend/src/pages/IndustryHeat.vue").read_text(encoding="utf-8")
     assert "#/?source=cn_arm_concept" in industry, "行业热度页应给出概念手臂名单的入口"
+
+
+def test_health_build_stamp_recomputes_after_rebuild(client):
+    """构建戳必须**每次请求重算**，不能是进程启动期的快照。
+
+    事故（2026-10-15）：前端 `npm run build` 之后页面确实加载了新 bundle，但 `/health` 还
+    报着启动那一刻的 `built_at` 与**磁盘上已经不存在的 entry**（实测 `index-B4_GoZm1.js`
+    vs index.html 里引用的 `index-cNKXPK90.js`）—— 用户正是拿这个戳判断"浏览器里跑的是不是
+    最新构建"，读到旧快照比没有戳更坏。这里用"改 index.html 的 mtime"当一次重建的替身：
+    mtime 变了而 `built_at` 没跟着变，就说明读的是快照。
+    """
+    payload = client.get("/health").json()
+    frontend = payload.get("frontend") or {}
+    if not frontend.get("dist"):
+        pytest.skip("未挂载前端 dist")
+    index = Path(frontend["dist"]) / "index.html"
+    original = index.stat().st_mtime
+    touch_time = original + 7.0
+    try:
+        os.utime(index, (touch_time, touch_time))
+        second = client.get("/health").json().get("frontend") or {}
+    finally:
+        os.utime(index, (original, original))         # 别把 dist 的戳改坏（其它用例要用）
+    stamped = datetime.fromtimestamp(touch_time).strftime("%Y-%m-%d %H:%M:%S")
+    assert second.get("built_at") == stamped, (
+        f"/health 的构建戳没跟着 index.html 变：{second.get('built_at')} != {stamped}"
+        "（说明返回的是进程启动期快照）")
+    assert (second.get("entry") or "").startswith("/assets/"), second.get("entry")

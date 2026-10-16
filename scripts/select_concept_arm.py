@@ -145,7 +145,11 @@ def board_members() -> pd.DataFrame:
 def board_scores(bars: pd.DataFrame, members: pd.DataFrame, flow: pd.DataFrame,
                  as_of: pd.Timestamp, mode: str = DEFAULT_BOARD_MODE) -> pd.DataFrame:
     """板块层打分（动量 / 资金流强度 / 涨停密度），权重由 `mode` 决定。"""
-    window = bars[bars["trade_date"] >= as_of - pd.Timedelta(days=45)]
+    # ⚠️ 上界必须有（2026-10-15 修）：原来只切下界 `>= as_of - 45d`，而窗口是"锚在今天的最近 N 天"
+    # ⇒ 窗口实际是 [as_of-45d, **今天**]，后面所有 `dates[-21] / dates[-5:] / dates[-1]` 都取到今天，
+    # 于是不同历史日期算出的分数完全一样（实测 5 个日期跑出同一批票 = 前视）。
+    window = bars[(bars["trade_date"] >= as_of - pd.Timedelta(days=45))
+                  & (bars["trade_date"] <= as_of)]
     dates = sorted(window["trade_date"].unique())
     base_day = dates[-21] if len(dates) >= 21 else dates[0]
     last = pd.Timestamp(dates[-1])
@@ -199,7 +203,11 @@ def stock_scores(bars: pd.DataFrame, flow: pd.DataFrame, as_of: pd.Timestamp,
     if mode not in STOCK_MODES:
         raise SystemExit(f"未知 stock-mode={mode}；可选 {sorted(STOCK_MODES)}")
     weights = STOCK_MODES[mode]
-    window = bars[bars["trade_date"] >= as_of - pd.Timedelta(days=45)]
+    # ⚠️ 上界必须有（2026-10-15 修）：原来只切下界 `>= as_of - 45d`，而窗口是"锚在今天的最近 N 天"
+    # ⇒ 窗口实际是 [as_of-45d, **今天**]，后面所有 `dates[-21] / dates[-5:] / dates[-1]` 都取到今天，
+    # 于是不同历史日期算出的分数完全一样（实测 5 个日期跑出同一批票 = 前视）。
+    window = bars[(bars["trade_date"] >= as_of - pd.Timedelta(days=45))
+                  & (bars["trade_date"] <= as_of)]
     dates = sorted(window["trade_date"].unique())
     last = pd.Timestamp(dates[-1])
     base5 = pd.Timestamp(dates[-6]) if len(dates) >= 6 else pd.Timestamp(dates[0])
@@ -239,10 +247,28 @@ def stock_scores(bars: pd.DataFrame, flow: pd.DataFrame, as_of: pd.Timestamp,
 def run(as_of: str, top_boards: int, candidates: int, holdings: int, capital: float,
         per_board: int = 4, max_per_board: int = 2, max_per_industry: int = 2,
         stock_mode: str = DEFAULT_STOCK_MODE, board_mode: str = DEFAULT_BOARD_MODE) -> dict:
-    bars = mbs.enriched_daily(90)
+    # ── as_of 感知（2026-10-15 修）──────────────────────────────────────────────
+    # 事故：原来固定 `enriched_daily(90)`（= 最近 90 个交易日，锚在**今天**），
+    # 而 `board_scores/stock_scores` 又按 `as_of - 45d` 过滤 ⇒ 只要 as_of 早于约 90 天，
+    # 窗口里根本没有那天的数据，分数退化成同一批 ⇒ **四个不同历史日期跑出同一批票**
+    # （实测 2022-06-30 / 2023-06-30 / 2024-06-28 / 2025-06-30 完全相同 = 前视）。
+    # 现在：按 as_of 需要的历史长度装载窗口；找不到"≤ as_of 的交易日"就**如实报错**，
+    # 绝不静默退回今天（那种静默回退就是前视本身）。
+    want = pd.Timestamp(as_of).normalize() if as_of else None
+    if want is not None:
+        need_days = mbs.window_days_for(want)          # 覆盖到 want 所需交易日数（+2 冗余）
+        # +60 个交易日：评分窗口要的是 [as_of-45d, as_of]，只装"到 as_of 为止"的天数会让窗口被截断
+        # （实测：只装 315 天时窗口只剩 3 天 ⇒ dates[-5] 直接 IndexError）。
+        bars = mbs.enriched_daily(max(120, min(int(need_days) + 60, 1600)))
+    else:
+        bars = mbs.enriched_daily(90)
     dates = sorted(bars["trade_date"].unique())
-    snap = pd.Timestamp(as_of) if as_of else pd.Timestamp(dates[-1])
-    if snap not in dates:
+    if want is not None:
+        usable = [d for d in dates if pd.Timestamp(d) <= want]
+        if not usable:
+            raise ValueError(f"窗口里没有 ≤ {want.date()} 的交易日（数据不够长），拒绝静默退回今天")
+        snap = pd.Timestamp(usable[-1])
+    else:
         snap = pd.Timestamp(dates[-1])
     flow = _moneyflow_window(snap)
     members = board_members()

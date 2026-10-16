@@ -470,7 +470,13 @@ function color(v: number | null | undefined) {
   return Number(v) > 0 ? `rgba(239,71,111,${a})` : `rgba(0,212,170,${a})`
 }
 function gotoStock(code: string) {
-  if (code) router.push({ path: '/kline', query: { code } })
+  // 带上当前看的月份（+ 选中日）：K 线页的迷你日历条与这里共用同一条时间轴，
+  // 否则跳过去会回到"最后一根 K 线所在月"，刚看的那个月丢了（2026-10-15）。
+  if (!code) return
+  const query: Record<string, string> = { code }
+  if (month.value) query.month = month.value
+  if (selectedDate.value) query.date = selectedDate.value
+  router.push({ path: '/kline', query })
 }
 const STAGE_KEYS: Record<string, string> = {
   '上涨趋势': 'uptrend', '下跌趋势': 'downtrend', '顶部区域（涨透/滞涨）': 'top_risk',

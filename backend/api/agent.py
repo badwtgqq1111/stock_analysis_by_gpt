@@ -60,10 +60,16 @@ FAMILIES: list[dict] = [
         "label": "规则类策略",
         "hint": "证据单位是「一笔」：单笔净期望 + 事件样本数 + 按决策日聚类 NW t + 参数敏感性 + 容量",
         "branches": [
-            {"key": "event", "label": "事件规则", "ids": ["first_ban_lowxi", "box_arm"]},
+            {"key": "event", "label": "事件规则", "ids": ["first_ban_lowxi"]},
             # 威科夫吸筹突破（2026-10-14）：结构型规则策略 —— 区间/spring/SOS 都是可复现的规则，
             # 证据单位同样是「一笔」（269 笔、逐笔 +1.31%、按决策日聚类可检验），所以放族 A。
             {"key": "structure", "label": "结构形态（威科夫）", "ids": ["wyckoff_arm"]},
+            # 突破（通道/箱体）：box_arm（横盘箱体突破回踩）与 donchian_breakout（通道突破腿，2026-10-15
+            # 从生产 config 的 model leg `[strategies.donchian_breakout]`（status=off）搬进策略池）。
+            # ⚠️ donchian_breakout 是 **zero-edge 观察候选**（A/B 8 个口径全为负、最好的打平），
+            # 登记只为和中证500 逐日对照；box_arm 参数极敏感，同为观察候选。
+            {"key": "breakout", "label": "突破（通道/箱体）",
+             "ids": ["box_arm", "donchian_breakout"]},
             # 主力追踪（2026-10-14）：资金流口径的规则策略（净流入 z 分数 + 吸筹形态），
             # 证据单位同样是「一笔」，所以同属族 A。
             {"key": "moneyflow", "label": "资金流（主力追踪）",

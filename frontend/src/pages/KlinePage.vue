@@ -3,7 +3,7 @@
     <h4 class="page-title">K线图表</h4>
     <div class="two-col">
       <div class="col-side">
-        <StockWatchlist v-model="selectedCode" />
+        <StockWatchlist v-model="selectedCode" :month="miniMonth" />
         <!-- K 线自选的分组直接取各策略最新名单：这里挂同一份刷新契约，名单停更看得见 -->
         <StrategyListsStatusBar />
       </div>
@@ -35,14 +35,70 @@
     </div>
     <!-- 逐股 AI 多空综合分析（买入/持有/卖出）：与 K 线同页，用户要求 -->
     <AiAnalysisPanel :code="selectedCode" />
+    <!-- 迷你选股日历条（可翻月；金点 = 台账里被策略选中过；悬停看当天明细；点一下切到那天） -->
+    <div class="mini-strip" v-if="barDates.length">
+      <span class="ms-label tiny dim">入选日历</span>
+      <button class="ms-nav" title="上一个月" @click="shiftMiniMonth(-1)">◀</button>
+      <span class="ms-month mono tiny">{{ miniMonth }}</span>
+      <button class="ms-nav" title="下一个月" @click="shiftMiniMonth(1)">▶</button>
+      <button class="ms-now tiny" title="回到最新交易日" @click="backToLatest">最新</button>
+      <button v-for="d in miniDays" :key="d.date" class="ms-cell"
+              :class="{ picked: d.date === pickedDate, hit: d.hits > 0 }"
+              :title="d.hits ? `${d.date}：被 ${d.hits} 条策略选中（悬停看明细）` : d.date"
+              @click="onPickDate(d.date)"
+              @mouseenter="onMiniHover(d)"
+              @mouseleave="hoverDay = null"
+              @focus="onMiniHover(d)"
+              @blur="hoverDay = null">
+        <span class="ms-day tiny">{{ d.date.slice(5) }}</span>
+        <span class="ms-dot" v-if="d.hits > 0"></span>
+      </button>
+      <span class="tiny dim" v-if="!miniDays.length"
+            title="这一档 K 线区间里没有这个月的 K 线：换区间或点「最新」回来">
+        这个月没有 K 线（区间 {{ barDates[0] }} ~ {{ barDates[barDates.length - 1] }}）
+      </span>
+      <span class="tiny dim" v-if="selectionRows.length">
+        共 {{ selectionRows.length }} 条台账记录（选股记录 tab 可看 T+1/T+5/T+20）
+      </span>
+      <span class="tiny dim" v-else>台账里没有这只票的选股记录</span>
+      <!-- 最新入选的快捷入口：台账里最老的一条可能是几年前（如 2017-08-16），
+           迷你条只在已加载的 K 线区间内翻月 ⇒ 这里只提供"区间内最近一次入选"的一跳。 -->
+      <button class="ms-now tiny" v-if="latestMark"
+              :title="`跳到 ${latestMark.date}（${strategyLabel(latestMark.source)}）`"
+              @click="jumpToDate(latestMark.date)">
+        最近入选 {{ latestMark.date.slice(5) }}
+      </button>
+      <!-- 悬停某天的明细浮层：策略名 + rank + 权重 + T+5 超额，并可跳日历看当天全部 -->
+      <SelectionDetailCard v-if="hoverRows.length" :date="hoverDay || ''" :rows="hoverRows"
+                            :names="strategyNames" :month="miniMonth" />
+    </div>
+    <!-- 当前选中日（点 K 线 / 点日历条那一格）的入选策略速读条：不用悬停也能看到"这天是谁选的" -->
+    <div class="sel-bar" v-if="pickedRows.length">
+      <span class="tiny dim">当日入选 <b class="mono">{{ pickedDate }}</b></span>
+      <span v-for="r in pickedRows" :key="r.source + r.decision_date" class="sel-chip"
+            :title="`${strategyLabel(r.source)}｜rank ${r.rank ?? '—'}${r.weight ? '｜权重 ' + (r.weight * 100).toFixed(1) + '%' : ''}｜${fwText(r)}`">
+        <span class="tag tiny">{{ strategyLabel(r.source) }}</span>
+        <span class="tiny dim" v-if="r.rank != null">#{{ r.rank }}</span>
+        <span class="tiny" :class="tone(r.excess_r5 ?? r.r5 ?? r.r1)" v-if="fwAvailable(r)">
+          {{ r.excess_r5 != null ? '超额' : 'T+5' }} {{ pct(r.excess_r5 ?? r.r5) }}</span>
+      </span>
+      <router-link class="link tiny" :to="{ path: '/calendar', query: { date: pickedDate, month: miniMonth } }">
+        当日全部 →</router-link>
+    </div>
     <div class="chart-area" v-if="data && data.data.length > 0">
       <div class="chart-row">
         <KlineChart
           :data="data" :is-loading="isLoading" :error="error"
           :show-signals="overlays.includes('signals')" :height="600"
           :selected-date="pickedDate"
+          :selection-marks="selectionMarks"
+          :selection-rows="selectionRows"
+          :selection-names="strategyNames"
+          :selection-month="miniMonth"
+          :name="data.name"
           @price-range="onPriceRange"
           @pick="onPickDate"
+          @selection-hover="onChartSelectionHover"
         />
         <ChipDistribution
           v-if="overlays.includes('chips') && data.chips"
@@ -221,8 +277,10 @@ import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
 import WyckoffChart from '@/components/WyckoffChart.vue'
 import StockInfoPanel from '@/components/StockInfoPanel.vue'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
+import SelectionDetailCard, { type SelectionRow } from '@/components/SelectionDetailCard.vue'
 import { useKlineData } from '@/composables/useKlineData'
-import { getIntraday, getIntradayCoverage, getWyckoff } from '@/api/client'
+import { mergeStrategyNames, readSharedMonth, writeSharedMonth } from '@/composables/selectionLabels'
+import { getIntraday, getIntradayCoverage, getStockBundle, getWyckoff } from '@/api/client'
 import type { IntradayCoverage, IntradayResponse, WyckoffRead } from '@/types/api'
 
 const route = useRoute()
@@ -362,8 +420,10 @@ watch(selectedCode, async (code) => {
   if (!code) return
   try {
     coverage.value = await getIntradayCoverage(code)
-    // 上一次选的日期可能在新票的覆盖范围外 → 默认回到"今天（若有实时）或最近交易日"
-    const last = preferredIntradayDate()
+    // ⚠️ 显式带了 ?date=（从选股日历 / 选股记录跳进来）就以它为准；否则默认"今天（若有实时）或最近交易日"。
+    // 不这么写的话这里会把 query date 覆盖掉（实测：?date=2026-10-13 被改成 10-15，迷你日历条没有选中格）。
+    const queryDate = String(route.query.date || '')
+    const last = queryDate || preferredIntradayDate()
     if (last) { pickedDate.value = last; void loadIntraday(last) }
   } catch { /* 覆盖范围拿不到时，点击仍会退回后端 404 文案 */ }
 })
@@ -404,11 +464,179 @@ onMounted(() => {
   if (code) selectedCode.value = code
 })
 watch(() => route.query.code, v => { if (v && String(v) !== selectedCode.value) selectedCode.value = String(v) })
+// ?date=：从选股日历 / 选股记录跳过来时定位到某一天（2026-10-15 加）
+// ⚠️ `immediate: true` 必须有：首次进入（URL 里就带 ?date=）时 watcher 不 immediate 就不会触发，
+// 结果被"默认最近交易日"覆盖掉（实测：?date=2026-10-13 显示成 10-14）。
+watch(() => route.query.date, v => {
+  const day = String(v || '')
+  if (day && day !== pickedDate.value) void onPickDate(day)
+}, { immediate: true })
+
+watch(pickedDate, (day) => {
+  const cur = String(route.query.date || '')
+  if (!day || cur === day) return
+  void router.replace({ query: { ...route.query, date: day } })
+})
+
+const barDates = computed(() => (data.value?.data || []).map((b) => String(b.time || '')).filter(Boolean))
+const miniDays = computed(() => {
+  const days = barDates.value
+  if (!days.length || !miniMonth.value) return []
+  const hits = new Map<string, number>()
+  for (const r of selectionRows.value) hits.set(r.decision_date, (hits.get(r.decision_date) || 0) + 1)
+  return days.filter((d) => d.slice(0, 7) === miniMonth.value).map((day) => ({ date: day, hits: hits.get(day) || 0 }))
+})
+/** 翻月：只在已加载的 K 线区间内；再往前到头就自动把区间放成「全部」（免得看起来像没数据） */
+function shiftMiniMonth(step: number) {
+  const days = barDates.value
+  if (!days.length) return
+  const base = miniMonth.value || days[days.length - 1].slice(0, 7)
+  const [y, m] = base.split('-').map(Number)
+  const dt = new Date(y, m - 1 + step, 1)
+  const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`
+  if (key < days[0].slice(0, 7)) { if (daysModel.value !== 0) daysModel.value = 0; miniMonth.value = key; return }
+  if (key > days[days.length - 1].slice(0, 7)) return
+  miniMonth.value = key
+}
+function backToLatest() {
+  const days = barDates.value
+  if (days.length) miniMonth.value = days[days.length - 1].slice(0, 7)
+}
 // 页面内换票（自选股侧栏 / 手动输入）也写回 URL：刷新、分享、从别的页返回都停在同一只票。
 // 不回写的话，用侧栏切了 5 只票再刷新，又回到最开始的代码（实测踩过）。
 watch(selectedCode, (code) => {
   if (!code || String(route.query.code || '') === code) return
   void router.replace({ query: { ...route.query, code } })
+})
+
+// ── 台账「选股记录」→ K 线上的入选记号 + 迷你日历条（把选股日历搬进 K 线的核心）──
+const selectionRows = ref<SelectionRow[]>([])
+/** 迷你条当前看的月份（默认 = 最后一根 K 线所在月）；可 ◀▶ 翻月 */
+const miniMonth = ref('')
+const hoverDay = ref<string | null>(null)
+/** 策略 id → 中文名（策略池一份；含 arm/wyckoff/主力追踪等） */
+const strategyNames = ref<Record<string, string>>({})
+const hoverRows = computed(() => hoverDay.value
+  ? selectionRows.value.filter((r) => r.decision_date === hoverDay.value) : [])
+/** 当前**选中日**的入选明细（点 K 线的每一天 / 迷你条每一格都会换）——
+ *  比"悬停才看得到"更进一步：选中那天就一直显示是谁选的（2026-10-15 第九十八轮）。 */
+const pickedRows = computed(() => pickedDate.value
+  ? selectionRows.value.filter((r) => r.decision_date === pickedDate.value) : [])
+const fwAvailable = (r: SelectionRow) =>
+  r.excess_r5 != null || r.r5 != null || r.r1 != null || r.r20 != null
+function fwText(r: SelectionRow): string {
+  if (r.excess_r5 != null) return `T+5 超额 ${pct(r.excess_r5)}`
+  if (r.r5 != null) return `T+5 收益 ${pct(r.r5)}`
+  if (r.r1 != null) return `T+1 收益 ${pct(r.r1)}`
+  if (r.r20 != null) return `T+20 收益 ${pct(r.r20)}`
+  return 'T+5 待结算'
+}
+function strategyLabel(src: string): string {
+  const key = String(src || '')
+  return strategyNames.value[key] || key || '—'
+}
+/** 台账里最新的一条入选（接口按决策日倒序）⇒ 迷你条给一个"一跳到底"的入口 */
+/** 迷你条悬停：悬停"最近入选"按钮时也要能出明细（它本身就是一条入选记录） */
+function onMiniHover(d: { date: string; hits: number }) {
+  hoverDay.value = d.hits ? d.date : null
+}
+/** 跳到某个月（越界就先把 K 线区间放成「全部」）：从"最近入选"按钮用 */
+function jumpToDate(day: string) {
+  const days = barDates.value
+  if (!days.length || !day) return
+  const key = day.slice(0, 7)
+  if (key < days[0].slice(0, 7)) {
+    if (daysModel.value !== 0) daysModel.value = 0
+    miniMonth.value = key
+    return
+  }
+  if (key > days[days.length - 1].slice(0, 7)) return
+  miniMonth.value = key
+}
+/** 图上入选记号的悬停：把迷你条的浮层收起来（避免两张卡同时挂在页面上） */
+function onChartSelectionHover(date: string | null) {
+  if (date) hoverDay.value = null
+}
+const selectionMarks = computed(() => {
+  const byDate = new Map<string, string[]>()
+  for (const r of selectionRows.value) {
+    const list = byDate.get(r.decision_date) || []
+    if (!list.includes(r.source)) list.push(r.source)
+    byDate.set(r.decision_date, list)
+  }
+  return [...byDate.entries()].map(([date, sources]) => ({
+    date,
+    text: sources.length > 1 ? `入选×${sources.length}` : '入选',
+  }))
+})
+watch(selectedCode, async (code) => {
+  if (!code) { selectionRows.value = []; return }
+  try {
+    const bundle = await getStockBundle(code)
+    selectionRows.value = (bundle.selections?.rows || []) as SelectionRow[]
+  } catch {
+    selectionRows.value = []          // 拿不到就当没有记录，不阻断 K 线
+  }
+}, { immediate: true })
+/** 迷你条里"最近一次入选"的快捷跳转目标：取**当前 K 线区间内**最新的一条入选记录。
+ *  两条纪律：① 台账里的记录可能早于 K 线区间（实测 300229.SZ 的 2025-10-31 在 1 年区间之外），
+ *  那种日期点了没反应 ⇒ 只在"图上真有记号"的日期里挑；② 接口按决策日**倒序**返回，
+ *  所以必须按日期取最大值，不能取数组最后一项（实测踩过：拿到了 2017-08-16）。 */
+const latestMark = computed(() => {
+  const sorted = selectionMarks.value.map((m) => m.date).sort()
+  if (!sorted.length) return null
+  const date = sorted[sorted.length - 1]
+  const row = selectionRows.value.find((r) => r.decision_date === date)
+  return { date, source: row?.source || '' }
+})
+// 迷你条默认停在哪个月（2026-10-15 第九十八轮改）：
+//   ① **先认显式 ?month=**（从选股日历点票过来时带的就是用户正在看的那个月）；
+//   ② 再认选股日历存的月（`selection_calendar_state_v1`，两页共用一份）；
+//   ③ 都没有才退回"最后一根 K 线所在月"。
+// 翻月后若落在没有 K 线的月份（换票/换区间时可能发生），就夹回最近的有数据的那一端。
+// `monthSettled` 只负责"别把初始的 clamp 结果当成用户翻月写回 URL/localStorage"。
+// ⚠️ 换票时**不能置空**再等 barDates 重算：中间有一个窗口 `miniMonth === ''`，此时点
+//    「最新」会走 `days[last] || ''` 那条分支、什么都不做（实测点"最新"停在 2026-08）。
+//    改成：换票时直接写入"要不要跟随 query 的月份"，其余情况保持当前月，等下方 clamp 兜底。
+watch(selectedCode, (code, prev) => {
+  if (!code) { miniMonth.value = ''; return }
+  if (prev === undefined) return                                  // 首次：交给 query 那条 watch
+  const shared = readSharedMonth(route.query as Record<string, unknown>)
+  if (shared) miniMonth.value = shared
+}, { immediate: true })
+// 首次（或带 ?month= 进来）：用显式 query / 日历存的月开局
+watch(() => route.query.month, (v) => {
+  const m = String(v || '')
+  if (m && m !== miniMonth.value) miniMonth.value = m
+}, { immediate: true })
+// 兜底 clamp：当前月在这只票的 K 线区间里没有数据时，夹到最近的有数据的那一端
+// （换票/换区间都会走到；`miniMonth` 为空 ⇒ 落到最新月）
+watch(barDates, (days) => {
+  if (!days.length) return
+  const months = [...new Set(days.map((d) => d.slice(0, 7)))]
+  const last = months[months.length - 1]
+  const cur = miniMonth.value
+  if (!cur) { miniMonth.value = last; return }
+  if (!months.includes(cur)) miniMonth.value = cur > last ? last : months[0]
+}, { immediate: true })
+// 翻月 → 写回 ?month= 与日历那份 localStorage（不回写的话，从 K 线切回日历又丢）。
+// **空值绝不写**：换票瞬间的空月如果落进 localStorage，会把日历存的月份清掉。
+watch(miniMonth, (m) => {
+  if (!m || !/^\d{4}-\d{2}$/.test(m)) return
+  writeSharedMonth(m)
+  if (String(route.query.month || '') === m) return
+  void router.replace({ query: { ...route.query, month: m } })
+})
+// 策略 id → 中文名（策略池一份；拿不到就退回 id，不阻断渲染）
+onMounted(async () => {
+  try {
+    const pool = await (await fetch('/api/strategies?refresh=false')).json()
+    const map: Record<string, string> = {}
+    for (const s of pool?.strategies || []) if (s?.id) map[String(s.id)] = String(s.name || s.id)
+    // 台账里还有 preselected / notify 这类**口径来源**（不是策略），策略池查不到 ⇒ 兜底表补上，
+    // 否则 K 线浮层会显示 `preselected` 这种内部 id（实测踩到）。
+    strategyNames.value = mergeStrategyNames(map)
+  } catch { /* 忽略 */ }
 })
 
 // ── 威科夫点图（P&F）：随选中标的自动算，箱 %/反转箱/区间天数可调 ───────────────
@@ -471,6 +699,30 @@ onUnmounted(() => { stopIntradayPoll() })
 </script>
 
 <style scoped>
+/* 迷你选股日历条（2026-10-15：把选股日历搬进 K 线页的轻量形态） */
+.mini-strip { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 6px 2px 2px; }
+.ms-label { margin-right: 2px; }
+.ms-cell {
+  position: relative; display: inline-flex; flex-direction: column; align-items: center;
+  min-width: 40px; padding: 2px 4px; border-radius: 4px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid transparent;
+}
+.ms-cell:hover { border-color: rgba(255, 209, 102, 0.5); }
+.ms-cell.hit { background: rgba(250, 204, 21, 0.12); }
+.ms-cell.picked { border-color: #ffd166; }
+.ms-dot { width: 5px; height: 5px; border-radius: 50%; background: #facc15; margin-top: 1px; }
+.ms-nav, .ms-now { padding: 1px 5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); }
+.ms-nav:hover, .ms-now:hover { background: rgba(255,209,102,0.2); }
+.ms-month { min-width: 5.2em; text-align: center; }
+.mini-strip { position: relative; }
+/* 明细卡本体在 SelectionDetailCard.vue（迷你条与 K 线图记号共用一份）：
+   嵌在迷你条里时跟着日历条走，绝对定位。 */
+.mini-strip > .ms-pop { position: absolute; z-index: 20; top: 100%; left: 2px; margin-top: 4px; }
+/* 选中日的入选策略速读条（不用悬停就能看到"这天是谁选的"） */
+.sel-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 2px 2px; }
+.sel-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(250, 204, 21, 0.10); border: 1px solid rgba(250, 204, 21, 0.28); }
+
 /* 左侧自选股在长页面上保持可见：K 线页要滚很久（图 + 分时 + 资料），
    侧栏跟着滚走的话，用户每次换票都得先滚回顶部。 */
 .col-side { position: sticky; top: 64px; align-self: flex-start; }

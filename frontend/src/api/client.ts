@@ -727,3 +727,35 @@ export async function getAgentFactors(
   const { data } = await http.get('/agent/factors', { params })
   return data
 }
+
+/** 一只票在选股台账里的入选摘要（自选侧栏悬停用；`/api/calendar/by-code`） */
+export interface LedgerCodeSummary {
+  code: string
+  name: string
+  n: number
+  n_sources: number
+  first_date: string
+  last_date: string
+  mean_excess_r5?: number | null
+  rows: {
+    decision_date: string; source: string
+    rank?: number | null; weight?: number | null
+    r1?: number | null; r5?: number | null; r20?: number | null; excess_r5?: number | null
+  }[]
+}
+export interface LedgerByCodeResponse {
+  built: boolean
+  as_of: string | null
+  requested?: number
+  found?: number
+  codes: Record<string, LedgerCodeSummary>
+  hint?: string
+}
+
+/** 批量取入选摘要：100+ 行自选也只发 1 个请求（逐行 bundle 会是 100 个请求）。 */
+export async function getSelectionByCode(codes: string[], limit = 3): Promise<LedgerByCodeResponse> {
+  const { data } = await http.get<LedgerByCodeResponse>('/calendar/by-code', {
+    params: { codes: codes.join(','), limit },
+  })
+  return data
+}

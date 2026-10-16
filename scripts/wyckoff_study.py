@@ -40,6 +40,32 @@ DEFAULTS = dict(range_days=60, range_max_pct=0.30, sideways_net=0.15, spring_win
                 trail_pct=0.08)        # trail 模式的回撤止盈幅度
 
 
+# ── 尾部「半天数据」闸门（2026-10-15 第九十八轮实测撞到）─────────────────────────
+# 日线是**增量写库**的：晚上跑回测时"今天"的横截面往往还没补齐（实测 19:30 时 2026-10-15
+# 只有 1340 只、前一日 6554 只）。把这种日期算进回放，持仓股当天没有 K 线 ⇒ 当日市值只余
+# 现金 ⇒ nav 从 2.72 掉到 −0.0008，`metrics()` 里 `(1+total) ** (1/years)` 底数为负还会抛
+# `TypeError: complex`（moneyflow_arm / mainforce_arm 的每日名单刷新就是这么挂的）。
+PARTIAL_DAY_MIN_RATIO = 0.6
+
+
+def drop_partial_tail(table: pd.DataFrame, min_ratio: float = PARTIAL_DAY_MIN_RATIO) -> pd.DataFrame:
+    """剥掉尾部横截面明显不全的交易日（判据：当天股票数 < 前一天的 `min_ratio`）。
+
+    连续多天没补齐就一路往回剥；剥到最后只剩一天就保留（宁可少几天，也不给回测喂半天数据）。
+    """
+    if table.empty or "trade_date" not in table.columns:
+        return table
+    counts = table.groupby("trade_date")["close"].size().sort_index()
+    keep = list(counts.index)
+    while len(keep) >= 2 and counts[keep[-1]] < counts[keep[-2]] * min_ratio:
+        dropped = keep.pop()
+        print(f"[bars] 丢掉尾部未补齐的交易日 {pd.Timestamp(dropped).date()}："
+              f"横截面 {int(counts[dropped])} < 前一日的 {min_ratio:.0%} × {int(counts[keep[-1]])}")
+    if len(keep) == len(counts):
+        return table
+    return table[table["trade_date"].isin(set(keep))].reset_index(drop=True)
+
+
 def load_bars(start: str = "2021-01-01") -> pd.DataFrame:
     """前复权日线（只读需要列，按股票+日期排序）。"""
     import pyarrow.dataset as ds
@@ -52,7 +78,7 @@ def load_bars(start: str = "2021-01-01") -> pd.DataFrame:
         columns=["trade_date", "stock_code", "open", "high", "low", "close", "volume", "amount"]).to_pandas()
     table["trade_date"] = pd.to_datetime(table["trade_date"])
     table = table.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
-    return table
+    return drop_partial_tail(table)          # 尾部没补齐的交易日不进回测（见上方闸门注释）
 
 
 def _universe() -> set[str]:
@@ -210,10 +236,17 @@ def metrics(nav: pd.Series) -> dict:
     ret = nav.pct_change().dropna()
     total = float(nav.iloc[-1] - 1)
     years = max(len(nav) / 244.0, 1e-9)
-    ann = float((1 + total) ** (1 / years) - 1)
+    # 净值被做穿（1+total ≤ 0）时 `base ** (1/years)` 在 Python 里是**复数** ⇒
+    # `float(...)` 抛 `TypeError: complex`（实测：半天数据把 nav 打到 −0.0008 那晚，
+    # moneyflow_arm / mainforce_arm 的名单刷新直接崩）。约定：净值归零/为负 ⇒ 年化记 −100%，
+    # 并把 `nav_non_positive` 标出来，宁可显示"亏光"也不给一个假数字、更不许崩。
+    base = 1 + total
+    non_positive = base <= 0
+    ann = -1.0 if non_positive else float(base ** (1 / years) - 1)
     dd = float((nav / nav.cummax() - 1).min())
     vol = float(ret.std() * np.sqrt(244))
     return {"total_return": total, "annual_return": ann, "max_drawdown": dd, "ann_vol": vol,
+            "nav_non_positive": bool(non_positive),
             "sharpe": float(ann / vol) if vol > 0 else None,
             "calmar": float(ann / abs(dd)) if dd < 0 else None,
             "win_rate_daily": float((ret > 0).mean()),

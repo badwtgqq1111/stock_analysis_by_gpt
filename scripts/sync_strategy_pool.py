@@ -316,6 +316,68 @@ def is_fresh(latest: "str | None", reference: "str | None") -> bool:
     return bool(latest) and bool(reference) and str(latest) >= str(reference)
 
 
+def _return_ranking(strategies: list[dict]) -> dict:
+    """策略按收益率排名（用户 2026-10-15："策略池里把策略按收益率排名"）。
+
+    口径（写进 payload，前端与本函数的判据一致）：
+      · 用 `performance.research`（没有就退 `tracking`）的**独立回放/跟踪曲线**；
+      · 主键 = **累计收益**（`metrics.total_return`），并列时看 **相对中证500 超额**、再看年化、最后看观测数；
+      · **各策略窗口不同**（这正是"多策略对比图"用共同窗口的原因）⇒ 排名里**同时给出每个策略的窗口与观测数**，
+        并在 `caveat` 里说明；观测 < 30 的只能算"样本不足"，不给名次（放 `excluded`）。
+    返回 {by_total_return: [{id, rank, total_return, annual_return, excess_return, observations, window, kind}],
+          by_excess_return: [...], excluded: [{id, reason}], caveat: str}
+    """
+    rows, excluded = [], []
+    for s in strategies:
+        perf = s.get("performance") or {}
+        curve = perf.get("research") or perf.get("tracking") or {}
+        metrics = curve.get("metrics") or {}
+        total = metrics.get("total_return")
+        # 观测数：`research_replay` 那一类只给 dates/nav、没有 observations 字段（实测 wyckoff/moneyflow/jq_*），
+        # 用 nav 长度 − 1 兜底，否则它们会被"观测不足 30"整批排除掉。
+        obs = curve.get("observations")
+        if obs in (None, 0):
+            obs = max(len(curve.get("nav") or []) - 1, 0) or None
+        if total is None or not curve.get("nav"):
+            excluded.append({"id": s["id"], "reason": "没有可用曲线"})
+            continue
+        if (obs or 0) < 30:
+            excluded.append({"id": s["id"], "reason": f"观测不足 30（{obs}）⇒ 不给名次"})
+            continue
+        rows.append({"id": s["id"], "total_return": total,
+                     "annual_return": metrics.get("annual_return"),
+                     "max_drawdown": metrics.get("max_drawdown"),
+                     "sharpe": metrics.get("sharpe_rf0", metrics.get("sharpe")),
+                     "excess_return": curve.get("excess_return"),
+                     "observations": obs, "kind": curve.get("kind"),
+                     "window": f"{curve.get('start_date')} ~ {curve.get('end_date')}"})
+    def rank(key: str) -> list[dict]:
+        ordered = sorted(rows, key=lambda r: (-(r.get(key) or -9e9), -(r.get("excess_return") or -9e9),
+                                              -(r.get("observations") or 0)))
+        return [{**r, "rank": i + 1} for i, r in enumerate(ordered)]
+    by_total = rank("total_return")
+    by_excess = rank("excess_return")
+    # 名次挂回每条策略（便于前端在卡片上显示）
+    for item in by_total:
+        for s in strategies:
+            if s["id"] == item["id"]:
+                s["return_rank"] = {"rank": item["rank"], "of": len(by_total),
+                                    "metric": "total_return", "value": item["total_return"],
+                                    "excess_return": item["excess_return"], "observations": item["observations"],
+                                    "window": item["window"], "basis": "累计收益（各策略窗口不同，见 caveat）"}
+    for item in by_excess:
+        for s in strategies:
+            if s["id"] == item["id"]:
+                s.setdefault("return_rank", {})
+                s["excess_rank"] = {"rank": item["rank"], "of": len(by_excess), "metric": "excess_return",
+                                    "value": item["excess_return"], "observations": item["observations"],
+                                    "window": item["window"], "basis": "相对中证500 超额（各策略窗口不同）"}
+    return {"by_total_return": by_total, "by_excess_return": by_excess, "excluded": excluded,
+            "basis": "累计收益为主键；并列看相对中证500 超额、再年化、最后观测数",
+            "caveat": ("各策略的回放/跟踪窗口不同（对比图另有共同窗口口径）⇒ 这份排名只做**同池横比参考**，"
+                       "跨窗口的收益率不能直接当「谁更强」的证明；窗口与观测数逐条列在下面。")}
+
+
 def build_pool() -> dict:
     if not CONFIG_PATH.exists():
         raise SystemExit(f"缺少策略登记表：{CONFIG_PATH}")
@@ -421,6 +483,7 @@ def build_pool() -> dict:
         "candidates": candidates,
         "performance_generated_at": performance.get("generated_at"),
         "common_window": performance.get("common_window", {"status": "insufficient_history"}),
+        "rankings": _return_ranking(strategies),
         "evidence": evidence,
         "totals": {
             "n_strategies": len(strategies),

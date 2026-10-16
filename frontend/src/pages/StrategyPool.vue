@@ -66,11 +66,27 @@
                 {{ f.label }} <span class="dim">{{ f.count }}</span>
               </button>
             </div>
+            <!-- 排序：默认按收益率排名（用户 2026-10-15 要求） -->
+            <div class="side-sort">
+              <span class="tiny dim">排序</span>
+              <button v-for="m in sortTabs" :key="m.key" class="tab tiny"
+                      :class="{ active: sortMode === m.key }" @click="sortMode = m.key">{{ m.label }}</button>
+              <span class="tiny dim" :title="rankingsCaveat">
+                {{ rankBasis }}
+              </span>
+            </div>
             <ul class="strategy-list">
               <li v-for="s in visible" :key="s.id" class="strategy-item"
                   :class="{ active: s.id === selectedId, negative: shouldCollapse(detailOf(s).curve) }"
                   @click="select(s.id)">
                 <div class="si-row">
+                  <span v-if="rankMode && s.return_rank" class="rank-badge mono"
+                        :class="{ gold: s.return_rank.rank === 1, silver: s.return_rank.rank === 2, bronze: s.return_rank.rank === 3 }"
+                        :title="`按收益率排名：第 ${s.return_rank.rank} / ${s.return_rank.of} 名（${s.return_rank.basis || ''}）｜窗口 ${s.return_rank.window || '—'}`">
+                    #{{ s.return_rank.rank }}</span>
+                  <span v-if="excessMode && s.excess_rank" class="rank-badge mono"
+                        :title="`按相对中证500 排名：第 ${s.excess_rank.rank} / ${s.excess_rank.of} 名｜窗口 ${s.excess_rank.window || '—'}`">
+                    #{{ s.excess_rank.rank }}</span>
                   <span class="si-name">{{ s.name }}</span>
                   <span class="tag" :class="detailOf(s).identity.groupClass">{{ s.group }}</span>
                 </div>
@@ -437,9 +453,21 @@ const filterTabs = computed(() => {
   ]
 })
 
+// 排序模式：默认「收益率排名」（用户 2026-10-15 要求把策略按收益率排名）
+const sortMode = ref<'return' | 'excess' | 'pool'>('return')
+const sortTabs = [
+  { key: 'return' as const, label: '收益率排名' },
+  { key: 'excess' as const, label: '相对中证500' },
+  { key: 'pool' as const, label: '池内顺序' },
+]
+const rankMode = computed(() => sortMode.value === 'return')
+const excessMode = computed(() => sortMode.value === 'excess')
+const rankBasis = computed(() => (pool.value?.rankings?.basis ? `（${pool.value.rankings.basis}）` : ''))
+const rankingsCaveat = computed(() => pool.value?.rankings?.caveat || '')
+
 const visible = computed(() => {
   const q = query.value.trim().toLowerCase()
-  return (pool.value?.strategies || []).filter((s) => {
+  const rows = (pool.value?.strategies || []).filter((s) => {
     const d = details.value[s.id]
     if (filter.value === 'production' && s.stage !== 'production') return false
     if (filter.value === 'candidate' && s.stage !== 'candidate') return false
@@ -448,6 +476,13 @@ const visible = computed(() => {
     if (!q) return true
     return `${s.name} ${s.id} ${s.group}`.toLowerCase().includes(q)
   })
+  if (sortMode.value === 'return') {
+    return [...rows].sort((a, b) => (a.return_rank?.rank ?? 999) - (b.return_rank?.rank ?? 999))
+  }
+  if (sortMode.value === 'excess') {
+    return [...rows].sort((a, b) => (a.excess_rank?.rank ?? 999) - (b.excess_rank?.rank ?? 999))
+  }
+  return rows
 })
 
 const current = computed(() => details.value[selectedId.value] || null)
@@ -612,6 +647,21 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 收益率排名的名次徽标 + 排序控件（2026-10-15） */
+.side-sort {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 4px 2px 6px;
+}
+.side-sort .tab { padding: 1px 6px; }
+.rank-badge {
+  display: inline-block; min-width: 2.2em; text-align: center;
+  padding: 0 4px; border-radius: 4px; font-weight: 700;
+  background: rgba(255, 255, 255, 0.08); color: #cbd5e1;
+}
+.rank-badge.gold { background: rgba(250, 204, 21, 0.22); color: #facc15; }
+.rank-badge.silver { background: rgba(203, 213, 225, 0.22); color: #e2e8f0; }
+.rank-badge.bronze { background: rgba(251, 146, 60, 0.22); color: #fb923c; }
+
 .pool-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: var(--sp-3); align-items: start; }
 @media (max-width: 1100px) { .pool-layout { grid-template-columns: 1fr; } }
 .pool-side { position: sticky; top: 64px; }

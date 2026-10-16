@@ -486,6 +486,45 @@ def read_box_arm_history() -> list[dict]:
     return rows
 
 
+def read_donchian_breakout_history() -> list[dict]:
+    """通道/箱体突破腿（donchian_breakout）的历史快照 → 台账。
+
+    产物 `output/results_cn/donchian_breakout_history/<决策日>.csv`（决策日 = 突破信号日，T+1 开盘买）
+    由 `scripts/select_donchian_breakout.py` 写。2026-10-15 从生产 config 的 model leg
+    （`[strategies.donchian_breakout]`，status=off）搬进策略池，台账/日历/K 线「选股记录」随之可查。
+    """
+    rows = []
+    hist = RESULTS / "donchian_breakout_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            # 只把**实际进组合**的那几只进台账（rank ≤ slots，默认 2 只/日）：这只腿每天有 ~60 个候选，
+            # 全量进日历会把日历变成"候选清单"（实测 221,704 行 / 2,604 天），稀释掉别的策略。
+            if not bool(r.get("in_portfolio")):
+                continue
+            rows.append({
+                "decision_date": path.stem,
+                "source": "donchian_breakout",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"{r.get('board') or ''}｜量比 {r.get('volume_ratio_20')}"
+                         f"｜超通道上沿 {r.get('dist_above_channel')}｜5日涨幅 {r.get('return_5d')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"donchian_breakout_history/{path.name}",
+            })
+    return rows
+
+
 def read_wyckoff_arm_history() -> list[dict]:
     """威科夫吸筹突破（wyckoff_arm）的历史快照 → 台账。
 
@@ -694,7 +733,7 @@ def main() -> int:
                           + read_arm_concept_history() + read_rot_arm_history()
                           + read_box_arm_history() + read_first_ban_lowxi_history()
                           + read_wyckoff_arm_history() + read_moneyflow_arm_history()
-                          + read_mainforce_arm_history()
+                          + read_mainforce_arm_history() + read_donchian_breakout_history()
                           + read_jq_history())
     if ledger.empty:
         raise SystemExit("三个来源都没读到选股记录")

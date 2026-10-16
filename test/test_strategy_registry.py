@@ -238,3 +238,34 @@ def test_daily_pipeline_and_audit_wire_the_registry():
         "抽象层自检不在每日流程里（漏接线又会是静默的）"
     audit = (ROOT / "scripts/audit_web_freshness.py").read_text(encoding="utf-8")
     assert "策略接线（抽象层自检）" in audit
+
+
+def test_donchian_breakout_moved_into_pool():
+    """donchian_breakout 从生产 config 的 model leg 搬进策略池（2026-10-15 用户要求）。
+
+    要锁三件事：① 接线完整（选股源/台账/历史/曲线/每日刷新）；② 曲线文件真的在；
+    ③ **如实标注它是负/零 edge 的观察候选**（不许把它包装成能用的策略）。
+    """
+    import json
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    specs = json.loads((root / "config/strategies.json").read_text(encoding="utf-8"))["strategies"]
+    spec = next((s for s in specs if s["id"] == "donchian_breakout"), None)
+    assert spec is not None, "donchian_breakout 应已登记进策略池"
+    assert spec["kind"] == "rule_strategy" and spec["stage"] == "candidate"
+    assert spec["selection_source"] == "cn_donchian_breakout"
+    assert spec["ledger_sources"] == ["donchian_breakout"]
+    assert str(spec["history_dir"]).endswith("donchian_breakout_history")
+    refresh = spec.get("daily_refresh") or {}
+    assert refresh.get("mode") == "run" and refresh.get("empty_is_ok") is True
+    nav_csv = (spec.get("curve_source") or {}).get("nav_csv") or ""
+    assert nav_csv.endswith("donchian_breakout/curve/nav_engine.csv"), nav_csv
+    assert (root / nav_csv).exists(), "曲线文件必须真的存在（策略池页面读它）"
+    text = (spec.get("summary", "") + (spec.get("selection") or {}).get("note", "")
+            + (spec.get("curve_source") or {}).get("reason", ""))
+    assert ("负" in text) or ("zero-edge" in text.lower()) or ("零 edge" in text), \
+        "必须如实写明它是负/零 edge 的观察候选（否则等于把它包装成能赚钱的策略）"
+    ledger_src = (root / "scripts/build_selection_ledger.py").read_text(encoding="utf-8")
+    assert "def read_donchian_breakout_history" in ledger_src, "台账 reader 要定义"
+    assert "read_donchian_breakout_history()" in ledger_src, "reader 要真的接进 main()（否则日历查不到）"

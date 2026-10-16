@@ -532,3 +532,48 @@ def test_event_study_replay_has_no_lookahead():
     assert nav.iloc[0] == 1.0 and nav.iloc[1] == 1.0, "前两日无信号，净值必须不动"
     assert nav.iloc[2] == 1.0, "信号当日不许建仓（当天收盘才算得出分数）"
     assert nav.iloc[3] > 1.9, "第 3 日（信号日的下一交易日）开盘建仓，吃到 10.0 → 20.0 的翻倍"
+
+
+# ── 8) 回测不许吃「半天数据」（第九十八轮实测撞到的那条）─────────────────────────
+# 日线是增量写库的：晚上跑回测时"今天"的横截面常常还没补齐（实测 2026-10-15 19:30 的
+# 2026-10-15 只有 1340 只、前一日 6554 只）。把这种日期算进回放，持仓股当天没有 K 线 ⇒
+# 当日市值只余现金 ⇒ nav 2.72 → −0.0008 ⇒ `metrics()` 抛 `TypeError: complex`
+# （moneyflow_arm / mainforce_arm 的每日名单刷新就是这么挂的：status.json counts.failed = 2）。
+
+
+def test_metrics_does_not_crash_when_nav_is_blown_to_zero():
+    import wyckoff_study as ws
+
+    blown = pd.Series([1.0, 1.05, 0.90, -0.0008], index=pd.bdate_range("2026-10-09", periods=4))
+    m = ws.metrics(blown)                       # 必须不抛 TypeError: complex
+    assert m["nav_non_positive"] is True, m
+    assert m["total_return"] < -1 and m["annual_return"] == -1.0, m
+    assert m["max_drawdown"] < -0.99, m
+    healthy = pd.Series([1.0, 1.2, 0.9, 1.1], index=pd.bdate_range("2026-10-09", periods=4))
+    m2 = ws.metrics(healthy)
+    assert m2["nav_non_positive"] is False and m2["annual_return"] > 0, m2
+
+
+def test_drop_partial_tail_strips_unfilled_trailing_days():
+    import wyckoff_study as ws
+
+    days = pd.bdate_range("2026-10-09", periods=4)
+    rows = []
+    for i, day in enumerate(days):
+        n = 100 if i < 3 else 20                # 最后一天只有前一日的 20% ⇒ 半天数据
+        rows += [{"trade_date": day, "stock_code": f"S{j:03d}", "close": 1.0} for j in range(n)]
+    kept = ws.drop_partial_tail(pd.DataFrame(rows))
+    assert sorted(kept["trade_date"].unique()) == list(days[:3]), "尾部半天数据必须被剥掉"
+
+    # 连续两天没补齐：一路往回剥；剥到只剩一天就保留（不把表剥空）
+    rows2 = [r for r in rows if r["trade_date"] <= days[2]]
+    rows2 += [{"trade_date": days[3], "stock_code": "S000", "close": 1.0}]
+    rows2 = [r for r in rows2 if r["trade_date"] != days[2]]
+    rows2 += [{"trade_date": days[2], "stock_code": "S000", "close": 1.0}]
+    kept2 = ws.drop_partial_tail(pd.DataFrame(rows2))
+    assert len(kept2["trade_date"].unique()) >= 1, "不许把表剥成空的"
+
+    # 数据齐全 ⇒ 一个都不动
+    full = pd.DataFrame([{"trade_date": d, "stock_code": f"S{j:03d}", "close": 1.0}
+                         for d in days for j in range(100)])
+    assert len(ws.drop_partial_tail(full)["trade_date"].unique()) == len(days)

@@ -190,7 +190,22 @@ else:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "frontend": frontend_audit}
+    """每次请求都重算前端构建戳。
+
+    2026-10-15 修：原来直接把**进程启动时**算出来的 `frontend_audit` 原样返回 ——
+    前端 `npm run build` 之后（页面已能加载新 bundle），导航栏的构建戳还停在旧时间，
+    甚至报着一个磁盘上已经不存在的 entry（实测：`built_at 17:14:49 / entry index-B4_GoZm1.js`，
+    而 index.html 引用的是 18:31 的 `index-cNKXPK90.js`）。构建戳本来就是用来回答
+    "我浏览器里跑的是不是最新构建"，读一个启动期的快照等于把这个自证工具作废。
+    只做 index.html 存在性 + stat + 目录内 is_file 检查，成本是几次 syscall。
+    """
+    audit = dict(frontend_audit)
+    if frontend_dist is not None:
+        try:
+            audit = _audit_dist(frontend_dist)
+        except OSError:                       # 读不到就退回启动期快照（不因体检失败而 500）
+            pass
+    return {"status": "ok", "frontend": audit}
 
 
 if frontend_dist is not None:

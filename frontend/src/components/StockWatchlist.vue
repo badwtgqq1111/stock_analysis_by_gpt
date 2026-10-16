@@ -55,8 +55,10 @@
 
     <ul class="rows">
       <li v-for="row in visibleRows" :key="row.code" :class="{ active: row.code === modelValue }"
-          v-memo="[row.code, row.name, row.tag, liveKey(row.code)]"
+          v-memo="[row.code, row.name, row.tag, liveKey(row.code), hoverOn(row.code)]"
           :title="`${row.code} ${row.name || '（缺名称）'}${row.tag ? ' · ' + row.tag : ''}`"
+          @mouseenter="hoverCode = row.code" @mouseleave="hoverCode = null"
+          @focusin="hoverCode = row.code" @focusout="hoverCode = null"
           @click="$emit('update:modelValue', row.code)">
         <span class="mono code">{{ row.code }}</span>
         <span class="name">{{ row.name || '—' }}</span>
@@ -68,25 +70,46 @@
           <span class="tiny">{{ livePct(row.code) }}</span>
           <span class="src tiny">{{ liveLabel(row.code) }}</span>
         </span>
+        <button v-if="row.source" class="goto" title="在「选股结果」里看它的分数 / 理由 / SHAP"
+                @click.stop="openSelection(row)">↗</button>
         <button class="star" :title="row.local ? '从自选移除' : '加入自选'"
                 @click.stop="toggleLocal(row)">{{ row.local ? '★' : '☆' }}</button>
       </li>
       <li v-if="!visibleRows.length" class="empty tiny">{{ emptyText }}</li>
     </ul>
+    <!-- 悬停一行 → 入选摘要（哪条策略 / rank / 权重 / T+5，走共用卡片，与 K 线浮层同一套文案。
+         数据来自 `/api/calendar/by-code` 批量接口；这一段刻意放在 <ul> 外面：
+         列表自己有 overflow:auto，放里面会被裁掉。 -->
+    <SelectionDetailCard v-if="hoverSummary" class="row-pop" show-dates
+                         :date="hoverSummary.last_date" :rows="hoverSummary.rows"
+                         :names="poolNames" :code="hoverCode" :month="month || undefined"
+                         :title="`台账共 ${hoverSummary.n} 条入选（${hoverSummary.first_date} ~ ${hoverSummary.last_date}，${hoverSummary.n_sources} 条策略）`" />
+    <p v-else-if="hoverCode && hoverProbed && !hoverSummaryLoading" class="hint tiny row-pop-note">
+      台账里没有 {{ hoverCode }} 的入选记录（台账截至 {{ asOf || '—' }}）。
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { getPaperStatus, getSelection, getStrategyPool, searchStocks } from '@/api/client'
 import type { StockSearchHit } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
 import { useLiveQuotes, quoteLabel } from '@/composables/useLiveQuotes'
+import { useSelectionSummaries } from '@/composables/useSelectionSummaries'
+import { LEDGER_SOURCE_LABEL } from '@/composables/selectionLabels'
+import SelectionDetailCard from './SelectionDetailCard.vue'
 import { groupRows, refreshMark, sortGroups, strategyGroups } from './watchlistStrategies'
 import type { GroupSortKey, WatchlistGroup, WatchlistRow } from './watchlistStrategies'
 import { strategyDetail } from './strategyDetail'
 
-const props = defineProps<{ modelValue: string | null }>()
+const props = defineProps<{
+  modelValue: string | null
+  /** 当前看的月份（YYYY-MM）：带上它，从浮层里点决策日进 K 线时日历条停在同一月 */
+  month?: string | null
+}>()
+const router = useRouter()
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 
 // 自选状态来自全局 composable（`composables/useWatchlist.ts`）：
@@ -130,6 +153,18 @@ const emptyText = computed(() => refreshing.value || activeGroup.value?.loading 
 
 // ── 实时快照（数据驱动 UI）：只轮询**当前可见**的自选（交易时段 + 页面可见才轮询） ──
 const liveCodes = computed(() => visibleRows.value.map((row) => row.code))
+
+/** 悬停那一行（鼠标或键盘聚焦都算）：用来出"入选摘要"浮层（2026-10-15 第九十八轮） */
+const hoverCode = ref<string | null>(null)
+const hoverOn = (code: string) => hoverCode.value === code
+/** 批量取入选摘要（100+ 行只发 1~2 个请求；查过就缓存，见 composable 注释） */
+const { hoverSummary, hoverProbed, asOf, loading: hoverSummaryLoading } = useSelectionSummaries(liveCodes, hoverCode)
+/** 浮层里策略 id → 中文名：台账来源兜底表 + 该分组自己的中文名 */
+const poolNames = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = { ...LEDGER_SOURCE_LABEL }
+  for (const g of groups.value) if (g.label) map[g.key] = g.label
+  return map
+})
 const live = useLiveQuotes(liveCodes, { intervalMs: 4000 })
 const liveUpdatedText = computed(() => (live.updatedAt.value
   ? `更新于 ${live.updatedAt.value.toLocaleTimeString('zh-CN')}${live.polling.value ? '（轮询中）' : ''}`
@@ -180,6 +215,13 @@ function liveQuoteTime(code: string): string {
 function liveTone(code: string): string {
   const pct = Number(live.quotes.value[code]?.change_pct ?? 0)
   return pct > 0 ? 'up' : (pct < 0 ? 'down' : '')
+}
+
+function openSelection(row: WatchlistRow) {
+  // 跳到「选股结果」对应来源 + 定位该票（2026-10-15：把"自选 → 审查"这条单行道补上）
+  // ⚠️ 选股结果页的路由是 `path: '/'`（name='selection'），不是 '/selection'
+  // （实测：跳到 #/selection 匹配不到路由 ⇒ main 里什么都没有）
+  void router.push({ path: '/', query: { source: row.source || '', code: row.code } })
 }
 
 function toggleLocal(row: WatchlistRow) {
@@ -295,6 +337,13 @@ onMounted(async () => {
 .g-refresh.bad { color: var(--state-bad); }
 .g-refresh.dim { color: var(--text-dim); }
 .groups { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--sp-2); }
+/* 悬停摘要浮层：贴在列表右侧（列表自己 overflow:auto，浮层必须在 <ul> 外面才不被裁） */
+.watchlist { position: relative; }
+.row-pop { position: absolute; z-index: 30; top: 6px; left: 100%; margin-left: 8px; }
+.row-pop-note { position: absolute; z-index: 30; top: 6px; left: 100%; margin-left: 8px;
+  background: #151b23; border: 1px solid var(--border-color); border-radius: 6px; padding: 6px 8px;
+  max-width: 240px; }
+@media (max-width: 1100px) { .row-pop, .row-pop-note { left: auto; right: 0; margin-left: 0; } }
 .batch-add { margin-bottom: var(--sp-2); }
 .chip { padding: 3px 8px; border-radius: var(--r-pill); border: 1px solid var(--border-color);
   background: var(--bg-input); color: var(--text-muted); font-size: var(--fs-xs); cursor: pointer; }

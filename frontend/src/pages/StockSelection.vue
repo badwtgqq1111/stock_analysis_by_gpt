@@ -90,7 +90,9 @@
                 <tr
                   v-for="(row, i) in pagedRows" :key="row.stock_code + '-' + i"
                   class="clickable"
-                  :class="{ selected: selectedCode === row.stock_code, strong: row.in_portfolio === true || row.stage === '最终入选（PK 后）' }"
+                  :class="{ selected: selectedCode === row.stock_code, strong: row.in_portfolio === true || row.stage === '最终入选（PK 后）',
+                            hl: highlightCode === row.stock_code }"
+                  :ref="(el: any) => registerRow(row.stock_code, el)"
                   @click="selectedCode = row.stock_code"
                 >
                   <td class="star-col">
@@ -221,6 +223,22 @@ const watchlist = useWatchlist()
 // 其它页面（如行业热度页的"概念/板块手臂名单 →"）可以直接把人送到这个来源上，
 // 不用再让用户自己去来源 tab 里找。
 const currentSource = ref(String(route.query.source || ''))
+// ?code=：从 K 线自选 / 日历跳进来时高亮并滚动到那一行（2026-10-15：把"自选 → 审查"这条单行道补上）
+const highlightCode = ref(String(route.query.code || ''))
+const rowEls = new Map<string, HTMLElement>()
+function registerRow(code: string, el: any) {
+  const node = el?.$el instanceof HTMLElement ? el.$el as HTMLElement : (el instanceof HTMLElement ? el : null)
+  if (node) rowEls.set(code, node)
+}
+// ⚠️ 必须挂载后再注册：`pagedRows` 在这个位置还没定义（TDZ）⇒ 直接 watch 会在 setup 阶段抛错，
+// 整页渲染不出来（实测：/selection?source=...&code=... 30 秒等不到表格）。
+onMounted(() => {
+  watch([highlightCode, () => pagedRows.value.length], () => {
+    const el = rowEls.get(highlightCode.value)
+    if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, { immediate: false })
+  watch(() => route.query.code, (v) => { highlightCode.value = String(v || '') })
+})
 // 来源 tab 的方向徽章（正期望/负期望/样本不足）：判定来自策略池，同一套规则
 const { verdicts, load: loadVerdicts } = usePoolVerdicts()
 onMounted(() => { void loadVerdicts() })
@@ -401,6 +419,10 @@ function fmtVal(v: unknown): string {
 </script>
 
 <style scoped>
+/* ?code= 深链进来的那一行（自选 → 选股结果） */
+tr.hl { background: rgba(250, 204, 21, 0.12); outline: 1px solid rgba(250, 204, 21, 0.45); }
+.go-to-selection { opacity: 0.75; }
+
 /* 页面专属：数据源条 + 主表/评分榜两列。其余全部走设计系统。 */
 .source-bar { display: flex; align-items: flex-start; gap: var(--sp-4); flex-wrap: wrap; }
 .source-bar .tabs { margin-bottom: 0; }

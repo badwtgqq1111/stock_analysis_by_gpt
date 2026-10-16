@@ -933,6 +933,15 @@ export interface StrategyPoolEntry {
   ledger_sources: string[]
   selection_source: string
   performance?: StrategyPerformance
+  /** 收益率排名（后端 sync_strategy_pool 计算；各策略窗口不同 ⇒ 只做同池横比参考） */
+  return_rank?: {
+    rank: number; of: number; metric: string; value: number | null
+    excess_return?: number | null; observations?: number | null; window?: string; basis?: string
+  }
+  excess_rank?: {
+    rank: number; of: number; metric: string; value: number | null
+    observations?: number | null; window?: string; basis?: string
+  }
   latest_date: string | null
   lag_days: number | null
   fresh: boolean
@@ -1063,6 +1072,16 @@ export interface StrategyPoolResponse {
   lists_status?: StrategyListsStatus
   performance_generated_at?: string | null
   common_window?: { status: string; start_date?: string; end_date?: string; reason?: string }
+  /** 收益率排名榜（用户 2026-10-15：「策略池里把策略按收益率排名」） */
+  rankings?: {
+    by_total_return: { id: string; rank: number; total_return: number | null; annual_return: number | null
+                       excess_return: number | null; observations: number | null; window: string; kind?: string }[]
+    by_excess_return: { id: string; rank: number; total_return: number | null; excess_return: number | null
+                        observations: number | null; window: string }[]
+    excluded: { id: string; reason: string }[]
+    basis: string
+    caveat: string
+  }
   evidence: StrategyEvidence[]
   totals: {
     n_strategies: number

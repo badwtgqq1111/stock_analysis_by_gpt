@@ -34,7 +34,10 @@
       "daily_refresh": {
         "mode": "run",
         "max_minutes": 10,
-        "freshness_columns": ["picks_date", "trade_date"],
+        "freshness_columns": [
+          "picks_date",
+          "trade_date"
+        ],
         "reason": "持仓快照日（trade_date）是人工录入、会长期落后；判「今天刷过没有」要看 picks_date（这行建议按哪个交易日的名单/行情算出来的）"
       },
       "selection": {
@@ -156,7 +159,8 @@
       "schedule": "每日自动化（sleeve 面板链路之后）",
       "artifacts": [
         "output/results_cn/arm_latest_selection.csv",
-        "output/results_cn/arm_latest_selection.json"
+        "output/results_cn/arm_latest_selection.json",
+        "output/research/arm_base_v1/REPORT.md"
       ],
       "history_dir": "output/results_cn/arm_selection_history",
       "ledger_sources": [
@@ -193,6 +197,12 @@
         ],
         "code_style": "ts_code",
         "supports_shap": false
+      },
+      "curve_source": {
+        "nav_csv": "output/research/arm_base_v1/curve/nav_engine.csv",
+        "kind": "arm_walkforward_daily_exec",
+        "reason": "独立回放：复用 2026-10-07 那次 walk-forward 产物（sleeve_oos_v4d/picks.csv，arm=base_v1，逐月 5 只等权），喂官方日度执行回放引擎 scripts/replay_daily_execution.py（停牌/涨跌停/整手/退市/真实费用都建模）；引擎口径 年化 +29.6% / 回撤 −17.3% / 夏普 1.57（2020-01-23~2026-10-14），相对中证500 +310%。",
+        "methodology": "月末选股 → 次日开盘买入（100 股整手）→ 每日盯市 → 下月末换仓；佣金 2.5bp + 滑点 3bp 双向 + 印花税 10bp（卖出）；涨停不追/跌停不砸/停牌不可成交/退市按最后价清算。"
       }
     },
     {
@@ -203,7 +213,7 @@
       "stage": "production",
       "owner": "pipeline",
       "tag_class": "ok",
-      "summary": "板块轮动：板块层 动量0.7−涨停密度0.3（去掉聚合资金流项）→ 板块内买滞涨；候选每板块≤4、每行业≤2。⚠️ 稳健性拆分显示**所有候选口径的前半窗超额都为负**（含本口径 -0.07%），只应当研究用，不要当生产 alpha。",
+      "summary": "板块轮动：板块层 动量0.7−涨停密度0.3（去掉聚合资金流项）→ 板块内买滞涨；候选每板块≤4、每行业≤2。⚠️ 稳健性拆分显示**所有候选口径的前半窗超额都为负**（含本口径 -0.07%），只应当研究用，不要当生产 alpha。 ｜ `scripts/select_concept_arm.py::run()` 不按 `--as-of` 切数据（板块成分/资金流/动量都取最新），实测 2022-06-30 / 2023-06-30 / 2024-06-28 / 2025-06-30 **四个不同日期跑出同一批票**（前视），把它们拼成曲线就是编数据 ⇒ 只登记每日名单跟踪曲线（daily_refresh=run、history_dir 在归档；连续归档段 ≥2 天后会自动出现在对比图）。要一条真正的长回测，需先把该手臂改成 as_of-aware。",
       "entry": "uv run python scripts/run_cn_pipeline.py --stage arm_concept",
       "schedule": "每日自动化（boards 之后）",
       "artifacts": [
@@ -211,7 +221,8 @@
         "output/results_cn/arm_concept_selection.json",
         "output/results_cn/arm_concept_backtest.json",
         "output/results_cn/arm_concept_grid_compare.json",
-        "output/results_cn/arm_concept_robustness.json"
+        "output/results_cn/arm_concept_robustness.json",
+        "output/research/arm_concept_rotation/REPORT.md"
       ],
       "history_dir": "output/results_cn/arm_concept_history",
       "ledger_sources": [
@@ -277,6 +288,12 @@
         ],
         "code_style": "ts_code",
         "supports_shap": false
+      },
+      "curve_source": {
+        "nav_csv": "output/research/arm_concept_rotation/curve/nav_engine.csv",
+        "kind": "arm_concept_rotation_daily_exec",
+        "reason": "独立回放（2026-10-15 起**可用**：先把 `select_concept_arm.run()` 改成 as_of 感知 —— 窗口按 as_of 装载、评分窗口补上界 ≤ as_of、找不到 ≤ as_of 的交易日就报错不静默退回今天；此前 4 个不同历史日期会跑出同一批票 = 前视）。名单逐月跑 `run()`，喂官方日度执行回放引擎（停牌/涨跌停/整手/退市/真实费用）。窗口 2025-03~2026-10（受 mbs 日线窗口与资金流可得区间限制），引擎口径 年化 +8.4% / 回撤 −14.0% / 夏普 0.50，相对中证500 **−5.4%**（跑输）。**残余前视**：概念成分表与市值仍是当前快照（`cn_board_membership.parquet` 只有一个快照、原始快照只回溯到 2026-10-09）⇒ 这条曲线是**研究示意口径**，不是可交易回测。",
+        "methodology": "月末决策 → 次日开盘等权买入 5 只（每概念 ≤2、每行业 ≤2）→ 每日盯市 → 下月末换仓；执行假设与费用同 arm_select（佣金 2.5bp + 滑点 3bp 双向 + 印花税 10bp）。"
       }
     },
     {
@@ -788,6 +805,66 @@
           "kind": "research_replay",
           "description": "主力追踪（资金流＋筹码成本偏离）独立回放（资金流触发 + 筹码成本偏离排序，持有 10 日或 −8% 止损，双边 15.5bp，2024-08 起）"
         }
+      }
+    },
+    {
+      "id": "donchian_breakout",
+      "name": "通道/箱体突破腿（Donchian breakout）",
+      "group": "研究手臂",
+      "kind": "rule_strategy",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "warn",
+      "summary": "原来是生产配置里的 model leg（`config/cn_pipeline.toml [strategies.donchian_breakout]`，status=off）。2026-10-15 用户要求'也走策略池，要不放在模型腿也没啥用了，也和中证500 做收益曲线参考' ⇒ 搬进池子做**观察候选**。信号：`close > 20 日通道上沿`（超上沿 ≤5% 不追高、5 日涨幅 ≤20%）＋ 量能条件；排序按量比；T+1 开盘买、持有 5 个交易日或 1.5×ATR14 止损（收盘卖）、每日最多 2 只等权、单边 15.5bp。",
+      "entry": "uv run python scripts/select_donchian_breakout.py --print",
+      "schedule": "每日自动化（名单刷新契约 strategy_lists / 非阻塞）",
+      "artifacts": [
+        "output/results_cn/donchian_breakout_selection.csv",
+        "output/research/donchian_breakout/curve/curve.json",
+        "output/research/donchian_breakout/REPORT.md"
+      ],
+      "history_dir": "output/results_cn/donchian_breakout_history",
+      "selection_source": "cn_donchian_breakout",
+      "date_column": "trade_date",
+      "ledger_sources": [
+        "donchian_breakout"
+      ],
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 15,
+        "empty_is_ok": true,
+        "note": "结构型信号：当日没有满足条件的票是正常的（脚本跑成功但不产生决策日）→ 记 no_signal，页面显示『当日无信号』而不是『没更新』。"
+      },
+      "curve_source": {
+        "nav_csv": "output/research/donchian_breakout/curve/nav_engine.csv",
+        "kind": "strategy_rule_net",
+        "reason": "登记默认口径 = D（量比 ≤60% 分位）× 量比降序 × **10% 预算**（config 的 sizing.share=0.10）：A/B 矩阵（4 个量能口径 × 2 个排序方向，2016-2026、扣双边 31bp）**全为负** —— config 原式（A/放量≥1.3/量比降序）年化 −6.5%、逐笔 −1.06%；最好的 D/降序 ≈ −0.05%（逐笔 +0.00%，打平）。默认选 D 是因为独立事件研究（docs/todo/P2_63，71,170 个突破事件）先验指出『放量是负向、缩量更好』，不是在曲线上挑出来的最优；完整矩阵见 curve.json 的 matrix 字段。",
+        "methodology": "T+1 开盘买、持有 5 个交易日或 1.5×ATR14 止损（收盘卖）、每日最多 2 只等权、只投 10% 净值（其余现金）、单边 15.5bp；基准中证500 同窗归一到 1。"
+      },
+      "selection": {
+        "label": "通道/箱体突破腿（Donchian breakout · 前 model leg）",
+        "note": "**zero-edge 观察候选，不参与生产权重**。原为 `[strategies.donchian_breakout]` model leg（2026-10-01 因 5 日超额 −0.29%/t=−6.4 被转 off），2026-10-15 搬进策略池以便和中证500 逐日对照。A/B：4 个量能口径 × 2 个排序方向全部为负（原式 −6.5%/年，最好的打平）；量能条件不是正向过滤 —— 与 docs/todo/P2_63 的 71,170 事件研究一致（最放量档 Q5 −1.14%、t=−10.11）。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/donchian_breakout_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "board",
+          "industry",
+          "score",
+          "in_portfolio",
+          "target_weight",
+          "volume_ratio_20",
+          "return_5d",
+          "dist_above_channel"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
       }
     }
   ]

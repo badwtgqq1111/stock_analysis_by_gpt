@@ -101,8 +101,19 @@ def select(day: str, variant: str = "original") -> pd.DataFrame:
     bars.trade_date = pd.to_datetime(bars.trade_date)
     bars = bars[bars.trade_date <= target].drop_duplicates(["trade_date", "stock_code"])
     days = sorted(bars.trade_date.unique())
+    # 候选池的 `day` 来自**中证500 基准的最新交易日**，而当日日线要等流水线的 daily_bars 阶段
+    # 才落地 ⇒ 两者有一个时间差窗口。原来这里直接抛 `No close bar on 2026-10-15`，
+    # 结果 2026-10-15 18:54 的 refresh_strategy_lists 把两条聚宽策略记成 failed，
+    # 每日预检的 `test_strategy_lists_contract` 因此变红、自动化被挡在门外（第九十八轮实测）。
+    # 现在退到"≤ 基准日的最后一个真实收盘日"，并把退让**写进日志**（不静默）。
+    if not days:
+        raise ValueError("No close bar at all for the requested universe")
     if target not in days:
-        raise ValueError(f"No close bar on {day}")
+        settled = days[-1]
+        print(f"[jq] 目标日 {day} 还没有收盘日线（基准走在前头）⇒ 退到最近收盘日 "
+              f"{pd.Timestamp(settled).date()}；名单日期会如实落后一个交易日", flush=True)
+        target = settled
+        day = str(pd.Timestamp(settled).date())
     last63 = days[-63:]
     if len(last63) < 63:
         raise ValueError("Fewer than 63 market sessions")
@@ -144,13 +155,17 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     for variant in (("original", "dynamic") if args.variant == "both" else (args.variant,)):
         result = select(day, variant)
+        # ⚠️ `select()` 可能因为"目标日还没有收盘日线"而**退到最近收盘日**（见里面的注释），
+        # 此时它以 `result` 的 trade_date 为准；沿用入参 `day` 会把名单日期写成 10-15
+        # 而信号其实来自 10-14（实测踩到：日志说退到 10-14，产物却写 10-15）。
+        settled = str(pd.to_datetime(result["trade_date"]).max().date()) if len(result) else day
         stem = "jq_multi_factor" if variant == "original" else "jq_roe_roa"
         history = OUT / f"{stem}_history"
         history.mkdir(exist_ok=True)
         result.to_csv(OUT / f"{stem}_selection.csv", index=False)
-        result.to_csv(history / f"{day}.csv", index=False)
+        result.to_csv(history / f"{settled}.csv", index=False)
         metadata = {
-            "trade_date": day,
+            "trade_date": settled,
             "strategy_id": "jq_multi_factor_size_roe" if variant == "original" else "jq_roe_roa_diagnostic",
             "stage": "candidate",
             "formula": ("rank(roe)-rank(market_cap)" if variant == "original"
@@ -161,7 +176,8 @@ def main() -> None:
         if variant == "dynamic":
             metadata.update(variant=variant, selection_note="Daily diagnostic list, not the 15-session research replay")
         (OUT / f"{stem}_selection.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2))
-        print(f"{stem} {day}: {len(result)} candidates; research only")
+        print(f"{stem} {settled}: {len(result)} candidates; research only"
+              + ("" if settled == day else f"（请求 {day}，当日日线未就绪）"))
 
 
 if __name__ == "__main__":

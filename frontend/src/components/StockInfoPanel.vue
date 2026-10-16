@@ -110,8 +110,14 @@
           <thead><tr><th>决策日</th><th>来源/策略</th><th>rank</th><th>权重</th>
             <th>T+1</th><th>T+5</th><th>T+20</th><th>超额T+5</th></tr></thead>
           <tbody>
-            <tr v-for="r in bundle.selections.rows" :key="r.decision_date + r.source">
-              <td class="mono">{{ r.decision_date }}</td><td class="mono tiny">{{ r.source }}</td>
+            <tr v-for="r in bundle.selections.rows" :key="r.decision_date + r.source"
+                class="rec-row" title="点这一行 → K 线跳到该决策日"
+                @click="openInKline(r.decision_date)">
+              <td class="mono">
+                <router-link class="link" :to="{ path: '/calendar', query: { date: r.decision_date } }"
+                             :title="`去选股日历看 ${r.decision_date} 那天的全部选股`"
+                             @click.stop>{{ r.decision_date }}</router-link>
+              </td><td class="mono tiny">{{ r.source }}</td>
               <td>{{ r.rank ?? '—' }}</td>
               <td>{{ r.weight ? (r.weight * 100).toFixed(1) + '%' : '—' }}</td>
               <td :class="tone(r.r1)">{{ pct(r.r1) }}</td><td :class="tone(r.r5)">{{ pct(r.r5) }}</td>
@@ -142,12 +148,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { getStockBundle } from '@/api/client'
+import { useRouter } from 'vue-router'
 import type { Bar } from '@/components/ui/BarChart.vue'
 import BarChart from '@/components/ui/BarChart.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 
 const props = defineProps<{ code: string | null }>()
 const bundle = ref<any>(null)
+const router = useRouter()
+/** 点选股记录的一行 → K 线页跳到该决策日（2026-10-15：日历 / 记录 / K 线三个视图互相可跳） */
+function openInKline(day: string) {
+  if (!day) return
+  void router.push({ path: '/kline', query: { code: props.code, date: day } })
+}
 const error = ref('')
 const tab = ref<'profile' | 'financials' | 'flow' | 'lhb' | 'selection' | 'news'>('profile')
 const tabs = [
@@ -191,6 +204,9 @@ const cn = (n: number) => CN_NUM[n] || String(n)
 </script>
 
 <style scoped>
+tr.rec-row { cursor: pointer; }
+tr.rec-row:hover { background: rgba(255, 255, 255, 0.05); }
+
 .info-panel h6 { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .tabs.inline { margin-left: auto; margin-bottom: 0; }
 .news { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; }

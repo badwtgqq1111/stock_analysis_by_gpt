@@ -72,7 +72,7 @@ export function sortGroups(groups: WatchlistGroup[], key: GroupSortKey): Watchli
   })
 }
 
-export interface WatchlistRow { code: string; name: string; tag: string; local: boolean;
+export interface WatchlistRow { code: string; name: string; tag: string; local: boolean; source?: string;
   /** 命中多条策略时的计数与首个策略名（标签显示成「策略A +N」） */
   extra?: number; baseTag?: string }
 
@@ -88,7 +88,7 @@ export function groupRows(groups: WatchlistGroup[], key: string): WatchlistRow[]
         existing.extra = extra
         existing.tag = `${existing.baseTag || existing.tag} +${extra}`
         if (!existing.name) existing.name = item.name
-      } else seen.set(item.code, { ...item, tag: g.label, baseTag: g.label, local: false } as WatchlistRow)
+      } else seen.set(item.code, { ...item, tag: g.label, baseTag: g.label, local: false, source: g.source } as WatchlistRow)
     }
   }
   return [...seen.values()]

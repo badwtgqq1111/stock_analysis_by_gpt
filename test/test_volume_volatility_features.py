@@ -130,3 +130,22 @@ def test_turnover_features_degrade_gracefully_without_the_column():
 
     frame = _bars(periods=80).drop(columns=["turnover"])
     assert compute_turnover_features(frame).empty
+
+
+def test_breakout_volume_study_has_no_lookahead():
+    """放量/缩量突破研究（`scripts/breakout_volume_study.py`）的**无前视**与口径锁。
+
+    2026-10-15：`docs/reference/breakout.md` 的说法被做成事件研究（71,170 个事件）。研究脚本也锁：
+    突破判定必须用 `shift(1)` 的历史极值、进场必须是**次日开盘**、成本必须是双边 31bp ——
+    这三条任一写错，结论就会"看起来很美"（这类错误不会报错，只会改结论）。
+    """
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    src = (root / "scripts/breakout_volume_study.py").read_text(encoding="utf-8")
+    assert "s.rolling(60, min_periods=40).max().shift(1)" in src, "60 日新高必须排除当日（shift(1)）"
+    assert "s.rolling(60, min_periods=40).sum().shift(1)" in src, "前期换手必须只看突破之前"
+    assert "s.shift(-1)" in src and "entry = entry.where(entry > 0)" in src, "进场=次日开盘，且非正价要挡掉"
+    assert "COST = 2 * 15.5 / 1e4" in src, "成本口径：双边 31bp（与 box_breakout_study 一致）"
+    assert "gap_next" in src and "0.095" in src, "次日开盘顶涨停（≥+9.5%）买不进，必须剔除"
+    assert "excess" in src, "要给出同期横截面超额，避免把市场涨跌算成信号"

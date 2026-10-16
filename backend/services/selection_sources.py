@@ -269,7 +269,11 @@ def _read_merged(spec: dict) -> pd.DataFrame:
     if len(frames) == 1:
         (role, frame), = frames.items()
         out = frame.copy()
+        # role → 阶段文案。2026-10-15 补 "arm"：`arm_select` 的 roles 是 [["arm", …]]（冻结的迁移前口径，
+        # 不许改），原来落到 else 分支 ⇒ 名单没有 stage 标签，前端的「阶段」列会是空的
+        # （被 test_positive_expectancy_strategies_are_selectable_everywhere 抓到）。
         out["stage"] = ("候选研究名单" if role == "research" else
+                        "研究手臂名单" if role == "arm" else
                         "最终入选（PK 后）" if role == "selected" else "候选池（preselect）")
         return _sort(out)
 
@@ -320,6 +324,11 @@ def load_source(key: str) -> dict:
     files = [dict(_file_meta(p), role=role) for role, p in spec["files"]]
     trade_date = None
     wanted = [c for c in spec["columns"] if c in df.columns]
+    # `stage` 是**算出来的**（按 role 标注每只票走到哪一步），不在声明层的 columns 里；
+    # 不补进去的话它会被"只输出声明列"的过滤丢掉 ⇒ 前端「阶段」列空着
+    # （2026-10-15 被 test_positive_expectancy_strategies_are_selectable_everywhere 抓到：cn_arm 没 stage）。
+    if "stage" in df.columns and "stage" not in wanted:
+        wanted.append("stage")
     if not df.empty and "trade_date" in df.columns:
         try:
             trade_date = str(pd.to_datetime(df["trade_date"]).max().date())
@@ -359,6 +368,8 @@ def load_source(key: str) -> dict:
         rows.append(item)
 
     columns = [{"key": "stock_code", "title": "代码"}]
+    if "stage" in wanted:
+        columns.append({"key": "stage", "title": "阶段"})
     if names or spec["code_style"] == "ts_code":
         columns.append({"key": "stock_name", "title": "名称"})
     for col in wanted:

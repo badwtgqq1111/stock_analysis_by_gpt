@@ -148,6 +148,61 @@ def month(month: str = Query(..., description="YYYY-MM"),
     return {"month": month, "source": source or "all", "days": sorted(days, key=lambda d: d["date"])}
 
 
+@router.get("/by-code")
+def by_code(codes: str = Query(..., description="逗号分隔的股票代码，如 300229.SZ,600252.SH"),
+            limit: int = Query(3, ge=1, le=20, description="每只票返回最近几条决策记录")) -> dict:
+    """一批股票在台账里的**入选摘要**（给自选侧栏悬停用）。
+
+    为什么需要这个接口：自选侧栏有 100+ 行，逐行去 `/api/stocks/{code}/bundle`
+    等于 100 个请求、每个都要读一堆无关块（估值/财务/龙虎榜…）。这里只读一列台账，
+    按 code 分组一次返回，并显式区分"从没入选过"（`rows` 空）与"当选日的收益还没走完"
+    （`r5/excess_r5` 为 None）—— 后者不能画成 0（第九十七轮已把这条写进浮层文案）。
+
+    **口径边界（必须一起显示）**：`r5/excess_r5` 是**决策日之后**的收益，所以
+    "这是不是未来函数"这件事只取决于**看的人是谁**：历史决策日已结算 = 事实；
+    `decision_date == 今天`的当日名单未来收益必然是 None。接口不替前端判断，
+    但把 `as_of`（台账最后决策日）一起给出来。
+    """
+    wanted = [c.strip() for c in str(codes).split(",") if c.strip()]
+    if not wanted:
+        return {"built": True, "as_of": None, "codes": {}, "n": 0}
+    if len(wanted) > 400:
+        wanted = wanted[:400]
+    frame = _load()
+    if frame.empty:
+        return {"built": False, "hint": "uv run python scripts/build_selection_ledger.py",
+                "as_of": None, "codes": {}, "n": 0}
+    sub = frame[frame["stock_code"].astype(str).isin(set(wanted))]
+    out: dict[str, dict] = {}
+    for code, group in sub.groupby(sub["stock_code"].astype(str)):
+        rec = group.sort_values("decision_date", ascending=False)
+        rows = []
+        for _, r in rec.head(int(limit)).iterrows():
+            rows.append({
+                "decision_date": str(r["decision_date"]), "source": str(r["source"]),
+                "rank": _num(r.get("rank")), "weight": _num(r.get("weight")),
+                "r1": _num(r.get("r1")), "r5": _num(r.get("r5")), "r20": _num(r.get("r20")),
+                "excess_r5": _num(r.get("excess_r5")),
+            })
+        name = next((str(n) for n in rec["name"].tolist() if isinstance(n, str) and n.strip()), "")
+        out[code] = {
+            "code": code, "name": name,
+            "n": int(len(rec)),
+            "n_sources": int(rec["source"].nunique()),
+            "first_date": str(rec["decision_date"].min()),
+            "last_date": str(rec["decision_date"].max()),
+            "mean_excess_r5": _num(rec["excess_r5"].mean()),
+            "rows": rows,
+        }
+    return {
+        "built": True,
+        "as_of": str(frame["decision_date"].max()),
+        "requested": len(wanted),
+        "found": len(out),
+        "codes": out,
+    }
+
+
 @router.get("/day")
 def day(date: str = Query(...), source: str = Query("")) -> dict:
     frame = _load()

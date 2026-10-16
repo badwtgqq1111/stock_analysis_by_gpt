@@ -89,6 +89,7 @@ LEDGER_ADAPTERS = {
     "wyckoff_arm": "build_selection_ledger.read_wyckoff_arm_history",
     "moneyflow_arm": "build_selection_ledger.read_moneyflow_arm_history",
     "mainforce_arm": "build_selection_ledger.read_mainforce_arm_history",
+    "donchian_breakout": "build_selection_ledger._from_named_history(donchian_breakout)",
     "jq_multi_factor": "build_selection_ledger._from_jq_multi_factor",
     "jq_roe_roa": "build_selection_ledger._from_jq_multi_factor",
     "survey_gate": "build_selection_ledger._from_survey",

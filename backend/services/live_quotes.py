@@ -22,6 +22,7 @@ import pandas as pd
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 _CACHE_LOCK = Lock()
+_BUILD_LOCKS: dict[tuple, Lock] = {}
 _CACHE: dict[tuple, tuple[float, object, str | None]] = {}
 
 
@@ -41,10 +42,17 @@ def _cached(key: tuple, ttl: float, builder, error_ttl: float = 20.0):
         hit = _CACHE.get(key)
         if hit and now - hit[0] < (ttl if hit[2] is None else min(ttl, error_ttl)):
             return hit[1], hit[2]
-    payload, error = builder()
-    with _CACHE_LOCK:
-        _CACHE[key] = (now, payload, error)
-    return payload, error
+        lock = _BUILD_LOCKS.setdefault(key, Lock())
+    with lock:
+        with _CACHE_LOCK:
+            hit = _CACHE.get(key)
+            if hit and time.time() - hit[0] < (ttl if hit[2] is None else min(ttl, error_ttl)):
+                return hit[1], hit[2]
+        payload, error = builder()
+        with _CACHE_LOCK:
+            _CACHE[key] = (time.time(), payload, error)
+        return payload, error
+
 
 
 def cache_clear() -> None:
@@ -234,10 +242,10 @@ def tx_symbol(code: str) -> str:
     return f"{prefix}{symbol}"
 
 
-def _tx_get(url: str, params: dict, timeout: float = 12.0):
+def _tx_get(url: str, params: dict, timeout: float = 12.0, attempts: int = 2):
     import requests
     last = None
-    for attempt in range(2):
+    for attempt in range(attempts):
         try:
             response = requests.get(url, params=params, headers=_TX_HEADERS, timeout=timeout)
             response.raise_for_status()
@@ -348,7 +356,7 @@ def tencent_kline(code: str, period: str = "m5", count: int = 320) -> tuple[pd.D
     return _cached(("tx_kline", symbol, period, int(count)), 15.0, build, error_ttl=8.0)
 
 
-def tencent_quotes(codes: list[str]) -> tuple[dict[str, dict], str | None]:
+def tencent_quotes(codes: list[str], timeout: float = 12.0, attempts: int = 2) -> tuple[dict[str, dict], str | None]:
     """腾讯批量快照（`qt.gtimg.cn/q=`，一次请求可带多只）。"""
     wanted = [tx_symbol(c) for c in codes if str(c).strip()]
     if not wanted:
@@ -356,7 +364,7 @@ def tencent_quotes(codes: list[str]) -> tuple[dict[str, dict], str | None]:
     joined = ",".join(wanted)
 
     def build():
-        response, error = _tx_get(f"https://qt.gtimg.cn/q={joined}", {})
+        response, error = _tx_get(f"https://qt.gtimg.cn/q={joined}", {}, timeout=timeout, attempts=attempts)
         if response is None:
             return None, error
         response.encoding = "gbk"

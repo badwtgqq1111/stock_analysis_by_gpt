@@ -105,7 +105,7 @@
         <div v-if="chartTab === 'intraday'">
           <p v-if="intradayLoading" class="tiny muted">加载分时…</p>
           <p v-else-if="!intraday" class="tiny muted">暂无分时（{{ intradayError || '非交易时段或源不可用' }}）</p>
-          <SvgCurve v-else :series="intradaySeries" :height="260" />
+          <IntradayChart v-else :code="intraday.code" :date="intraday.date" :points="intraday.points" :prev-close="intraday.prev_close" :height="300" />
         </div>
         <div v-else>
           <p v-if="ohlcvLoading" class="tiny muted">加载日K…</p>
@@ -204,6 +204,7 @@ import StateBlock from '@/components/ui/StateBlock.vue'
 import StatTile from '@/components/ui/StatTile.vue'
 import SvgCurve from '@/components/ui/SvgCurve.vue'
 import KlineChart from '@/components/KlineChart.vue'
+import IntradayChart from '@/components/IntradayChart.vue'
 
 const paper = ref<PaperStatus | null>(null)
 const perf = ref<LivePerformance | null>(null)
@@ -377,19 +378,7 @@ onMounted(async () => {
 })
 onUnmounted(() => { if (timer) clearInterval(timer); if (rtTimer) clearInterval(rtTimer) })
 
-const intradaySeries = computed(() => {
-  const points = intraday.value?.points ?? []
-  const price = points.map((p) => (p.price === null ? NaN : Number(p.price)))
-  const avg = points.map((p) => (p.avg === null ? NaN : Number(p.avg)))
-  const prev = intraday.value?.prev_close === null || intraday.value?.prev_close === undefined
-    ? null : Number(intraday.value.prev_close)
-  const series = [
-    { name: '价格', color: '#118ab2', points: price },
-    { name: '均价', color: '#e9c46a', points: avg },
-  ]
-  if (prev !== null) series.push({ name: '昨收', color: '#8d99ae', points: price.map(() => prev) })
-  return series
-})
+
 
 // ── 收益对比（日/周/月 × 区间）──
 const block = computed(() => perf.value?.[freq.value] ?? null)

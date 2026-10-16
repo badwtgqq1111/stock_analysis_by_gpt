@@ -4,7 +4,10 @@
       <span><i class="lg-price" :style="{ background: up ? 'var(--accent-up)' : 'var(--accent-down)' }" />价格</span>
       <span v-if="hasAvg"><i class="lg-avg" />均价</span>
       <span><i class="lg-prev" />前收 {{ fmt(prevClose) }}</span>
-      <span class="dim tiny">共 {{ points.length }} 个点</span>
+      <span v-if="auctionPoints.length" class="dim tiny">分钟采样，非逐笔/L2委托</span>
+      <span class="dim tiny">共 {{ points.length }} 个连续交易点</span>
+      <span v-if="auctionPoints.length" class="gold">集合竞价 {{ auctionPoints.length }} 点 · 指示价/开盘结果</span>
+      <span v-else-if="code" class="dim tiny">集合竞价：{{ auctionReason || '加载中…' }}</span>
     </div>
 
     <div class="ic-body" :style="{ height: H + 'px' }">
@@ -12,6 +15,10 @@
         <!-- 网格 -->
         <line v-for="n in 4" :key="'g' + n" x1="0" x2="1000" :y1="(priceH / 4) * n" :y2="(priceH / 4) * n"
               stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke" />
+        <rect x="0" y="0" :width="xOf('09:30')" :height="H" fill="var(--accent-gold)" opacity="0.06" />
+        <line :x1="xOf('09:30')" :x2="xOf('09:30')" y1="0" :y2="H" stroke="var(--accent-gold)" stroke-dasharray="3 3" />
+        <polyline v-if="auctionLine" :points="auctionLine" fill="none" stroke="var(--accent-gold)"
+                  stroke-width="1.5" stroke-dasharray="3 2" vector-effect="non-scaling-stroke" />
         <!-- 前收基准线 -->
         <line v-if="prevY !== null" x1="0" x2="1000" :y1="prevY" :y2="prevY"
               stroke="var(--text-dim)" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke" />
@@ -37,31 +44,69 @@
       </div>
 
       <div v-if="hover" class="ic-tip" :style="tipStyle">
-        <div class="tip-time">{{ hover.point.clock }}</div>
+        <div class="tip-time">{{ hover.point.clock }} {{ hover.point.clock < '09:30' ? '竞价采样' : '连续交易' }}</div>
         <div class="tip-row"><span>价格</span><b :class="toneOf(hover.point.price)">{{ fmt(hover.point.price) }}</b></div>
         <div class="tip-row"><span>均价</span><span>{{ fmt(hover.point.avg) }}</span></div>
         <div class="tip-row"><span>涨跌</span>
           <b :class="toneOf(hoverDiff)">{{ hoverDiff === null ? '—' : (hoverDiff > 0 ? '+' : '') + hoverDiff.toFixed(2)
             + '%' }}</b>
         </div>
-        <div class="tip-row"><span>成交量</span><span>{{ vol(hover.point.volume_shares) }}</span></div>
+        <div class="tip-row"><span>{{ hover.point.clock < '09:25' ? '源报告量' : '成交量' }}</span><span>{{ vol(hover.point.volume_shares) }}</span></div>
       </div>
     </div>
 
     <div class="ic-axis">
-      <span>09:30</span><span>10:30</span><span>11:30/13:00</span><span>14:00</span><span>15:00</span>
+      <span>09:15 竞价</span><span>09:30</span><span>10:30</span><span>11:30/13:00</span><span>14:00</span><span>15:00</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import type { IntradayPoint } from '@/types/api'
 
 const props = withDefaults(
-  defineProps<{ points: IntradayPoint[]; prevClose?: number | null; height?: number }>(),
+  defineProps<{ points: IntradayPoint[]; prevClose?: number | null; height?: number; code?: string; date?: string }>(),
   { prevClose: null, height: 320 },
 )
+
+const auctionRaw = ref<IntradayPoint[]>([])
+const auctionPrev = ref<number | null>(null)
+const auctionPoints = computed(() => {
+  const factor = props.prevClose && auctionPrev.value ? props.prevClose / auctionPrev.value : 1
+  return auctionRaw.value.map(p => ({ ...p, price: p.price == null ? null : p.price * factor,
+    open: p.open == null ? null : p.open * factor, high: p.high == null ? null : p.high * factor, low: p.low == null ? null : p.low * factor }))
+})
+const auctionReason = ref('')
+let auctionRequest = 0
+let auctionPending = false
+async function loadAuction() {
+  if (!props.code || document.hidden || auctionPending) return
+  const request = ++auctionRequest
+  const code = props.code, date = props.date || props.points[0]?.time.slice(0,10) || ''
+  auctionPending = true
+  try {
+    const query = new URLSearchParams({ date })
+    const response = await fetch(`/api/intraday/auction/${encodeURIComponent(code)}?${query}`)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const data = await response.json()
+    if (request !== auctionRequest || code !== props.code) return
+    auctionRaw.value = data.available ? data.points : []
+    auctionPrev.value = data.prev_close || null
+    auctionReason.value = data.available ? '' : data.reason || '该日无采样记录'
+  } catch (e) { if (request === auctionRequest) auctionReason.value = String(e) }
+  finally { if (request === auctionRequest) auctionPending = false }
+}
+watch(() => [props.code, props.date], () => {
+  ++auctionRequest; auctionRaw.value = []; auctionPrev.value = null; auctionReason.value = ''
+  auctionPending = false; void loadAuction()
+}, { immediate: true })
+const auctionTimer = setInterval(() => {
+  const cn = new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false })
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
+  if ((!props.date || props.date === today) && cn >= '09:15:00' && cn <= '09:31:00') void loadAuction()
+}, 5000)
+onUnmounted(() => { ++auctionRequest; clearInterval(auctionTimer) })
 
 const H = computed(() => props.height)
 const priceH = computed(() => Math.round(H.value * 0.72))
@@ -76,18 +121,19 @@ const hover = ref<{ x: number; index: number; point: IntradayPoint } | null>(nul
 function minuteOf(clock: string): number {
   const [h, m] = clock.split(':').map(Number)
   const minutes = h * 60 + m
-  if (minutes <= 11 * 60 + 30) return Math.max(0, minutes - (9 * 60 + 30))
-  return 120 + Math.min(120, minutes - 13 * 60)
+  if (minutes <= 11 * 60 + 30) return Math.max(0, minutes - (9 * 60 + 15))
+  return 135 + Math.max(0, Math.min(120, minutes - 13 * 60))
 }
 
-const valid = computed(() => props.points.filter((p) => p.price !== null))
+const regular = computed(() => props.points.filter((p) => p.price !== null && p.clock >= '09:30'))
+const valid = computed(() => [...auctionPoints.value.filter(p => p.clock < '09:30'), ...regular.value])
 const hasAvg = computed(() => valid.value.some((p) => p.avg !== null))
 
 const bounds = computed(() => {
   const prices = valid.value.map((p) => p.price as number)
   const lows = valid.value.map((p) => (p.low ?? p.price) as number)
   const highs = valid.value.map((p) => (p.high ?? p.price) as number)
-  const pool = [...prices, ...lows, ...highs]
+  const pool = [...prices, ...lows, ...highs, ...auctionPoints.value.map(p => p.price as number)]
   if (props.prevClose) pool.push(props.prevClose)
   if (!pool.length) return { min: 0, max: 1 }
   let min = Math.min(...pool)
@@ -103,7 +149,7 @@ const bounds = computed(() => {
   return { min, max }
 })
 
-const xOf = (clock: string) => (minuteOf(clock) / 240) * 1000
+const xOf = (clock: string) => (minuteOf(clock) / 255) * 1000
 const yOf = (price: number) => {
   const { min, max } = bounds.value
   const span = max - min || 1
@@ -111,20 +157,21 @@ const yOf = (price: number) => {
 }
 
 const priceLine = computed(() => {
-  if (!valid.value.length) return ''
-  return valid.value.map((p) => `${xOf(p.clock).toFixed(1)},${yOf(p.price as number).toFixed(1)}`).join(' ')
+  if (!regular.value.length) return ''
+  return regular.value.map((p) => `${xOf(p.clock).toFixed(1)},${yOf(p.price as number).toFixed(1)}`).join(' ')
 })
 
+const auctionLine = computed(() => auctionPoints.value.filter(p => p.price !== null).map(p => `${xOf(p.clock).toFixed(1)},${yOf(p.price as number).toFixed(1)}`).join(' '))
 const priceArea = computed(() => {
-  if (valid.value.length < 2) return ''
+  if (regular.value.length < 2) return ''
   const base = props.prevClose ? yOf(props.prevClose) : priceH.value
-  const first = valid.value[0], last = valid.value[valid.value.length - 1]
+  const first = regular.value[0], last = regular.value[regular.value.length - 1]
   return `${xOf(first.clock).toFixed(1)},${base.toFixed(1)} ${priceLine.value} `
     + `${xOf(last.clock).toFixed(1)},${base.toFixed(1)}`
 })
 
 const avgLine = computed(() => {
-  const rows = valid.value.filter((p) => p.avg !== null)
+  const rows = regular.value.filter((p) => p.avg !== null)
   if (rows.length < 2) return ''
   return rows.map((p) => `${xOf(p.clock).toFixed(1)},${yOf(p.avg as number).toFixed(1)}`).join(' ')
 })
@@ -136,7 +183,7 @@ const fillColor = computed(() => (up.value ? 'var(--accent-up)' : 'var(--accent-
 
 const volumeBars = computed(() => {
   const maxVolume = Math.max(...valid.value.map((p) => p.volume_shares), 1)
-  const width = Math.max(1000 / Math.max(valid.value.length, 1) - 0.6, 0.8)
+  const width = Math.max(1.8, regular.value.length > 0 && regular.value.length < 60 ? 9 : 1.8)
   return valid.value.map((p, i) => {
     const h = (p.volume_shares / maxVolume) * (volH.value - GAP)
     const prev = i > 0 ? valid.value[i - 1].price as number : p.price as number
@@ -144,7 +191,7 @@ const volumeBars = computed(() => {
       x: xOf(p.clock) - width / 2,
       y: volTop.value + (volH.value - GAP - h),
       w: width,
-      h: Math.max(h, 0.5),
+      h: p.volume_shares > 0 ? Math.max(h, 0.5) : 0,
       up: (p.price as number) >= prev,
     }
   })
@@ -165,7 +212,7 @@ function onMove(event: MouseEvent) {
   if (!root || !valid.value.length) return
   const rect = root.getBoundingClientRect()
   const ratio = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1)
-  const targetMinute = ratio * 240
+  const targetMinute = ratio * 255
   let best = 0
   let bestDelta = Infinity
   valid.value.forEach((p, i) => {

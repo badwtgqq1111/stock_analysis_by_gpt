@@ -2,7 +2,7 @@
   <div class="page">
     <PageHeader
       title="涨跌 / 资金流排行"
-      description="每日与每周（近 5 个交易日）两个口径的全市场排行。<strong>涨跌</strong>取本地前复权日线；<strong>资金流</strong>取资金流面板（tushare / 东财 / 同花顺三种口径可切换，单位为亿元）。行点开进 K 线，「分时」直达当日分时。"
+      description="每日与每周（近 5 个交易日）两个口径的全市场排行。<strong>涨跌</strong>归档取本地前复权日线，当日开启实时后按最新报价统计；<strong>资金流</strong>取资金流面板（tushare / 东财 / 同花顺三种口径可切换，单位为亿元）。行点开进 K 线，「分时」直达当日分时。"
     >
       <template #actions>
         <select v-model="period" class="picker">
@@ -25,18 +25,19 @@
             <option value="up">涨幅榜</option>
             <option value="down">跌幅榜</option>
           </select>
+          <input v-model="changeDate" type="date" class="picker" :max="cnToday()" aria-label="涨跌排行历史日期" />
+          <button v-if="changeDate" class="btn-ghost btn-sm" @click="changeDate = ''">最新</button>
         </template>
         <template v-else>
           <select v-model="flowDirection" class="picker">
             <option value="in">净流入榜</option>
             <option value="out">净流出榜</option>
           </select>
-          <select v-model="source" class="picker">
+          <select v-model="source" class="picker" :disabled="liveEnabled"><option v-if="liveEnabled" :value="source">当日实时：东财主力净额</option>
             <option v-for="s in overview?.moneyflow_sources || []" :key="s.key" :value="s.key">{{ s.label }}</option>
           </select>
-          <select v-model="flowDate" class="picker" v-if="(overview?.moneyflow_dates || []).length">
-            <option v-for="d in (overview?.moneyflow_dates || []).slice().reverse()" :key="d" :value="d">{{ d }}</option>
-          </select>
+          <input v-model="flowDate" type="date" class="picker" :max="cnToday()" aria-label="资金流排行历史日期" />
+          <button v-if="flowDate" class="btn-ghost btn-sm" @click="flowDate = ''">最新</button>
         </template>
         <select v-model="board" class="picker">
           <option value="">全部板块</option>
@@ -49,9 +50,11 @@
           <option :value="200">前 200</option>
         </select>
         <label class="chk"><input type="checkbox" v-model="excludeSt" /> 排除 ST</label>
+        <label class="chk"><input type="checkbox" v-model="realtime" /> 当日实时（15秒）</label>
         <span class="pill dim tiny" v-if="session">行情状态 <b>{{ sessionLabel }}</b> · {{ session?.now }}</span>
       </div>
 
+      <RealtimeStatus :meta="current?.realtime" :enabled="liveEnabled" />
       <StateBlock v-if="error" state="error" title="排行取数失败" :detail="error" :retry="() => reload()" />
       <StateBlock v-else-if="!current" state="loading" title="加载排行…" />
 
@@ -115,6 +118,7 @@
 
         <!-- 资金流榜 -->
         <template v-else>
+          <p v-if="!flowData?.available" class="hint">{{ flowData?.hint || flowData?.stats?.error || '所选日期暂无资金流数据，请选择其他交易日。' }}</p>
           <div class="pill-row">
             <span class="pill">数据日 <b>{{ flowData?.date }}</b></span>
             <span class="pill">口径 <b>{{ flowData?.source_label }}</b></span>
@@ -164,7 +168,7 @@
               </tbody>
             </table>
           </div>
-          <p class="hint tiny mt">净流入额为亿元；原始面板单位是万元。三口径定义不同，别跨口径比名次。</p>
+          <p class="hint tiny mt">净流入额为亿元；归档原始面板单位是万元；实时东财源为元，均已换算。三口径定义不同，别跨口径比名次。</p>
         </template>
 
         <ul class="hint tiny mt">
@@ -177,7 +181,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { getChangeRanking, getMoneyflowRanking, getRankingsOverview } from '@/api/client'
 import type { RankingRow, RankingsChangeResponse, RankingsMoneyflowResponse, RankingsOverview, SessionPhase } from '@/types/api'
@@ -185,6 +189,11 @@ import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import BarChart, { type Bar } from '@/components/ui/BarChart.vue'
 
+import RealtimeStatus from '@/components/RealtimeStatus.vue'
+import { cnToday, useMarketPoll } from '@/composables/useMarketPoll'
+
+const realtime = ref(true)
+const liveEnabled = computed(() => realtime.value && !(view.value === 'change' ? changeDate.value : flowDate.value))
 const router = useRouter()
 const overview = ref<RankingsOverview | null>(null)
 const session = ref<SessionPhase | null>(null)
@@ -194,6 +203,7 @@ const limit = ref(50)
 const board = ref('')
 const excludeSt = ref(false)
 const changeDirection = ref<'up' | 'down'>('up')
+const changeDate = ref('')
 const flowDirection = ref<'in' | 'out'>('in')
 const source = ref('moneyflow')
 const flowDate = ref('')
@@ -209,36 +219,45 @@ const sessionLabel = computed(() => {
   return map[session.value?.phase || 'closed'] || '—'
 })
 
-async function reload() {
+async function fetchRanking(live = false) {
+  const request = ++requestId
   loading.value = true
   try {
-    if (!overview.value) {
-      overview.value = await getRankingsOverview()
-      session.value = overview.value.session
-      if (!flowDate.value && overview.value.moneyflow_dates?.length) {
-        flowDate.value = overview.value.moneyflow_dates[overview.value.moneyflow_dates.length - 1]
-      }
-    }
     if (view.value === 'change') {
-      changeData.value = await getChangeRanking({
+      const data = await getChangeRanking({
         period: period.value, direction: changeDirection.value, limit: limit.value,
-        board: board.value, exclude_st: excludeSt.value,
+        board: board.value, exclude_st: excludeSt.value, date: changeDate.value, live,
       })
+      if (request === requestId) changeData.value = data
     } else {
-      flowData.value = await getMoneyflowRanking({
+      const data = await getMoneyflowRanking({
         period: period.value, direction: flowDirection.value, limit: limit.value,
-        source: source.value, date: flowDate.value, board: board.value, exclude_st: excludeSt.value,
+        source: source.value, date: flowDate.value, board: board.value, exclude_st: excludeSt.value, live,
       })
+      if (request === requestId) flowData.value = data
     }
-    error.value = ''
+    if (request === requestId) error.value = ''
   } catch (e) {
-    error.value = String(e)
+    if (request === requestId) error.value = String(e)
   } finally {
-    loading.value = false
+    if (request === requestId) loading.value = false
   }
 }
 
-onMounted(reload)
+let reloadId = 0
+let alive = true
+async function reload() {
+  const request = ++reloadId
+  await fetchRanking(false)
+  if (alive && request === reloadId && liveEnabled.value) await fetchRanking(true)
+}
+useMarketPoll(() => fetchRanking(true), () => liveEnabled.value && !loading.value)
+onUnmounted(() => { alive = false; ++reloadId; ++requestId })
+let requestId = 0
+onMounted(() => {
+  void getRankingsOverview().then((data) => { overview.value = data; session.value = data.session }).catch(() => { /* 元信息失败不阻塞榜单 */ })
+  void reload()
+})
 
 const changeBars = computed<Bar[]>(() =>
   (changeData.value?.rows || []).slice(0, 20).map((r: RankingRow) => ({
@@ -275,8 +294,8 @@ function money(yuan: number | null | undefined) {
 const CN_NUM = ['零', '一', '两', '三', '四', '五', '六', '七', '八', '九', '十']
 const cn = (n: number) => CN_NUM[n] || String(n)
 
-watch([view, period, board, excludeSt, limit], () => void reload())
-watch([changeDirection, flowDirection, source, flowDate], () => void reload())
+watch([view, period, board, excludeSt, limit, realtime], () => void reload())
+watch([changeDirection, changeDate, flowDirection, source, flowDate], () => void reload())
 </script>
 
 <style scoped>

@@ -313,6 +313,44 @@ def intraday_quotes(codes: str = Query(..., description="逗号分隔的股票�
             "missing": missing if missing else []}
 
 
+@router.get("/auction/{code}")
+def opening_auction(code: str, date: str = Query("")) -> dict:
+    from backend.api._history_date import history_date
+    from backend.services.auction_service import auction
+    return auction(code, history_date(date))
+
+
+@router.get("/daily/{code}")
+@ttl_cache(5.0, name="live_daily_bar")
+def live_daily_bar(code: str) -> dict:
+    """A provisional current-day candle, kept separate from archived EOD bars."""
+    from backend.services.realtime_market import eligible
+    ts_code = live_quotes.to_ts_code(code)
+    today = live_quotes.now_cn().strftime("%Y-%m-%d")
+    if not eligible(today):
+        return {"available": False, "date": today, "reason": "尚未进入当日连续交易时段"}
+    quotes, error = live_quotes.tencent_quotes([ts_code])
+    quote = quotes.get(ts_code.split(".")[0])
+    if not quote:
+        return {"available": False, "date": today, "reason": error or "当日快照缺失"}
+    stamp = pd.to_datetime(quote.get("time"), format="%Y%m%d%H%M%S", errors="coerce")
+    now = live_quotes.now_cn()
+    if pd.isna(stamp) or str(stamp.date()) != today or (live_quotes.trading_phase()["live"] and (now.replace(tzinfo=None)-stamp.to_pydatetime()).total_seconds() > 180):
+        return {"available": False, "date": today, "reason": "快照日期或时效不符"}
+    if not all(quote.get(k) and _f(quote[k]) and quote[k] > 0 for k in ("price","open","high","low","prev_close")) or not quote.get("volume_lots") or quote["high"] < max(quote["open"],quote["price"]) or quote["low"] > min(quote["open"],quote["price"]):
+        return {"available": False, "date": today, "reason": "尚无有效当日成交价"}
+    previous = _prev_close(ts_code,pd.Timestamp(today))
+    factor = previous/quote["prev_close"] if previous and previous > 0 else 1.
+    candle = {"time":today, **{key:round(quote[src]*factor,4) for key,src in
+        [("open","open"),("high","high"),("low","low"),("close","price")]},
+        "volume":(quote.get("volume_lots") or 0)*100,
+        "change_pct":round((quote["price"]/quote["prev_close"]-1)*100,4),
+        "buy_signal":False,"sell_signal":False}
+    return {"available":True,"date":today,"asof":str(stamp),"provisional":True,
+        "source":"tencent_quote","price_basis":"aligned_to_local_daily","price_factor":factor,
+        "raw_price":quote["price"],"candle":candle,"session":live_quotes.trading_phase()}
+
+
 @router.get("/coverage/{code}")
 @ttl_cache(30.0, name="intraday_coverage")
 def intraday_coverage(code: str) -> dict:
@@ -355,10 +393,24 @@ def intraday(
 ) -> dict:
     """单只股票的分时序列（含均价线），供分时图与实时刷新使用。"""
     ts_code = live_quotes.to_ts_code(code)
+    if not date and mode != "store" and live_quotes.now_cn().weekday() < 5 and "09:15" <= live_quotes.now_cn().strftime("%H:%M") <= "15:00":
+        date = live_quotes.now_cn().strftime("%Y-%m-%d")
     name = ""
     basics = mbs.basic_frame()
     if not basics.empty and ts_code in basics.index:
         name = str(basics.loc[ts_code, "name"])
+
+    if mode != "store" and date == live_quotes.now_cn().strftime("%Y-%m-%d") and "09:15" <= live_quotes.now_cn().strftime("%H:%M") < "09:30":
+        from backend.services.auction_service import auction
+        sampled = auction(ts_code,date)
+        if sampled.get("available"):
+            prev = sampled.get("prev_close")
+            return {"code":ts_code,"name":name,"period":period,"requested_period":period,
+                "mode":mode,"source":"eastmoney_preopen","source_label":"竞价指示价（尚无连续交易）",
+                "date":date,"prev_close":_f(prev),"points":[],"auction_only":True,
+                "latest":_summarize(sampled['points'],prev),"session":live_quotes.trading_phase(),
+                "live":{"available":True,"reason":None},"store":{"available":False},
+                "notes":[sampled['note']]}
 
     coverage = mbs.intraday_store_coverage(ts_code)
     store_dates = set(coverage["dates"] or [])
@@ -410,7 +462,14 @@ def intraday(
     if points:
         error = None
 
-    if not points:
+    auction_only = None
+    if not points and mode != "store" and date == live_quotes.now_cn().strftime("%Y-%m-%d"):
+        from backend.services.auction_service import auction
+        candidate = auction(ts_code,date)
+        if candidate.get("available"):
+            auction_only = candidate
+            source = "em"
+    if not points and not auction_only:
         coverage_text = (
             f"本地 5 分钟归档覆盖 {coverage['first_date']} ~ {coverage['last_date']}"
             if coverage["available"] else "本地 5 分钟归档里没有这只票"
@@ -424,8 +483,17 @@ def intraday(
                     "本地同步：uv run python scripts/sync_cn_intraday_full.py --refresh",
         })
 
-    day = pd.Timestamp(points[-1]["time"]).normalize()
+    day = pd.Timestamp(points[-1]["time"] if points else auction_only["date"]).normalize()
     prev_close = _prev_close(ts_code, day)
+    if auction_only:
+        prev_close = auction_only.get("prev_close") or prev_close
+        source = "eastmoney_preopen"
+    if source != "store":
+        quotes, _ = live_quotes.tencent_quotes([ts_code])
+        quote = quotes.get(ts_code.split(".")[0], {})
+        stamp = str(quote.get("time") or "")
+        if stamp[:8] == day.strftime("%Y%m%d") and quote.get("prev_close"):
+            prev_close = quote["prev_close"]
     store_path = mbs.intraday_store_path(ts_code)
     return {
         "code": ts_code,
@@ -434,11 +502,12 @@ def intraday(
         "requested_period": period,
         "mode": mode,
         "source": source,
-        "source_label": {"tx_minute": "腾讯分时", "em": "东财分时",
+        "source_label": {"eastmoney_preopen":"竞价指示价（尚无连续交易）","tx_minute": "腾讯分时", "em": "东财分时",
                          "tx_kline": "腾讯 5 分钟 K", "store": "本地 5 分钟"}.get(source, source),
         "date": day.strftime("%Y-%m-%d"),
         "prev_close": _f(prev_close),
-        "latest": _summarize(points, prev_close),
+        "latest": _summarize(points or (auction_only or {}).get("points",[]), prev_close),
+        "auction_only": bool(auction_only),
         "points": points,
         "session": live_quotes.trading_phase(),
         "live": {"available": source in ("tx_minute", "em", "tx_kline"), "reason": live_error},

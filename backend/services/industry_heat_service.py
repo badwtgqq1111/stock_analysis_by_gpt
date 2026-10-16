@@ -45,6 +45,7 @@ UNCLASSIFIED = "未分类"
 
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[tuple, tuple[float, object]] = {}
+_BUILD_LOCKS: dict[tuple, threading.Lock] = {}
 
 
 def _cached(key: tuple, ttl: float, builder):
@@ -53,10 +54,16 @@ def _cached(key: tuple, ttl: float, builder):
         hit = _CACHE.get(key)
         if hit and now - hit[0] < ttl:
             return hit[1]
-    value = builder()
-    with _CACHE_LOCK:
-        _CACHE[key] = (now, value)
-    return value
+        lock = _BUILD_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        with _CACHE_LOCK:
+            hit = _CACHE.get(key)
+            if hit and time.time() - hit[0] < ttl:
+                return hit[1]
+        value = builder()
+        with _CACHE_LOCK:
+            _CACHE[key] = (time.time(), value)
+        return value
 
 
 def cache_clear() -> None:
@@ -80,9 +87,9 @@ def _num(value, nd: int = 2):
 # ─────────────────────────────────────────────────────────────────────────────
 # 数据装配
 # ─────────────────────────────────────────────────────────────────────────────
-def _bars(days: int = 90) -> pd.DataFrame:
+def _bars(days: int = 90, day=None) -> pd.DataFrame:
     """日线窗口 + 涨停/连板/ST 标记（复用 market_board_service，同一个 TTL 缓存）。"""
-    return mbs.enriched_daily(days)
+    return mbs.enriched_daily(days, asof=day)
 
 
 def _moneyflow(start: str, end: str, source: str = "moneyflow") -> pd.DataFrame:
@@ -117,16 +124,19 @@ def _industry_map() -> pd.Series:
     return industry
 
 
-def build_frame(period: str = "daily", days: int = 90, source: str = "moneyflow") -> dict:
+def _build_frame(period: str = "daily", days: int = 70, source: str = "moneyflow", day=None, bars_override=None, flow_override=None) -> dict:
     """把"个股 → 行业 → 行业榜"的整条链路算出来（页面与 drill-down 共用一份结果）。"""
     if period not in PERIODS:
         period = "daily"
     span = PERIODS[period][1]
 
-    bars = _bars(days) if span <= 20 else _bars(days + 20)
+    # 保留足够的历史窗口，允许页面回看最近数月，而不是永远锁定最新交易日。
+    bars = bars_override if bars_override is not None else _bars(days, day=day)
     if bars.empty:
         return {"available": False, "period": period, "rows": [], "hint": "本地日线为空"}
     dates = sorted(bars["trade_date"].unique())
+    if day is not None:
+        dates = [d for d in dates if d <= pd.Timestamp(day).normalize()]
     if len(dates) < span + 1:
         return {"available": False, "period": period, "rows": [],
                 "hint": f"本地日线只有 {len(dates)} 个交易日，算不出 {PERIODS[period][0]} 区间"}
@@ -162,7 +172,9 @@ def build_frame(period: str = "daily", days: int = 90, source: str = "moneyflow"
     stocks["amount"] = stocks["stock_code"].map(amount_sum)
     stocks["zt_days"] = stocks["stock_code"].map(zt_days).fillna(0)
 
-    flow = _moneyflow(str(pd.Timestamp(dates[-span]).date()), str(last.date()), source)
+    flow = flow_override if flow_override is not None else _moneyflow(str(pd.Timestamp(dates[-span]).date()), str(last.date()), source)
+    if not flow.empty and "trade_date" in flow:
+        flow = flow[(pd.to_datetime(flow["trade_date"]) > base) & (pd.to_datetime(flow["trade_date"]) <= last)]
     if not flow.empty:
         net = flow.groupby("stock_code")["net_amount"].sum()
         stocks["net_amount"] = stocks["stock_code"].map(net)          # 万元
@@ -219,7 +231,7 @@ def build_frame(period: str = "daily", days: int = 90, source: str = "moneyflow"
 
     # 上一个同长度窗口的热度（用于"升温/降温"）
     delta = None
-    if prev_base is not None and prev_last is not None and len(dates) >= 2 * span + 1:
+    if flow_override is None and prev_base is not None and prev_last is not None and len(dates) >= 2 * span + 1:
         delta = _heat_at(bars, dates, span * 2, span, industry, source)
     if delta is not None:
         table["heat_prev"] = delta.reindex(table.index)
@@ -249,10 +261,17 @@ def build_frame(period: str = "daily", days: int = 90, source: str = "moneyflow"
     return {"available": True, "period": period, "indices": table, "stocks": stocks, "market": market}
 
 
+def build_frame(period: str = "daily", days: int = 70, source: str = "moneyflow", day=None) -> dict:
+    """构建并缓存行业数据；`day` 指定历史截止交易日。"""
+    target = str(pd.Timestamp(day).date()) if day is not None else "latest"
+    return _cached(("frame", period, int(days), source, target), 300.0,
+                   lambda: _build_frame(period, days, source, day))
+
+
 def _heat_at(bars: pd.DataFrame, dates: list, offset: int, span: int,
              industry: pd.Series, source: str) -> pd.Series | None:
     """历史某个同长度窗口的行业热度（只算热度的分位，用于计算"热度变化"）。"""
-    if len(dates) < offset + 1:
+    if len(dates) < offset + span + 1:
         return None
     last, base = pd.Timestamp(dates[-1 - offset]), pd.Timestamp(dates[-1 - offset - span])
     window = bars[bars["trade_date"].isin([last, base])]
@@ -287,10 +306,10 @@ def _heat_at(bars: pd.DataFrame, dates: list, offset: int, span: int,
 
 
 def industry_heat(period: str = "daily", limit: int = 60, source: str = "moneyflow",
-                  min_n: int = 0) -> dict:
+                  min_n: int = 0, day=None, _built=None) -> dict:
     """行业热度榜（对外 API 用）。`min_n` 用来滤掉成分股过少的小行业（4~7 只的行业
     中位数噪声很大，热度榜常被它们占满榜首）。"""
-    built = build_frame(period, source=source)
+    built = _built if _built is not None else build_frame(period, source=source, day=day)
     if not built.get("available"):
         return built
     table = built["indices"]
@@ -343,9 +362,9 @@ LABELS = {
 
 
 def industry_stocks(industry: str, period: str = "daily", direction: str = "up",
-                    limit: int = 50, source: str = "moneyflow") -> dict:
+                    limit: int = 50, source: str = "moneyflow", day=None, _built=None) -> dict:
     """行业内个股涨跌排名（drill-down）。"""
-    built = build_frame(period, source=source)
+    built = _built if _built is not None else build_frame(period, source=source, day=day)
     if not built.get("available"):
         return built
     stocks = built["stocks"]
@@ -360,7 +379,7 @@ def industry_stocks(industry: str, period: str = "daily", direction: str = "up",
     # "这个行业里谁最大"）。只作为**标签**展示，不改变排序（排序仍是区间涨跌幅）。
     # 注意：把选股口径改成"买龙头"在本仓库 12 组网格回放里全部更差
     # （见 scripts/select_concept_arm.py 的模块 docstring），所以这里只标、不推荐。
-    mktcap, _stamp = _mktcap_lookup()
+    mktcap, _stamp = _mktcap_lookup(day)
     cap_rank: dict[str, int] = {}
     # 踩坑：第一版写 `caps.sort_values(...).index` —— 那是 DataFrame 的**行标签**（0,1,2…），
     # 不是股票代码，于是 cap_rank 的键全成了 "0"/"1"/"2"，get(stock_code) 永远 None，
@@ -405,7 +424,7 @@ def industry_stocks(industry: str, period: str = "daily", direction: str = "up",
 # ─────────────────────────────────────────────────────────────────────────────
 # 热力图（a-share-heatmap 风格：面积=市值、颜色=涨跌幅、可下钻到个股）
 # ─────────────────────────────────────────────────────────────────────────────
-def _mktcap_lookup() -> tuple[dict, str | None]:
+def _mktcap_lookup(day=None) -> tuple[dict, str | None]:
     """代码 → 流通市值（亿元）。
 
     市值用 Tushare relay 的 **daily_basic 月频快照**（实测最新 2026-09-30，5,572 只）：
@@ -415,44 +434,58 @@ def _mktcap_lookup() -> tuple[dict, str | None]:
     def build():
         folder = ROOT / "assets/data/raw/daily_basic_relay"
         files = sorted(folder.glob("month=*.parquet")) if folder.exists() else []
+        if day is not None:
+            files = [p for p in files if p.stem.removeprefix("month=") <= str(pd.Timestamp(day).date())[:7]]
         result: dict[str, float] = {}
         stamp = None
-        if files:
-            frame = pd.read_parquet(files[-1], columns=["ts_code", "trade_date", "circ_mv", "total_mv"])
+        for file in reversed(files):
+            frame = pd.read_parquet(file, columns=["ts_code", "trade_date", "circ_mv", "total_mv"])
             frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+            if day is not None:
+                frame = frame[frame["trade_date"] <= pd.Timestamp(day)]
+            if frame.empty:
+                continue
             latest = frame[frame["trade_date"] == frame["trade_date"].max()]
             column = "circ_mv" if latest["circ_mv"].notna().any() else "total_mv"
             for code, value in zip(latest["ts_code"].astype(str), latest[column]):
                 if pd.notna(value):
                     result[code] = float(value) / 1e4          # 万元 → 亿元
             stamp = str(latest["trade_date"].max().date())
+            break
         if len(result) < 1000:                                 # 兜底：v4 面板（domain 内）
             panel = ROOT / "assets/data/meta/cn_sleeve_features_long_v4.parquet"
             if panel.exists():
                 import pyarrow.dataset as ds
                 dataset = ds.dataset(str(panel), format="parquet")
-                table = dataset.to_table(columns=["trade_date", "stock_code", "circ_mktcap"])
+                target = pd.Timestamp(day) if day is not None else mbs.latest_trade_date()
+                filter_expr = ((ds.field("trade_date") <= target)
+                               & (ds.field("trade_date") >= target - pd.Timedelta(days=60))) if target is not None else None
+                table = dataset.to_table(columns=["trade_date", "stock_code", "circ_mktcap"],
+                                         filter=filter_expr)
                 frame = table.to_pandas()
                 frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+                if day is not None:
+                    frame = frame[frame["trade_date"] <= pd.Timestamp(day)]
                 latest = frame[frame["trade_date"] == frame["trade_date"].max()]
                 for code, value in zip(latest["stock_code"].astype(str), latest["circ_mktcap"]):
                     if pd.notna(value):
                         result.setdefault(code, float(value) / 1e8)
-                stamp = stamp or str(latest["trade_date"].max().date())
+                if not latest.empty:
+                    stamp = stamp or str(latest["trade_date"].max().date())
         return result, stamp
 
-    return _cached(("mktcap",), 1800.0, build)
+    return _cached(("mktcap", str(pd.Timestamp(day).date()) if day is not None else "latest"), 1800.0, build)
 
 
-def heatmap(period: str = "daily", market: str = "", limit_per_industry: int = 400) -> dict:
+def heatmap(period: str = "daily", market: str = "", limit_per_industry: int = 400, day=None, _built=None) -> dict:
     """行业 → 成分股 的两级热力图数据（面积=流通市值，颜色=区间涨跌幅）。"""
-    built = build_frame(period)
+    built = _built if _built is not None else build_frame(period, day=day)
     if not built.get("available"):
         return built
     stocks = built["stocks"].copy()
     if market:
         stocks = stocks[stocks["market"] == market]
-    mktcap, mktcap_date = _mktcap_lookup()
+    mktcap, mktcap_date = _mktcap_lookup(day)
     stocks["mktcap_yi"] = stocks["stock_code"].map(mktcap)
     missing = int(stocks["mktcap_yi"].isna().sum())
     median_cap = float(stocks["mktcap_yi"].median() or 20.0)

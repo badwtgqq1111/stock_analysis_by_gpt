@@ -70,6 +70,7 @@ export interface TrendStage {
 }
 
 export interface OhlcvResponse {
+  realtime?: { available: boolean; asof: string; provisional: boolean }
   code: string
   name: string
   data: OhlcvDataPoint[]
@@ -571,6 +572,7 @@ export interface RankingRow {
 }
 
 export interface RankingsChangeResponse {
+  realtime?: RealtimeMeta
   period: string
   direction: string
   limit: number
@@ -583,6 +585,7 @@ export interface RankingsChangeResponse {
 }
 
 export interface RankingsMoneyflowResponse {
+  realtime?: RealtimeMeta
   available: boolean
   period: string
   direction: string
@@ -612,6 +615,7 @@ export interface LimitUpLadderDay {
 }
 
 export interface LimitUpLadder {
+  realtime?: RealtimeMeta
   buckets: LimitUpBucket[]
   dates: string[]
   series: LimitUpLadderDay[]
@@ -643,6 +647,7 @@ export interface LimitUpRow {
 }
 
 export interface LimitUpDetail {
+  realtime?: RealtimeMeta
   available: boolean
   date: string
   dates: string[]
@@ -787,6 +792,7 @@ export interface IndustryHeatRow {
 }
 
 export interface IndustryHeatResponse {
+  realtime?: RealtimeMeta
   available: boolean
   period: string
   period_label: string
@@ -824,6 +830,7 @@ export interface IndustryStockRow {
 }
 
 export interface IndustryStocksResponse {
+  realtime?: RealtimeMeta
   available: boolean
   industry: string
   period: string
@@ -858,6 +865,7 @@ export interface IndustryHeatmapIndustry {
 }
 
 export interface IndustryHeatmapResponse {
+  realtime?: RealtimeMeta
   available: boolean
   period: string
   period_label: string
@@ -1615,4 +1623,15 @@ export interface WyckoffRead {
   event_cloud?: WyckoffCloud
   reference?: string
   pnf: PnFChart
+}
+
+export interface RealtimeMeta {
+  available: boolean
+  asof?: string
+  date?: string
+  valid?: number
+  expected?: number
+  excluded?: number
+  coverage?: number
+  reason?: string | null
 }

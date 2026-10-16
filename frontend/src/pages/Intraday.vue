@@ -66,7 +66,7 @@
       </div>
 
       <div class="panel">
-        <IntradayChart :points="data.points" :prev-close="data.prev_close" :height="340" />
+        <IntradayChart :code="data.code" :date="data.date" :points="data.points" :prev-close="data.prev_close" :height="340" />
         <p class="hint tiny mt">
           {{ data.name }}（{{ data.code }}）· {{ data.period }} 分钟 ·
           {{ data.points[0]?.time }} → {{ data.latest.time }}
@@ -156,7 +156,7 @@ function restartTimer() {
   countdown = null
   if (!intervalMs.value) { left.value = 0; return }
   left.value = Math.round(intervalMs.value / 1000)
-  timer = setInterval(() => { void reload(true); void loadChips() }, intervalMs.value)
+  timer = setInterval(() => { if (!document.hidden) { void reload(true); void loadChips() } }, intervalMs.value)
   countdown = setInterval(() => { left.value = Math.max(left.value - 1, 0) }, 1000)
 }
 

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.api._history_date import history_date
 from backend.services import industry_heat_service as ihs
+from backend.services import realtime_market as rt
 from backend.services import live_quotes
 from backend.services import market_board_service as mbs
 
@@ -27,7 +29,7 @@ NOTES = [
 
 @router.get("/overview")
 def industry_overview() -> dict:
-    dates = [d.strftime("%Y-%m-%d") for d in mbs.trade_dates(30)]
+    dates = [d.strftime("%Y-%m-%d") for d in mbs.trade_dates(120)]
     basics = mbs.basic_frame()
     industries = []
     if not basics.empty:
@@ -52,8 +54,14 @@ def industry_heat(
     limit: int = Query(60, ge=1, le=200),
     min_n: int = Query(0, ge=0, le=100, description="只看成分股 >= min_n 的行业"),
     source: str = Query("moneyflow"),
+    date: str = Query("", description="截止交易日 YYYY-MM-DD，留空 = 最新"),
+    live: int = Query(0, ge=0, le=1),
 ) -> dict:
-    result = ihs.industry_heat(period=period, limit=limit, source=source, min_n=min_n)
+    date = history_date(date)
+    snap = rt.snapshot() if live and rt.eligible(date) else None
+    built = rt.industry_frame(period, snap) if snap and snap['available'] else None
+    result = ihs.industry_heat(period=period, limit=limit, source=source, min_n=min_n, day=date or None, _built=built)
+    result["realtime"] = rt.metadata(snap) if snap else {"available":False}
     if not result.get("available"):
         return {**result, "rows": [], "notes": NOTES}
     result["notes"] = NOTES
@@ -65,9 +73,15 @@ def industry_heat(
 def industry_heatmap(
     period: str = Query("daily", pattern="^(daily|weekly|monthly)$"),
     market: str = Query("", description="板块过滤：主板/创业板/科创板/北交所，留空=全市场"),
+    date: str = Query("", description="截止交易日 YYYY-MM-DD，留空 = 最新"),
+    live: int = Query(0, ge=0, le=1),
 ) -> dict:
     """行业 → 成分股 两级热力图（a-share-heatmap 风格：面积=流通市值、颜色=涨跌幅）。"""
-    result = ihs.heatmap(period=period, market=market)
+    date = history_date(date)
+    snap = rt.snapshot() if live and rt.eligible(date) else None
+    built = rt.industry_frame(period, snap) if snap and snap['available'] else None
+    result = ihs.heatmap(period=period, market=market, day=date or None, _built=built)
+    result["realtime"] = rt.metadata(snap) if snap else {"available":False}
     if not result.get("available"):
         return {**result, "industries": []}
     return result
@@ -80,9 +94,15 @@ def industry_stocks(
     direction: str = Query("up", pattern="^(up|down)$"),
     limit: int = Query(50, ge=1, le=300),
     source: str = Query("moneyflow"),
+    date: str = Query("", description="截止交易日 YYYY-MM-DD，留空 = 最新"),
+    live: int = Query(0, ge=0, le=1),
 ) -> dict:
+    date = history_date(date)
+    snap = rt.snapshot() if live and rt.eligible(date) else None
+    built = rt.industry_frame(period, snap) if snap and snap['available'] else None
     result = ihs.industry_stocks(industry=name, period=period, direction=direction,
-                                 limit=limit, source=source)
+                                 limit=limit, source=source, day=date or None, _built=built)
+    result["realtime"] = rt.metadata(snap) if snap else {"available":False}
     if not result.get("available"):
         raise HTTPException(status_code=404, detail=result.get("hint") or "该行业没有数据")
     return result

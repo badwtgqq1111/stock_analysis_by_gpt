@@ -22,6 +22,7 @@
       <span :class="data.latest.change_pct >= 0 ? 'up' : 'down'">
         &nbsp;{{ data.latest.change_pct >= 0 ? '+' : '' }}{{ data.latest.change_pct.toFixed(2) }}%
       </span>
+      <span v-if="data.realtime?.available" class="tag gold">当日日K · 盘中合成 {{ data.realtime.asof }}</span>
       <span class="bar-count">({{ data.latest.total_bars }}根K线)</span>
       <span v-if="data.profile" class="profile">
         · {{ data.profile.board }}<template v-if="data.profile.industry"> / {{ data.profile.industry }}</template>
@@ -107,7 +108,7 @@
       </div>
       <p class="hint tiny click-hint">
         💡 点任意一根 K 线 = 看这一天的分时（本地 5 分钟归档 <b>{{ coverageText }}</b>；更近的交易日走实时源）。
-        当前选中：<b class="link" @click="focusSelected">{{ pickedDate || '—' }}</b>
+        当前选中：<b class="link" @click="focusSelected">{{ pickedDate || '—' }}</b>。换票默认当日实时；历史模式可点「返回当日实时」。
       </p>
     </div>
     <div v-else-if="!selectedCode" class="empty-state">请选择股票代码</div>
@@ -199,18 +200,20 @@
     <!-- 分时面板：K 线页点选的交易日 -->
     <div class="panel intraday-panel" v-if="selectedCode && (pickedDate || intraday || intradayError)">
       <h6>
-        当日分时
+        {{ pickedDate === cnToday() ? '当日实时分时' : '历史分时' }}
         <b class="link" @click="focusSelected">{{ pickedDate }}</b>
         <span class="tag" :class="intradayTagClass" v-if="intraday">{{ intraday.source_label }}</span>
         <span class="dim tiny" v-if="intraday">
           前收 {{ fmt(intraday.prev_close) }} · {{ intraday.points.length }} 个点 ·
           {{ intraday.points[0]?.clock }} → {{ intraday.points[intraday.points.length - 1]?.clock }}
         </span>
+        <button v-if="pickedDate !== cnToday()" class="btn-ghost btn-sm" @click="returnToToday">返回当日实时</button>
+        <span v-else class="dim tiny">交易时段每30秒刷新</span>
         <button class="btn-ghost btn-sm close-btn" @click="clearIntraday">收起</button>
       </h6>
 
-      <StateBlock v-if="loadingIntraday" state="loading" title="加载该日分时…" />
-      <StateBlock v-else-if="intradayError" state="error" title="该交易日没有分时数据" :detail="intradayError" />
+      <StateBlock v-if="loadingIntraday && !intraday" state="loading" title="加载该日分时…" />
+      <StateBlock v-else-if="intradayError" state="error" :title="pickedDate === cnToday() ? '今日暂无实时分时' : '该交易日没有分时数据'" :detail="intradayError" />
       <template v-else-if="intraday">
         <!-- 标头：这是**哪只票**的分时（用户 2026-10-13："点中某只股票的时候，分时线看不到股票标头"）。
              数据取当前 K 线标的（data）+ 分时口径的最新价/涨跌幅，滚动到面板时一眼知道看的是谁。 -->
@@ -244,7 +247,7 @@
           <StatTile label="成交量" :value="shares(intraday.latest.volume_shares)"
                     :sub="`${intraday.period} 分钟`" />
         </div>
-        <IntradayChart :points="intraday.points" :prev-close="intraday.prev_close" :height="300" />
+        <IntradayChart :code="intraday.code" :date="intraday.date" :points="intraday.points" :prev-close="intraday.prev_close" :height="300" />
         <p class="hint tiny" v-if="!intraday.live.available && intraday.live.reason">
           实时源不可用，用的是本地归档：<span class="dim">{{ intraday.live.reason }}</span>
         </p>
@@ -264,7 +267,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import ControlPanel from '@/components/ControlPanel.vue'
 import KlineChart from '@/components/KlineChart.vue'
 import ChipDistribution from '@/components/ChipDistribution.vue'
@@ -279,6 +282,7 @@ import StockInfoPanel from '@/components/StockInfoPanel.vue'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
 import SelectionDetailCard, { type SelectionRow } from '@/components/SelectionDetailCard.vue'
 import { useKlineData } from '@/composables/useKlineData'
+import { cnToday } from '@/composables/useMarketPoll'
 import { mergeStrategyNames, readSharedMonth, writeSharedMonth } from '@/composables/selectionLabels'
 import { getIntraday, getIntradayCoverage, getStockBundle, getWyckoff } from '@/api/client'
 import type { IntradayCoverage, IntradayResponse, WyckoffRead } from '@/types/api'
@@ -323,54 +327,94 @@ const intradayTagClass = computed(() => (intraday.value?.source === 'store' ? ''
 /** 这一天到底有没有分时（本地归档 ∪ 实时源覆盖）。没有就直接说明，不发注定 404 的请求。 */
 function hasData(date: string) {
   if (!date) return false
+  if (date === coverage.value?.today) return true
   const local = coverage.value?.store_dates || []
   const live = coverage.value?.live?.dates || []
   return local.includes(date) || live.includes(date)
 }
 
+// 自动默认日期不写入 URL，只有用户主动点历史 K 线/日历才保留 ?date=。
+// 否则日线先于 coverage 返回时，会把旧日期写成“显式选择”，并被下一只票继承。
+let intradayRequest = 0
+let coverageRequest = 0
+let pendingIntraday = ''
+const liveTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const intradayUpdatedAt = ref<Date | null>(null)
+
+function preferredIntradayDate(): string {
+  if (/^\d{6}\.(SH|SZ|BJ)$/.test(selectedCode.value || '')) return cnToday()
+  return String(data.value?.data?.[data.value.data.length - 1]?.time || '')
+}
+
+function selectIntradayDate(date: string) {
+  if (!date) return
+  pickedDate.value = date
+  void loadIntraday(date)
+  startIntradayPoll()
+}
+
 async function onPickDate(date: string) {
   if (!date || date === pickedDate.value) return
-  pickedDate.value = date
-  await loadIntraday(date)
+  selectIntradayDate(date)
+  const query = { ...route.query }
+  if (date === cnToday()) delete query.date
+  else query.date = date
+  await router.replace({ query })
+}
+
+async function returnToToday() {
+  selectIntradayDate(cnToday())
+  const query = { ...route.query }
+  delete query.date
+  await router.replace({ query })
 }
 
 async function loadIntraday(date: string) {
-  intraday.value = null
+  const code = selectedCode.value
+  const key = `${code}/${date}`
+  if (!code || !date || pendingIntraday === key) return
+  const request = ++intradayRequest
+  pendingIntraday = key
+  if (intraday.value?.date !== date || intraday.value?.code !== code) intraday.value = null
   intradayError.value = ''
-  if (!hasData(date)) {
-    const store = coverage.value?.store
-    const live = coverage.value?.live
-    intradayError.value =
-      `${date} 没有分时数据。`
-      + (store?.available ? `本地归档覆盖 ${store.first_date} ~ ${store.last_date}（共 ${store.n_dates} 个交易日）；` : '本地归档缺失；')
-      + (live?.available ? `实时源只覆盖 ${live.dates[0]} ~ ${live.dates[live.dates.length - 1]}。` : '实时源当前不可用。')
+  // 今日直接问实时接口，不等慢 coverage，也不把“源覆盖清单为空”当成今日没数据。
+  if (date !== cnToday() && coverage.value && !hasData(date)) {
+    pendingIntraday = ''
+    loadingIntraday.value = false
+    const store = coverage.value.store
+    intradayError.value = `${date} 没有分时数据。`
+      + (store?.available ? `本地归档覆盖 ${store.first_date} ~ ${store.last_date}；` : '本地归档缺失；')
+      + '实时源仅覆盖最近几个交易日。'
     return
   }
   loadingIntraday.value = true
   try {
-    intraday.value = await getIntraday(selectedCode.value || '', '1', 'auto', date)
+    const result = await getIntraday(code, '1', date === cnToday() ? 'live' : 'auto', date)
+    // 换票/换日后旧响应作废，避免慢历史请求把今日结果盖回去。
+    if (request !== intradayRequest || code !== selectedCode.value || date !== pickedDate.value) return
+    if (result.date !== date || result.code !== code) throw new Error('返回的股票或日期与请求不符')
+    intraday.value = result
     intradayUpdatedAt.value = new Date()
   } catch (e) {
-    intradayError.value = String(e)      // 保留上一次成功数据，只标错
+    if (request === intradayRequest && code === selectedCode.value && date === pickedDate.value) {
+      intradayError.value = date === cnToday()
+        ? `今日无有效分时，未切换历史归档。${String(e)}` : String(e)
+    }
   } finally {
-    loadingIntraday.value = false
+    if (request === intradayRequest) {
+      loadingIntraday.value = false
+      pendingIntraday = ''
+    }
   }
-  startIntradayPoll()
 }
 
-// ── 分时"实时推进"（2026-10-12）：只在**当日/最近交易日**且**交易时段**轮询；页面隐藏即停 ──
-// 与自选侧栏的 useLiveQuotes 同一套门控口径（phase 由后端给），避免两处各写一套判断。
-const liveTimer = ref<ReturnType<typeof setInterval> | null>(null)
-const intradayUpdatedAt = ref<Date | null>(null)
-const liveQuotesSession = ref<{ phase?: string } | null>(null)
-
 function intradayPollable(date: string): boolean {
-  const target = String(date || '')
-  // `coverage.today` 就是"最近交易日"（后端 `IntradayCoverage.today`）；看历史某天时不动它。
-  const latest = String(coverage.value?.today || '')
-  if (!target || !latest || target !== latest) return false      // 看历史某天时不动它
-  const phase = liveQuotesSession.value?.phase
-  return phase === 'am' || phase === 'pm' || phase === 'auction'
+  if (date !== cnToday()) return false
+  const now = new Date()
+  const weekday = now.toLocaleDateString('en-US', { timeZone: 'Asia/Shanghai', weekday: 'short' })
+  const clock = now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false })
+  return weekday !== 'Sat' && weekday !== 'Sun'
+    && ((clock >= '09:15:00' && clock <= '11:31:00') || (clock >= '13:00:00' && clock <= '15:01:00'))
 }
 
 function stopIntradayPoll() {
@@ -380,52 +424,42 @@ function stopIntradayPoll() {
 
 function startIntradayPoll() {
   stopIntradayPoll()
-  const target = pickedDate.value || String(coverage.value?.today || '')
-  if (document.hidden || !intradayPollable(target)) return
+  if (pickedDate.value !== cnToday()) return
+  // 定时器保留，逐次看时钟；午休/竞价到开盘后会自行恢复，不锁死首次 session.phase。
   liveTimer.value = setInterval(() => {
-    if (!document.hidden) void loadIntraday(pickedDate.value || String(coverage.value?.today || ''))
+    if (!document.hidden && intradayPollable(pickedDate.value)) void loadIntraday(pickedDate.value)
   }, 30000)
 }
 
 function clearIntraday() {
+  ++intradayRequest
+  pendingIntraday = ''
+  stopIntradayPoll()
   pickedDate.value = ''
   intraday.value = null
   intradayError.value = ''
+  loadingIntraday.value = false
 }
 
-/** 默认看哪一天：**优先今天**（只要实时源今天有数据），否则退回"日线最后一根"（= 最近一个交易日）。
-
-2026-10-12 修：原来两处都默认 `data.data[last]`（日线最后一根 = 本地/前收日），于是"今天上午的分时"
-根本不显示 —— 实测后端 `mode=live` 明明有今天 121 根 1 分钟线（腾讯分时），页面却停在 10-09 的归档上。
-*/
-function preferredIntradayDate(): string {
-  const today = String(coverage.value?.today || '')
-  if (today && hasData(today)) return today
-  return String(data.value?.data?.[data.value.data.length - 1]?.time || '')
-}
-
-/** K 线区间里还没有选中日期时，默认看最近一个交易日 */
-watch(() => data.value, (d) => {
-  if (d && d.data.length && !pickedDate.value) {
-    const last = preferredIntradayDate()
-    pickedDate.value = last
-    void loadIntraday(last)
+// CN 初始选票即请求今天；非 CN 日线加载后再补默认日期。
+watch(() => data.value, d => {
+  if (d?.code === selectedCode.value && !pickedDate.value && !/^\d{6}\.(SH|SZ|BJ)$/.test(selectedCode.value || '')) {
+    selectIntradayDate(preferredIntradayDate())
   }
 })
 
-/** 换票：清掉旧分时，重新取一次覆盖范围 */
-watch(selectedCode, async (code) => {
+watch(selectedCode, async code => {
   clearIntraday()
   coverage.value = null
+  const request = ++coverageRequest
   if (!code) return
+  // 只有指向新票的路由本身带 date 才沿用。侧栏/手输换票不继承旧票历史日期。
+  const queryDate = String(route.query.code || '') === code ? String(route.query.date || '') : ''
+  selectIntradayDate(queryDate || preferredIntradayDate())
   try {
-    coverage.value = await getIntradayCoverage(code)
-    // ⚠️ 显式带了 ?date=（从选股日历 / 选股记录跳进来）就以它为准；否则默认"今天（若有实时）或最近交易日"。
-    // 不这么写的话这里会把 query date 覆盖掉（实测：?date=2026-10-13 被改成 10-15，迷你日历条没有选中格）。
-    const queryDate = String(route.query.date || '')
-    const last = queryDate || preferredIntradayDate()
-    if (last) { pickedDate.value = last; void loadIntraday(last) }
-  } catch { /* 覆盖范围拿不到时，点击仍会退回后端 404 文案 */ }
+    const result = await getIntradayCoverage(code)
+    if (request === coverageRequest && code === selectedCode.value) coverage.value = result
+  } catch { /* 覆盖清单失败不拦截当日实时请求 */ }
 })
 
 function focusSelected() {
@@ -451,32 +485,17 @@ function shares(n: number | null | undefined) {
   return n + ' 股'
 }
 
-// 支持从别处跳转：/#/kline?code=301230.SZ
-onMounted(async () => {
-  // 轻量拉一次"当前时段"，用于分时轮询的门控（失败不影响页面其它部分）
-  try {
-    const overview = await (await fetch('/api/rankings/overview')).json()
-    liveQuotesSession.value = { phase: overview?.session?.phase }
-  } catch { /* 忽略：拿不到时段就不轮询 */ }
-})
-onMounted(() => {
-  const code = String(route.query.code || '')
-  if (code) selectedCode.value = code
-})
-watch(() => route.query.code, v => { if (v && String(v) !== selectedCode.value) selectedCode.value = String(v) })
-// ?date=：从选股日历 / 选股记录跳过来时定位到某一天（2026-10-15 加）
-// ⚠️ `immediate: true` 必须有：首次进入（URL 里就带 ?date=）时 watcher 不 immediate 就不会触发，
-// 结果被"默认最近交易日"覆盖掉（实测：?date=2026-10-13 显示成 10-14）。
-watch(() => route.query.date, v => {
-  const day = String(v || '')
-  if (day && day !== pickedDate.value) void onPickDate(day)
+// 路由深链明确带 date 才进入历史；删除 date 即回到默认当日。
+watch(() => [route.query.code, route.query.date], ([codeValue, dayValue], previous) => {
+  const code = String(codeValue || '')
+  if (code && code !== selectedCode.value) {
+    selectedCode.value = code
+    return
+  }
+  if (!code || previous?.[1] === dayValue) return
+  const day = String(dayValue || '') || preferredIntradayDate()
+  if (day !== pickedDate.value) selectIntradayDate(day)
 }, { immediate: true })
-
-watch(pickedDate, (day) => {
-  const cur = String(route.query.date || '')
-  if (!day || cur === day) return
-  void router.replace({ query: { ...route.query, date: day } })
-})
 
 const barDates = computed(() => (data.value?.data || []).map((b) => String(b.time || '')).filter(Boolean))
 const miniDays = computed(() => {
@@ -506,7 +525,9 @@ function backToLatest() {
 // 不回写的话，用侧栏切了 5 只票再刷新，又回到最开始的代码（实测踩过）。
 watch(selectedCode, (code) => {
   if (!code || String(route.query.code || '') === code) return
-  void router.replace({ query: { ...route.query, code } })
+  const query: LocationQueryRaw = { ...route.query, code }
+  delete query.date
+  void router.replace({ query })
 })
 
 // ── 台账「选股记录」→ K 线上的入选记号 + 迷你日历条（把选股日历搬进 K 线的核心）──
@@ -695,7 +716,15 @@ async function loadWyckoff() {
 watch(selectedCode, (code) => { if (code) loadWyckoff() })
 onMounted(() => { if (selectedCode.value) loadWyckoff() })
 
-onUnmounted(() => { stopIntradayPoll() })
+function onIntradayVisible() {
+  if (!document.hidden && intradayPollable(pickedDate.value)) void loadIntraday(pickedDate.value)
+}
+onMounted(() => document.addEventListener('visibilitychange', onIntradayVisible))
+onUnmounted(() => {
+  ++intradayRequest; ++coverageRequest
+  stopIntradayPoll()
+  document.removeEventListener('visibilitychange', onIntradayVisible)
+})
 </script>
 
 <style scoped>

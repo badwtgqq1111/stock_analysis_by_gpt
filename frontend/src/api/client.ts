@@ -457,13 +457,16 @@ export interface ChangeParams {
   board?: string
   exclude_st?: boolean
   min_amount?: number
+  live?: boolean
+  date?: string
 }
 
 export async function getChangeRanking(params: ChangeParams): Promise<RankingsChangeResponse> {
   const query = new URLSearchParams({
     period: params.period, direction: params.direction, limit: String(params.limit),
     board: params.board ?? '', exclude_st: String(params.exclude_st ?? false),
-    min_amount: String(params.min_amount ?? 0),
+    min_amount: String(params.min_amount ?? 0), live: params.live ? '1' : '0',
+    date: params.date ?? '',
   })
   const resp = await fetch(`/api/rankings/change?${query}`)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -493,8 +496,9 @@ export async function getMoneyflowRanking(params: MoneyflowParams): Promise<Rank
 }
 
 // ─── 连板记录统计 ───
-export async function getLimitUpLadder(lookback: number): Promise<LimitUpLadder> {
-  const resp = await fetch(`/api/limitup/ladder?lookback=${lookback}`)
+export async function getLimitUpLadder(lookback: number, date = '', live = false): Promise<LimitUpLadder> {
+  const query = new URLSearchParams({ lookback: String(lookback), date, live: live ? '1' : '0' })
+  const resp = await fetch(`/api/limitup/ladder?${query}`)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return (await resp.json()) as LimitUpLadder
 }
@@ -547,18 +551,18 @@ export async function getIndustryOverview(): Promise<IndustryOverview> {
 }
 
 export async function getIndustryHeat(
-  period: 'daily' | 'weekly' | 'monthly', limit = 60, minN = 0,
+  period: 'daily' | 'weekly' | 'monthly', limit = 60, minN = 0, date = '', live = false,
 ): Promise<IndustryHeatResponse> {
-  const query = new URLSearchParams({ period, limit: String(limit), min_n: String(minN) })
+  const query = new URLSearchParams({ period, limit: String(limit), min_n: String(minN), date, live: live ? '1' : '0' })
   const resp = await fetch(`/api/industry/heat?${query}`)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return (await resp.json()) as IndustryHeatResponse
 }
 
 export async function getIndustryStocks(
-  industry: string, period: 'daily' | 'weekly' | 'monthly', direction: 'up' | 'down', limit = 50,
+  industry: string, period: 'daily' | 'weekly' | 'monthly', direction: 'up' | 'down', limit = 50, date = '', live = false,
 ): Promise<IndustryStocksResponse> {
-  const query = new URLSearchParams({ period, direction, limit: String(limit) })
+  const query = new URLSearchParams({ period, direction, limit: String(limit), date, live: live ? '1' : '0' })
   const resp = await fetch(`/api/industry/${encodeURIComponent(industry)}/stocks?${query}`)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return (await resp.json()) as IndustryStocksResponse
@@ -566,9 +570,9 @@ export async function getIndustryStocks(
 
 /** 行业热力图（a-share-heatmap 风格：面积=流通市值、颜色=区间涨跌幅、两级下钻）。 */
 export async function getIndustryHeatmap(
-  period: 'daily' | 'weekly' | 'monthly', market = '',
+  period: 'daily' | 'weekly' | 'monthly', market = '', date = '', live = false,
 ): Promise<IndustryHeatmapResponse> {
-  const query = new URLSearchParams({ period })
+  const query = new URLSearchParams({ period, date, live: live ? '1' : '0' })
   if (market) query.set('market', market)
   const resp = await fetch(`/api/industry/heatmap?${query}`)
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)

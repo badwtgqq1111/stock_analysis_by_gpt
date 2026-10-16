@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
+from backend.api._history_date import history_date
+from backend.services import realtime_market as rt
 from backend.services import live_quotes
 from backend.services import market_board_service as mbs
 
@@ -25,9 +27,12 @@ BUCKET_LABELS = {"b1": "一板", "b2": "两板", "b3": "三板", "b4p": "四板+
 
 
 @router.get("/ladder")
-def limitup_ladder(lookback: int = Query(30, ge=3, le=120)) -> dict:
+def limitup_ladder(lookback: int = Query(30, ge=3, le=120), date: str = Query(""), live: int = Query(0,ge=0,le=1)) -> dict:
     """近 N 个交易日的连板阶梯：逐日各板家数、当日最高板、昨日→今日晋级率。"""
-    data = mbs.ladder(lookback)
+    date = history_date(date)
+    snap = rt.snapshot() if live and rt.eligible(date) else None
+    daily = rt.bars(mbs.window_for(lookback=lookback),snap) if snap and snap['available'] else None
+    data = mbs.ladder(lookback, day=date or None, _daily=daily)
     latest = data["series"][-1] if data["series"] else None
     return {
         "buckets": [{"key": k, "label": BUCKET_LABELS[k]} for k in data["buckets"]],
@@ -35,11 +40,12 @@ def limitup_ladder(lookback: int = Query(30, ge=3, le=120)) -> dict:
         "series": data["series"],
         "latest": latest,
         "lookback": lookback,
-        "source": "local",
+        "source": "realtime" if daily is not None else "local",
+        "realtime": rt.metadata(snap) if snap else {"available":False},
         "notes": [
             "连板数 = 同一只票连续涨停的交易日数（当天没涨停则不计入）。",
             "晋级率 = 昨日恰好 N 板、今日变成 N+1 板及以上的家数 ÷ 昨日恰好 N 板的家数。",
-            "涨停判定：板块上限（主板 10% / 创业板·科创板 20% / 北交所 30%）+ 按价格浮动的舍入容差。",
+            "实时近涨跌停股票优先按腾讯明确上限价核对；其余按归档判定：板块上限（主板 10% / 创业板·科创板 20% / 北交所 30%）+ 按价格浮动的舍入容差。",
         ],
     }
 
@@ -51,23 +57,36 @@ def limitup_detail(
     live: str = Query("auto", pattern="^(auto|1|0)$"),
 ) -> dict:
     """某日涨停明细（含连板数），并把东财涨停池的封板资金/首封时间并进来。"""
-    dates = [d.strftime("%Y-%m-%d") for d in mbs.trade_dates(30)]
+    date = history_date(date)
+    snap = rt.snapshot() if live != "0" and rt.eligible(date) else None
+    daily = rt.bars(70,snap) if snap and snap['available'] else None
+    dates = [d.strftime("%Y-%m-%d") for d in mbs.trade_dates(120)]
     day = date or (dates[-1] if dates else "")
+    if date:
+        frame = mbs.load_daily(1, asof=date)
+        if not frame.empty:
+            day = frame["trade_date"].max().strftime("%Y-%m-%d")
+    if daily is not None:
+        day = snap['date']
+        dates = sorted(set(dates + [day]))
     if not day:
         return {"available": False, "rows": [], "hint": "本地日线不可用，先跑数据同步脚本"}
 
-    local_rows = mbs.limit_up_detail(day, limit=1000)
+    local_rows = mbs.limit_up_detail(day, limit=1000, _daily=daily)
     local_map = {r["stock_code"]: r for r in local_rows}
 
     pool, live_error = (None, None)
-    if live != "0":
+    # 历史日期没有实时涨停池，避免无意义的网络请求拖慢页面。
+    latest = dates[-1] if dates else ""
+    want_live = live != "0" and day == latest and daily is None and day == live_quotes.now_cn().strftime("%Y-%m-%d")
+    if want_live:
         pool, live_error = live_quotes.zt_pool(day)
     live_used = bool(pool)
 
     merged: list[dict] = []
     for code, row in local_map.items():
         item = dict(row)
-        item["source"] = "local"
+        item["source"] = "realtime" if daily is not None else "local"
         info = (pool or {}).get(code)
         if info:
             item["source"] = "both"
@@ -114,7 +133,8 @@ def limitup_detail(
         row["rank"] = i
 
     return {
-        "available": bool(merged),
+        "realtime": rt.metadata(snap) if snap else {"available":False},
+        "available": bool(merged) or daily is not None,
         "date": day,
         "dates": dates,
         "counts": counts,
@@ -122,7 +142,7 @@ def limitup_detail(
         "total": len(merged),
         "max_boards": max([int(r["boards"] or 0) for r in merged], default=0),
         "rows": merged[: int(limit)],
-        "live": {"requested": live != "0", "available": live_used, "reason": live_error},
+        "live": {"requested": want_live, "available": live_used, "reason": live_error},
         "session": live_quotes.trading_phase(),
         "notes": [
             "封板资金 / 首次封板时间 / 炸板次数 只有东财涨停池能给（本地日线算不出来），"

@@ -69,6 +69,7 @@ MONEYFLOW_SOURCES = {
 
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[tuple, tuple[float, object]] = {}
+_BUILD_LOCKS: dict[tuple, threading.Lock] = {}
 
 
 def _cached(key: tuple, ttl: float, builder):
@@ -83,10 +84,17 @@ def _cached(key: tuple, ttl: float, builder):
         hit = _CACHE.get(key)
         if hit and now - hit[0] < ttl:
             return hit[1]
-    value = builder()
-    with _CACHE_LOCK:
-        _CACHE[key] = (now, value)
-    return value
+        build_lock = _BUILD_LOCKS.setdefault(key, threading.Lock())
+    # 同一页面的并发请求会争用相同日线；只让一个请求真正扫描 parquet。
+    with build_lock:
+        with _CACHE_LOCK:
+            hit = _CACHE.get(key)
+            if hit and time.time() - hit[0] < ttl:
+                return hit[1]
+        value = builder()
+        with _CACHE_LOCK:
+            _CACHE[key] = (time.time(), value)
+        return value
 
 
 def cache_clear() -> None:
@@ -135,7 +143,7 @@ def latest_trade_date() -> pd.Timestamp | None:
     return dates[-1] if dates else None
 
 
-def load_daily(days: int = 90) -> pd.DataFrame:
+def load_daily(days: int = 90, asof=None) -> pd.DataFrame:
     """最近 `days` 个交易日的全市场日线（前复权）。
 
     返回列：trade_date / stock_code / open / high / low / close / volume / amount。
@@ -146,20 +154,28 @@ def load_daily(days: int = 90) -> pd.DataFrame:
         import pyarrow.dataset as ds
         # 要多少天就取多少天：trade_dates() 默认只返回最近 400 个交易日，
         # 直接 dates[-700] 会 IndexError（实测：概念手臂做 24 个月回放时炸在这里）。
-        dates = trade_dates(max(int(days) + 5, 400))
-        if not dates:
-            return pd.DataFrame()
-        cutoff = dates[max(-int(days), -len(dates))]
-        years = sorted({cutoff.year, dates[-1].year})
+        if asof is None:
+            dates = trade_dates(max(int(days) + 5, 400))
+            if not dates:
+                return pd.DataFrame()
+            cutoff = dates[max(-int(days), -len(dates))]
+            end = dates[-1]
+        else:
+            end = pd.Timestamp(asof).normalize()
+            # 扫描历史目标日前的一段日历窗口，随后按真实交易日截取；无需读取目标日至今的数据。
+            cutoff = end - pd.Timedelta(days=int(days) * 2 + 30)
+        years = list(range(cutoff.year, end.year + 1))
         dataset, files = _daily_dataset(years)
         if dataset is None:
             return pd.DataFrame()
         table = dataset.to_table(
             columns=["trade_date", "stock_code", "open", "high", "low", "close", "volume", "amount"],
-            filter=ds.field("trade_date") >= cutoff,
+            filter=(ds.field("trade_date") >= cutoff) & (ds.field("trade_date") <= end),
         )
         frame = table.to_pandas()
         frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
+        keep_dates = sorted(frame["trade_date"].unique())[-int(days):]
+        frame = frame[frame["trade_date"].isin(keep_dates)]
         # 去重（2026-10-10 实测）：日线分区里存在**同一 (trade_date, stock_code) 重复行**
         # （最近 120 天里有 3,870 行，value 完全相同 —— 应该是同步时重复写入）。
         # 下游大量 `set_index("stock_code")` 后再 `.map()/.reindex()`，pandas 3 遇到非唯一索引会**直接抛**
@@ -168,7 +184,8 @@ def load_daily(days: int = 90) -> pd.DataFrame:
         frame = frame.drop_duplicates(subset=["trade_date", "stock_code"], keep="last")
         return frame.sort_values(["stock_code", "trade_date"], kind="stable").reset_index(drop=True)
 
-    return _cached(("daily", int(days)), 300.0, build)
+    key_day = str(pd.Timestamp(asof).date()) if asof is not None else "latest"
+    return _cached(("daily", int(days), key_day), 300.0, build)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,13 +327,15 @@ def board_bucket(boards: int) -> str:
     return f"b{boards}" if boards <= 3 else "b4p"
 
 
-def enriched_daily(days: int = 120) -> pd.DataFrame:
+def enriched_daily(days: int = 120, asof=None) -> pd.DataFrame:
     """带涨停/连板标记的日线窗口（TTL 缓存）。
 
     `with_limit_flags` 里有一次性 Python 循环（算连板数），960k 行约 0.6s；
     榜单页 + 连板页 + 明细页都会用到，所以必须缓存，不能每个请求重算。
     """
-    return _cached(("enriched", int(days)), 300.0, lambda: with_limit_flags(load_daily(days)))
+    key_day = str(pd.Timestamp(asof).date()) if asof is not None else "latest"
+    return _cached(("enriched", int(days), key_day), 300.0,
+                   lambda: with_limit_flags(load_daily(days, asof=asof)))
 
 
 def window_days_for(day) -> int:
@@ -340,8 +359,6 @@ MIN_WINDOW = 45
 def window_for(day=None, lookback: int = 0) -> int:
     """统一的日线窗口大小（交易日数）。"""
     days = MIN_WINDOW
-    if day is not None:
-        days = max(days, window_days_for(day) + STREAK_LOOKBACK)
     if lookback:
         days = max(days, int(lookback) + STREAK_LOOKBACK + 10)
     return days
@@ -356,16 +373,19 @@ def _date_boards(frame: pd.DataFrame, day: pd.Timestamp) -> pd.DataFrame:
     return sub[[c for c in cols if c in sub.columns]].copy()
 
 
-def ladder(lookback: int = 30) -> dict:
+def ladder(lookback: int = 30, day=None, _daily=None) -> dict:
     """连板梯队：逐日各板数量 + 昨日→今日 晋级率。
 
     晋级率 = 昨日恰好 N 板、今日变成 N+1 板及以上的家数 ÷ 昨日恰好 N 板的家数。
     这是"连板记录统计"里唯一能看出**情绪强弱**的量：数量只是存量，晋级率才是流量。
     """
-    daily = enriched_daily(window_for(lookback=int(lookback)))
+    daily = _daily if _daily is not None else enriched_daily(window_for(day=day, lookback=int(lookback)), asof=day)
     if daily.empty:
         return {"dates": [], "series": [], "buckets": ["b1", "b2", "b3", "b4p"]}
     flagged = daily
+    if day is not None:
+        target = pd.Timestamp(day).normalize()
+        flagged = flagged[flagged["trade_date"] <= target]
     days = sorted(flagged["trade_date"].unique())[-int(lookback):]
     flagged = flagged[flagged["trade_date"].isin(days)]
     flagged = flagged[flagged["boards"] > 0]
@@ -406,9 +426,9 @@ def ladder(lookback: int = 30) -> dict:
     return {"dates": dates, "series": series, "buckets": ["b1", "b2", "b3", "b4p"]}
 
 
-def limit_up_detail(day, limit: int = 300) -> list[dict]:
+def limit_up_detail(day, limit: int = 300, _daily=None) -> list[dict]:
     """某日涨停明细（按连板数、成交额降序）。"""
-    flagged = enriched_daily(window_for(day=day))
+    flagged = _daily if _daily is not None else enriched_daily(window_for(day=day), asof=day)
     sub = _date_boards(flagged, pd.Timestamp(day))
     if sub.empty:
         return []
@@ -431,17 +451,19 @@ def limit_up_detail(day, limit: int = 300) -> list[dict]:
 
 def change_rank(period: str = "daily", limit: int = 50,
                 direction: str = "up", board: str = "", exclude_st: bool = False,
-                min_amount: float = 0.0) -> tuple[list[dict], dict]:
+                min_amount: float = 0.0, day=None, _daily=None) -> tuple[list[dict], dict]:
     """涨跌幅排行。period=daily → 最近交易日单日；weekly → 近 5 个交易日累计。
 
     过滤（板块 / 排除 ST / 最小成交额）**在排序取前 N 之后不做**，而是先过滤再排序，
     否则会出现"筛掉 ST 后前 50 名只剩 12 只"这种看着像 bug 的结果。
     `stats` 里的市场宽度永远是**全市场**口径（不受过滤影响），否则"上涨家数"会骗人。
     """
-    daily = enriched_daily(window_for())
+    daily = _daily if _daily is not None else enriched_daily(window_for(day=day), asof=day)
     if daily.empty:
         return [], {}
     flagged = daily
+    if day is not None:
+        flagged = flagged[flagged["trade_date"] <= pd.Timestamp(day).normalize()]
     days = sorted(flagged["trade_date"].unique())
     if not days:
         return [], {}
@@ -562,7 +584,7 @@ def moneyflow_rank(day: str, period: str = "daily", limit: int = 50, direction: 
 
     basics = _name_lookup()
     closes: dict[str, dict] = {}
-    flagged = enriched_daily(window_for(day=day))
+    flagged = enriched_daily(window_for(day=day), asof=day)
     if not flagged.empty:
         sub = _date_boards(flagged, pd.Timestamp(day))
         if not sub.empty:

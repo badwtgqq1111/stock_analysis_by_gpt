@@ -2,7 +2,7 @@
   <div class="page">
     <PageHeader
       title="连板记录统计"
-      description="一板 / 两板 / 三板 / 四板+ 的每日家数、最高板与<strong>晋级率</strong>（昨日 N 板 → 今日 N+1 板的比例）。历史来自本地日线（离线可算），当日梯队来自东财涨停池（盘中实时，且能给出封板资金 / 首封时间 / 炸板次数）。"
+      description="一板 / 两板 / 三板 / 四板+ 的每日家数、最高板与<strong>晋级率</strong>（昨日 N 板 → 今日 N+1 板的比例）。历史来自本地日线（离线可算），当日梯队由全市场实时快照和历史日线连续计算；盘中开板即移出，卡片和趋势同源。封板资金等缺失字段留空。"
     >
       <template #actions>
         <select v-model.number="lookback" class="picker">
@@ -10,60 +10,24 @@
           <option :value="30">近 30 个交易日</option>
           <option :value="60">近 60 个交易日</option>
         </select>
-        <select v-model="date" class="picker" v-if="detail?.dates?.length">
-          <option v-for="d in detail.dates.slice().reverse()" :key="d" :value="d">{{ d }}</option>
-        </select>
+        <input v-model="date" type="date" class="picker" :max="cnToday()" aria-label="连板统计历史日期" />
+        <button v-if="date" class="btn-ghost btn-sm" @click="date = ''">最新</button>
+        <label class="hint tiny"><input type="checkbox" v-model="realtime" /> 当日实时（15秒）</label>
         <button class="btn-ghost" :disabled="loading" @click="reload()">刷新</button>
       </template>
     </PageHeader>
 
+    <RealtimeStatus :meta="detail?.realtime" :enabled="liveEnabled" />
     <StateBlock v-if="error" state="error" title="连板数据取数失败" :detail="error" :retry="() => reload()" />
     <StateBlock v-else-if="!ladder" state="loading" title="加载连板阶梯…" />
 
     <template v-else>
-      <!-- 盘中实时梯队 -->
-      <div class="panel">
-        <h6>
-          当日涨停池
-          <span class="tag" :class="liveTone">{{ live?.available ? '实时' : '不可用' }}</span>
-          <span class="dim tiny" v-if="live?.date"> {{ live.date }}</span>
-          <span class="dim tiny"> · {{ live?.session?.now }}</span>
-        </h6>
-        <div class="pill-row" v-if="live?.available">
-          <span class="pill">涨停 <b class="up">{{ live.total }}</b> 只</span>
-          <span class="pill" v-for="b in buckets" :key="b.key">
-            {{ b.label }} <b>{{ live.counts_label[b.label] ?? 0 }}</b>
-          </span>
-          <span class="pill">最高 <b class="gold">{{ cn(live.max_boards) }}板</b></span>
-        </div>
-        <p class="hint tiny" v-else>
-          实时不可用：<span class="dim">{{ live?.reason || '—' }}</span>
-          （历史统计与本地明细不受影响）
-        </p>
-        <div class="live-grid" v-if="live?.available">
-          <div v-for="r in (live.rows || []).slice(0, 12)" :key="r.stock_code" class="live-card">
-            <div class="lc-head">
-              <span class="tag gold">{{ cn(r.boards) }}板</span>
-              <span class="lc-name">{{ r.name }}</span>
-            </div>
-            <div class="lc-code mono tiny dim">
-              <span class="link" @click="gotoKline(r.stock_code)">{{ r.stock_code }}</span>
-              · {{ r.industry || '—' }}
-            </div>
-            <div class="lc-meta tiny">
-              <span :class="tone(r.pct_chg)">{{ pct(r.pct_chg) }}</span>
-              <span class="dim">封 {{ money(r.seal_amount) }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <!-- 统计卡 -->
       <div class="stat-grid">
         <StatTile label="涨停家数" :value="detail?.total ?? 0" tone="up"
-                  :sub="selectedDate ? `${selectedDate} 收板` : '—'" />
+                  :sub="selectedDate ? `${selectedDate} ${detail?.realtime?.available ? '当前封板' : '收板'}` : '—'" />
         <StatTile label="最高板" :value="`${cn(detail?.max_boards || 0)}板`" tone="gold"
-                  :sub="`来自 ${detail?.live?.available ? '东财+本地' : '本地日线'}`" />
+                  :sub="`来自 ${detail?.realtime?.available ? '实时快照+历史' : '本地日线'}`" />
         <StatTile v-for="b in buckets" :key="b.key" :label="b.label"
                   :value="detail?.counts?.[b.key] ?? 0"
                   :sub="promotionText(b.key)" />
@@ -91,7 +55,7 @@
           涨停明细
           <span class="dim tiny"> {{ selectedDate }} · {{ detail?.total ?? 0 }} 只</span>
           <span class="tag" :class="detail?.live?.available ? 'ok' : 'dim'">
-            {{ detail?.live?.available ? '已并入东财封板数据' : '仅本地日线' }}
+            {{ detail?.realtime?.available ? '当前报价封板，非收盘结果' : '本地归档' }}
           </span>
         </h6>
         <div class="table-scroll">
@@ -140,19 +104,23 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getLimitUpDetail, getLimitUpLadder, getLimitUpLive } from '@/api/client'
-import type { LimitUpDetail, LimitUpLadder, LimitUpLive } from '@/types/api'
+import { getLimitUpDetail, getLimitUpLadder } from '@/api/client'
+import type { LimitUpDetail, LimitUpLadder } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import StatTile from '@/components/ui/StatTile.vue'
 import SvgCurve from '@/components/ui/SvgCurve.vue'
 
+import RealtimeStatus from '@/components/RealtimeStatus.vue'
+import { cnToday, useMarketPoll } from '@/composables/useMarketPoll'
+
+const realtime = ref(true)
+const liveEnabled = computed(() => realtime.value && !date.value)
 const router = useRouter()
 const lookback = ref(30)
 const date = ref('')
 const ladder = ref<LimitUpLadder | null>(null)
 const detail = ref<LimitUpDetail | null>(null)
-const live = ref<LimitUpLive | null>(null)
 const error = ref('')
 const loading = ref(false)
 
@@ -161,7 +129,6 @@ const buckets = computed(() => ladder.value?.buckets || [
   { key: 'b3', label: '三板' }, { key: 'b4p', label: '四板+' },
 ])
 const selectedDate = computed(() => detail.value?.date || date.value)
-const liveTone = computed(() => (live.value?.available ? 'ok' : 'dim'))
 const promotion = computed(() => detail.value && ladder.value
   ? (ladder.value.series.find((s) => s.date === detail.value?.date)?.promotion || {})
   : {})
@@ -203,32 +170,37 @@ function promotionText(key: string) {
   return `本地晋级 ${p.next}/${p.prev} = ${rate}`
 }
 
-async function reload() {
+async function fetchLimitup(live = false) {
+  const request = ++requestId
   loading.value = true
   try {
-    const [lad, det, lv] = await Promise.all([
-      getLimitUpLadder(lookback.value),
-      getLimitUpDetail(date.value, true),
-      getLimitUpLive(),
+    const [lad, det] = await Promise.all([
+      live ? getLimitUpLadder(lookback.value, date.value, true) : getLimitUpLadder(lookback.value, date.value),
+      live ? getLimitUpDetail(date.value, true) : getLimitUpDetail(date.value, false),
     ])
+    if (request !== requestId) return
     ladder.value = lad
     detail.value = det
-    live.value = lv
-    if (!date.value && det.date) date.value = det.date
     error.value = ''
   } catch (e) {
-    error.value = String(e)
+    if (request === requestId) error.value = String(e)
   } finally {
-    loading.value = false
+    if (request === requestId) loading.value = false
   }
 }
 
+let reloadId = 0
+let alive = true
+async function reload() {
+  const request = ++reloadId
+  await fetchLimitup(false)
+  if (alive && request === reloadId && liveEnabled.value) await fetchLimitup(true)
+}
+let requestId = 0
 onMounted(reload)
-watch([lookback, date], () => void reload())
-
-let timer: ReturnType<typeof setInterval> | null = null
-onMounted(() => { timer = setInterval(() => { void getLimitUpLive().then((r) => { live.value = r }) }, 30000) })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+watch([lookback, date, realtime], () => void reload())
+useMarketPoll(() => fetchLimitup(true), () => liveEnabled.value && !loading.value)
+onUnmounted(() => { alive = false; ++reloadId; ++requestId })
 
 function gotoKline(code: string) { void router.push({ path: '/kline', query: { code } }) }
 function gotoIntraday(code: string) { void router.push({ path: '/intraday', query: { code } }) }
@@ -251,7 +223,7 @@ function seal(v: string | null | undefined) {
   return `${v.slice(0, 2)}:${v.slice(2, 4)}`
 }
 function sourceLabel(source?: string) {
-  return ({ both: '东财+本地', live: '东财', local: '本地' } as Record<string, string>)[source || 'local'] || '本地'
+  return ({ both: '东财+本地', live: '东财', local: '本地', realtime: '实时快照' } as Record<string, string>)[source || 'local'] || '本地'
 }
 </script>
 

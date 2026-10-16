@@ -12,6 +12,8 @@
         <select v-model="period" class="picker">
           <option v-for="p in overview?.periods || []" :key="p.key" :value="p.key">{{ p.label }}</option>
         </select>
+        <input v-model="date" type="date" class="picker" :max="cnToday()" aria-label="行业热度历史日期" />
+        <button v-if="date" class="btn-ghost btn-sm" @click="date = ''">最新</button>
         <select v-model.number="minN" class="picker">
           <option :value="0">全部行业</option>
           <option :value="5">只看 ≥5 只</option>
@@ -22,11 +24,13 @@
           <option value="">全市场</option>
           <option v-for="m in MARKETS" :key="m" :value="m">{{ m }}</option>
         </select>
+        <label class="hint tiny"><input type="checkbox" v-model="realtime" /> 当日实时（15秒）</label>
         <button class="btn-ghost" :disabled="loading" @click="reload()">刷新</button>
         <a class="btn-ghost link-btn" href="#/?source=cn_arm_concept">概念/板块手臂名单 →</a>
       </template>
     </PageHeader>
 
+    <RealtimeStatus :meta="heat?.realtime" :enabled="liveEnabled" />
     <StateBlock v-if="error" state="error" title="取不到行业热度" :detail="error" :retry="() => reload()" />
     <StateBlock v-else-if="!heat" state="loading" title="加载行业热度…" />
     <StateBlock v-else-if="!heat.available" state="empty" title="没有可用的行业热度"
@@ -264,7 +268,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { getIndustryHeat, getIndustryHeatmap, getIndustryOverview, getIndustryStocks } from '@/api/client'
 import type {
@@ -276,6 +280,11 @@ import StateBlock from '@/components/ui/StateBlock.vue'
 import BarChart, { type Bar } from '@/components/ui/BarChart.vue'
 import IndustryHeatmap from '@/components/IndustryHeatmap.vue'
 
+import RealtimeStatus from '@/components/RealtimeStatus.vue'
+import { cnToday, useMarketPoll } from '@/composables/useMarketPoll'
+
+const realtime = ref(true)
+const liveEnabled = computed(() => realtime.value && !date.value)
 const MARKETS = ['主板', '创业板', '科创板', '北交所']
 
 const router = useRouter()
@@ -289,51 +298,71 @@ const stocksError = ref('')
 const error = ref('')
 const loading = ref(false)
 const period = ref<'daily' | 'weekly' | 'monthly'>('daily')
+const date = ref('')
 const minN = ref(0)
 const view = ref<'grid' | 'map'>('grid')
 const market = ref('')
 const direction = ref<'up' | 'down'>('up')
 const selected = ref('')
 
-async function reload() {
+async function fetchHeat(live = false) {
+  const request = ++requestId
   loading.value = true
+  if (!live) { heatmap.value = null; stocks.value = null }
   try {
-    if (!overview.value) overview.value = await getIndustryOverview()
-    heat.value = await getIndustryHeat(period.value, 120, minN.value)
+    if (!overview.value) void getIndustryOverview().then((meta) => { overview.value = meta }).catch(() => { /* 元信息失败不阻塞热度榜 */ })
+    const data = await getIndustryHeat(period.value, 120, minN.value, date.value, live)
+    if (request !== requestId) return
+    heat.value = data
     error.value = ''
     // 自动列出：进入页面 / 换周期 / 当前选中行业消失时，默认选热度第 1 名
     if (!selected.value || !heat.value.rows.some((r) => r.industry === selected.value)) {
       selected.value = heat.value.rows[0]?.industry || ''
       stocks.value = null
     }
-    if (selected.value) await loadStocks()
-    if (view.value === 'map') await loadHeatmap()
+    await Promise.all([selected.value ? loadStocks() : Promise.resolve(), view.value === 'map' ? loadHeatmap() : Promise.resolve()])
   } catch (e) {
-    error.value = String(e)
+    if (request === requestId) error.value = String(e)
   } finally {
-    loading.value = false
+    if (request === requestId) loading.value = false
   }
 }
 
+let reloadId = 0
+let alive = true
+async function reload() {
+  const request = ++reloadId
+  await fetchHeat(false)
+  if (alive && request === reloadId && liveEnabled.value) await fetchHeat(true)
+}
+useMarketPoll(() => fetchHeat(true), () => liveEnabled.value && !loading.value)
+onUnmounted(() => { alive = false; ++reloadId; ++requestId })
+let requestId = 0
 async function loadHeatmap() {
+  const request = requestId
+  const selectedMarket = market.value
   heatmapError.value = ''
   try {
-    heatmap.value = await getIndustryHeatmap(period.value, market.value)
+    const data = await getIndustryHeatmap(period.value, selectedMarket, date.value, Boolean(heat.value?.realtime?.available) && liveEnabled.value)
+    if (request === requestId && selectedMarket === market.value) heatmap.value = data
   } catch (e) {
-    heatmapError.value = String(e)
-    heatmap.value = null
+    if (request === requestId) { heatmapError.value = String(e); heatmap.value = null }
   }
 }
 
 async function loadStocks() {
   if (!selected.value) { stocks.value = null; return }
+  const request = requestId
+  const name = selected.value
+  const selectedDirection = direction.value
   stocksError.value = ''
   try {
-    stocks.value = await getIndustryStocks(selected.value, period.value, direction.value, 50)
-    watchlist.rememberMany(stocks.value.rows.map((r) => ({ code: r.stock_code, name: r.name })))
+    const data = await getIndustryStocks(name, period.value, selectedDirection, 50, date.value, Boolean(heat.value?.realtime?.available) && liveEnabled.value)
+    if (request !== requestId || name !== selected.value || selectedDirection !== direction.value) return
+    stocks.value = data
+    watchlist.rememberMany(data.rows.map((r) => ({ code: r.stock_code, name: r.name })))
   } catch (e) {
-    stocksError.value = String(e)
-    stocks.value = null
+    if (request === requestId && name === selected.value) { stocksError.value = String(e); stocks.value = null }
   }
 }
 
@@ -346,7 +375,7 @@ async function selectIndustry(name: string) {
 }
 
 onMounted(reload)
-watch([period, minN], () => { void reload() })
+watch([period, minN, date, realtime], () => { void reload() })
 watch(market, () => { if (view.value === 'map') void loadHeatmap() })
 watch(view, (v) => { if (v === 'map' && !heatmap.value) void loadHeatmap() })
 watch(direction, () => { void loadStocks() })

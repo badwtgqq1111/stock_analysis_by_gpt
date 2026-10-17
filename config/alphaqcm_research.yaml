@@ -1,0 +1,70 @@
+protocol: p2_71_alphaqcm_v1
+status: pilot_only_not_promotion
+pilot_result: NEGATIVE_OR_INCONCLUSIVE
+
+official:
+  repo: https://github.com/ZhuZhouFan/AlphaQCM
+  commit: dffc695f9ea54e6a54e4dac86ee357be314fead4
+  vendored_path: vendor/alphaqcm
+  license: MIT
+  target: Ref($close, -20) / $close - 1
+
+isolation:
+  worker_receives: [train_panel, valid_panel]
+  worker_never_receives: [test_panel, test_labels]
+  selection: valid_ic_only
+  artifact_hash_before_test: true
+  test_evaluation_process: scripts/alphaqcm_evaluate.py
+
+data:
+  panel: assets/data/clean/ohlcv/market=CN
+  price_adjustment: qfq
+  vwap_default: OHLC3 proxy
+  paper_label: close[t+20] / close[t] - 1
+  executable_label: open[t+21] / open[t+1] - 1
+  purge_sessions: 20
+  features:
+    price_volume: [open, high, low, close, volume, vwap]
+    financial_pit: [roe, roa, grossprofit_margin, netprofit_margin, debt_to_assets, netprofit_yoy, or_yoy, ocfps]
+    industry_relative: [pe_ind_pct, pb_ind_pct, size_ind_pct]
+  financial_availability: ann_date as-of join; missing stays NaN
+  default_with_fundamentals: true
+
+split:
+  train: [2018-01-01, 2022-12-31]
+  validation: [2023-01-01, 2024-12-31]
+  test: [2025-01-01, 2025-10-31]
+
+pilot:
+  panel_assets: 60
+  selection: top train-period median amount among names present on >=90% of train dates
+  seeds: [0, 1, 2]
+  steps: 20000
+  models: [iqn]
+  std_lam: [1.0, 0.0]
+  pool_capacity: 10
+  note: 20k steps is a CPU pipeline pilot, not the official 2M-step budget
+
+financial_pilot:
+  panel_assets: 60
+  steps: 10000
+  seed: 0
+  with_fundamentals: true
+  output: output/research/p2_71/alphaqcm_fin_v1
+  result: negative_vs_csi500_research_only
+
+portfolio_replay:
+  output: output/research/p2_71/alphaqcm_portfolio_v1
+  benchmark: 000905.SH
+  top_n: 20
+  rebalance_sessions: 20
+  cost_one_way_bps: 15.5
+  status: negative_vs_csi500_research_only
+
+full_budget:
+  steps: 2000000
+  status: not_run
+  requires:
+    - P0 tests pass
+    - per-1000-step time/memory estimate reviewed
+    - isolated Linux/CUDA or explicit CPU partial-run archive

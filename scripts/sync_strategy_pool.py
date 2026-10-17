@@ -337,6 +337,12 @@ def _return_ranking(strategies: list[dict]) -> dict:
         # 重复同步同一对象时，旧名次不得残留。
         for field in ("return_rank", "excess_rank", "annual_rank", "annual_rank_reason"):
             s.pop(field, None)
+        if s.get("ranking_eligible") is False:
+            reason = s.get("ranking_reason") or "研究曲线仅展示，暂不参与收益排名"
+            s["annual_rank_reason"] = reason
+            excluded.append({"id": s["id"], "reason": reason})
+            annual_excluded.append({"id": s["id"], "reason": reason})
+            continue
         perf = s.get("performance") or {}
         curve = next((perf[k] for k in ("research", "tracking")
                       if (perf.get(k) or {}).get("nav")), {})
@@ -419,9 +425,18 @@ def build_pool() -> dict:
         history_dir = item.get("history_dir", "")
         history_date = _history_latest(history_dir)
         history_count = _history_count(history_dir)
+        curve_replay = ((item.get("curve") or {}).get("replay") or {})
+        research_latest = None
+        if curve_replay.get("manifest"):
+            try:
+                research_latest = json.loads((ROOT / curve_replay["manifest"]).read_text(encoding="utf-8")).get("end")
+            except (OSError, json.JSONDecodeError, TypeError):
+                research_latest = None
         dates = [a["latest_date"] for a in artifacts if a["latest_date"]]
         if history_date:
             dates.append(history_date)
+        if research_latest:
+            dates.append(research_latest)
         latest = max(dates) if dates else None
         primary = next((a for a in artifacts if a["exists"] and a["rows"]), None) or (artifacts[0] if artifacts else None)
         lag = None
@@ -446,12 +461,17 @@ def build_pool() -> dict:
             "schedule": item.get("schedule", ""),
             "ledger_sources": item.get("ledger_sources", []),
             "selection_source": item.get("selection_source", ""),
+            "ranking_eligible": item.get("ranking_eligible", True),
+            "ranking_reason": item.get("ranking_reason", ""),
             "performance": performance_for(item["id"], latest),
             "latest_date": latest,
             "lag_days": lag,
             "fresh": fresh,
-            "n_picks": primary["rows"] if primary else None,
+            # A research-only curve artifact is not a daily stock list; do not label
+            # its NAV row count as picks in the strategy pool card.
+            "n_picks": primary["rows"] if primary and item.get("selection_source") else None,
             "n_snapshots": history_count,
+            "research_latest_date": research_latest,
             "history_dir": history_dir,
             "artifacts": artifacts,
             "metrics": _metrics_from_files(

@@ -914,6 +914,8 @@ export interface StrategyPerformanceCurve {
   dates: string[]
   nav: number[]
   benchmark_nav: number[]
+  comparators?: { id: string; name: string; nav: number[]; metrics: Record<string, number | null> }[]
+  annualization?: string
   metrics: Record<string, number | null>
   benchmark_metrics: Record<string, number | null>
   excess_return?: number
@@ -927,6 +929,7 @@ export interface StrategyPerformance {
 }
 
 export interface StrategyPoolEntry {
+  factor_design?: { family_id: string; decision_type: string; implementation_version: string; benchmark_id: string | null; factor_refs: { factor_id: string; version: number }[] } | null
   id: string
   name: string
   group: string

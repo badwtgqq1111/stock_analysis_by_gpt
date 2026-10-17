@@ -41,6 +41,12 @@ dev = [
     "pytest",
 ]
 
+[project.optional-dependencies]
+alphaqcm = [
+    "gymnasium>=1.0",
+    "tensorboard>=2.14",
+]
+
 [tool.uv]
 package = false
 

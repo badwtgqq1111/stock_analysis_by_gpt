@@ -39,6 +39,7 @@ STRATEGY_META = {
     "jq_roe_roa": {"label": "动态诊断候选：ROE＋0.25×ROA", "group": "多因子策略"},
     "survey_raw": {"label": "调研回看（原）", "group": "调研"},
     "survey_gate": {"label": "调研回看（门禁）", "group": "调研"},
+    "moneyflow_ml_nb": {"label": "ML选股·剔停（历史研究候选，次日开盘后筛选）", "group": "机器学习研究"},
 }
 _cache: dict[str, object] = {"mtime": None, "frame": None}
 

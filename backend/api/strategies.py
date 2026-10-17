@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.services import strategy_registry as registry
+from backend.services.factor_pool import annotate_strategies
 
 ROOT = Path(__file__).resolve().parents[2]
 POOL_PATH = ROOT / "output/strategy_pool/strategy_pool.json"
@@ -170,7 +171,7 @@ def strategy_pool(refresh: bool = True) -> dict:
             if not payload:
                 raise HTTPException(status_code=500, detail=f"策略池同步失败：{exc}") from exc
             payload = {**payload, "sync_error": str(exc)}
-    return merge_registry_wiring(merge_lists_status(payload))
+    return annotate_strategies(merge_registry_wiring(merge_lists_status(payload)))
 
 
 class CandidateRequest(BaseModel):

@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "families": [
+    {
+      "id": "moneyflow",
+      "name": "主力资金流追踪（大单净流入 + 吸筹形态）",
+      "primary_benchmark": "moneyflow_arm",
+      "market_benchmark": "000905.SH",
+      "variants": [
+        {
+          "id": "moneyflow_arm",
+          "name": "原规则",
+          "decision_type": "rule",
+          "implementation_version": "original",
+          "status": "frozen_reference",
+          "benchmark_id": null,
+          "factor_refs": []
+        },
+        {
+          "id": "moneyflow_factor_equivalent",
+          "name": "等价因子版",
+          "decision_type": "hybrid",
+          "implementation_version": "equivalent_factorized",
+          "status": "research_replay_parity",
+          "benchmark_id": "moneyflow_arm",
+          "factor_refs": [
+            {
+              "factor_id": "mf_strength",
+              "version": 1
+            },
+            {
+              "factor_id": "mf_persistence",
+              "version": 1
+            },
+            {
+              "factor_id": "mf_return20",
+              "version": 1
+            },
+            {
+              "factor_id": "mf_ma20",
+              "version": 1
+            },
+            {
+              "factor_id": "mf_amount20",
+              "version": 1
+            },
+            {
+              "factor_id": "mf_price",
+              "version": 1
+            }
+          ],
+          "gates": [
+            {
+              "factor_id": "mf_strength",
+              "op": ">=",
+              "value": 1.0
+            },
+            {
+              "factor_id": "mf_persistence",
+              "op": ">=",
+              "value": 0.6
+            },
+            {
+              "factor_id": "mf_return20",
+              "op": ">=",
+              "value": -0.1
+            },
+            {
+              "factor_id": "mf_return20",
+              "op": "<=",
+              "value": 0.08
+            },
+            {
+              "factor_id": "mf_price",
+              "op": ">",
+              "other_factor_id": "mf_ma20"
+            },
+            {
+              "factor_id": "mf_amount20",
+              "op": ">=",
+              "value": 20000000
+            },
+            {
+              "factor_id": "mf_price",
+              "op": ">",
+              "value": 2.0
+            }
+          ],
+          "rank": {
+            "factor_id": "mf_strength",
+            "ascending": false,
+            "tie_break": "stock_code_ascending"
+          },
+          "execution": {
+            "max_positions": 5,
+            "max_hold": 10,
+            "stop_pct": 0.08,
+            "stop_basis": "signal_close",
+            "cost_one_way": 0.00155,
+            "signal": "close_t",
+            "entry": "next_open",
+            "holding_clock": "valid_close"
+          }
+        },
+        {
+          "id": "moneyflow_factor_optimized",
+          "name": "组合优化版（待实现）",
+          "decision_type": "hybrid",
+          "implementation_version": "optimized",
+          "status": "planned",
+          "benchmark_id": "moneyflow_arm",
+          "factor_refs": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "namespace": "alpha101_exact71",
+  "formula_count": 71,
+  "source_repo": "https://github.com/ZhuoHan1998/FactorBench-Release",
+  "source_commit": "8dbc5b42e005a4038dd52e4790b30b467a5c1575",
+  "source_file": "factor_mining/methods/alpha101/alpha101.py",
+  "license": "MIT",
+  "reference": "https://arxiv.org/abs/1601.00991",
+  "rank": "same-date cross-sectional percentile rank",
+  "vwap": "OHLC3 proxy by default; native upstream vwap is raw-scale and excluded",
+  "missing_correlation": "undefined => 0, matching FactorBench",
+  "excluded": "30 formulas requiring IndNeutralize; no industry classification in the local panel",
+  "legacy_namespace": "factor_engine.expressions.alpha101 (single-stock time-series proxy, retained for comparison)"
+}

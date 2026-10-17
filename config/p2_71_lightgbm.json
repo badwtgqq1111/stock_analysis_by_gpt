@@ -1,0 +1,22 @@
+{
+  "protocol_version": "p2_71_lgbm_v1",
+  "strategy": "moneyflow_factor_lightgbm",
+  "baseline": "moneyflow_factor_equivalent",
+  "features": ["mf_strength", "mf_persistence", "mf_return20", "price_to_ma20", "log_amount20", "log_price"],
+  "label": "open(t+11)/open(t+1)-1; 10 market-session holding proxy, not realized stop/fees",
+  "horizon_sessions": 10,
+  "train": ["2024-08-27", "2025-06-30"],
+  "validation": ["2025-07-01", "2025-12-31"],
+  "evaluation": ["2026-01-05", "2026-10-15"],
+  "evaluation_kind": "retrospective holdout, not blind OOS; previously researched historical data",
+  "parameters": {
+    "objective": "regression", "n_estimators": 100, "num_leaves": 7,
+    "learning_rate": 0.03, "min_child_samples": 100, "reg_lambda": 1.0,
+    "random_state": 71, "n_jobs": 2, "deterministic": true,
+    "force_col_wise": true, "verbosity": -1
+  },
+  "gate": {"cagr_tolerance": 0.0, "max_drawdown_extra": 0.03, "min_evaluation_returns": 252},
+  "selection": "one prespecified model; validation gate before evaluation; no test-based model/parameter selection",
+  "promotion": "require validation and holdout CAGR >= BOTH paired baselines, drawdown <= baseline+3pp, >=252 returns and PIT/execution/forward checks; otherwise retain baseline",
+  "dependencies": "independent factor_lightgbm + factor_replay; no legacy training/preselect/PK/risk"
+}

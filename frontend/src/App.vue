@@ -64,6 +64,7 @@ const navGroups = [
     links: [
       { to: '/agent', label: '投研执行台' },
       { to: '/strategies', label: '策略池' },
+      { to: '/factors', label: '因子池' },
       { to: '/factor-ic', label: '因子 IC' },
       { to: '/attribution', label: '选股归因' },
     ],

@@ -13,6 +13,7 @@
 
 - [环境部署与检查](./runbooks/environment-setup.md)
 - [A 股数据分层与训练门禁](./runbooks/cn-data-pipeline.md)
+- [P2.71 AlphaQCM 因子挖掘](./runbooks/alphaqcm-research.md)
 
 ## Todo
 

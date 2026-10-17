@@ -1,0 +1,9 @@
+{
+  "protocol_version": "p2_71_institutional_v1",
+  "objective": "mu'w - lambda w'Cov w - gamma turnover",
+  "constraints": ["long_only", "max_weight", "target_gross", "positive_ridge_covariance"],
+  "risk_models": ["trailing_60_session_sample_covariance"],
+  "variants": ["rule_baseline", "institutional_equal_risk", "institutional_conservative"],
+  "selection": "validation-only; no holdout selection",
+  "status": "research_only"
+}

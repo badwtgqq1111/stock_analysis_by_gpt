@@ -1,7 +1,7 @@
 {
   "version": 1,
   "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。 2026-10-13 追加 daily_refresh（每日名单刷新契约）与 selection/curve（抽象层的声明层，由 backend/services/strategy_registry.py 派生给选股结果页 / 曲线 / 导出 / 自选等消费端）。",
-  "updated_at": "2026-10-14",
+  "updated_at": "2026-10-17",
   "strategies": [
     {
       "id": "live_holdings",
@@ -970,6 +970,221 @@
           "history_csv": "output/research/volatility_shadow/arm_select_volrisk.csv",
           "kind": "shadow_account_net",
           "methodology": "scripts/run_volatility_shadow.py；45,000初始资金、统一执行假设；causal_execution=True，t收盘定仓，t+1开盘成交后才记账。研究手动刷新，非实盘。"
+        }
+      }
+    },
+    {
+      "id": "moneyflow_factor_equivalent",
+      "name": "主力资金流追踪（等价因子版）",
+      "group": "因子策略",
+      "kind": "factor_pipeline",
+      "stage": "research",
+      "owner": "research",
+      "tag_class": "info",
+      "summary": "固定6个因子v1的硬门槛+资金流排序；与原规则同公共因果评测器逐笔/NAV等价。展示2024-08-27至2026-10-15研究曲线及中证500；非PIT/盲测/生产收益。",
+      "entry": ".venv/bin/python scripts/p2_71_replay_audit.py",
+      "schedule": "手动研究重算，不接生产调度",
+      "artifacts": [
+        "output/research/p2_71/replay_audit/nav.csv",
+        "output/research/p2_71/replay_audit/manifest.json"
+      ],
+      "no_tracking": true,
+      "date_column": "trade_date",
+      "ledger_sources": [],
+      "daily_refresh": {
+        "mode": "skip",
+        "reason": "冻结研究回放；不生成生产名单或订单。数据日期在策略池明确展示。"
+      },
+      "curve": {
+        "replay": {
+          "format": "p2_71_causal",
+          "nav_csv": "output/research/p2_71/replay_audit/nav.csv",
+          "nav_column": "factor_nav",
+          "manifest": "output/research/p2_71/replay_audit/manifest.json"
+        }
+      }
+    },
+    {
+      "id": "moneyflow_factor_institutional",
+      "name": "主力资金流追踪（机构式组合版）",
+      "group": "因子策略",
+      "kind": "factor_pipeline",
+      "stage": "research",
+      "owner": "research",
+      "tag_class": "info",
+      "summary": "独立因子分数 + 滚动协方差 + 风险厌恶/换手惩罚的长仓目标权重；公共因果回放与传统等价因子版同口径对比。当前留出未达晋级门槛，不接生产调度。",
+      "entry": ".venv/bin/python scripts/p2_71_institutional_study.py",
+      "schedule": "手动研究重算，不接生产调度",
+      "artifacts": [
+        "output/research/p2_71/institutional_v1/institutional_equal_risk_evaluation_nav.csv",
+        "output/research/p2_71/institutional_v1/institutional_conservative_evaluation_nav.csv",
+        "output/research/p2_71/institutional_v1/comparison_nav.csv",
+        "output/research/p2_71/institutional_v1/REPORT.md",
+        "output/research/p2_71/institutional_v1/manifest.json"
+      ],
+      "no_tracking": true,
+      "date_column": "trade_date",
+      "ledger_sources": [],
+      "daily_refresh": {
+        "mode": "skip",
+        "reason": "研究版组合优化；需满足至少252个留出观测、PIT、容量和前向影子后才能候选接线。"
+      },
+      "curve": {
+        "replay": {
+          "format": "p2_71_causal_optimizer",
+          "nav_csv": "output/research/p2_71/institutional_v1/institutional_equal_risk_evaluation_nav.csv",
+          "nav_column": "nav",
+          "benchmark_column": "benchmark_nav",
+          "comparison_csv": "output/research/p2_71/institutional_v1/comparison_nav.csv",
+          "comparators": [
+            {
+              "column": "rule_nav",
+              "name": "传统规则版"
+            },
+            {
+              "column": "factor_nav",
+              "name": "等价因子版"
+            }
+          ],
+          "manifest": "output/research/p2_71/institutional_v1/manifest.json"
+        }
+      }
+    },
+    {
+      "id": "moneyflow_ml_nb",
+      "name": "ML 选股版·剔除涨停开盘（历史研究）",
+      "group": "资金流·机器学习",
+      "kind": "factor_pipeline",
+      "stage": "research",
+      "owner": "research",
+      "tag_class": "info",
+      "summary": "已复现Trae历史结果：累计+249.0%、原244日年化+77.4%、回撤−54.4%；原夏普0.73实为CAGR/波动率。策略池按统一252日和日均收益夏普重新计算。9.5%开盘阈值为粗略代理，历史候选使用次日开盘事后筛选，非当日已知信号；旧回放存在当日收盘定开盘预算等偏差，尚未证明优于规则版。",
+      "entry": ".venv/bin/python scripts/moneyflow_ml.py --bars-start 2024-04-01",
+      "schedule": "手动研究重算，不接生产调度",
+      "artifacts": [
+        "output/results_cn/moneyflow_ml_nb_selection.csv",
+        "output/research/moneyflow_ml/REPORT.md",
+        "output/research/moneyflow_ml/summary.json",
+        "output/research/moneyflow_ml/nav_curves.csv",
+        "output/research/moneyflow_ml/nav_curves.png",
+        "output/research/moneyflow_ml/INTEGRATION_AUDIT.md"
+      ],
+      "history_dir": "output/results_cn/moneyflow_ml_nb_history",
+      "selection_source": "cn_moneyflow_ml_nb",
+      "ledger_sources": [
+        "moneyflow_ml_nb"
+      ],
+      "date_column": "trade_date",
+      "daily_refresh": {
+        "mode": "skip",
+        "reason": "研究版固定walk-forward结果；需重新跑完整实验后再更新名单，不接每日生产刷新。"
+      },
+      "selection": {
+        "label": "ML 选股版·剔除涨停开盘（历史研究）",
+        "note": "事后研究候选：按次日开盘≥信号收盘×1.095过滤，非信号日已知名单，也非实际成交/持仓。最新可核验名单比行情末日早一天；未知次日开盘不推断可成交。20%为单席上限。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/moneyflow_ml_nb_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "model_score",
+          "target_weight",
+          "close",
+          "next_open",
+          "moneyflow_net_z_5d",
+          "moneyflow_positive_ratio_10d",
+          "ret20",
+          "ma20_dev",
+          "record_kind",
+          "note"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve": {
+        "replay": {
+          "format": "research_replay",
+          "nav_csv": "output/research/moneyflow_ml/nav_curves.csv",
+          "nav_column": "ml_full_nb",
+          "benchmark_column": "csi500",
+          "description": "主力资金流ML全市场选股（买入端剔除涨停开盘）独立研究回放；同规则版执行参数，回顾式OOS非生产业绩。",
+          "methodology": "Trae历史walk-forward研究；每日Top5候选，最多5仓，次日开盘成交，持有10个有效收盘日/信号收盘−8%止损，每边15.5bp（双边31bp）；开盘9.5%阈值仅粗略代理，历史名单次日开盘后筛选，不补足Top5；当前股票池非PIT。旧引擎开盘预算引用当日close、缺价漏估，收益未作可执行性背书。主榜252日复合/常规日均收益夏普，与原报告244日、CAGR除波动率口径不同。"
+        }
+      },
+      "no_tracking": true,
+      "ranking_eligible": false,
+      "ranking_reason": "历史研究仅展示：次日开盘事后筛选及旧回放偏差尚未完成统一因果账本复核，暂不参与收益排名。"
+    },
+    {
+      "id": "brain_quality_lowpe_momentum",
+      "name": "质量-低估值-动量（头脑风暴）",
+      "group": "因子策略",
+      "kind": "factor_pipeline",
+      "stage": "research",
+      "owner": "research",
+      "tag_class": "ok",
+      "summary": "头脑风暴候选1：rank(roe) - rank(pe_ind_pct) + 0.5*rank(20日动量)，300只流动性面板top20等权、20日调仓、t+1开盘、每边15.5bp。2023-01-03至2026-10-15累计+27.63%、252日年化+6.97%、最大回撤−23.90%、Sharpe+0.440；同期中证500累计+13.66%、年化+3.60%，相对累计超额+12.30%。研究阶段，不接生产调度。",
+      "entry": ".venv/bin/python scripts/p2_71_brainstorm_strategies.py --output output/research/p2_71/brainstorm_strategies --start 2023-01-01 --end 2026-10-15 --assets 300",
+      "schedule": "手动研究重算，不接生产调度",
+      "artifacts": [
+        "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/nav.csv",
+        "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/metrics.json",
+        "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/REPORT.md"
+      ],
+      "no_tracking": true,
+      "date_column": "trade_date",
+      "ledger_sources": [],
+      "daily_refresh": {
+        "mode": "skip",
+        "reason": "头脑风暴研究因子；不生成生产名单或订单。"
+      },
+      "curve": {
+        "replay": {
+          "format": "research_replay",
+          "nav_csv": "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/nav.csv",
+          "nav_column": "nav",
+          "benchmark_column": "benchmark_nav",
+          "description": "质量-低估值-动量：rank(roe) - rank(pe_ind_pct) + 0.5*rank(20d momentum)，top20等权、20日调仓、t+1开盘、15.5bp/边。",
+          "methodology": "300只训练期流动性面板；截面rank按同日有效股票计算；2023-01-03至2026-10-15回顾式研究；分数股、close估值、期末不强平；未计整手、涨跌停/ST/停牌、容量和冲击。"
+        }
+      }
+    },
+    {
+      "id": "brain_panic_reversal_quality",
+      "name": "恐慌反转-质量过滤（头脑风暴）",
+      "group": "因子策略",
+      "kind": "factor_pipeline",
+      "stage": "research",
+      "owner": "research",
+      "tag_class": "info",
+      "summary": "头脑风暴候选2：单日跌幅≤−6%、量比≥2、close<MA20、PE行业分位≤20%；次日收涨且资金流z5>0，再次日开盘入场；最多10仓，持有20日或跌破恐慌低点退出，每边15.5bp。2023-01-03至2026-10-15共40个触发，累计+1.36%、年化+0.37%、最大回撤−2.20%、Sharpe+0.216；同期中证500累计+13.66%、年化+3.60%，相对超额−10.82%。低暴露事件策略，不接生产调度。",
+      "entry": ".venv/bin/python scripts/p2_71_brainstorm_strategies.py --output output/research/p2_71/brainstorm_strategies --start 2023-01-01 --end 2026-10-15 --assets 300",
+      "schedule": "手动研究重算，不接生产调度",
+      "artifacts": [
+        "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/nav.csv",
+        "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/metrics.json",
+        "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/REPORT.md"
+      ],
+      "no_tracking": true,
+      "date_column": "trade_date",
+      "ledger_sources": [],
+      "daily_refresh": {
+        "mode": "skip",
+        "reason": "事件型头脑风暴研究；不生成生产名单或订单。"
+      },
+      "curve": {
+        "replay": {
+          "format": "research_replay",
+          "nav_csv": "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/nav.csv",
+          "nav_column": "nav",
+          "benchmark_column": "benchmark_nav",
+          "description": "恐慌反转-质量过滤：恐慌日−6%、量比2、PE行业分位≤20%，次日收涨且资金流z5>0后再次日开盘入场；最多10仓，20日/恐慌低点退出，15.5bp/边。",
+          "methodology": "300只训练期流动性面板；事件型长仓回测，现金闲置；2023-01-03至2026-10-15回顾式研究；分数股、close估值、期末不强平；未计整手、涨跌停/ST/停牌、容量和冲击。"
         }
       }
     }

@@ -616,6 +616,33 @@ def read_mainforce_arm_history() -> list[dict]:
     return rows
 
 
+def read_moneyflow_ml_nb_history() -> list[dict]:
+    """研究版 ML 全市场选股（剔除涨停开盘）历史快照 → 台账。"""
+    rows = []
+    hist = RESULTS / "moneyflow_ml_nb_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "moneyflow_ml_nb",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("model_score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "note": (f"LightGBM预测分数 {r.get('model_score')}｜历史研究候选，次日开盘后筛选，非当日已知信号；20%为席位上限"),
+                "file": f"moneyflow_ml_nb_history/{path.name}",
+            })
+    return rows
+
+
 def read_first_ban_lowxi_history() -> list[dict]:
     """首板低吸（社区策略）的历史快照 → 台账（**反例档案**：负期望，只为对照与追溯）。
 
@@ -733,7 +760,8 @@ def main() -> int:
                           + read_arm_concept_history() + read_rot_arm_history()
                           + read_box_arm_history() + read_first_ban_lowxi_history()
                           + read_wyckoff_arm_history() + read_moneyflow_arm_history()
-                          + read_mainforce_arm_history() + read_donchian_breakout_history()
+                          + read_mainforce_arm_history() + read_moneyflow_ml_nb_history()
+                          + read_donchian_breakout_history()
                           + read_jq_history())
     if ledger.empty:
         raise SystemExit("三个来源都没读到选股记录")

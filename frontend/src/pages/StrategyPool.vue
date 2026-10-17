@@ -51,6 +51,12 @@
         </p>
       </div>
 
+      <div class="panel">
+        <b>P2.71 策略设计：</b>决策类型与实现版本分开登记；原规则、等价因子版、组合优化版属于同一策略家族。
+        <router-link to="/factors">打开因子池与版本对照</router-link>
+        <select v-model="designFilter" aria-label="决策类型筛选"><option value="all">全部决策类型</option><option value="rule">规则</option><option value="factor_combination">因子组合</option><option value="hybrid">混合</option><option value="unknown">未标注</option></select>
+        <select v-model="versionFilter" aria-label="实现版本筛选"><option value="all">全部实现版本</option><option value="original">原版</option><option value="equivalent_factorized">等价因子版</option><option value="optimized">优化版</option></select>
+      </div>
       <!-- ── 主区：左侧策略列表 + 右侧详情 ─────────────────────────────── -->
       <div class="pool-layout">
         <aside class="pool-side">
@@ -90,6 +96,7 @@
                         :title="`按相对中证500 排名：第 ${s.excess_rank.rank} / ${s.excess_rank.of} 名｜窗口 ${s.excess_rank.window || '—'}`">
                     #{{ s.excess_rank.rank }}</span>
                   <span class="si-name">{{ s.name }}</span>
+                  <span v-if="s.factor_design" class="tiny dim">{{ s.factor_design.family_id }} · {{ s.factor_design.decision_type }} / {{ s.factor_design.implementation_version }}</span>
                   <span class="tag" :class="detailOf(s).identity.groupClass">{{ s.group }}</span>
                 </div>
                 <div class="si-row">
@@ -148,7 +155,7 @@
                 （{{ current.curve.startDate }} ~ {{ current.curve.endDate }}）</template>
             </div>
             <div class="dh-actions">
-              <a class="btn-ghost btn-sm" :href="selectionLink(entryById(current.identity.id))">看最新名单 →</a>
+              <a v-if="entryById(current.identity.id)?.selection_source" class="btn-ghost btn-sm" :href="selectionLink(entryById(current.identity.id))">看最新名单 →</a>
               <a class="btn-ghost btn-sm" href="#/calendar">选股日历 →</a>
             </div>
           </div>
@@ -482,10 +489,14 @@ const rankBasis = computed(() => {
 })
 const rankingsCaveat = computed(() => pool.value?.rankings?.caveat || '')
 
+const designFilter = ref('all')
+const versionFilter = ref('all')
 const visible = computed(() => {
   const q = query.value.trim().toLowerCase()
   const rows = (pool.value?.strategies || []).filter((s) => {
     const d = details.value[s.id]
+    if (designFilter.value !== 'all' && (s.factor_design?.decision_type || 'unknown') !== designFilter.value) return false
+    if (versionFilter.value !== 'all' && s.factor_design?.implementation_version !== versionFilter.value) return false
     if (filter.value === 'production' && s.stage !== 'production') return false
     if (filter.value === 'candidate' && s.stage !== 'candidate') return false
     if (filter.value === 'positive' && !((d?.curve.total ?? 0) > 0)) return false

@@ -1,0 +1,9 @@
+{
+  "protocol_version": "p2_71_probability_v1",
+  "events": "factor predicates are events; hard AND is joint-event membership",
+  "probability": "empirical CDF fitted on train only",
+  "independence_product": "P(A and B) approximately product P(A)P(B), diagnostic assumption only",
+  "logit_sum": "weighted log-odds ranking, not calibrated probability",
+  "selection": "validation-only; no holdout selection",
+  "status": "research_only"
+}

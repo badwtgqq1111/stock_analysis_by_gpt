@@ -1,0 +1,9 @@
+{
+  "protocol_version": "p2_71_trade_aligned_v1",
+  "label": "next-open entry, signal-close minus 8% stop, 10 valid-close sessions, next-open exit, both-side 15.5bp fees",
+  "models": ["ridge", "extra_trees", "hist_gradient_boosting"],
+  "blend_alphas": [0.25, 0.5],
+  "selection": "validation-only; rule rank remains the anchor; no holdout selection",
+  "promotion": "validation and frozen holdout CAGR not below paired baselines, >=252 returns, PIT/execution/forward gates",
+  "status": "research_only"
+}

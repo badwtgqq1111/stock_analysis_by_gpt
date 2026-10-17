@@ -1,0 +1,9 @@
+{
+  "protocol_version": "p2_71_model_matrix_v1",
+  "models": ["ridge", "elasticnet", "logistic", "extra_trees", "random_forest", "hist_gradient_boosting"],
+  "selection": "validation only; no holdout parameter or model selection",
+  "features": "the frozen six causal factor transforms from p2_71_lightgbm.json",
+  "replay": "same independent factor_replay, costs and exits as moneyflow_factor_equivalent",
+  "promotion": "validation and frozen holdout CAGR not below both baselines, drawdown within +3pp, at least 252 returns, then PIT/execution/forward gates",
+  "status": "research_only"
+}

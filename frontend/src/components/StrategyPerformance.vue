@@ -20,6 +20,7 @@
     </template>
     <p v-else class="hint tiny">{{ curve?.reason || '历史不足：等待归档名单和后续交易日行情，暂未生成中证500对比曲线。' }}</p>
     <p v-if="curve?.nav?.length && curve.reason" class="hint tiny">{{ curve.reason }}</p>
+    <p v-if="curve?.comparators?.length" class="hint tiny">原规则同评测器净值与等价因子版重合；不是两份独立alpha。旧规则页面的legacy曲线使用不同执行口径，直接比较其差值不代表模型增益。</p>
     <p class="tiny dim">{{ curve?.methodology || '统一基准：中证500（000905.SH）。' }}</p>
     <p class="tiny" v-if="curve?.kind">
       当前曲线：<b>{{ curve.kind === 'shadow_account_net' ? '模拟盘净值（含成本）'
@@ -54,11 +55,13 @@ const curve = computed(() => props.data?.[mode.value])
 const series = computed(() => curve.value ? [
   { name: mode.value === 'research' ? '研究回测净值' : '名单跟踪毛净值', color: 'var(--accent-gold)', points: curve.value.nav },
   { name: '中证500', color: 'var(--accent-blue)', points: curve.value.benchmark_nav },
+  ...(curve.value.comparators || []).map(c => ({ name: c.name, color: 'var(--accent-green)', points: c.nav })),
 ] : [])
 const metricDefs = [
   { key: 'total_return', label: '累计收益', pct: true },
   { key: 'max_drawdown', label: '最大回撤', pct: true },
-  { key: 'annual_return', label: '年化收益', pct: true },
+  { key: 'annual_return', label: '年化收益（252日）', pct: true },
+  { key: 'calendar_cagr', label: '日历年化（365.25天）', pct: true },
   { key: 'calmar', label: '卡玛', pct: false },
   { key: 'sharpe_rf0', label: '夏普（无风险=0）', pct: false },
 ]

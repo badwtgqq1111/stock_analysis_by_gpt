@@ -130,7 +130,9 @@ def track(targets: dict, bench: pd.Series, bars: pd.DataFrame) -> dict:
 
 
 def replay(path: Path, bench: pd.Series, *, strategy_id: str = "jq_multi_factor_size_roe",
-           description: str | None = None) -> dict:
+           description: str | None = None, comparison_csv: str | None = None,
+           comparators: list[dict] | None = None, nav_column: str = "nav",
+           benchmark_column: str | None = None, methodology: str | None = None) -> dict:
     """读独立回放的 nav.csv（列：`trade_date` + `nav`）。
 
     `description` 优先用声明层的 `curve.replay.description`；没有就退回下面这张老表，
@@ -145,22 +147,59 @@ def replay(path: Path, bench: pd.Series, *, strategy_id: str = "jq_multi_factor_
         f"{strategy_id} 独立研究回放（口径见该策略的 curve.json / REPORT.md）"
     frame = pd.read_csv(path, parse_dates=["trade_date"]).set_index("trade_date")
     frame = frame.sort_index()
-    if frame.index.duplicated().any() or not np.isfinite(frame.nav).all() or (frame.nav <= 0).any():
+    if nav_column not in frame.columns:
+        raise ValueError(f"Replay NAV column missing: {nav_column}")
+    nav_raw = pd.to_numeric(frame[nav_column], errors="coerce")
+    if frame.empty or frame.index.hasnans or frame.index.duplicated().any() or nav_raw.isna().any() or not np.isfinite(nav_raw).all() or (nav_raw <= 0).any():
         raise ValueError("Invalid replay NAV")
     expected = bench.loc[frame.index.min():frame.index.max()]
     if not expected.index.equals(frame.index):
         raise ValueError("Replay calendar differs from CSI500 calendar")
-    nav = (frame.nav / frame.nav.iloc[0]).tolist()
+    if not np.isfinite(expected).all() or (expected <= 0).any():
+        raise ValueError("Invalid CSI500 prices")
+    if benchmark_column:
+        if benchmark_column not in frame.columns:
+            raise ValueError(f"Replay benchmark column missing: {benchmark_column}")
+        supplied = pd.to_numeric(frame[benchmark_column], errors="coerce")
+        if not np.isfinite(supplied).all() or (supplied <= 0).any():
+            raise ValueError("Invalid replay benchmark NAV")
+        if not np.allclose(supplied / supplied.iloc[0], expected / expected.iloc[0], rtol=2e-6, atol=2e-6):
+            raise ValueError("Replay benchmark disagrees with CSI500 prices")
+    nav = (nav_raw / nav_raw.iloc[0]).tolist()
     bnav = (expected / expected.iloc[0]).tolist()
-    return {"status": "ok", "kind": "research_replay", "strategy_id": strategy_id,
+    result = {"status": "ok", "kind": "research_replay", "strategy_id": strategy_id,
             "benchmark_code": "000905.SH",
             "benchmark_name": "中证500", "start_date": str(frame.index[0].date()),
             "end_date": str(frame.index[-1].date()), "dates": [str(d.date()) for d in frame.index],
             "nav": nav, "benchmark_nav": bnav, "metrics": metrics(nav),
+            "observations": len(nav) - 1,
             "benchmark_metrics": metrics(bnav), "excess_return": nav[-1] / bnav[-1] - 1,
             "reason": "独立研究回放，不是每日名单跟踪或实盘业绩。",
-            "methodology": description + "；15交易日调仓，次日开盘成交，含研究费用模型、分数股；非每日名单跟踪或生产账户。",
+            "methodology": methodology or (description + "；15交易日调仓，次日开盘成交，含研究费用模型、分数股；非每日名单跟踪或生产账户。"),
             "source": str(path.relative_to(ROOT))}
+    # Optional paired curves let a research variant show its frozen traditional
+    # comparator on the same dates.  They are normalized only for display and
+    # never participate in selection or ranking.
+    if comparison_csv and comparators:
+        compare_path = ROOT / comparison_csv
+        if compare_path.exists():
+            compare = pd.read_csv(compare_path, parse_dates=["trade_date"]).set_index("trade_date")
+            if compare.index.equals(frame.index):
+                paired = []
+                for spec in comparators:
+                    column = str(spec.get("column", ""))
+                    name = str(spec.get("name") or column)
+                    if column not in compare.columns:
+                        continue
+                    values = pd.to_numeric(compare[column], errors="coerce")
+                    if values.isna().any() or (values <= 0).any():
+                        continue
+                    normalized = values / values.iloc[0]
+                    paired.append({"id": column, "name": name,
+                                   "nav": normalized.tolist(), "metrics": metrics(normalized.tolist())})
+                if paired:
+                    result["comparators"] = paired
+    return result
 
 
 LEDGER = ROOT / "output/results_cn/selection_ledger.parquet"
@@ -355,8 +394,24 @@ def build() -> dict:
             continue
         _path = ROOT / str(_rel)
         if _path.exists():
-            rows[_spec["id"]]["research"] = replay(_path, bench, strategy_id=_spec["id"],
-                                                   description=_replay.get("description"))
+            if _replay.get("format") == "p2_71_causal":
+                from backend.services.factor_research_curve import read_curve
+                try:
+                    rows[_spec["id"]]["research"] = read_curve(ROOT, _replay, bench, _spec["id"])
+                except (ValueError, KeyError, OSError, AssertionError) as exc:
+                    rows[_spec["id"]]["research"] = {"status": "data_gap", "kind": "factor_causal_replay_net",
+                        "reason": f"公共回放审计产物不一致: {exc}", "dates": [], "nav": [],
+                        "benchmark_nav": [], "metrics": {}, "benchmark_metrics": {}}
+            else:
+                rows[_spec["id"]]["research"] = replay(
+                    _path, bench, strategy_id=_spec["id"],
+                    description=_replay.get("description"),
+                    comparison_csv=_replay.get("comparison_csv"),
+                    comparators=_replay.get("comparators"),
+                    nav_column=_replay.get("nav_column", "nav"),
+                    benchmark_column=_replay.get("benchmark_column"),
+                    methodology=_replay.get("methodology"),
+                )
     # ── 模拟盘（影子组合）净值 → 长窗口对照曲线 ────────────────────────────────
     # 为什么需要：`tracking` 要求**连续交易日**都有归档名单（见 METHOD），而按决策日归档的策略
     # （rot_arm 这类，决策日稀疏到每周/每月）只能拿到"最近几个连续交易日"的样本

@@ -1,0 +1,8 @@
+{
+  "protocol_version": "p2_71_drawdown_overlay_v1",
+  "variants": ["drawdown_throttle", "benchmark_regime", "cross_sectional_volatility_filter", "combined"],
+  "drawdown_throttle": "soft/hard thresholds scale only new entries; no forced liquidation",
+  "selection": "validation-only; holdout frozen diagnostic",
+  "promotion": "CAGR not lower than paired baseline, drawdown within +3pp, >=252 returns, PIT/execution/forward gates",
+  "status": "research_only"
+}

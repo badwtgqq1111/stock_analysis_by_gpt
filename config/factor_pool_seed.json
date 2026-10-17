@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "factors": [
+    {
+      "factor_id": "mf_strength",
+      "name": "主力资金流强度",
+      "formula": "moneyflow_net_z_5d",
+      "description": "当日net_mf_amount减向后5观测均值，再除以该窗口样本标准差(ddof=1,min_periods=2,含当日)。完整5点理论界约±4/√5≈1.788854，非硬截断、非5日累计净额的z。门槛≥1.0，降序。显式source=moneyflow，沿用原策略总净额输入；并非严格仅大单口径。",
+      "sources": [
+        {
+          "title": "本项目主力资金流规则（非AlphaQCM论文公式）",
+          "url": "",
+          "locator": "scripts/moneyflow_study.py:DEFAULTS/build_signals；原始规则冻结于2026-10-16"
+        },
+        {
+          "title": "本地资金流特征定义与历史尾部修复",
+          "url": "",
+          "locator": "data/ingest/providers/cn_moneyflow.py:build_moneyflow_features；data/ingest/service.py:rebuild_moneyflow_rolling_tail",
+          "date": "2026-10-16"
+        }
+      ],
+      "change_note": "P2.71原规则拆解，未优化未评估",
+      "action": "seed"
+    },
+    {
+      "factor_id": "mf_persistence",
+      "name": "主力净流入持续性",
+      "formula": "moneyflow_positive_ratio_10d",
+      "description": "显式source=moneyflow；上游(net_mf_amount>0)的向后10观测均值(min_periods=1，含当日)，门槛≥0.6。上游缺失净额比较为false会计作非正；本层不再填零。发布时点待审计。",
+      "sources": [
+        {
+          "title": "本项目主力资金流规则（非AlphaQCM论文公式）",
+          "url": "",
+          "locator": "scripts/moneyflow_study.py:DEFAULTS/build_signals；原始规则冻结于2026-10-16"
+        },
+        {
+          "title": "本地资金流特征定义与历史尾部修复",
+          "url": "",
+          "locator": "data/ingest/providers/cn_moneyflow.py:build_moneyflow_features；data/ingest/service.py:rebuild_moneyflow_rolling_tail",
+          "date": "2026-10-16"
+        }
+      ],
+      "change_note": "P2.71原规则拆解，未优化未评估",
+      "action": "seed"
+    },
+    {
+      "factor_id": "mf_return20",
+      "name": "20期涨幅",
+      "formula": "close / delay(close, 20) - 1",
+      "description": "close为当日复权收盘；delay(close,20)为此前20条交易观测收盘；1用于转成收益率。门槛[-0.10,0.08]，满21条观测才有值。",
+      "sources": [
+        {
+          "title": "本项目主力资金流规则（非AlphaQCM论文公式）",
+          "url": "",
+          "locator": "scripts/moneyflow_study.py:DEFAULTS/build_signals；原始规则冻结于2026-10-16"
+        }
+      ],
+      "change_note": "P2.71原规则拆解，未优化未评估",
+      "action": "seed"
+    },
+    {
+      "factor_id": "mf_ma20",
+      "name": "20期均线",
+      "formula": "mean(close, 20)",
+      "description": "close为当日复权收盘；20表示含当日的20条交易观测。价格必须严格高于均线；满20条才有值。",
+      "sources": [
+        {
+          "title": "本项目主力资金流规则（非AlphaQCM论文公式）",
+          "url": "",
+          "locator": "scripts/moneyflow_study.py:DEFAULTS/build_signals；原始规则冻结于2026-10-16"
+        }
+      ],
+      "change_note": "P2.71原规则拆解，未优化未评估",
+      "action": "seed"
+    },
+    {
+      "factor_id": "mf_amount20",
+      "name": "20期均成交额",
+      "formula": "mean(amount, 20)",
+      "description": "amount为日线成交额；20表示含当日20条观测；等价版门槛20,000,000（沿用原规则，待独立单位审计）。",
+      "sources": [
+        {
+          "title": "本项目主力资金流规则（非AlphaQCM论文公式）",
+          "url": "",
+          "locator": "scripts/moneyflow_study.py:DEFAULTS/build_signals；原始规则冻结于2026-10-16"
+        }
+      ],
+      "change_note": "P2.71原规则拆解，未优化未评估",
+      "action": "seed"
+    },
+    {
+      "factor_id": "mf_price",
+      "name": "价格下限输入",
+      "formula": "close",
+      "description": "close为当日复权收盘价，严格大于2元才通过；历史复权版本须一致。",
+      "sources": [
+        {
+          "title": "本项目主力资金流规则（非AlphaQCM论文公式）",
+          "url": "",
+          "locator": "scripts/moneyflow_study.py:DEFAULTS/build_signals；原始规则冻结于2026-10-16"
+        }
+      ],
+      "change_note": "P2.71原规则拆解，未优化未评估",
+      "action": "seed"
+    }
+  ]
+}

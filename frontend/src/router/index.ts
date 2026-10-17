@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
 const routes = [
+  { path: '/factors', name: 'factors', component: () => import('@/pages/FactorPool.vue') },
   { path: '/', name: 'selection', component: () => import('@/pages/StockSelection.vue') },
   { path: '/factor-ic', name: 'factor-ic', component: () => import('@/pages/FactorIC.vue') },
   { path: '/kline', name: 'kline', component: () => import('@/pages/KlinePage.vue') },

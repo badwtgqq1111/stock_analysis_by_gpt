@@ -1,0 +1,9 @@
+{
+  "protocol_version": "p2_71_composition_v1",
+  "and": "hard conjunction of registered predicates; NaN fails closed",
+  "numeric_and": "product of 0/1 indicators; soft t-norm is diagnostics only",
+  "ranking": ["baseline_strength", "equal_cross_sectional_rank", "train_ic_weighted_rank", "train_pca", "rule_rank_75_pca_rank_25"],
+  "pca": "fit mean/scale/one component and label sign on train only",
+  "selection": "validation only; no holdout selection",
+  "status": "research_only"
+}

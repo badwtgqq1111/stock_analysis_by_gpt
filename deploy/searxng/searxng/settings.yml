@@ -3,6 +3,11 @@ use_default_settings:
     keep_only:
       - bing
       - duckduckgo
+      - baidu
+      - sogou
+      - 360search
+      - google
+      - quark
 
 server:
   secret_key: "replace-with-random-secret"
@@ -28,4 +33,14 @@ engines:
   - name: bing
     disabled: false
   - name: duckduckgo
+    disabled: false
+  - name: baidu
+    disabled: false
+  - name: sogou
+    disabled: false
+  - name: 360search
+    disabled: false
+  - name: google
+    disabled: false
+  - name: quark
     disabled: false

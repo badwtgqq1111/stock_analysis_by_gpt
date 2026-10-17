@@ -327,6 +327,19 @@ export async function getAutomationStatus(): Promise<AutomationStatus> {
   return (await resp.json()) as AutomationStatus
 }
 
+export async function triggerAutomation(body: {
+  trade_date?: string; force?: boolean
+}): Promise<{ ok: boolean; pid: number; trade_date: string; log: string }> {
+  const resp = await fetch('/api/automation/trigger', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force: true, ...body }),
+  })
+  const payload = await resp.json().catch(() => ({}))
+  if (!resp.ok) throw new Error(payload?.detail || `HTTP ${resp.status}`)
+  return payload
+}
+
 // ─── 组合绩效（对照聚宽收益概述）───
 export async function getPerformanceSummary(): Promise<PerformanceSummary> {
   const resp = await fetch('/api/performance')
@@ -685,6 +698,13 @@ export async function getStockAi(code: string, limit = 20): Promise<import('@/ty
 /** AI 结论按决策日的覆盖情况（哪个交易日已经分析过、买/持/卖分布）。 */
 export async function getAiPicksSummary(): Promise<import('@/types/api').AiPicksSummary> {
   const { data } = await http.get('/ai-picks/summary')
+  return data
+}
+
+// ─── 逐股 Bynewlt 研报多空调研（K 线页；只读盘不发计费请求）──────────────────
+/** 这只票的研报调研：覆盖状态 + 证据摘要 +（若有）逐条核对后的多空稿。 */
+export async function getStockResearch(code: string): Promise<import('@/types/api').StockResearchResponse> {
+  const { data } = await http.get(`/stocks/${encodeURIComponent(code)}/research`)
   return data
 }
 

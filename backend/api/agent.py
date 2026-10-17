@@ -75,7 +75,8 @@ FAMILIES: list[dict] = [
             {"key": "moneyflow", "label": "资金流（主力追踪）",
              "ids": ["moneyflow_arm", "mainforce_arm"]},
             {"key": "formula", "label": "公式打分（不训练）", "ids": ["jq_multi_factor_size_roe", "jq_roe_roa_diagnostic"]},
-            {"key": "arm", "label": "手臂规则（行业/概念/宽度）", "ids": ["arm_concept", "rot_arm", "arm_select"]},
+            {"key": "arm", "label": "手臂规则（行业/概念/宽度）",
+             "ids": ["arm_concept", "rot_arm", "arm_select", "arm_select_volrisk"]},
         ],
     },
     {
@@ -84,7 +85,10 @@ FAMILIES: list[dict] = [
         "hint": "证据单位是「一个截面/一个组合」：秩 IC / ICIR / NW t / BH-FDR + 组合级逐期配对",
         "branches": [
             {
-                "key": "linear", "label": "B1 线性组合", "ids": [],
+                "key": "linear", "label": "B1 线性组合",
+                "ids": ["moneyflow_factor_equivalent", "moneyflow_factor_institutional",
+                        "moneyflow_ml_nb", "brain_quality_lowpe_momentum",
+                        "brain_panic_reversal_quality"],
                 "note": "等权 / IC 加权线性合成（base_v1、llm_new、combo_50_50），不训练模型",
                 "evidence": ["output/research/llm_factor_mining_20261007_155107/sleeve_oos_v4d/arms_summary_daily.csv"],
             },
@@ -92,7 +96,7 @@ FAMILIES: list[dict] = [
                 # cn_ensemble_pk_legacy（2026-10-12）：旧 PK 口径的对照臂，和 cn_ensemble 同属
                 # 这条流水线（只是被生产替换掉了），所以放同一支里，不要另开一族。
                 "key": "nonlinear", "label": "B2 非线性组合",
-                "ids": ["cn_ensemble", "cn_ensemble_pk_legacy"],
+                "ids": ["cn_ensemble", "cn_ensemble_pk_legacy", "cn_ensemble_volcap"],
                 "note": "LightGBM / Transformer / CNN；生产 ensemble_weights = {lightgbm 1.00, transformer 0.00}；"
                         "cn_ensemble_pk_legacy = 旧 PK 口径对照（stage=research，已不进生产）",
                 "evidence": ["output/models/cn/lightgbm", "output/models/cn/transformer", "output/models/cn/cnn"],

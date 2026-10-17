@@ -18,7 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ADMITTED = ROOT / "output/research/factor_ic_protocol/factor_ic_admitted.json"
 CONFIG = ROOT / "config/strategies.json"
-ALLOWED_STATUS = {"admitted", "rejected", "excluded", "proposed", "candidate", "in_use", "retired"}
+ALLOWED_STATUS = {"admitted", "rejected", "excluded", "proposed", "candidate", "research", "in_use", "retired"}
 
 
 def _load():

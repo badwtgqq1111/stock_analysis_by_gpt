@@ -985,7 +985,7 @@
       "entry": ".venv/bin/python scripts/p2_71_replay_audit.py",
       "schedule": "手动研究重算，不接生产调度",
       "artifacts": [
-        "output/research/p2_71/replay_audit/nav.csv",
+        "output/research/p2_71/replay_audit/REPORT.md",
         "output/research/p2_71/replay_audit/manifest.json"
       ],
       "no_tracking": true,
@@ -1016,7 +1016,6 @@
       "entry": ".venv/bin/python scripts/p2_71_institutional_study.py",
       "schedule": "手动研究重算，不接生产调度",
       "artifacts": [
-        "output/research/p2_71/institutional_v1/institutional_equal_risk_evaluation_nav.csv",
         "output/research/p2_71/institutional_v1/institutional_conservative_evaluation_nav.csv",
         "output/research/p2_71/institutional_v1/comparison_nav.csv",
         "output/research/p2_71/institutional_v1/REPORT.md",
@@ -1065,7 +1064,6 @@
         "output/results_cn/moneyflow_ml_nb_selection.csv",
         "output/research/moneyflow_ml/REPORT.md",
         "output/research/moneyflow_ml/summary.json",
-        "output/research/moneyflow_ml/nav_curves.csv",
         "output/research/moneyflow_ml/nav_curves.png",
         "output/research/moneyflow_ml/INTEGRATION_AUDIT.md"
       ],
@@ -1132,7 +1130,6 @@
       "entry": ".venv/bin/python scripts/p2_71_brainstorm_strategies.py --output output/research/p2_71/brainstorm_strategies --start 2023-01-01 --end 2026-10-15 --assets 300",
       "schedule": "手动研究重算，不接生产调度",
       "artifacts": [
-        "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/nav.csv",
         "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/metrics.json",
         "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/REPORT.md"
       ],
@@ -1166,7 +1163,6 @@
       "entry": ".venv/bin/python scripts/p2_71_brainstorm_strategies.py --output output/research/p2_71/brainstorm_strategies --start 2023-01-01 --end 2026-10-15 --assets 300",
       "schedule": "手动研究重算，不接生产调度",
       "artifacts": [
-        "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/nav.csv",
         "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/metrics.json",
         "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/REPORT.md"
       ],

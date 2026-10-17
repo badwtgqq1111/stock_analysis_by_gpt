@@ -31,6 +31,7 @@ from backend.api.stock_info import router as stock_info_router
 from backend.api.freshness import router as freshness_router
 from backend.api.strategies import router as strategies_router
 from backend.api.ai_picks import router as ai_picks_router
+from backend.api.stock_research import router as stock_research_router
 from backend.api.agent import router as agent_router
 from backend.api.factor_pool import router as factor_pool_router
 
@@ -83,6 +84,7 @@ app.include_router(stock_info_router)
 app.include_router(freshness_router)
 app.include_router(strategies_router)
 app.include_router(ai_picks_router)
+app.include_router(stock_research_router)
 app.include_router(agent_router)
 app.include_router(factor_pool_router)
 

@@ -11,6 +11,26 @@
       </template>
     </PageHeader>
 
+    <div class="panel trigger-panel">
+      <div class="trigger-row">
+        <div>
+          <h6>手动触发全链路</h6>
+          <p class="hint tiny">
+            使用与 launchd 相同的 <code>run_daily_production.sh</code>；日期默认取最新行情交易日，
+            可改成漏跑日期补跑。已有运行/锁时会拒绝，不会重复启动。
+          </p>
+        </div>
+        <div class="trigger-controls">
+          <input v-model="triggerDate" type="date" :disabled="triggering || isRunning" />
+          <button class="btn-primary" :disabled="triggering || isRunning" @click="triggerFull">
+            {{ triggering ? '启动中…' : '手动触发全链路' }}
+          </button>
+        </div>
+      </div>
+      <p v-if="triggerMessage" class="hint tiny ok-text">{{ triggerMessage }}</p>
+      <p v-if="triggerError" class="hint tiny warn-text">{{ triggerError }}</p>
+    </div>
+
     <StateBlock v-if="error && !status" state="error" title="取不到自动化状态" :detail="error" :retry="reload" />
     <StateBlock v-else-if="!status" state="loading" title="加载中…" />
 
@@ -77,10 +97,14 @@
               <span v-if="runningStage">· 当前：<b>{{ runningStage.name }}</b>
                 <span v-if="runningStage.progress"> {{ runningStage.progress.percent }}%（{{ runningStage.progress.current }}/{{ runningStage.progress.total }}）</span>
               </span>
+              <span v-else-if="status.daily.current" class="dim">
+                · 当前：<b>{{ status.daily.current.file }}</b>
+                <template v-if="status.daily.current.percent != null"> {{ status.daily.current.percent }}%</template>
+              </span>
               <span v-if="status.daily.eta_seconds != null">· 预计剩余 <b>{{ human(status.daily.eta_seconds) }}</b>
                 （约 {{ etaClock }} 完成）</span>
             </div>
-            <div v-if="status.today && !status.today_started" class="dim tiny">
+            <div v-if="status.today && !status.today_started && !isRunning" class="dim tiny">
               今天（{{ status.today }}）还没跑进主阶段<template v-if="status.today_attempts">：
               已触发 {{ status.today_attempts }} 次<template v-if="status.today_last_error">，最近一次失败于
               <b>{{ status.today_last_error }}</b></template></template>；
@@ -89,6 +113,11 @@
             </div>
             <div v-if="status.daily.failed_stage" class="warn-text tiny">
               最近一次失败在此阶段：{{ status.daily.failed_stage }}（后续触发会自动重试）
+            </div>
+            <div v-if="status.last_attempt?.outcome === 'preflight_failed' && !isRunning" class="warn-text tiny">
+              最近一次手动触发（{{ hhmmss(status.last_attempt.started_at) }}，交易日 {{ status.last_attempt.trade_date }}，
+              pid={{ status.last_attempt.pid }}）停在预检：<b>{{ status.last_attempt.error }}</b>，
+              主链路未启动，进度条不会变化。原因见同目录 <code>preflight.log</code>。
             </div>
           </div>
         </div>
@@ -200,7 +229,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { getAutomationStatus, getWebFreshness } from '@/api/client'
+import { getAutomationStatus, getWebFreshness, triggerAutomation } from '@/api/client'
 import type { AutomationStage, AutomationStatus } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
@@ -211,6 +240,10 @@ const status = ref<AutomationStatus | null>(null)
 const freshness = ref<any>(null)
 const error = ref('')
 const loading = ref(false)
+const triggering = ref(false)
+const triggerDate = ref('')
+const triggerMessage = ref('')
+const triggerError = ref('')
 const pollSeconds = 5
 let timer: ReturnType<typeof setInterval> | null = null
 
@@ -218,6 +251,9 @@ async function reload() {
   loading.value = true
   try {
     status.value = await getAutomationStatus()
+    if (!triggerDate.value) {
+      triggerDate.value = status.value.latest_market_date || status.value.trade_date || status.value.today || ''
+    }
     // 体检产物独立于运行状态：加载失败不影响主面板
     try { freshness.value = await getWebFreshness() } catch { /* 忽略 */ }
     error.value = ''
@@ -233,6 +269,27 @@ onMounted(() => {
   timer = setInterval(() => { if (!document.hidden) void reload() }, pollSeconds * 1000)
 })
 onUnmounted(() => { if (timer) clearInterval(timer) })
+
+const isRunning = computed(() => status.value?.daily.state === 'running')
+
+async function triggerFull() {
+  if (!triggerDate.value) {
+    triggerError.value = '请选择要触发的交易日'
+    return
+  }
+  triggering.value = true
+  triggerMessage.value = ''
+  triggerError.value = ''
+  try {
+    const result = await triggerAutomation({ trade_date: triggerDate.value, force: true })
+    triggerMessage.value = `已触发 ${result.trade_date} 全链路，pid=${result.pid}，日志：${result.log}`
+    window.setTimeout(() => { void reload() }, 1500)
+  } catch (e) {
+    triggerError.value = String(e)
+  } finally {
+    triggering.value = false
+  }
+}
 
 const runningStage = computed<AutomationStage | undefined>(
   () => status.value?.daily.stages.find((s) => s.status === 'running'),
@@ -318,6 +375,11 @@ const finRows = computed(() => {
 
 <style scoped>
 .overview { display: flex; gap: var(--sp-4); }
+.trigger-panel { margin-bottom: var(--sp-3); }
+.trigger-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
+.trigger-controls { display: flex; align-items: center; gap: var(--sp-2); }
+.trigger-controls input { width: 150px; }
+.ok-text { color: var(--state-ok); }
 .ov-main { flex: 1; min-width: 0; }
 .ov-line { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }
 .ov-state { font-size: var(--fs-lg); }

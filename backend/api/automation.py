@@ -21,13 +21,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import statistics
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[2]
 DAILY_DIR = ROOT / "output/pipeline_reports/daily"
@@ -38,7 +41,9 @@ COMPLETENESS_JSON = ROOT / "output/data_quality/data_completeness.json"
 
 # 执行顺序与 run_daily_production.sh 保持一致（数据补齐 → 主阶段 → 收尾）
 STAGE_ORDER = [
+    ("data", "benchmark"),
     ("data", "fundamental"),
+    ("data", "macro"),
     ("data", "financials"),
     ("data", "financials_merge"),
     ("main", "daily_bars"),
@@ -57,7 +62,9 @@ STAGE_ORDER = [
     ("tail", "data-completeness"),
 ]
 STAGE_LABEL = {
+    "benchmark": "数据补齐 · 基准指数",
     "fundamental": "数据补齐 · 基础信息/估值/行业",
+    "macro": "数据补齐 · 宏观/流动性",
     "financials": "数据补齐 · 财务财报增量",
     "financials_merge": "数据补齐 · 财务合并",
     "arm_selection": "研究手臂选股",
@@ -65,7 +72,47 @@ STAGE_LABEL = {
     "data-completeness": "数据完整性体检",
 }
 
+# 数据补齐全走 `run_data_step`，日志名是 `data_<step>.log`；分时刷新是 `intraday_refresh.log`。
+# 不映射的话，最长的 fundamental（实测 ~39 分钟）在页面上完全没有"当前阶段"，进度条当然不动。
+STAGE_LOG_ALIAS = {
+    "fundamental": "data_fundamental.log",
+    "macro": "data_macro.log",
+    "financials": "data_financials.log",
+    "financials_merge": "data_financials_merge.log",
+    "intraday-refresh": "intraday_refresh.log",
+}
+# 这些是流水账，不是阶段日志（不能当成"当前阶段"）
+NON_STAGE_LOGS = {"run.log", "preflight.log", "ready_gate.log", "manual_trigger.log"}
+
 router = APIRouter(prefix="/api/automation", tags=["automation"])
+
+
+class TriggerRequest(BaseModel):
+    trade_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    force: bool = True
+
+
+def _latest_market_date() -> str | None:
+    """Latest benchmark session, used as the one-click default for catch-up."""
+    path = ROOT / "assets/data/meta/cn_benchmark_daily.parquet"
+    if not path.exists():
+        return None
+    try:
+        import pandas as pd
+        frame = pd.read_parquet(path, columns=["trade_date"])
+        values = pd.to_datetime(frame["trade_date"], errors="coerce").dropna()
+        return str(values.max().date()) if len(values) else None
+    except Exception:
+        return None
+
+
+def _runner_processes() -> list[int]:
+    try:
+        proc = subprocess.run(["pgrep", "-f", "run_daily_production.sh"],
+                              capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    return [int(x) for x in proc.stdout.split() if x.isdigit()]
 
 _TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(.*)$")
 _START = re.compile(r"start daily production trade_date=(\S+).*dry_run=(\d)")
@@ -100,9 +147,12 @@ def _parse_hms(text: str) -> int:
     return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
 
-def _stage_log_progress(stage: str, log_dir: Path) -> dict | None:
-    """从阶段日志里取 tqdm 的进度/剩余时间（取最后一条完整的进度条行）。"""
-    path = log_dir / f"{stage}.log"
+def _stage_log_path(log_dir: Path, stage: str) -> Path:
+    return log_dir / STAGE_LOG_ALIAS.get(stage, f"{stage}.log")
+
+
+def _progress_from_log(path: Path) -> dict | None:
+    """从日志里取 tqdm 的进度/剩余时间（取最后一条完整的进度条行）。"""
     if not path.exists():
         return None
     text = _read_tail(path).replace("\r", "\n")
@@ -118,6 +168,44 @@ def _stage_log_progress(stage: str, log_dir: Path) -> dict | None:
                 "detail": m.group("label").strip(),
             }
     return None
+
+
+def _stage_log_progress(stage: str, log_dir: Path) -> dict | None:
+    return _progress_from_log(_stage_log_path(log_dir, stage))
+
+
+def _current_activity(log_dir: Path | None, known_stage: str | None) -> dict | None:
+    """页面上"现在到底在干什么"：优先认阶段名，认不出就看最近写入的阶段日志。
+
+    流水线有二十多个 `data-step`（benchmark / macro / boards / adj_factor / ...），
+    STAGE_ORDER 只列了主链路，剩下的步骤以前在页面上完全不可见。
+    """
+    if log_dir is None:
+        return None
+    if known_stage:
+        progress = _stage_log_progress(known_stage, log_dir)
+        return {
+            "name": known_stage,
+            "file": _stage_log_path(log_dir, known_stage).name,
+            "percent": (progress or {}).get("percent"),
+            "eta_s": (progress or {}).get("eta_s"),
+        }
+    candidates = [
+        p for p in log_dir.glob("*.log")
+        if p.name not in NON_STAGE_LOGS and p.name not in STAGE_LOG_ALIAS.values()
+    ]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    if time.time() - newest.stat().st_mtime > 900:   # 15 分钟没写入 ⇒ 不算"正在跑"
+        return None
+    progress = _progress_from_log(newest)
+    return {
+        "name": newest.stem,
+        "file": newest.name,
+        "percent": (progress or {}).get("percent"),
+        "eta_s": (progress or {}).get("eta_s"),
+    }
 
 
 def _historical_medians() -> dict[str, float]:
@@ -195,22 +283,35 @@ def _parse_run(log_dir: Path) -> dict:
             "finished": finished, "failed": failed, "last_log_at": last_ts}
 
 
-def _running_stage(log_dir: Path, steps: dict) -> str | None:
+def _running_stage(log_dir: Path, steps: dict, started_at: str | None = None) -> str | None:
     """正在跑的阶段 = **最后一个**"有日志文件、但没有终态"的阶段。
 
     为什么取"最后一个"而不是"第一个"：早期版本的任务列表里可能根本没有某些阶段
     （例如 19:30 那轮用的还是旧脚本，没有「数据补齐」三步），
     从前往后找会在 `fundamental` 上直接返回 None，于是整页显示"全部 pending"。
     从后往前找则天然跳过这些"本次没包含"的阶段。
+
+    另外只看**本轮开始之后**写过的日志：上一轮中断留下的 `data_fundamental.log`
+    会让新一轮刚起跑就误报"正在跑 fundamental"（2026-10-17 实测）。
     """
     if log_dir is None:
         return None
+    started_ts = None
+    if started_at:
+        try:
+            started_ts = datetime.fromisoformat(started_at).timestamp()
+        except ValueError:
+            started_ts = None
     running = None
     for _group, name in STAGE_ORDER:
         if steps.get(name, {}).get("status") in ("ok", "failed"):
             continue
-        if (log_dir / f"{name}.log").exists():
-            running = name
+        path = _stage_log_path(log_dir, name)
+        if not path.exists():
+            continue
+        if started_ts is not None and path.stat().st_mtime < started_ts:
+            continue
+        running = name
     return running
 
 
@@ -276,6 +377,73 @@ def _sidecar_progress(path: Path, label: str) -> dict:
     }
 
 
+def _last_attempt(log_dir: Path | None) -> dict | None:
+    """最近一次「手动触发全链路」的结局（页面用它解释进度条为什么没动）。
+
+    只看产物：`manual_trigger.json` 给了 pid/时间，`run.log` 里有没有同一时刻之后的
+    `start daily production` 决定主链路是否真的起来了，`manual_trigger.log` 里有没有
+    `preflight FAILED` 决定它是不是死在预检。
+    """
+    if log_dir is None:
+        return None
+    record_path = log_dir / "manual_trigger.json"
+    if not record_path.exists():
+        return None
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        started_at = datetime.fromisoformat(str(record.get("started_at")))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+    started = False
+    for line in _read_tail(log_dir / "run.log", max_bytes=200_000).splitlines():
+        m = _TS.match(line.strip())
+        if not m:
+            continue
+        try:
+            ts = datetime.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        sm = _START.search(m.group(2))
+        if sm and sm.group(2) == "0" and ts >= started_at:
+            started = True
+            break
+
+    error = None
+    for line in reversed(_read_tail(log_dir / "manual_trigger.log", max_bytes=120_000).splitlines()):
+        m = _TS.match(line.strip())
+        if not m:
+            continue
+        try:
+            ts = datetime.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        if ts < started_at:      # 只认本次触发之后的失败，不能把上一轮的错误算到这一轮头上
+            break
+        hit = re.search(r"preflight FAILED|ready-gate FAILED", m.group(2))
+        if hit:
+            error = hit.group(0)
+            break
+
+    pid = record.get("pid")
+    if started:
+        outcome = "started"
+    elif error:
+        outcome = "preflight_failed"
+    elif _pid_alive(pid):
+        outcome = "starting"
+    else:
+        outcome = "exited"
+    return {
+        "trade_date": record.get("trade_date"),
+        "started_at": record.get("started_at"),
+        "pid": pid,
+        "log": record.get("log"),
+        "outcome": outcome,
+        "error": error,
+    }
+
+
 def build_status() -> dict:
     # 日期目录形如 2026-10-08；注意别写成 `name[:4] == "20"`（那是 "2026"，永远不成立 —— 踩过）
     all_dirs = []
@@ -291,11 +459,32 @@ def build_status() -> dict:
     # 正确判据：run.log 里出现过 `start daily production ... dry_run=0`。
     dates = [p for p in all_dirs if _has_real_run(p)]
     log_dir = dates[0] if dates else None
+    # 手动触发的记录可能落在一个「预检就失败、没有 start 行」的目录里（例如补跑某天），
+    # 所以尝试记录单独按 manual_trigger.json 找，不能跟着 log_dir 走。
+    attempt_dirs = [p for p in all_dirs if (p / "manual_trigger.json").exists()]
+    attempt_dir = attempt_dirs[0] if attempt_dirs else None
     parsed = _parse_run(log_dir) if log_dir else {"trade_date": None, "started_at": None, "steps": {}, "finished": False, "failed": None}
+    attempt = _last_attempt(attempt_dir)
+    # 新一轮已经拉起、但还没写 `start daily production` ⇒ 正在跑预检（~3 分钟）。
+    # 此时 run.log 里最后一条 start 属于**上一轮**，直接解析会把上一轮的阶段/进度显示成
+    # "本轮正在跑"（2026-10-17：页面停在 fundamental 76%，预检结束后才跳）。
+    preflight_only = False
+    if attempt and attempt.get("outcome") == "starting":
+        try:
+            triggered = datetime.fromisoformat(str(attempt.get("started_at")))
+            previous = (datetime.fromisoformat(parsed["started_at"])
+                        if parsed.get("started_at") else None)
+        except (ValueError, TypeError):
+            triggered, previous = None, None
+        if triggered is not None and (previous is None or triggered > previous):
+            preflight_only = True
+            parsed = {"trade_date": attempt.get("trade_date"),
+                      "started_at": triggered.strftime("%Y-%m-%d %H:%M:%S"),
+                      "steps": {}, "finished": False, "failed": None, "last_log_at": None}
     steps = parsed["steps"]
     medians = _historical_medians()
 
-    running = _running_stage(log_dir, steps) if log_dir else None
+    running = _running_stage(log_dir, steps, parsed.get("started_at")) if log_dir else None
     lock_pid_raw = _lock_holder()
     lock_alive = _pid_alive(lock_pid_raw)
     # 进程已经不在的锁是**陈旧锁**（trap 没跑到、或进程被杀）。仍然展示会让页面
@@ -316,7 +505,7 @@ def build_status() -> dict:
             if name == running and active:
                 status = "running"
                 progress = _stage_log_progress(name, log_dir) if log_dir else None
-            elif i < running_pos:
+            elif i < running_pos and not preflight_only:
                 status = "not_in_run"
             elif active:
                 status = "pending"
@@ -336,6 +525,18 @@ def build_status() -> dict:
 
     counted = [r for r in rows if r["status"] != "not_in_run"]
     done = sum(1 for r in counted if r["status"] == "ok")
+    # 大进度条不能只在阶段切换时跳：最长的一段（fundamental 实测 39 分钟）里
+    # 若只算"完成阶段数"，条子会一直停在 0%。把当前阶段 tqdm 的百分比折进去。
+    current = (_current_activity(log_dir, running) if active else None)
+    if preflight_only:
+        current = {"name": "preflight", "file": "preflight.log", "percent": None, "eta_s": None}
+    partial = 0.0
+    for row in counted:
+        if row["status"] == "running" and row.get("progress"):
+            partial = float(row["progress"].get("percent") or 0) / 100.0
+    if not partial and current and current.get("percent") is not None:
+        partial = float(current["percent"]) / 100.0
+    progress_ratio = (done + partial) / max(len(counted), 1)
     # 已结束的运行要把耗时**冻结**在结束时刻：第一版无条件用 now()-started_at，
     # 于是 10-08 那轮 02:31 就跑完了，早上打开页面却显示"已跑 12h51m"还在涨。
     end_at = parsed.get("last_log_at") if (parsed["finished"] or parsed["failed"]) else None
@@ -376,6 +577,8 @@ def build_status() -> dict:
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "latest_market_date": _latest_market_date(),
+        "last_attempt": _last_attempt(attempt_dir),
         "trade_date": parsed["trade_date"] or (log_dir.name if log_dir else None),
         "today": today,
         "today_started": today_started,
@@ -394,7 +597,8 @@ def build_status() -> dict:
             "finished_at": end_at,
             "done_stages": done,
             "total_stages": len(counted) or len(STAGE_ORDER),
-            "progress": round(done / max(len(counted), 1), 4),
+            "progress": round(progress_ratio, 4),
+            "current": current,
             "eta_seconds": int(eta_remaining) if active else None,
             "stages": rows,
         },
@@ -421,3 +625,53 @@ def automation_completeness():
     payload["age_seconds"] = int(
         (datetime.now() - datetime.fromtimestamp(COMPLETENESS_JSON.stat().st_mtime)).total_seconds())
     return payload
+
+
+@router.post("/trigger")
+def trigger_full_pipeline(req: TriggerRequest):
+    """Start the same full daily runner used by launchd, for one chosen date.
+
+    The HTTP request returns immediately; the child is detached and writes to
+    ``manual_trigger.log`` plus the normal ``run.log``.  The single-instance
+    lock is checked before spawning so a button click cannot start two runs.
+    """
+    if _runner_processes():
+        raise HTTPException(status_code=409, detail="已有 run_daily_production.sh 在运行，请等它结束")
+    lock_pid = _lock_holder()
+    if _pid_alive(lock_pid):
+        raise HTTPException(status_code=409, detail=f"流水线锁仍被 pid={lock_pid} 持有")
+
+    trade_date = req.trade_date or _latest_market_date()
+    if not trade_date:
+        raise HTTPException(status_code=422, detail="无法确定最新交易日，请显式填写 trade_date")
+    try:
+        datetime.strptime(trade_date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="trade_date 格式必须为 YYYY-MM-DD") from exc
+
+    log_dir = DAILY_DIR / trade_date
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "manual_trigger.log"
+    env = os.environ.copy()
+    env["DAILY_TRADE_DATE"] = trade_date
+    command = ["/bin/bash", str(ROOT / "scripts/run_daily_production.sh")]
+    if req.force:
+        command.append("--force")
+    with log_path.open("ab") as log_handle:
+        proc = subprocess.Popen(
+            command, cwd=ROOT, env=env,
+            stdout=log_handle, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    record = {
+        "trade_date": trade_date,
+        "pid": proc.pid,
+        "force": bool(req.force),
+        "command": " ".join(command),
+        "log": (str(log_path.relative_to(ROOT))
+                if log_path.is_relative_to(ROOT) else str(log_path)),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    (log_dir / "manual_trigger.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, **record}

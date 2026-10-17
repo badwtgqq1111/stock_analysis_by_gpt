@@ -1190,27 +1190,37 @@ def main() -> int:
         base_dir=pipeline_config.get("base_dir", "./assets/data"),
         data_source=pipeline_config.get("data_source", "akshare"),
     )
+    # 覆盖率体检要放在**补数阶段之后**：一次中断的 daily_bars 会留下"当天只灌了一半"的分区，
+    # 此时开机就体检会把整轮生产拦在门口（2026-10-17 实测 2,108/7,323），而 daily_bars 本来
+    # 就是来补齐它的。因此把检查推迟到第一个真正依赖完整日线的阶段（features 等）之前。
+    health_stages = set()
+    if data_health.get("enabled") and str(data_health.get("mode", "enforce")).lower() != "off":
+        health_stages = {str(name) for name in (data_health.get("stages") or [])}
+    health_checked = False
+
+    def check_data_health(stage_name: str) -> None:
+        """在第一个受保护的阶段前跑一次覆盖率体检（不达标按 mode 中止/告警）。"""
+        nonlocal health_checked
+        if health_checked or stage_name not in health_stages:
+            return
+        health_checked = True
+        # 覆盖率体检只跑一次（同一决策日），不达标就按 mode 决定中止还是告警。
+        from data.ingest.service import MarketDataService as _MDS
+
+        report = _MDS(base_dir=str(ROOT / "assets/data")).check_daily_bar_coverage(
+            as_of=args.trade_date, lookback_sessions=int(data_health.get("lookback_sessions", 10) or 10),
+            min_ratio=float(data_health.get("min_bar_coverage", 0.98) or 0.98),
+        )
+        print(f"[data_health] bar 覆盖率 {report['session']}: {report['bars']}/{report['baseline']} = "
+              f"{report.get('ratio')}（阈值 {report.get('min_ratio')}）ok={report['ok']}", flush=True)
+        if not report["ok"] and str(data_health.get("mode", "enforce")).lower() == "enforce":
+            raise SystemExit(
+                f"数据健康门未通过：{report['session']} 只有 {report['bars']} 只 bar（基线 {report['baseline']}，"
+                f"覆盖率 {report.get('ratio')} < {report.get('min_ratio')}）。先补齐日线再跑 {stage_name}；"
+                "临时的 warn 模式：把 [pipeline.data_health].mode 改成 'warn'。"
+            )
+
     try:
-        if data_health.get("enabled") and str(data_health.get("mode", "enforce")).lower() != "off":
-            watched = {str(name) for name in (data_health.get("stages") or [])}
-            hits = [stage for stage in stages if stage in watched]
-            if hits:
-                # 覆盖率体检只跑一次（同一决策日），不达标就按 mode 决定中止还是告警。
-                from data.ingest.service import MarketDataService as _MDS
-
-                report = _MDS(base_dir=str(ROOT / "assets/data")).check_daily_bar_coverage(
-                    as_of=args.trade_date, lookback_sessions=int(data_health.get("lookback_sessions", 10) or 10),
-                    min_ratio=float(data_health.get("min_bar_coverage", 0.98) or 0.98),
-                )
-                print(f"[data_health] bar 覆盖率 {report['session']}: {report['bars']}/{report['baseline']} = "
-                      f"{report.get('ratio')}（阈值 {report.get('min_ratio')}）ok={report['ok']}", flush=True)
-                if not report["ok"] and str(data_health.get("mode", "enforce")).lower() == "enforce":
-                    raise SystemExit(
-                        f"数据健康门未通过：{report['session']} 只有 {report['bars']} 只 bar（基线 {report['baseline']}，"
-                        f"覆盖率 {report.get('ratio')} < {report.get('min_ratio')}）。先补齐日线再跑 {hits}；"
-                        "临时的 warn 模式：把 [pipeline.data_health].mode 改成 'warn'。"
-                    )
-
         for stage in stages:
             # A stage explicitly selected on the command line is an operator
             # request and must run even when it is disabled in the default all-stage profile.
@@ -1220,6 +1230,7 @@ def main() -> int:
             if stage == "alternative" and not config.get("alternative", {}).get("input_path"):
                 result["stages"].append({"name": stage, "status": "skipped", "detail": "set alternative.input_path to a local PIT evidence CSV"})
                 continue
+            check_data_health(stage)
             if stage in {"features", "clean_panel", "lightgbm", "transformer", "cnn", "model_scores", "preselection", "pk", "selection", "oos_predictions"}:
                 if last_coverage is None:
                     try:

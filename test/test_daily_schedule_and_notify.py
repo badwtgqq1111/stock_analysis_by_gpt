@@ -91,7 +91,9 @@ def test_ready_gate_verdicts(tmp_path):
     saturday = module.evaluate(now=__import__("datetime").datetime(2026, 10, 10, 18, 0))
     assert saturday["is_trading_weekday"] is False and saturday["verdict"] == "skip"
     # ② 两种判据任一成立即 ready：本地日线已到当天，**或**上游（腾讯）已经有当天的 bar
-    now = module.evaluate()
+    # Fixed weekday so Saturday/Sunday runs do not turn this into a date-dependent
+    # test failure; 2026-10-16 is a Friday.
+    now = module.evaluate(now=__import__("datetime").datetime(2026, 10, 16, 18, 0))
     assert now["verdict"] in ("ready", "not_ready")
     if now["latest"]:
         local_ok = now["latest"] >= now["today"]
@@ -106,18 +108,18 @@ def test_ready_gate_verdicts(tmp_path):
     module.BENCH = bench
     module.CLEAN = tmp_path / "empty-clean"          # 目录不存在 ⇒ clean_latest 为 None
     module.upstream_has_today = lambda day: False
-    stale = module.evaluate()
+    stale = module.evaluate(now=__import__("datetime").datetime(2026, 10, 16, 18, 0))
     assert stale["bench_latest"] == "2020-01-02" and stale["latest"] == "2020-01-02"
     if stale["is_trading_weekday"]:
         assert stale["verdict"] == "not_ready" and stale["ready"] is False and stale["judged_by"] == "none"
     # ④ **本地落后但上游已有今天 ⇒ ready**：闸门不能自指死锁
     #    （clean 日线/基准指数都是流水线自己在闸门**之后**写的；只按本地判，漏跑一天就永远追不上）
     module.upstream_has_today = lambda day: True
-    catchup = module.evaluate()
+    catchup = module.evaluate(now=__import__("datetime").datetime(2026, 10, 16, 18, 0))
     assert catchup["ready"] is True and catchup["judged_by"] == "upstream"
     # ⑤ 探针取不到（None，网络/接口抽风）不许被当成"就绪"
     module.upstream_has_today = lambda day: None
-    unseen = module.evaluate()
+    unseen = module.evaluate(now=__import__("datetime").datetime(2026, 10, 16, 18, 0))
     assert unseen["ready"] is False and unseen["verdict"] == "not_ready"
     # ⑥ 入口在"未就绪 + 已过 min-hour"时必须非零退出（中止本次，交给重试触发）
     proc = subprocess.run([PY, "scripts/daily_ready_gate.py", "--check"],

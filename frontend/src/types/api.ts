@@ -200,8 +200,18 @@ export interface AutomationCompletenessCheck {
   key: string; name: string; cadence: string; latest: string | null
   n: number | null; ok: boolean; detail: string
 }
+export interface AutomationAttempt {
+  trade_date: string | null
+  started_at: string | null
+  pid: number | null
+  log: string | null
+  outcome: 'started' | 'preflight_failed' | 'starting' | 'exited'
+  error: string | null
+}
 export interface AutomationStatus {
   generated_at: string
+  latest_market_date?: string | null
+  last_attempt?: AutomationAttempt | null
   trade_date: string | null
   today?: string
   today_started?: boolean
@@ -219,6 +229,7 @@ export interface AutomationStatus {
     done_stages: number
     total_stages: number
     progress: number
+    current?: { name: string; file: string; percent: number | null; eta_s: number | null } | null
     eta_seconds: number | null
     stages: AutomationStage[]
   }
@@ -1163,6 +1174,104 @@ export interface AiPicksSummary {
   latest_date?: string
   dates: string[]
   by_date: AiPicksSummaryDay[]
+  hint?: string
+}
+
+// ─── 逐股 Bynewlt 研报多空调研（K 线页）───────────────────────────────────────
+// 数据源：backend/api/stock_research.py；原文证据由 scripts/bynewlt_stock_research.py
+// 从 Bynewlt 研报库取回（ref/引文/机构/日期/页码/来源哈希），多空稿由 agent 逐条核对后写。
+export interface StockResearchCitation {
+  /** 稿内编号（Bynewlt 稿 c1/c2…；公开来源稿 R1/A1/N1/D1/Q） */
+  id: string
+  /** Bynewlt 证据引用编号（<request_id>:<n>，原文核对用；公开来源稿无此字段） */
+  ref?: string
+  /** 原文引文（保持原语言） */
+  quote: string
+  quote_zh?: string
+  broker?: string
+  reportTitle?: string
+  reportDate?: string
+  page?: number
+  metric?: string
+  /** cite（引文绑定检查）/ read（原文页核对） */
+  verified?: string
+  /** 公开来源稿：证据种类 report|announcement|news|tushare|quote */
+  kind?: string
+  /** 公开来源稿：出处（机构名/网站名） */
+  source?: string
+  /** 公开来源稿：标题 */
+  title?: string
+  /** 公开来源稿：日期 */
+  date?: string
+  /** 公开来源稿：原文链接 */
+  url?: string
+}
+
+export interface StockResearchPoint {
+  point: string
+  refs: string[]
+}
+
+export interface StockResearchRating {
+  broker: string
+  rating?: string
+  target_price?: string
+  date?: string
+  change?: string
+  refs?: string[]
+}
+
+export interface StockResearchDossier {
+  code: string
+  name?: string
+  updated_at?: string
+  /** 证据倾向：偏多 / 中性 / 偏空 / 证据不足（研报证据整理，不构成投资建议） */
+  stance?: string
+  summary?: string
+  bull?: StockResearchPoint[]
+  bear?: StockResearchPoint[]
+  risks?: StockResearchPoint[]
+  ratings?: StockResearchRating[]
+  citations?: StockResearchCitation[]
+  verification?: { level?: string; notes?: string; checked_at?: string }
+  caveats?: string
+  window?: string
+  /** 来源：bynewlt（研报库）/ public_web（公开来源兜底） */
+  source?: string
+}
+
+export interface StockResearchResponse {
+  code: string
+  in_scope: boolean
+  state: string
+  /** 稿的来源：bynewlt / public_web（未合成时为 null） */
+  source?: string | null
+  name?: string
+  note?: string
+  fetched_at?: string
+  calls_used?: number
+  strategies?: string[]
+  strategy_labels?: string[]
+  dossier: StockResearchDossier | null
+  evidence?: {
+    items?: number
+    context?: number
+    reports?: number
+    report_pdfs?: number
+    announcements?: number
+    announcement_pdfs?: number
+    news?: number
+    news_text?: number
+    tushare?: Record<string, number>
+    brokers?: string[]
+    report_dates?: string[]
+    window_since?: string
+    fetched_at?: string
+    library_status?: string
+    returned_items?: number
+    /** public_web = 公开来源证据档 */
+    source?: string
+  } | null
   hint?: string
 }
 

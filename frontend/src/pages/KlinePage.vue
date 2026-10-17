@@ -175,6 +175,7 @@
     </div>
 
     <AiAnalysisPanel :code="selectedCode" />
+    <StockResearchPanel :code="selectedCode" />
     <!-- 威科夫点图（P&F）+ 阶段速读（用户 2026-10-14 要求补在 K 线页） -->
     <details class="panel research-panel" v-if="selectedCode" :open="researchOpen" @toggle="onResearchToggle">
       <summary>威科夫研究 · 点数图 / 阶段 / 事件概率（展开加载）</summary>
@@ -283,6 +284,7 @@ import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
 import WyckoffChart from '@/components/WyckoffChart.vue'
 import StockInfoPanel from '@/components/StockInfoPanel.vue'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
+import StockResearchPanel from '@/components/StockResearchPanel.vue'
 import SelectionDetailCard, { type SelectionRow } from '@/components/SelectionDetailCard.vue'
 import { useKlineData } from '@/composables/useKlineData'
 import { cnToday } from '@/composables/useMarketPoll'

@@ -1368,6 +1368,9 @@ launchctl print gui/$(id -u)/com.quant.cn-pipeline  # 查看状态
 launchctl kickstart -k gui/$(id -u)/com.quant.cn-pipeline   # 立即手动跑一次
 ```
 
+前端「自动化」页的「手动触发全链路」按钮调用同一个 `run_daily_production.sh`：
+日期默认取最新行情交易日，可改成漏跑日期补跑；已有 `run_daily_production.sh` 或存活锁时返回 409，不会重复启动。
+
 - 计划：每天 **19:30 / 20:30 / 22:00** + `RunAtLoad`（开机补跑）；`DAILY_EARLIEST_HOUR=16` 保证
   16:00 之前触发只会直接退出（收盘数据未就绪）。幂等标记
   `output/pipeline_reports/daily/<date>/production.done`（当天成功过就跳过，`--force` 重跑）。

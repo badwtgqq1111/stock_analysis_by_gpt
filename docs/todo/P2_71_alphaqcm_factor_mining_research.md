@@ -521,10 +521,12 @@ FactorBench 比较 9 个自动挖掘方法、5 个市场、每市场 3 个随机
 - 修正：valid切分按标签期限回切32个交易日、严格不进入test（与pilot的±2月padding为**有记录的口径差异**，两套结果不可直接对比）；每窗口面板只用test开始前数据按流动性选样（严格PIT）；张量切片前补110/后补30个交易日；空池窗口记录`eval_error`跳过（不再崩溃）。
 - 演示（[walk_forward_v1/REPORT.md](../../output/research/p2_71/walk_forward_v1/REPORT.md)，20,000步/窗口×10窗口×seed0）：窗口均值test RankIC **−0.0307**（std 0.1036，范围−0.1755..+0.1291），正IC窗口50%，跨窗口t=−0.94。此为框架验证演示；全量外层评测用`--steps 2000000`。
 
-#### 6. 2M 步全量训练（已启动）
+#### 6. 2M 步全量训练（已完成，2026-10-17 18:25 CST）
 
 - 门槛满足：完整状态快照机制就位（25,000步间隔、保留2份）；探针记录→[budget_estimate.json](../../output/research/p2_71/alphaqcm_2m_v1/budget_estimate.json)：1,500步探测1.845 s/1k步、worker峰值RSS 528MB、外推约1.03小时（探针前段为随机相位，偏低；v3三个qcm参考run稳态实测2.3–3.2 s/1k → 全量约1.3–1.8小时为参考区间）。
 - 已detached启动（[launch.json](../../output/research/p2_71/alphaqcm_2m_v1/launch.json)：pid 65983，日志`logs/run_20261017_073956.log`），可`--resume`续训；test指标在artifact哈希冻结后由独立进程评测；如中断，产物按partial归档、不外推。
+- **完成记录**（`runs.jsonl`）：`status=COMPLETED`，step 2,000,008，wall 9,924.5s（≈2.76h）；冻结 test 评测：**RankIC −0.1201、RankICIR −0.6619、NW t −2.70（200 个测试日）**。
+- **口径**：单次全量 run 的**描述性结果**；test IC 为负且统计显著，说明该训练配置下因子方向在测试期为反向（或与市场状态不匹配），**不得据此宣称晋级**。后续需先做方向/符号复核（不得用 test 反推）、与 pilot/equal-evals 的同口径对照、以及 2M 预算的 walk-forward 复核。
 
 #### 7. 验证
 
@@ -535,6 +537,6 @@ FactorBench 比较 9 个自动挖掘方法、5 个市场、每市场 3 个随机
 
 #### 8. 剩余
 
-- 2M run完成后的冻结test评测（runs.jsonl）与结论归档；
+- 2M run 已完成：冻结 test 评测已归档（§6）；结论为**负 RankIC（−0.12，NW t −2.70），不晋级**，待方向复核与 2M 预算 walk-forward；
 - 全市场PIT刷新（先删`universe.json`重新生成股票池universe；清理残存失败条目）并重跑审计；
 - 等评价/等池饱和结论需更高预算或更大面板重复验证；walk-forward的2M预算版本；成本后组合回放与前向影子沿用既有边界。

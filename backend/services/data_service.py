@@ -19,12 +19,32 @@ _CN_BARS_DIR = PROJECT_ROOT / "assets/data/clean/ohlcv/market=CN"
 _CN_BASIC = PROJECT_ROOT / "assets/data/meta/cn_stock_basic.parquet"
 
 
-@lru_cache(maxsize=32)
-def load_cn_stock_ohlcv(stock_code: str, days: int = 365) -> pd.DataFrame | None:
+def _cn_bars_version() -> tuple[float, int]:
+    """A 股日线分区的数据版本 = (最新 parquet mtime, 文件数)。
+
+    盘后 `daily_bars` 补齐/重写分区后 mtime 必变，用它做缓存键的一部分，
+    K 线页不必重启后端就能看到新补的那根（2026-10-17 实测：600252.SH 的
+    10-16 已入库，但 `days=365` 命中了补数前的 lru_cache，页面一直停在 10-15）。
+    """
+    latest = 0.0
+    count = 0
+    for path in _CN_BARS_DIR.glob(
+            "exchange=*/asset_type=equity/frequency=daily/adjust=qfq/year=*/*.parquet"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        latest = max(latest, stat.st_mtime)
+        count += 1
+    return (round(latest, 3), count)
+
+
+@lru_cache(maxsize=256)
+def _load_cn_stock_ohlcv_cached(stock_code: str, days: int, version: tuple[float, int]) -> pd.DataFrame | None:
     """A 股日线（qfq 复权）→ 与港股同一形态：index=日期，列 Open/High/Low/Close/Volume。
 
     只读 [今天-days, 今天] 覆盖到的年份分区，并用谓词下推按 stock_code 过滤；
-    结果 lru_cache（同一只票反复看图不用重复扫 parquet）。
+    结果按"数据版本"缓存（同一只票反复看图不用重复扫 parquet，补数后自动失效）。
     """
     import pyarrow.dataset as ds
 
@@ -48,6 +68,12 @@ def load_cn_stock_ohlcv(stock_code: str, days: int = 365) -> pd.DataFrame | None
                                   "close": "Close", "volume": "Volume"})
     frame = frame.set_index("trade_date")[["Open", "High", "Low", "Close", "Volume"]]
     return frame.tail(int(days))
+
+
+def load_cn_stock_ohlcv(stock_code: str, days: int = 365) -> pd.DataFrame | None:
+    """A 股日线（qfq）：带数据版本失效的缓存入口（签名保持不变）。"""
+    code = str(stock_code).strip().upper()
+    return _load_cn_stock_ohlcv_cached(code, int(days), _cn_bars_version())
 
 
 @lru_cache(maxsize=1)

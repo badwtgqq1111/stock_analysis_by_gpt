@@ -148,6 +148,11 @@ def test_positive_expectancy_strategies_are_selectable_everywhere(client):
     assert positive, "至少应有一条正期望策略"
 
     for spec in positive:
+        # Frozen research replays intentionally have no daily list; they are
+        # curves, not selectable strategies.  Do not require a selection source
+        # for an artifact that declares no_tracking/skip by design.
+        if spec.get("no_tracking") or (spec.get("daily_refresh") or {}).get("mode") == "skip":
+            continue
         source = spec.get("selection_source")
         assert source, f"正期望策略 {spec['id']} 没有 selection_source（选股/自选侧栏就看不到它）"
         assert source in SOURCES, f"{source} 不在 selection_sources.SOURCES 里"
@@ -165,6 +170,8 @@ def test_positive_expectancy_strategies_are_selectable_everywhere(client):
     group_sources = {s.get("selection_source") for s in pool["strategies"]
                      if s.get("selection_source") and s["stage"] != "retired"}
     for spec in positive:
+        if spec.get("no_tracking") or (spec.get("daily_refresh") or {}).get("mode") == "skip":
+            continue
         assert spec["selection_source"] in group_sources, f"{spec['id']} 不会出现在 K 线自选侧栏"
 
 

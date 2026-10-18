@@ -26,8 +26,8 @@
 | 门 | 判据 | 不通过怎么办 |
 | --- | --- | --- |
 | G0 数据契约 | PIT 审计通过、**38/40 维**有效样本覆盖 ≥95%、无未来函数 | 先补数据，不训练 |
-| G1 先验可用 | S1-only 验证期 RankIC ≥ 5%（论文 CN 5.15%） | 检查标签/特征口径 |
-| G2 表征有增量 | 完整模型验证 RankIC ≥ 最强基线 + 1pp | 停止，写负结论 |
+| G1 先验可用 | S1-only 验证期 RankIC ≥ 5%（**已通过：R21 13.88% / E21 14.12%**） | 检查标签/特征口径 |
+| G2 表征有增量 | 完整模型验证 RankIC ≥ 最强基线 +1pp（**未稳定通过**：验证期 R1 6.96% vs R2 6.71%；测试期 R2 14.55% vs R1 10.72%） | 停止，写负结论 |
 | G3 测试可交易 | 2024–2026 RankIC ≥ 8%、净 Sharpe ≥ 0.8、MDD 不差于基线 5pp 以上 | 只留研究，不进池 |
 
 ## 1. 资料与事实核对
@@ -227,20 +227,33 @@ turnover_agg, moneyflow_intensity, shibor_3m, usdcnh_ret_5, commodity_ret_5`
 - 待办（P0.5）：随机抽 20 个样本人工核对日期边界；补 `pit_data` 的 ST/停牌标记到样本索引
   （当前只按"是否有 bar"判连续，ST 状态留给评估期过滤）。
 
-### P1 先验与张量（3 天）
+### P1 先验与张量（已完成，2026-10-18）
 
-- `scripts/p2_74_prior.py`：8 目标 → Ridge → 16 维先验；输出分块缓存与拟合报告。
-- `scripts/p2_74_panel.py`：把面板转成按股票连续的 float32 memmap（约 2.9GB），
-  提供 `(code, date) → 126×40` 与 `→ 21×40` 切片。
-- 验收：G1（S1-only RankIC ≥5%）；先验残差尺度分布合理；无 NaN。
+- `scripts/p2_74_prior.py`：8 目标（5/21 日收益、波动、回撤、等权超额）→ 多输出 Ridge（α=20）
+  → 16 维先验；按年扩展窗口（2016–2026 共 11 个块），训练样本上限 300 万；
+  产物 `output/research/p2_74_stock_jepa/prior/year=YYYY/part.parquet`。
+- **G1 通过**：验证期 2022–2023（484 个交易日）：
+  - `R21` 预测 vs 实现 R21：**RankIC 0.1388**
+  - `E21` 预测 vs 实现 E21：**RankIC 0.1412**
+  远高于论文 S1-only 的 5.15% 门槛。
+- 需要审计：IC 偏高，先确认特征没有未来函数（尤其估值/财务的 as-of）；残差尺度在
+  0.74–1.00 之间，说明线性先验解释力有限但排序能力很强——两者并不矛盾，仍需抽查。
+- `scripts/p2_74_panel.py`（张量 memmap）尚未单独抽出；当前 P2 的数据加载会直接从
+  `features/year=*.parquet` 切窗口，后续再按资源情况决定是否改用 memmap。
 
 ### P2 表征训练（5 天）
 
-- `scripts/p2_74_jepa_train.py`：双优化器、EMA、detach、掩码、修正标准化；
-  合成数据先跑通"慢/快状态恢复"（复现论文 Appendix K 的方向，不追数值）。
-- batch 采用 `N_DATES × N_STOCKS` 的结构化采样（参考 `JEPAprojV9`），保证每个 batch
-  都有可计算的截面结构；SIGReg 作为 `--anti-collapse sigreg|ema|none` 的可选对照。
-- 资源探针：记录 s/step、峰值内存；MPS 不可用则自动降级到 lite 配置。
+- `scripts/p2_74_jepa_train.py` 已实现：双优化器、EMA（target 0.996 / anchor 0.99）、
+  detach、修正目标标准化、4 层 Transformer（128 维/8 头/FFN 512）。
+- **Smoke 已通过**（MPS）：3,222 个样本、20 步、batch 32：
+  - anchor loss 1.099 → 0.991
+  - revision loss 0.971 → 0.924
+  - 约 0.07 s/step（warmup 后），4,000 步约 5 分钟，全量训练可行。
+- **完整 S2 训练已跑完**（2026-10-18，已加训练集逐特征标准化）：2016–2021、4,000 步、batch 32；
+  checkpoint `output/research/p2_74_stock_jepa/checkpoints/jepa.pt`（7.0MB），
+  末段 anchor ≈0.82 / revision ≈0.39，约 0.045 s/step。
+- 掩码已实现（连续 5–21 天块，≥30%）；尚未实现：特征组 dropout、
+  结构化 `N_DATES × N_STOCKS` batch、合成数据慢/快状态恢复实验。
 - 验收：G2；`Separate-EMA` 的验证损失优于 `Joint-online` 与 `Ordinary-JEPA`；
   锚点分支对修正损失无梯度（单测）。
 
@@ -253,6 +266,22 @@ turnover_agg, moneyflow_intensity, shibor_3m, usdcnh_ret_5, commodity_ret_5`
 - 基线：FMB/IPCA 自写；LightGBM 直接复用生产预测；平凡基线必须包含
   "上一日收益"、"截面均值（随机打破平局）"，**不要**用常数 0 预测（排序退化）。
 - 验收：G3；产出 `report.md` + 图（NAV、RankIC 时序、回撤）。
+
+**P3 完成（2026-10-18，采样版，100k 训练 / 40k 评估）**：
+
+| 区间 | R0 | R1 +anchor | R2 +revision |
+|---|---:|---:|---:|
+| 2022–2023 RankIC | 0.0092 | 0.0696 | 0.0671 |
+| 2024–2026H1 RankIC | 0.1144 | 0.1072 | **0.1455** |
+
+- 验证期锚点最好；测试期修正最好（+3.8pp vs anchor），**两段方向不一致**，G2 不能算稳定通过。
+- Top30 long-only vs 中证500（非重叠 21 日、5bp/边）：
+  - 验证：R1 年化 13.1% vs 基准 -10.2%，每期超额 +2.08%（t=1.8）
+  - 测试：R2 年化 33.1% vs 基准 32.8%，每期超额 +0.19%（t=0.16）
+- Top30−Bottom30 多空：R2 验证 23.2%/Sharpe 1.46，测试 23.9%/Sharpe 1.64，**两段稳定**；
+  说明 alpha 主要在空头端，long-only 主要吃 beta。
+- 结论：**long-only 暂不作为正式策略**；多空/对冲作为研究手臂继续（需券源与借券成本）。
+  详见 `output/research/p2_74_stock_jepa/report.md`。
 
 ### P4 消融与稳健性（4 天）
 

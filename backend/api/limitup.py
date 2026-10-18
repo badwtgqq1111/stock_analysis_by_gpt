@@ -129,6 +129,11 @@ def limitup_detail(
         bucket = mbs.board_bucket(int(row["boards"] or 0))
         if bucket:
             counts[bucket] += 1
+    window_counts = {
+        "d3_2b": sum(1 for r in merged if r.get("is_3d2b")),
+        "d5_3b": sum(1 for r in merged if r.get("is_5d3b")),
+        "d10_5b": sum(1 for r in merged if r.get("is_10d5b")),
+    }
     for i, row in enumerate(merged, 1):
         row["rank"] = i
 
@@ -139,6 +144,8 @@ def limitup_detail(
         "dates": dates,
         "counts": counts,
         "counts_label": {BUCKET_LABELS[k]: v for k, v in counts.items()},
+        "window_counts": window_counts,
+        "window_counts_label": {"3天2板": window_counts["d3_2b"], "5天3板": window_counts["d5_3b"], "10天5板": window_counts["d10_5b"]},
         "total": len(merged),
         "max_boards": max([int(r["boards"] or 0) for r in merged], default=0),
         "rows": merged[: int(limit)],

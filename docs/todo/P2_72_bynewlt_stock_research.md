@@ -104,10 +104,17 @@
 - 后端：`/api/stocks/{code}/research` 多态实测（not_in_scope / fetched / composed /
   public_web 回落）。
 - 覆盖：42 只 `status=fetched` 全部有 `dossier/<code>.json`（面板不再出现「证据已取回待整理」）。
+- 2026-10-18：前端把「AI 结论」与「研报证据」合并为**一张个股多空结论卡**（多头/空头两栏，
+  每条标 `AI` / `研报` 出处；两边冲突显示「分歧」）；每日选股页每行「多空」抽屉复用同一张卡。
 
 ## 5. 边界与后续
 
 - 名单随策略名单刷新变化：新票自动入队（`queued`），重跑 `fetch` 即补漏。
+- **已并入每日自动化（2026-10-18）**：顺序改为 `strategy_lists`（刷新 box/wyckoff/moneyflow/
+  mainforce/donchian 等全部名单）→ `ai_picks` → `research_bynewlt/research_public`（fetch）→
+  `draft --only-missing` → `promote --missing --level auto_checked`。
+  预算：`DAILY_RESEARCH_MAX_CALLS`（默认 20，Bynewlt 计费）、
+  `DAILY_RESEARCH_PUBLIC_LIMIT`（默认 10，公开源）、`DAILY_STOCK_RESEARCH=0` 可关。
 - **Bynewlt 未收录的 61 只已由 P2.73 公开来源兜底**（东财研报/巨潮公告/searxng/Tushare 结构化
   数据），面板同区展示、来源徽标区分；两库证据口径互不混同。
 - 库覆盖在扩充：`not_found` 的票以后重查只需 `fetch --codes 600xxx.SH`（会再计 1 次/票）。

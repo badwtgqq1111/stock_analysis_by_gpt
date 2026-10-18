@@ -178,6 +178,9 @@ frontend/src/components/StockResearchPanel.vue  同面板展示 + 公开来源�
   中区分；合成时评级/目标价优先引用同报告的结构化行。
 - LightRAG 留作后续（跨股票图谱检索）；如重启评估，先解决 embedding 后端（bge-m3 超时）。
 - 名单刷新：新入队票重跑 `fetch`（自动追加），已 composed 的票不会被覆盖。
+- **已并入每日自动化（2026-10-18）**：`run_daily_production.sh` 在 `strategy_lists` 之后、
+  台账之前跑 `fetch --limit 10` → `draft --only-missing` → `promote --missing --level auto_checked`；
+  已 composed 的票默认不再重采（此前 `fetch` 会白跑重采 61 只，已修）。
 
 ## 6. 预算
 

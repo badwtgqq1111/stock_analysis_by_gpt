@@ -8,6 +8,9 @@
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.api._history_date import history_date
@@ -17,6 +20,8 @@ from backend.services import live_quotes
 from backend.services import market_board_service as mbs
 
 router = APIRouter(prefix="/api/industry", tags=["industry"])
+ROOT = Path(__file__).resolve().parents[2]
+HEAT_HISTORY = ROOT / "output/research/industry_heat/history.json"
 
 NOTES = [
     "热度指数 = 5 个分项在「行业之间」的横截面 z 分数加权后取分位（0~100）："
@@ -25,6 +30,26 @@ NOTES = [
     "行业归属用 cn_stock_basic.industry（110 个行业），无行业信息的票归入「未分类」且不参与排名。",
     "成分数很少的行业（4~7 只）中位数噪声大，可用「只看 ≥N 只」过滤。",
 ]
+
+
+@router.get("/heat-history")
+def industry_heat_history(days: int = Query(40, ge=10, le=250)) -> dict:
+    """行业热度 3D 动态排名数据（时间 × 排名 × 行业）。"""
+    if not HEAT_HISTORY.exists():
+        return {"available": False, "hint": "先跑 scripts/build_industry_heat_history.py"}
+    try:
+        payload = json.loads(HEAT_HISTORY.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"available": False, "hint": f"读取失败：{exc}"}
+    if days and len(payload.get("dates") or []) > days:
+        cut = -int(days)
+        payload["dates"] = payload["dates"][cut:]
+        # ranks/heats 是 (industry, date) 行；按日期截尾
+        payload["ranks"] = [row[cut:] for row in payload.get("ranks", [])]
+        payload["heats"] = [row[cut:] for row in payload.get("heats", [])]
+        payload["days"] = len(payload["dates"])
+    payload["available"] = True
+    return payload
 
 
 @router.get("/overview")

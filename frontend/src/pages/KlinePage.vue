@@ -95,13 +95,20 @@
           :selection-names="strategyNames"
           :selection-month="miniMonth"
           :name="data.name"
+          :wyckoff-series="wyckoffSeries"
+          :wyckoff-top="wyckoffTop"
+          :wyckoff-wso="wyckoffWso"
+          :wyckoff-structure="wyckoff?.event_cloud?.structure?.pattern || ''"
+          @hover="hoverDate = $event"
+          @plot-metrics="onPlotMetrics"
           @price-range="onPriceRange"
           @pick="onPickDate"
           @selection-hover="onChartSelectionHover"
         />
         <ChipDistribution
-          v-if="overlays.includes('chips') && data.chips"
-          :chips="data.chips" :height="600" :price-range="priceRange"
+          v-if="overlays.includes('chips') && hoverChips"
+          :chips="hoverChips" :height="600" :price-range="plotRange || priceRange"
+          :plot-height="plotHeight" :asof="hoverDate || undefined"
         />
       </div>
       <p class="hint tiny click-hint">
@@ -174,8 +181,7 @@
       </template>
     </div>
 
-    <AiAnalysisPanel :code="selectedCode" />
-    <StockResearchPanel :code="selectedCode" />
+    <StockLongShortPanel :code="selectedCode" />
     <!-- 威科夫点图（P&F）+ 阶段速读（用户 2026-10-14 要求补在 K 线页） -->
     <details class="panel research-panel" v-if="selectedCode" :open="researchOpen" @toggle="onResearchToggle">
       <summary>威科夫研究 · 点数图 / 阶段 / 事件概率（展开加载）</summary>
@@ -283,14 +289,13 @@ import StockWatchlist from '@/components/StockWatchlist.vue'
 import StrategyListsStatusBar from '@/components/StrategyListsStatusBar.vue'
 import WyckoffChart from '@/components/WyckoffChart.vue'
 import StockInfoPanel from '@/components/StockInfoPanel.vue'
-import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
-import StockResearchPanel from '@/components/StockResearchPanel.vue'
+import StockLongShortPanel from '@/components/StockLongShortPanel.vue'
 import SelectionDetailCard, { type SelectionRow } from '@/components/SelectionDetailCard.vue'
 import { useKlineData } from '@/composables/useKlineData'
 import { cnToday } from '@/composables/useMarketPoll'
 import { mergeStrategyNames, readSharedMonth, writeSharedMonth } from '@/composables/selectionLabels'
 import { getIntraday, getIntradayCoverage, getStockBundle, getWyckoff } from '@/api/client'
-import type { IntradayCoverage, IntradayResponse, WyckoffRead } from '@/types/api'
+import type { ChipData, IntradayCoverage, IntradayResponse, WyckoffRead } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -456,8 +461,12 @@ watch(() => data.value, d => {
 watch(selectedCode, async code => {
   clearIntraday()
   coverage.value = null
+  hoverDate.value = null
+  plotRange.value = null
   const request = ++coverageRequest
   if (!code) return
+  // 悬停浮窗要逐日威科夫事件：换票就后台算一次（不阻塞 K 线加载）。
+  void loadWyckoff()
   // 只有指向新票的路由本身带 date 才沿用。侧栏/手输换票不继承旧票历史日期。
   const queryDate = String(route.query.code || '') === code ? String(route.query.date || '') : ''
   selectIntradayDate(queryDate || preferredIntradayDate())
@@ -673,6 +682,60 @@ function onResearchToggle(event: Event) {
   if (researchOpen.value && !wyckoff.value && !wyckoffLoading.value) void loadWyckoff()
 }
 const wyckoff = ref<WyckoffRead | null>(null)
+/** 逐日威科夫坍缩事件 → K 线悬停浮窗按日期查（2026-10-18 用户要求） */
+const wyckoffSeries = computed<Record<string, { label: string; side: number; prob: number }>>(() => {
+  const map: Record<string, { label: string; side: number; prob: number }> = {}
+  for (const e of wyckoff.value?.event_cloud?.series || []) {
+    if (e.date) map[e.date] = { label: e.label, side: e.side, prob: e.prob }
+  }
+  return map
+})
+const wyckoffTop = computed(() => wyckoff.value?.event_cloud?.series_top || {})
+const wyckoffWso = computed(() => wyckoff.value?.event_cloud?.series_wso || {})
+/** 悬停日期（null = 没悬停）；右侧筹码分布跟着它逐日重算（2026-10-18 用户要求）。 */
+const hoverDate = ref<string | null>(null)
+const plotHeight = ref(572)
+const plotRange = ref<[number, number] | null>(null)
+function onPlotMetrics(e: { height: number; priceMin?: number; priceMax?: number }) {
+  plotHeight.value = e.height
+  if (e.priceMin != null && e.priceMax != null) plotRange.value = [e.priceMin, e.priceMax]
+}
+const hoverChips = computed<ChipData | null>(() => {
+  const bars = data.value?.data || []
+  if (!bars.length) return null
+  if (!hoverDate.value) return data.value?.chips ?? null
+  const idx = bars.findIndex((b) => b.time === hoverDate.value)
+  if (idx < 0) return data.value?.chips ?? null
+  const recent = bars.slice(Math.max(0, idx - 119), idx + 1)
+  if (recent.length < 20) return data.value?.chips ?? null
+
+  // 与后端 _compute_chip_distribution 同一口径：120 日、exp(-0.02*age) 衰减、
+  // 每日成交量按 [low, high] 覆盖的 bin 均分、归一化到 100。
+  const nBins = 50
+  let lo = Infinity, hi = -Infinity
+  for (const b of recent) { lo = Math.min(lo, b.low); hi = Math.max(hi, b.high) }
+  lo *= 0.95; hi *= 1.05
+  if (!(hi > lo)) return data.value?.chips ?? null
+  const centers: number[] = []
+  for (let i = 0; i < nBins; i++) centers.push(lo + (hi - lo) * (i + 0.5) / nBins)
+  const vols = new Array<number>(nBins).fill(0)
+  const n = recent.length
+  for (let i = 0; i < n; i++) {
+    const b = recent[i]
+    if (!(b.high > b.low) || !(b.volume > 0)) continue
+    const weight = Math.exp(-0.02 * (n - 1 - i))
+    const covered: number[] = []
+    for (let j = 0; j < nBins; j++) if (centers[j] >= b.low && centers[j] <= b.high) covered.push(j)
+    if (!covered.length) continue
+    for (const j of covered) vols[j] += b.volume * weight / covered.length
+  }
+  const total = vols.reduce((a, b) => a + b, 0)
+  return {
+    prices: centers,
+    volumes: total > 0 ? vols.map((v) => v / total * 100) : vols,
+    current_price: bars[idx].close,
+  }
+})
 /** 概率云面板只渲染似然度靠前的候选（接口仍返回全部 27 个代码；一屏排不下，
  *  低似然度的候选也不该抢视觉权重）。 */
 const cloudRows = computed(() => {

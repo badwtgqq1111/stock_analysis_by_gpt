@@ -12,9 +12,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 WATCHLIST = ROOT / "frontend/src/components/StockWatchlist.vue"
 STRATEGIES = ROOT / "frontend/src/components/watchlistStrategies.ts"
+
+
+@pytest.fixture(scope="module")
+def client():
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 def test_name_column_has_min_width():
@@ -134,3 +144,38 @@ def test_watchlist_store_sanitizes_names():
     assert "names = ref<Record<string, string>>(readNames())" in text
     assert text.count("readNames()") >= 3, "两处监听（同 tab 事件 / 跨 tab storage）也要清洗"
     assert "const cleaned = cleanName(name)" in text, "写入路径要过清洗"
+
+
+def test_kline_hover_recomputes_chip_distribution():
+    """悬停某根 K 线时，右侧筹码分布必须按该日重算（2026-10-18 用户要求）。"""
+    page = (ROOT / "frontend/src/pages/KlinePage.vue").read_text(encoding="utf-8")
+    chip = (ROOT / "frontend/src/components/ChipDistribution.vue").read_text(encoding="utf-8")
+    assert '@hover="hoverDate = $event"' in page
+    assert "hoverChips" in page and "current_price" in page
+    assert "exp(-0.02" in page, "前端重算口径要跟后端 _compute_chip_distribution 一致"
+    assert "asof" in chip and "筹码分布" in chip
+    # 价格轴对齐：用图表自己的 coordinateToPrice 反推上下界，而不是 bin 序号等距摆放
+    chart = (ROOT / "frontend/src/components/KlineChart.vue").read_text(encoding="utf-8")
+    assert "coordinateToPrice" in chart and "plotMetrics" in chart
+    assert "priceToY" in chip and "plotHeight" in chip
+    assert "获利盘" in chip and "平均成本" in chip and "90%成本" in chip and "集中度" in chip
+
+
+def test_watchlist_sorts_by_candidate_rank_and_pins_live():
+    """K 线左侧：全部策略按综合评分排序；实盘持仓置顶但仍显示排名/分数。"""
+    text = (ROOT / "frontend/src/components/StockWatchlist.vue").read_text(encoding="utf-8")
+    assert "getCandidateRank" in text
+    assert "rowSort" in text and "综合评分" in text
+    assert "a.isLive ? -1 : 1" in text, "实盘必须置顶"
+    assert "row.rank" in text and "row.score" in text and "实盘" in text
+    # 2026-10-18：资金流与个股多空按权重合成**一个**排序，不是两个独立模式
+    assert "flow_longshort_score" in text and "comboScore" in text
+    assert "资金流 × 个股多空（50/50）" in text
+    assert "return 'combo'" in text and "kline.watchlist.rowSort" in text
+
+
+def test_candidate_rank_api_serves_latest(client):
+    body = client.get("/api/candidate-rank").json()
+    assert body["available"] is True
+    assert body["rows"], "二次排序产物不能为空"
+    assert {"rank", "code", "composite", "coverage"} <= set(body["rows"][0])

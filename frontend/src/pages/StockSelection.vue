@@ -84,6 +84,7 @@
                       @click="sortBy(col.key)">
                     {{ col.title }} {{ sortKey === col.key ? (sortAsc ? '▲' : '▼') : '' }}
                   </th>
+                  <th class="ls-col">多空</th>
                 </tr>
               </thead>
               <tbody>
@@ -113,6 +114,10 @@
                       <span class="tag" :class="row.stage === '最终入选（PK 后）' ? 'gold' : ''">{{ row.stage }}</span>
                     </template>
                     <template v-else>{{ fmtVal(row[col.key]) }}</template>
+                  </td>
+                  <td class="ls-col">
+                    <button class="btn-ghost btn-sm" title="看这只票的 AI 结论 / 研报证据"
+                            @click.stop="longShortCode = row.stock_code">多空</button>
                   </td>
                 </tr>
               </tbody>
@@ -201,6 +206,16 @@
       </template>
     </template>
   </div>
+    <div v-if="longShortCode" class="ls-mask" @click.self="longShortCode = null">
+      <aside class="ls-drawer">
+        <header class="ls-head">
+          <b class="mono">{{ longShortCode }}</b>
+          <span class="dim tiny">AI 结论 + 研报证据（两个口径）</span>
+          <button class="btn-ghost btn-sm" @click="longShortCode = null">关闭</button>
+        </header>
+        <StockLongShortPanel :code="longShortCode" />
+      </aside>
+    </div>
 </template>
 
 <script setup lang="ts">
@@ -208,6 +223,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePoolVerdicts } from '@/composables/usePoolVerdicts'
 import { getImportance, getSelection, getShap, getThsExportFiles, thsDownloadUrl } from '@/api/client'
+import StockLongShortPanel from '@/components/StockLongShortPanel.vue'
 import { useAsync } from '@/composables/useAsync'
 import { useWatchlist } from '@/composables/useWatchlist'
 import type { ImportanceResponse, SelectionRow, ShapFeature, ThsExportList } from '@/types/api'
@@ -248,6 +264,7 @@ const perPage = 20
 const sortKey = ref('')
 const sortAsc = ref(false)
 const selectedCode = ref<string | null>(null)
+const longShortCode = ref<string | null>(null)
 /** 名单筛选：关键字（代码/名称/行业/阶段）+ 只看自选（与 K 线页侧栏同一份自选） */
 const keyword = ref('')
 const onlyWatchlist = ref(false)
@@ -469,4 +486,11 @@ tr.hl { background: rgba(250, 204, 21, 0.12); outline: 1px solid rgba(250, 204, 
   padding: 2px 0; }
 .collapse summary:hover { color: var(--text-primary); }
 .collapse[open] summary { margin-bottom: var(--sp-2); }
+.ls-col { width: 56px; text-align: center; }
+.ls-mask { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.45); }
+.ls-drawer { width: min(820px, 94vw); height: 100%; overflow-y: auto; padding: var(--sp-3);
+  background: var(--bg-panel, #141414); border-left: 1px solid var(--border-color); }
+.ls-head { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.ls-head .btn-ghost { margin-left: auto; }
 </style>

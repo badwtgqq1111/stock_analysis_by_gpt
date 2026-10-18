@@ -360,9 +360,10 @@ const intradayRows = computed(() => {
   if (!i?.available) return [{ value: '—', sub: '无台账' }, { value: '—', sub: '' }, { value: '—', sub: '' }]
   const updated = i.updated_at ? hhmmss(i.updated_at.replace('T', ' ')) : '—'
   return [
-    { value: updated, sub: `台账更新时刻（文件数 ${i.done_total}/${i.target_total}）` },
+    { value: updated, sub: `台账 ${i.done_total}/${i.target_total}${i.pending_total != null ? `，待补 ${i.pending_total}` : ''}` },
     { value: String(i.session_processed ?? '—'), sub: `累计隔离 ${i.quarantined ?? 0} 只` },
-    { value: i.rate_per_sec ? `${i.rate_per_sec.toFixed(3)} 只/秒` : '—', sub: '本会话实测' },
+    { value: i.rate_per_sec ? `${i.rate_per_sec.toFixed(3)} 只/秒` : '—',
+      sub: i.eta_hours != null ? `预计 ${i.eta_hours.toFixed(2)} 小时补完` : '本会话实测' },
   ]
 })
 

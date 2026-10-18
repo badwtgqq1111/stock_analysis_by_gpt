@@ -599,6 +599,8 @@ def draft(args) -> int:
              and (getattr(args, "refetch", False) or not (DRAFT_DIR / f"{c}.json").exists())),
             key=lambda c: (stocks[c].get("priority", 9), c),
         )
+    if getattr(args, "only_missing", False):
+        codes = [c for c in codes if not (DOSSIER_DIR / f"{c}.json").exists()]
     print(f"起草 {len(codes)} 只：{codes}", flush=True)
     DRAFT_DIR.mkdir(parents=True, exist_ok=True)
     done = 0
@@ -636,7 +638,21 @@ def draft(args) -> int:
 
 def promote(args) -> int:
     """agent 复核后：草稿 → dossier，并把台账置 composed。"""
-    code = norm_code(args.code)
+    if getattr(args, "missing", False):
+        codes = [p.stem for p in DRAFT_DIR.glob("*.json") if not (DOSSIER_DIR / p.name).exists()]
+    else:
+        codes = [norm_code(getattr(args, "code", "") or "")]
+    codes = [c for c in codes if c]
+    if not codes:
+        print("没有需要晋级的草稿")
+        return 0
+    rc = 0
+    for code in codes:
+        rc = _promote_one(code, str(getattr(args, "level", "agent_checked") or "agent_checked")) or rc
+    return rc
+
+
+def _promote_one(code: str, level: str) -> int:
     path = DRAFT_DIR / f"{code}.json"
     if not path.exists():
         print(f"没有草稿：{path}")
@@ -644,7 +660,7 @@ def promote(args) -> int:
     dossier = json.loads(path.read_text(encoding="utf-8"))
     verification = dossier.get("verification") or {}
     dossier["verification"] = {
-        "level": str(getattr(args, "level", "agent_checked") or "agent_checked"),
+        "level": level,
         "method": "自动引文比对 + agent 复核（数值/口径/结论）",
         "verified": verification.get("verified"),
         "checked": verification.get("checked"),
@@ -742,10 +758,12 @@ def main() -> int:
     p_draft.add_argument("--codes", default="", help="逗号分隔；默认全部 fetched 票")
     p_draft.add_argument("--sleep", type=float, default=1.0, help="每票间隔秒数")
     p_draft.add_argument("--refetch", action="store_true", help="已有草稿也重写")
+    p_draft.add_argument("--only-missing", action="store_true", help="跳过已有草稿/成品的票")
     p_draft.set_defaults(func=draft)
 
     p_promote = sub.add_parser("promote", help="草稿 → dossier（agent 复核后）")
-    p_promote.add_argument("--code", required=True)
+    p_promote.add_argument("--code", default="")
+    p_promote.add_argument("--missing", action="store_true", help="批量晋级所有还没有成品的草稿")
     p_promote.add_argument("--level", default="agent_checked",
                            choices=["auto_checked", "agent_checked"],
                            help="未人工复核的批次请用 auto_checked")

@@ -156,7 +156,9 @@ def test_frontend_wiring():
     kline = (ROOT / "frontend/src/pages/KlinePage.vue").read_text(encoding="utf-8")
     client_ts = (ROOT / "frontend/src/api/client.ts").read_text(encoding="utf-8")
     panel = (ROOT / "frontend/src/components/StockResearchPanel.vue").read_text(encoding="utf-8")
-    assert "StockResearchPanel" in kline and "<StockResearchPanel" in kline
+    wrapper = (ROOT / "frontend/src/components/StockLongShortPanel.vue").read_text(encoding="utf-8")
+    assert "StockLongShortPanel" in kline and "<StockLongShortPanel" in kline
+    assert "getStockResearch" in wrapper and "研报证据" in wrapper
     assert "getStockResearch" in client_ts and "/research`" in client_ts
     assert "getStockResearch" in panel and "引用明细" in panel
 

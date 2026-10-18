@@ -206,6 +206,10 @@ def test_event_cloud_structure_and_collapse():
         "JOC", "BOI", "OB_LINE", "OS_LINE"}, "结构类事件必须在已实现清单里"
     assert cloud["calibers"], "研报没给构造细节的地方要如实列出「口径自定」"
     assert cloud["score"]["half_life"] == 10 and "民生证券" in cloud["source"]
+    # 悬停浮窗的精简逐日视图（2026-10-18）：每日前 5 个候选事件 + 滚动 WSO
+    assert cloud["series_top"] and cloud["series_wso"]
+    assert cloud["date"] in cloud["series_top"] and cloud["date"] in cloud["series_wso"]
+    assert len(cloud["series_top"][cloud["date"]]) >= 1   # 2026-10-18：悬停要展示全部候选事件
 
 
 def test_event_cloud_score_math_matches_documented_decay():

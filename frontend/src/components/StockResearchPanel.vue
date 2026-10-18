@@ -9,8 +9,8 @@
   未收录/未整理的票如实显示状态，不编造内容；本面板只读盘，不发计费请求（"刷新"=重新读盘）。
 -->
 <template>
-  <div class="panel stock-research-panel" v-if="code">
-    <h6>
+  <div :class="['stock-research-panel', embedded ? 'embedded' : 'panel']" v-if="code">
+    <h6 v-if="!embedded">
       研报多空调研
       <span class="dim tiny">{{ sourceSubtitle }}</span>
       <span class="tag info" v-if="isPublic">公开来源</span>
@@ -184,7 +184,7 @@ import { getStockResearch } from '@/api/client'
 import { useAsync } from '@/composables/useAsync'
 import type { StockResearchCitation, StockResearchResponse } from '@/types/api'
 
-const props = defineProps<{ code: string | null }>()
+const props = defineProps<{ code: string | null; embedded?: boolean }>()
 
 const EMPTY: StockResearchResponse = { code: '', in_scope: false, state: 'not_in_scope', dossier: null }
 

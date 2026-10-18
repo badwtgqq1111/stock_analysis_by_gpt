@@ -196,7 +196,9 @@ def main() -> int:
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     parser.add_argument("--progress-file", type=Path, default=DEFAULT_PROGRESS)
     parser.add_argument("--quarantine-file", type=Path, default=DEFAULT_QUARANTINE)
-    parser.add_argument("--batch-size", type=int, default=5, help="每批交给一个子进程的标的数")
+    # 2026-10-18：batch=5 时每批 ~55s（uv 启动 + baostock 登录占大头），实测 20 只/15s；
+    # 提到 40 后单进程只登录一次，吞吐约 1 只/秒，808 只待补可在 ~15 分钟完成。
+    parser.add_argument("--batch-size", type=int, default=40, help="每批交给一个子进程的标的数")
     parser.add_argument("--batch-timeout", type=int, default=180, help="每批硬超时（秒），到点 SIGKILL")
     parser.add_argument("--sleep", type=float, default=0.5)
     parser.add_argument("--session-seconds", type=int, default=3600)
@@ -209,6 +211,8 @@ def main() -> int:
                         help="最新交易日（留空=从日线数据推断）；仅 --refresh 用")
     parser.add_argument("--limit", type=int, default=0,
                         help=">0：本次最多处理这么多只（调试/限时用）")
+    parser.add_argument("--reset-quarantine", action="store_true",
+                        help="清空隔离计数（历史瞬时失败不该永久挡住这些票）")
     args = parser.parse_args()
 
     if args.build_codes:
@@ -228,6 +232,10 @@ def main() -> int:
         build_codes(args.freq, args.codes_file)
     target = [c for c in args.codes_file.read_text(encoding="utf-8").split() if c.strip()]
     quarantine = json.loads(args.quarantine_file.read_text()) if args.quarantine_file.exists() else {}
+    if args.reset_quarantine:
+        quarantine = {}
+        args.quarantine_file.write_text("{}", encoding="utf-8")
+        log(args.log, "=== 已清空 quarantine 计数，所有失败票重新进入队列 ===")
     session_start = time.time()
     latest = None
     if args.refresh:
@@ -241,14 +249,17 @@ def main() -> int:
     processed = 0
     while True:
         have = {p.name.replace("_", ".")[:-8] for p in freq_dir.glob("*.parquet")}
+        pending_count = 0
         if args.refresh:
             pending = [(c, last) for c, last in refresh_pending(freq_dir, target, latest)
                        if quarantine.get(c, 0) < args.max_failures_per_code]
+            pending_count = len(pending)
             if args.limit:
                 pending = pending[: args.limit]
         else:
             pending = [(c, None) for c in target
                        if c not in have and quarantine.get(c, 0) < args.max_failures_per_code]
+            pending_count = len(pending)
         if not pending:
             log(args.log, f"全部完成或有配额隔离：done={len(have)} quarantine={sum(1 for v in quarantine.values() if v >= args.max_failures_per_code)}")
             break
@@ -259,19 +270,15 @@ def main() -> int:
         batch = pending[: args.batch_size]
         # 刷新模式下每只票的起始日不同（= 自己最后一条的下一天），按 start 分组后各起一个子进程；
         # 历史回补模式则只有一组（args.start）。正常情况下同一批的 start 完全相同，所以就是 1 个子进程。
-        groups: dict[str, list[str]] = {}
-        for code, last in batch:
-            if args.refresh and last is not None:
-                start = (last + timedelta(days=1)).isoformat()
-                if latest is not None and start > latest.isoformat():
-                    groups.setdefault("__skip__", []).append(code)   # 已经是最新，跳过
-                    continue
-            else:
-                start = args.start
-            groups.setdefault(start, []).append(code)
+        # 2026-10-18：按"各自最后日期+1"分组会退化成大量 1-2 只的小批次
+        # （每批一次 uv 启动 + baostock 登录，实测 0.66 只/秒）。改成整批统一从
+        # latest-10 天拉取 + --merge：重叠几天由 merge 去重，批次始终保持 batch-size。
+        if args.refresh and latest is not None:
+            start = (latest - timedelta(days=10)).isoformat()
+            groups: dict[str, list[str]] = {start: [c for c, _ in batch]}
+        else:
+            groups = {args.start: [c for c, _ in batch]}
         codes_batch = [c for v in groups.values() for c in v]
-        if "__skip__" in groups:
-            groups.pop("__skip__")
         batch_start = time.time()
         timed_out = False
         for start, group_codes in groups.items():
@@ -319,7 +326,9 @@ def main() -> int:
                     quarantine[code] = quarantine.get(code, 0) + 1
         args.quarantine_file.write_text(json.dumps(quarantine, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        done = len(have_now)
+        # 进度只统计**目标票**里已经更新到最新交易日的数量。
+        # 旧实现用 len(have)（全目录文件数），会出现 done=5228 > target=4533、ETA 为负。
+        done = max(0, len(target) - pending_count)
         elapsed = max(time.time() - session_start, 1e-9)
         rate = processed / elapsed
         args.progress_file.write_text(json.dumps({
@@ -329,7 +338,8 @@ def main() -> int:
             "target_total": len(target),
             "session_processed": processed,
             "rate_per_sec": round(rate, 4),
-            "eta_hours": round((len(target) - done) / rate / 3600, 2) if rate > 0 else None,
+            "pending_total": pending_count,
+            "eta_hours": round(pending_count / rate / 3600, 2) if rate > 0 else None,
             "last_batch_seconds": round(duration, 1),
             "last_batch_timed_out": timed_out,
             "quarantined": sum(1 for v in quarantine.values() if v >= args.max_failures_per_code),

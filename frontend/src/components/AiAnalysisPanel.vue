@@ -8,8 +8,8 @@
   多空分析与 买入/持有/卖出。策略覆盖生产（模型选股/手臂）与备选（多因子候选）。
 -->
 <template>
-  <div class="panel ai-panel" v-if="code">
-    <h6>
+  <div :class="['ai-panel', embedded ? 'embedded' : 'panel']" v-if="code">
+    <h6 v-if="!embedded">
       AI 多空分析
       <span class="dim tiny">覆盖全部策略（生产 + 备选）</span>
       <span class="tag info" v-if="summary?.latest_date">AI 已到 {{ summary.latest_date }}</span>
@@ -81,7 +81,7 @@ import { getAiPicksSummary, getStockAi } from '@/api/client'
 import { useAsync } from '@/composables/useAsync'
 import type { StockAiResponse } from '@/types/api'
 
-const props = defineProps<{ code: string | null }>()
+const props = defineProps<{ code: string | null; embedded?: boolean }>()
 
 const EMPTY: StockAiResponse = {
   code: '', available: false, n: 0, latest: null, rows: [], actions: {},

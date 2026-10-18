@@ -371,6 +371,8 @@ def _sidecar_progress(path: Path, label: str) -> dict:
         "updated_at": d.get("updated_at"),
         "done_total": d.get("done_total"),
         "target_total": d.get("target_total"),
+        "pending_total": d.get("pending_total"),
+        "eta_hours": d.get("eta_hours"),
         "session_processed": d.get("session_processed"),
         "rate_per_sec": d.get("rate_per_sec"),
         "quarantined": d.get("quarantined"),

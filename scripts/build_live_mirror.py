@@ -193,7 +193,8 @@ def selection_rows(state: dict, advice: pd.DataFrame, picks_date: str, industrie
     ]]
 
 
-def performance_payload(state: dict, *, years: int = 3, freq_stats=("D", "W", "M")) -> dict:
+def performance_payload(state: dict, *, years: int = 3, freq_stats=("D", "W", "M"),
+                        nav: pd.DataFrame | None = None) -> dict:
     """日/周/月 三个粒度的「当前持仓固定权重 vs 中证500」+ 收益日历（用户 2026-10-12 要求）。
 
     回填口径写在 `notes` 里：**当前权重、买入持有、不含现金/已实现/成本** ——
@@ -201,7 +202,11 @@ def performance_payload(state: dict, *, years: int = 3, freq_stats=("D", "W", "M
     """
     codes = [str(r.stock_code) for r in state["positions"].itertuples()]
     weights = {str(r.stock_code): float(r.weight) for r in state["positions"].itertuples()}
+    # 2026-10-18 修：快照日是 10-15，但 nav.csv 已经用 10-16 收盘价盯市；
+    # 对比曲线却停在 10-15（晚一天）。曲线终点跟 nav 的最新日期走。
     end = pd.Timestamp(state["asof"]).normalize()
+    if nav is not None and not nav.empty and "asof_date" in nav.columns:
+        end = max(end, pd.Timestamp(nav["asof_date"].max()).normalize())
     start = end - pd.DateOffset(years=years)
     bars = load_bars(codes, start=(start - pd.Timedelta(days=10)).strftime("%Y-%m-%d"))
     bench = load_benchmark(start=(start - pd.Timedelta(days=10)).strftime("%Y-%m-%d"))
@@ -216,23 +221,36 @@ def performance_payload(state: dict, *, years: int = 3, freq_stats=("D", "W", "M
                                ("y3", f"近 {years} 年", pd.DateOffset(years=years))):
         chunk = curve[curve["trade_date"] >= (end - offset)]
         windows[key] = {"label": label, "stats": curve_stats(chunk.reset_index(drop=True), freq="D")}
+    cash = float(state.get("cash") or 0.0)
+    realized = float(state.get("realized_pnl") or 0.0)
     payload = {
         "available": True,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "asof": str(state["asof"]),
+        "asof": str(end.date()),
+        "snapshot_asof": str(state["asof"]),
         "window": {"start": daily_stats.get("start"), "end": daily_stats.get("end"), "years": years},
         "benchmark": {"code": "000905.SH", "name": "中证500", "source": "assets/data/meta/cn_benchmark_daily.parquet"},
         "weight_mode": "当前持仓市值权重（固定不漂移）买入持有",
         "weights": weights,
         "coverage_weight": float(curve["coverage_weight"].iloc[0]),
         "notes": [
-            "回填口径：按**当前权重**在窗口起点买入并持有到最新交易日（不含现金 40.55 元、不含已实现 −5,988.40 元、不含交易成本）。",
+            f"回填口径：按**当前权重**在窗口起点买入并持有到最新交易日（不含现金 {cash:.2f} 元、"
+            f"不含已实现 {realized:+.2f} 元、不含交易成本）。",
             "它回答「这一篮子现在这个结构，过去 N 年跟中证500 比怎样」——**不是**账户业绩；账户业绩只能从快照日向前累积（见 nav.csv）。",
             "中证500 用价格指数（000905.SH），与策略池曲线同一口径；组合用后复权收盘价。",
         ],
         "stats_daily": daily_stats,
         "windows": windows,
     }
+    if nav is not None and not nav.empty:
+        first, last = nav.iloc[0], nav.iloc[-1]
+        payload["account"] = {
+            "start": str(pd.Timestamp(first["asof_date"]).date()),
+            "end": str(pd.Timestamp(last["asof_date"]).date()),
+            "rows": int(len(nav)),
+            "cum_return": float(last.get("cum_return") or 0.0),
+            "note": "账户实际：从快照日起逐日盯市，含现金与已实现盈亏；样本不足 30 天时仅作参考。",
+        }
     for key, freq in (("daily", "D"), ("weekly", "W"), ("monthly", "M")):
         resampled = curve if freq == "D" else resample_curve(curve, freq)
         dates = [str(pd.Timestamp(d).date()) for d in
@@ -366,7 +384,7 @@ def build(*, snapshot_path: Path = SNAPSHOT, out_dir: Path = OUT_DIR, use_live: 
     nav.to_csv(out_dir / "nav.csv", index=False)
     (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     # 日/周/月 对比曲线 + 收益日历（用户 2026-10-12 要求）：单独一份产物，页面按需取。
-    performance = performance_payload(state, years=years)
+    performance = performance_payload(state, years=years, nav=nav)
     (out_dir / "performance.json").write_text(json.dumps(performance, ensure_ascii=False, indent=2),
                                               encoding="utf-8")
     summary["performance_available"] = bool(performance.get("available"))

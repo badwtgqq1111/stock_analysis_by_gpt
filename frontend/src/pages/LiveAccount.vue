@@ -119,8 +119,15 @@
       <div class="panel">
         <h6>收益对比：实盘持仓（当前权重） vs 中证500</h6>
         <p class="tiny muted">
-          回填口径：按<strong>当前权重</strong>在窗口起点买入并持有到最新交易日（不含现金 40.55 元、不含已实现 {{ money(live.realized_pnl) }}、不含交易成本）。
+          回填口径：按<strong>当前权重</strong>在窗口起点买入并持有到最新交易日（不含现金 {{ money(live.cash) }} 元、不含已实现 {{ money(live.realized_pnl) }}、不含交易成本）。
           它回答「这一篮子现在这个结构，过去这段跟中证500 比怎样」——<strong>不是账户业绩</strong>；账户业绩只能从快照日起向前累积（上面第 ① 块）。
+        </p>
+        <p class="tiny" v-if="perf?.account">
+          账户实际累计（推算初始本金起）：
+          <b :class="tone(live.cumulative_return)">{{ pct(live.cumulative_return) }}</b>
+          · 快照起（含现金/已实现）：
+          <b :class="tone(perf.account.cum_return)">{{ pct(perf.account.cum_return) }}</b>
+          · {{ perf.account.start }} ~ {{ perf.account.end }}（{{ perf.account.rows }} 个交易日<template v-if="perf.account.rows < 30">，样本不足 30 天，仅参考</template>）
         </p>
         <div class="pill-row">
           <button v-for="f in freqs" :key="f.key" class="tab" :class="{ on: freq === f.key }" @click="freq = f.key">

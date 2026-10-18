@@ -522,6 +522,11 @@ if [ "${DAILY_ROT_ARM:-1}" = "1" ]; then
   run_data_step rot_arm uv run python scripts/select_rotation_arm.py
 fi
 
+# 行业热度 3D 动态排名：逐日重算最近 40 个交易日（约 2 分钟），供前端 3D 视图。
+if [ "${DAILY_INDUSTRY_3D:-1}" = "1" ]; then
+  run_data_step industry_heat_history uv run python scripts/build_industry_heat_history.py --days 40 --top 20
+fi
+
 if [ "${DAILY_LIVE_MIRROR:-1}" = "1" ]; then
   # 实盘镜像（2026-10-12 新增）：把真实券商持仓（人工录入 config/live_account_holdings.json）
   # 用当日行情盯市 + 逐票建议，写 output/paper_trading/live_mirror/ 与
@@ -530,19 +535,6 @@ if [ "${DAILY_LIVE_MIRROR:-1}" = "1" ]; then
   # 晚于它当天就不分析实盘持仓了；也必须在 strategy-pool **之前**（策略池要读到今天的名单归档）。
   # 它不产生订单、不参与生产权重；拿不到实时价就用快照价，失败只记一行。
   run_data_step live_mirror uv run python scripts/build_live_mirror.py --print
-fi
-
-if [ "${DAILY_AI_PICKS:-1}" = "1" ]; then
-  # 当日全部策略（生产 + 备选）逐股多空分析 → 买入/持有/卖出。
-  # --skip-existing：当天 19:00/20:30/22:00 的失败重试只补"待分析"的股票，不重复烧 API。
-  # 开关：DAILY_AI_PICKS=0；显式给 key 时用 DAILY_AI_PICKS_KEY 覆盖 DEEPSEEK_API_KEY。
-  run_data_step ai_picks uv run python scripts/analyze_strategy_picks_ai.py \
-      --date "$TRADE_DATE" --skip-existing
-  if [ -f "output/results_cn/ai_pick_analysis/$TRADE_DATE.json" ]; then
-    log "ai-picks -> output/results_cn/ai_pick_analysis/$TRADE_DATE.json（K 线页 / 选股日历逐股 AI 结论）"
-  else
-    log "ai-picks 未产出名单（见 $LOG_DIR/data_ai_picks.log；不阻塞生产）"
-  fi
 fi
 
 # ── 策略名单统一刷新（P2.56，2026-10-13 新增）────────────────────────────────
@@ -556,6 +548,43 @@ if [ "${DAILY_STRATEGY_LISTS:-1}" = "1" ]; then
   run_data_step strategy_lists uv run python scripts/refresh_strategy_lists.py --print
   # 抽象层自检：每条策略的选股源/刷新/台账/曲线/历史都接上了吗（漏接线在这里点名）
   run_data_step strategy_registry uv run python scripts/strategy_registry.py --check --save
+fi
+
+# ── 逐股 AI 多空（2026-10-18 顺序修正）──────────────────────────────────────
+# 必须放在 strategy_lists **之后**：box/wyckoff/moneyflow/mainforce/donchian 的当日名单
+# 由 strategy_lists 刷新；此前 AI 先跑，导致这些票（如 10-16 康普顿）永远"暂无 AI 结论"。
+if [ "${DAILY_AI_PICKS:-1}" = "1" ]; then
+  run_data_step ai_picks uv run python scripts/analyze_strategy_picks_ai.py \
+      --date "$TRADE_DATE" --skip-existing
+  if [ -f "output/results_cn/ai_pick_analysis/$TRADE_DATE.json" ]; then
+    log "ai-picks -> output/results_cn/ai_pick_analysis/$TRADE_DATE.json（K 线页 / 选股日历逐股 AI 结论）"
+  else
+    log "ai-picks 未产出名单（见 $LOG_DIR/data_ai_picks.log；不阻塞生产）"
+  fi
+fi
+
+# ── 逐股研报多空（2026-10-18 新增到每日自动化）──────────────────────────────
+# Bynewlt 优先（计费，按日预算）；未收录回落公开源（免费但慢）。只处理新票/未成品，
+# --only-missing 保证重试不重复烧钱；promote 统一标 auto_checked（人工复核后再升）。
+if [ "${DAILY_STOCK_RESEARCH:-1}" = "1" ]; then
+  run_data_step research_bynewlt uv run python scripts/bynewlt_stock_research.py fetch \
+      --max-calls "${DAILY_RESEARCH_MAX_CALLS:-20}" --sleep 1
+  run_data_step research_public uv run python scripts/cn_public_stock_research.py fetch \
+      --limit "${DAILY_RESEARCH_PUBLIC_LIMIT:-10}" --sleep 1
+  run_data_step research_bynewlt_draft uv run python scripts/bynewlt_stock_research.py draft --only-missing --sleep 1
+  run_data_step research_public_draft uv run python scripts/cn_public_stock_research.py draft --only-missing --sleep 2
+  run_data_step research_promote_bynewlt uv run python scripts/bynewlt_stock_research.py promote --missing --level auto_checked
+  run_data_step research_promote_public uv run python scripts/cn_public_stock_research.py promote --missing --level auto_checked
+fi
+
+# ── 候选池二次排序（2026-10-18）────────────────────────────────────────────
+# 在"策略已入选"的候选池内，把 策略先验 / AI / 研报 / 威科夫 / 筹码 做截面 z-score
+# 后合成综合分；产物 output/research/p2_75_candidate_rank/<date>.{csv,json}。
+# 只排序、不改变生产名单；权重是初始先验，上线前必须走 walk-forward（见脚本头注释）。
+if [ "${DAILY_CANDIDATE_RANK:-1}" = "1" ]; then
+  run_data_step candidate_rank uv run python scripts/p2_75_candidate_rank.py --date "$TRADE_DATE"
+  # 排序台账 + 未来 5/10/21 日超额（前向评估用；当日数据不足时先记 NaN）
+  run_data_step candidate_rank_ledger uv run python scripts/p2_75_rank_ledger.py --update
 fi
 
 # ── 选股台账重建（前端「选股日历」的数据源）──────────────────────────────

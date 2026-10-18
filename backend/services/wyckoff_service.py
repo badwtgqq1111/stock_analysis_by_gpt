@@ -769,6 +769,24 @@ def event_cloud(bars: pd.DataFrame, *, window: int = 60, collapse_threshold: flo
     current = [e for e in events if e["date"] == str(frame.index[-1].date())]
     current.sort(key=lambda e: -e["prob"])
     top_now = current[0] if current else None
+    # 悬停浮窗用的逐日视图：**全部**候选事件（按似然度降序）+ 滚动 WSO（半衰期同主口径）。
+    series_top: dict[str, list[dict[str, Any]]] = {}
+    for day, group in by_bar.groupby("date", sort=True):
+        top = group.sort_values("prob", ascending=False)
+        series_top[str(day)] = [
+            {"type": str(r["type"]), "label": str(r["label"]),
+             "side": int(r["side"]), "prob": round(float(r["prob"]), 4)}
+            for _, r in top.iterrows()
+        ]
+    series_wso: dict[str, float] = {}
+    for idx, item in enumerate(collapsed):
+        window = collapsed[max(0, idx - 19): idx + 1]
+        weight, total, weight_sum = 1.0, 0.0, 0.0
+        for it in reversed(window):
+            total += it["side"] * weight
+            weight_sum += weight
+            weight *= decay
+        series_wso[item["date"]] = round(total / weight_sum, 4) if weight_sum else 0.0
     return {
         "available": True,
         "date": str(frame.index[-1].date()),
@@ -779,6 +797,10 @@ def event_cloud(bars: pd.DataFrame, *, window: int = 60, collapse_threshold: flo
         "score": {"wso": wso, "n_events": len(collapsed), "half_life": half_life,
                   "mapping": "吸筹/强势SOS/超卖 = +1；派发/弱势SOW/超买 = −1（研报 §3.1）"},
         "recent_collapsed": collapsed[-recent:],
+        # 逐日坍缩事件（K 线悬停浮窗用）：{date,type,label,side,prob}，与 recent_collapsed 同源。
+        "series": collapsed,
+        "series_top": series_top,
+        "series_wso": series_wso,
         "implemented": sorted(_EVENT_META.keys()),
         "not_implemented": list(_NOT_IMPLEMENTED),
         "calibers": list(_CALIBERS),

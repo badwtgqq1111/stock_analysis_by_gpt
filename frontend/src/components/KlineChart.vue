@@ -27,6 +27,32 @@
         <span class="hr-k">振幅</span><span class="hr-v mono">{{ hoverPanel.amplitude }}</span>
         <span class="hr-k">量</span><span class="hr-v mono">{{ hoverPanel.volume }}</span>
       </span>
+      <span class="hr-group">
+        <span class="hr-k">威科夫</span>
+        <template v-if="hoverPanel.wkLabel">
+          <span class="hr-v" :class="hoverPanel.wkSide > 0 ? 'tt-up' : 'tt-down'">{{ hoverPanel.wkLabel }}</span>
+          <span class="hr-v mono" :class="hoverPanel.wkSide > 0 ? 'tt-up' : 'tt-down'">
+            {{ hoverPanel.wkSide > 0 ? '偏多' : '偏空' }} {{ (hoverPanel.wkProb * 100).toFixed(0) }}%
+          </span>
+        </template>
+        <span v-else class="hr-v dim">当日无坍缩事件</span>
+      </span>
+      <div class="wk-card" v-if="hoverPanel.wkRange || hoverPanel.wkTop.length">
+        <div class="wk-row"><span class="wk-k">区间</span><span>{{ hoverPanel.wkRange }}</span></div>
+        <div class="wk-row"><span class="wk-k">位置</span><span>{{ hoverPanel.wkPos }}</span></div>
+        <div class="wk-row" v-if="hoverPanel.wkTop.length">
+          <span class="wk-k">事件</span>
+          <span class="wk-events">
+            <span v-for="e in hoverPanel.wkTop" :key="e.label" class="wk-ev" :class="e.side > 0 ? 'up' : 'down'">
+              {{ e.label }} {{ (e.prob * 100).toFixed(0) }}%
+            </span>
+          </span>
+        </div>
+        <div class="wk-row" v-if="hoverPanel.wkWso != null">
+          <span class="wk-k">WSO</span><span class="mono">{{ hoverPanel.wkWso.toFixed(3) }}</span>
+          <span v-if="hoverPanel.wkStruct" class="dim">· 结构 {{ hoverPanel.wkStruct }}</span>
+        </div>
+      </div>
     </div>
     <!-- 入选记号的可交互命中区（2026-10-15）：lightweight-charts 的 marker 画在 canvas 上，
          没有 DOM 也没有 hover 事件 ⇒ 在图下方铺一层透明"热区"，悬停/聚焦就出明细卡。 -->
@@ -71,11 +97,23 @@ const props = defineProps<{
   selectionMonth?: string
   /** 股票名称兜底（图例里显示"代码 + 名称"；`data.name` 缺的时候用） */
   name?: string
+  /** 逐日威科夫坍缩事件：date → {label, side(+1多/-1空), prob}（悬停浮窗用） */
+  wyckoffSeries?: Record<string, { label: string; side: number; prob: number }>
+  /** 逐日候选事件前 5 个（"事件概率云"精简版） */
+  wyckoffTop?: Record<string, { label: string; side: number; prob: number }[]>
+  /** 逐日滚动 WSO */
+  wyckoffWso?: Record<string, number>
+  /** 当前结构（只在最新一根显示，历史根没有当时的快照） */
+  wyckoffStructure?: string
 }>()
 
 const emit = defineEmits<{
   priceRange: [range: [number, number]]
   pick: [date: string]
+  /** 悬停到某根 K 线（null = 离开图区）；父组件用它同步右侧筹码分布 */
+  hover: [date: string | null]
+  /** 价格绘图区高度（不含时间轴），右侧筹码分布按它对齐价格坐标 */
+  plotMetrics: [payload: { height: number; priceMin?: number; priceMax?: number }]
   /** 鼠标钻进/离开某个入选记号的命中区（父组件可据此收起别的浮层） */
   selectionHover: [date: string | null]
 }>()
@@ -124,6 +162,9 @@ const hoverPanel = reactive({
   visible: false,
   date: '', open: '', high: '', low: '', close: '',
   changePct: '', amplitude: '', volume: '', chgUp: true,
+  wkLabel: '', wkSide: 0, wkProb: 0,
+  wkTop: [] as { label: string; side: number; prob: number }[],
+  wkWso: null as number | null, wkRange: '', wkPos: '', wkStruct: '',
 })
 
 function fmtNum(v: number | null | undefined): string {
@@ -151,6 +192,7 @@ function showTooltip(param: any, container: HTMLElement) {
 function fillTooltip(dp: OhlcvDataPoint) {
   hoverPanel.visible = true
   hoverPanel.date = dp.time
+  emit('hover', dp.time)
   hoverPanel.open = fmtNum(dp.open)
   hoverPanel.high = fmtNum(dp.high)
   hoverPanel.low = fmtNum(dp.low)
@@ -159,6 +201,26 @@ function fillTooltip(dp: OhlcvDataPoint) {
   hoverPanel.changePct = dp.change_pct != null ? (dp.change_pct >= 0 ? '+' : '') + dp.change_pct.toFixed(2) + '%' : '-'
   hoverPanel.amplitude = dp.amplitude != null ? dp.amplitude.toFixed(2) + '%' : '-'
   hoverPanel.volume = fmtVol(dp.volume)
+  const wk = props.wyckoffSeries?.[dp.time]
+  hoverPanel.wkLabel = wk?.label || ''
+  hoverPanel.wkSide = wk?.side || 0
+  hoverPanel.wkProb = wk?.prob || 0
+  const bars = props.data?.data || []
+  const idx = bars.findIndex((b) => b.time === dp.time)
+  if (idx >= 0) {
+    const win = bars.slice(Math.max(0, idx - 59), idx + 1)
+    const hi = Math.max(...win.map((b) => b.high))
+    const lo = Math.min(...win.map((b) => b.low))
+    const net = win.length > 1 ? dp.close / win[0].close - 1 : 0
+    const width = lo > 0 ? (hi - lo) / lo : 0
+    hoverPanel.wkRange = `${win.length}日 ${lo.toFixed(2)}~${hi.toFixed(2)}（宽${(width * 100).toFixed(1)}%，净${(net * 100).toFixed(1)}%）`
+    const back = idx >= 120 ? bars[idx - 120].close : null
+    const pos = back ? dp.close / back - 1 : null
+    hoverPanel.wkPos = pos == null ? '—' : `近120日 ${(pos * 100).toFixed(1)}% → ${pos < 0 ? '吸筹/底部区域' : '派发/顶部区域'}`
+    hoverPanel.wkTop = props.wyckoffTop?.[dp.time] || []
+    hoverPanel.wkWso = props.wyckoffWso?.[dp.time] ?? null
+    hoverPanel.wkStruct = idx === bars.length - 1 ? (props.wyckoffStructure || '') : ''
+  }
   legend.chgUp = hoverPanel.chgUp
   legend.changePct = hoverPanel.changePct
 }
@@ -166,6 +228,7 @@ function fillTooltip(dp: OhlcvDataPoint) {
 /** 光标不在任何一根 K 线上（离开图区 / 落在空白处）⇒ 收起悬停面板，身份条回到"最新" */
 function fillTooltipLatest() {
   hoverPanel.visible = false
+  emit('hover', null)
   const bars = props.data?.data || []
   const last = bars[bars.length - 1] as OhlcvDataPoint | undefined
   const change = last?.change_pct
@@ -227,6 +290,7 @@ function initChart() {
   })
 
   chart.timeScale().fitContent()
+  emitPlotMetrics()
 
   chart.subscribeCrosshairMove((param) => {
     if (!containerRef.value) return
@@ -240,7 +304,28 @@ function initChart() {
     if (param.time) emit('pick', String(param.time))
   })
 
-  chart.timeScale().subscribeVisibleTimeRangeChange(() => { updatePriceRange(); updateHitboxes() })
+  chart.timeScale().subscribeVisibleTimeRangeChange(() => { updatePriceRange(); updateHitboxes(); emitPlotMetrics() })
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => emitPlotMetrics())
+    resizeObserver.observe(containerRef.value)
+  }
+}
+
+let resizeObserver: ResizeObserver | null = null
+function emitPlotMetrics() {
+  if (!chart || !containerRef.value) return
+  const total = containerRef.value.clientHeight
+  const axis = chart.timeScale().height()
+  const height = Math.max(1, total - axis)
+  const payload: { height: number; priceMin?: number; priceMax?: number } = { height }
+  // 用图表自己的坐标反推价格上下界 ⇒ 筹码条与左侧价格轴逐像素对齐（不靠 5% padding 近似）
+  const top = candleSeries?.coordinateToPrice(0)
+  const bottom = candleSeries?.coordinateToPrice(height)
+  if (top != null && bottom != null && Number(top) !== Number(bottom)) {
+    payload.priceMin = Math.min(Number(top), Number(bottom))
+    payload.priceMax = Math.max(Number(top), Number(bottom))
+  }
+  emit('plotMetrics', payload)
 }
 
 function updatePriceRange() {
@@ -311,6 +396,7 @@ function setData(resp: OhlcvResponse) {
   selMarkSeries?.setData(selLine)
   candleSeries.setMarkers(markers)
   chart.timeScale().fitContent()
+  requestAnimationFrame(emitPlotMetrics)
   nextTick(() => { updatePriceRange(); updateHitboxes() })
 }
 
@@ -458,6 +544,8 @@ function onChartLeave() {
 }
 
 function destroyChart() {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   if (chart) { chart.remove(); chart = null }
   candleSeries = null; volumeSeries = null
   ma5Series = ma10Series = ma20Series = ma60Series = null
@@ -524,6 +612,7 @@ watch(() => props.selectionRows, () => { hideSelectionDetail(); nextTick(updateH
 .hover-readout {
   position: absolute; z-index: 12; left: 8px; bottom: 96px;   /* 避开底部成交量一根 */
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  max-width: min(680px, 92%);
   padding: 3px 8px; border-radius: 6px;
   background: rgba(20, 24, 32, 0.92);
   border: 1px solid rgba(255, 209, 102, 0.28);
@@ -535,6 +624,17 @@ watch(() => props.selectionRows, () => { hideSelectionDetail(); nextTick(updateH
 .hover-readout .hr-group { display: inline-flex; align-items: center; gap: 4px; margin-left: 2px; }
 .hover-readout .hr-k { color: var(--text-muted); }
 .hover-readout .hr-v { color: var(--text-primary); }
+.hover-readout .wk-card { flex-basis: 100%; display: flex; flex-direction: column; gap: 1px;
+  margin-top: 2px; padding-top: 3px; border-top: 1px solid rgba(255, 209, 102, 0.18);
+  font-size: 11px; line-height: 1.5; }
+.hover-readout .wk-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.hover-readout .wk-k { color: var(--text-muted); min-width: 28px; }
+.hover-readout .wk-events { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px;
+  flex: 1; min-width: 0; }
+.hover-readout .wk-ev { display: flex; justify-content: space-between; gap: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hover-readout .wk-ev.up { color: var(--accent-up); }
+.hover-readout .wk-ev.down { color: var(--accent-down); }
 .tt-high { color: var(--accent-up) !important; }
 .tt-low { color: var(--accent-down) !important; }
 .tt-up { color: var(--accent-up) !important; }

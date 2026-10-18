@@ -1,0 +1,89 @@
+# P2.74 STOCK-JEPA 复现配置（论文为唯一规范；外部仓库只作参考）
+# 论文：arXiv 2610.07006v1
+# 本文件冻结"40 维描述符 + 标签 + 窗口 + 超参"，训练脚本不得在代码里另立口径。
+
+[data]
+start = "2014-01-01"
+end = ""                      # 空 = 用数据里最新交易日
+context_days = 126
+target_days = 21
+horizons = [5, 21]
+min_listed_days = 60
+# 连续样本判据：126+21 个交易日都必须有该股票的 bar（停牌日不算）
+require_contiguous = true
+
+[features]
+# 28 个股描述符（顺序即张量列顺序）
+stock = [
+  "ret_1d", "ret_5", "ret_20", "ret_120", "mom_12m_skip_1m",
+  "rps_20", "rps_60", "pos_52w", "ma20_dev", "ma60_dev",
+  "rev_5d", "vol_20", "mdd_60",
+  "turnover_rate_f", "turnover_5d", "log_circ_mv", "circ_ratio", "volume_ratio",
+  "pe_ttm", "pb", "ps_ttm", "dv_ttm",
+  "roe", "roa", "grossprofit_margin", "netprofit_margin", "debt_to_assets",
+  "netprofit_yoy",
+]
+# 12 市场描述符
+market = [
+  "idx_ret_1d", "idx_ret_5", "idx_ret_20", "idx_vol_20",
+  "xs_dispersion", "up_ratio", "limit_up_ratio",
+  "turnover_agg", "amount_z20",
+  "shibor_3m", "usdcnh_ret_5", "credit_spread_aa_1y",
+]
+
+[split]
+# 论文口径：2014–2015 先验拟合；2016–2021 表征/读出训练；2022–2023 验证；2024–2026H1 测试
+prior_fit = ["2014-01-01", "2015-12-31"]
+train = ["2016-01-01", "2021-12-31"]
+valid = ["2022-01-01", "2023-12-31"]
+test = ["2024-01-01", "2026-06-30"]
+
+[prior]
+alpha = 20.0
+clip = 8.0
+residual_floor = 1.0e-4
+blocks = "annual"
+
+[model]
+d_model = 128
+n_layers = 4
+n_heads = 8
+ffn_dim = 512
+dropout = 0.1
+batch_size = 256
+lr = 1.0e-4
+weight_decay = 0.01
+grad_clip = 1.0
+epochs = 4
+max_steps_per_epoch = 1000
+target_ema = 0.996
+anchor_ema = 0.99
+mask_min_fraction = 0.30
+mask_block_min = 5
+mask_block_max = 21
+feature_group_drop = 0.25
+revision_clip = 8.0
+
+[readout]
+hidden = 256
+dropout = 0.05
+lr = 1.0e-4
+weight_decay = 0.05
+epochs = 6
+max_steps_per_epoch = 1000
+
+[eval]
+top_k = 30
+holding_days = 21
+cost_bps = 5
+bootstrap_block_days = 21
+seeds = [7, 17, 27]
+
+[lite]
+# 本机 MPS 资源不足时的降级配置（报告中必须注明）
+d_model = 96
+n_layers = 3
+n_heads = 6
+batch_size = 128
+epochs = 3
+max_steps_per_epoch = 600

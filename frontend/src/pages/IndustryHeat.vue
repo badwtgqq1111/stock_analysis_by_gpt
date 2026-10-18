@@ -8,6 +8,7 @@
         <div class="seg">
           <button class="seg-btn" :class="{ active: view === 'grid' }" @click="view = 'grid'">热度网格</button>
           <button class="seg-btn" :class="{ active: view === 'map' }" @click="view = 'map'">股票热力图</button>
+          <button class="seg-btn" :class="{ active: view === '3d' }" @click="view = '3d'">热度动态曲线</button>
         </div>
         <select v-model="period" class="picker">
           <option v-for="p in overview?.periods || []" :key="p.key" :value="p.key">{{ p.label }}</option>
@@ -54,7 +55,19 @@
       </div>
 
       <!-- 左侧 = 视图（网格 / 热力图），右侧 = 选中行业的成分股（自动列出） -->
-      <div class="two-col">
+      <div class="panel" v-if="view === '3d'">
+        <h6>
+          行业热度动态曲线
+          <span class="dim tiny">当前热度前 N 行业的时间演变 · X=时间 · Y=热度 0~100 · 可播放/悬停</span>
+        </h6>
+        <StateBlock v-if="heat3dError" state="error" title="取不到 3D 数据" :detail="heat3dError"
+                    :retry="() => loadHeat3d()" />
+        <div v-else-if="!heat3d" class="loading-mini">加载 3D 数据…</div>
+        <IndustryHeat3D v-else-if="heat3d.available" :data="heat3d" :height="580" />
+        <StateBlock v-else state="empty" title="暂无 3D 行业热度数据" :detail="heat3d.hint || '先跑 scripts/build_industry_heat_history.py'" />
+      </div>
+
+      <div class="two-col" v-if="view !== '3d'">
         <div class="col-main">
           <div class="panel" v-if="view === 'map'">
             <h6>
@@ -268,13 +281,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getIndustryHeat, getIndustryHeatmap, getIndustryOverview, getIndustryStocks } from '@/api/client'
+import { getIndustryHeat, getIndustryHeatHistory, getIndustryHeatmap, getIndustryOverview, getIndustryStocks } from '@/api/client'
 import type {
-  IndustryHeatResponse, IndustryHeatmapResponse, IndustryOverview, IndustryStocksResponse,
+  IndustryHeatHistoryResponse, IndustryHeatResponse, IndustryHeatmapResponse, IndustryOverview, IndustryStocksResponse,
 } from '@/types/api'
 import { useWatchlist } from '@/composables/useWatchlist'
+const IndustryHeat3D = defineAsyncComponent(() => import('@/components/IndustryHeat3D.vue'))
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import BarChart, { type Bar } from '@/components/ui/BarChart.vue'
@@ -300,7 +314,9 @@ const loading = ref(false)
 const period = ref<'daily' | 'weekly' | 'monthly'>('daily')
 const date = ref('')
 const minN = ref(0)
-const view = ref<'grid' | 'map'>('grid')
+const view = ref<'grid' | 'map' | '3d'>('grid')
+const heat3d = ref<IndustryHeatHistoryResponse | null>(null)
+const heat3dError = ref('')
 const market = ref('')
 const direction = ref<'up' | 'down'>('up')
 const selected = ref('')
@@ -350,6 +366,15 @@ async function loadHeatmap() {
   }
 }
 
+async function loadHeat3d() {
+  heat3dError.value = ''
+  try {
+    heat3d.value = await getIndustryHeatHistory(40)
+  } catch (e) {
+    heat3dError.value = String(e)
+  }
+}
+
 async function loadStocks() {
   if (!selected.value) { stocks.value = null; return }
   const request = requestId
@@ -378,6 +403,7 @@ onMounted(reload)
 watch([period, minN, date, realtime], () => { void reload() })
 watch(market, () => { if (view.value === 'map') void loadHeatmap() })
 watch(view, (v) => { if (v === 'map' && !heatmap.value) void loadHeatmap() })
+watch(view, (v) => { if (v === '3d' && !heat3d.value) void loadHeat3d() })
 watch(direction, () => { void loadStocks() })
 
 const heatBars = computed<Bar[]>(() =>

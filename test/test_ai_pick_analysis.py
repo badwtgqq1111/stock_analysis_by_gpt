@@ -162,11 +162,23 @@ def test_daily_automation_runs_ai_and_candidates_before_ledger():
 
 def test_kline_page_shows_ai_panel():
     page = (ROOT / "frontend/src/pages/KlinePage.vue").read_text(encoding="utf-8")
-    assert "AiAnalysisPanel" in page and "<AiAnalysisPanel" in page
+    # 2026-10-18：AI 结论与研报证据合并成一张「个股多空」结论卡，K 线页只挂 wrapper。
+    wrapper = (ROOT / "frontend/src/components/StockLongShortPanel.vue").read_text(encoding="utf-8")
+    assert "StockLongShortPanel" in page and "<StockLongShortPanel" in page
+    assert "getStockAi" in wrapper and "多头依据" in wrapper and "空头依据" in wrapper
     assert (ROOT / "frontend/src/components/AiAnalysisPanel.vue").exists()
     panel = (ROOT / "frontend/src/components/AiAnalysisPanel.vue").read_text(encoding="utf-8")
     for token in ("getStockAi", "买入", "持有", "卖出", "bull_case", "bear_case"):
         assert token in panel, f"AI 面板缺 {token}"
+
+
+def test_daily_picks_page_opens_merged_long_short_drawer():
+    """每日策略选股页要能直接看 AI 结论 + 研报证据（2026-10-18 用户要求）。"""
+    page = (ROOT / "frontend/src/pages/StockSelection.vue").read_text(encoding="utf-8")
+    assert "StockLongShortPanel" in page and "longShortCode" in page
+    wrapper = (ROOT / "frontend/src/components/StockLongShortPanel.vue").read_text(encoding="utf-8")
+    assert "AI 决策" in wrapper and "研报证据" in wrapper
+    assert "getStockAi" in wrapper and "getStockResearch" in wrapper
 
 
 def test_stock_ai_endpoint_serves_analysis(tmp_path, monkeypatch):

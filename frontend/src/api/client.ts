@@ -788,3 +788,15 @@ export async function getVolatilityRisk(date?: string, variant = 'cn_ensemble_vo
   const { data } = await http.get('/strategies/volatility-risk', { params: { date, variant } })
   return data
 }
+
+/** P2.75 候选池二次排序（K 线左侧自选按综合分排序）。 */
+export async function getCandidateRank(date?: string): Promise<import('@/types/api').CandidateRankResponse> {
+  const { data } = await http.get('/candidate-rank', { params: { date } })
+  return data
+}
+
+/** 行业热度 3D 动态排名（时间 × 排名 × 行业）。 */
+export async function getIndustryHeatHistory(days = 40): Promise<import('@/types/api').IndustryHeatHistoryResponse> {
+  const { data } = await http.get('/industry/heat-history', { params: { days } })
+  return data
+}

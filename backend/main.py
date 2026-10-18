@@ -34,6 +34,7 @@ from backend.api.ai_picks import router as ai_picks_router
 from backend.api.stock_research import router as stock_research_router
 from backend.api.agent import router as agent_router
 from backend.api.factor_pool import router as factor_pool_router
+from backend.api.candidate_rank import router as candidate_rank_router
 
 app = FastAPI(title="Quant Analysis API", version="2.0")
 
@@ -87,6 +88,7 @@ app.include_router(ai_picks_router)
 app.include_router(stock_research_router)
 app.include_router(agent_router)
 app.include_router(factor_pool_router)
+app.include_router(candidate_rank_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

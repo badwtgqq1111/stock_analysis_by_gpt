@@ -208,6 +208,22 @@ def test_api_limitup_smoke_local_only(client):
     assert sum(detail["counts"].values()) <= detail["total"]
 
 
+def test_limitup_rolling_window_stats(client):
+    """3天2板 / 5天3板 / 10天5板：窗口内涨停次数，不要求连续。"""
+    detail = client.get("/api/limitup/detail?live=0&limit=80").json()
+    assert set(detail["window_counts"]) == {"d3_2b", "d5_3b", "d10_5b"}
+    for row in detail["rows"]:
+        assert 0 <= row["lu_3d"] <= 3
+        assert 0 <= row["lu_5d"] <= 5
+        assert 0 <= row["lu_10d"] <= 10
+        assert row["is_3d2b"] == (row["lu_3d"] >= 2)
+        assert row["is_5d3b"] == (row["lu_5d"] >= 3)
+        assert row["is_10d5b"] == (row["lu_10d"] >= 5)
+    ladder = client.get("/api/limitup/ladder?lookback=5").json()
+    for day in ladder["series"]:
+        assert set(day["window_counts"]) == {"d3_2b", "d5_3b", "d10_5b"}
+
+
 def test_api_intraday_store_only(client):
     response = client.get("/api/intraday/000001.SZ?mode=store&period=5")
     if response.status_code == 404:

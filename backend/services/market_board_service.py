@@ -317,6 +317,19 @@ def with_limit_flags(daily: pd.DataFrame, basics: pd.DataFrame | None = None) ->
         run = run + 1 if bool(hit) else 0
         streak.append(run)
     frame["boards"] = streak
+
+    # 隔日统计（2026-10-18）：滚动窗口内涨停次数，不要求连续。
+    #   3天2板 = 最近 3 个交易日至少 2 次涨停；5天3板 = 最近 5 天至少 3 次；
+    #   10天5板 = 最近 10 天至少 5 次。
+    hit = frame["is_limit_up"].astype(int)
+    grouped = hit.groupby(frame["stock_code"], sort=False)
+    for window in (3, 5, 10):
+        frame[f"lu_{window}d"] = grouped.transform(
+            lambda s, w=window: s.rolling(w, min_periods=1).sum()
+        ).astype(int)
+    frame["is_3d2b"] = frame["lu_3d"] >= 2
+    frame["is_5d3b"] = frame["lu_5d"] >= 3
+    frame["is_10d5b"] = frame["lu_10d"] >= 5
     return frame
 
 
@@ -369,6 +382,7 @@ def _date_boards(frame: pd.DataFrame, day: pd.Timestamp) -> pd.DataFrame:
     if sub.empty:
         return sub
     cols = ["stock_code", "name", "market", "close", "pct_chg", "amount", "boards",
+            "lu_3d", "lu_5d", "lu_10d", "is_3d2b", "is_5d3b", "is_10d5b",
             "is_limit_up", "is_limit_down", "prev_close", "limit_ratio", "st_pit"]
     return sub[[c for c in cols if c in sub.columns]].copy()
 
@@ -388,6 +402,7 @@ def ladder(lookback: int = 30, day=None, _daily=None) -> dict:
         flagged = flagged[flagged["trade_date"] <= target]
     days = sorted(flagged["trade_date"].unique())[-int(lookback):]
     flagged = flagged[flagged["trade_date"].isin(days)]
+    day_all = flagged   # 保留含未涨停股票的全市场切片，用于隔日统计
     flagged = flagged[flagged["boards"] > 0]
 
     dates: list[str] = []
@@ -420,6 +435,11 @@ def ladder(lookback: int = 30, day=None, _daily=None) -> dict:
             "counts": counts,
             "total": int(len(group)),
             "max_boards": int(group["boards"].max()) if len(group) else 0,
+            "window_counts": {
+                "d3_2b": int(day_all[day_all["trade_date"] == pd.Timestamp(day)]["is_3d2b"].sum()),
+                "d5_3b": int(day_all[day_all["trade_date"] == pd.Timestamp(day)]["is_5d3b"].sum()),
+                "d10_5b": int(day_all[day_all["trade_date"] == pd.Timestamp(day)]["is_10d5b"].sum()),
+            },
             "promotion": promotion,
         })
         dates.append(pd.Timestamp(day).strftime("%Y-%m-%d"))
@@ -440,6 +460,12 @@ def limit_up_detail(day, limit: int = 300, _daily=None) -> list[dict]:
             "name": str(r["name"] or ""),
             "market": str(r["market"] or ""),
             "boards": int(r["boards"]),
+            "lu_3d": int(r.get("lu_3d", 0)),
+            "lu_5d": int(r.get("lu_5d", 0)),
+            "lu_10d": int(r.get("lu_10d", 0)),
+            "is_3d2b": bool(r.get("is_3d2b", False)),
+            "is_5d3b": bool(r.get("is_5d3b", False)),
+            "is_10d5b": bool(r.get("is_10d5b", False)),
             "bucket": board_bucket(int(r["boards"])),
             "close": _num(r["close"]),
             "pct_chg": _num(r["pct_chg"], 4),

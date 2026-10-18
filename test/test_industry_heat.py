@@ -201,3 +201,21 @@ def test_daily_bars_have_no_duplicate_symbol_days():
         pytest.skip("本地日线不可用")
     duplicated = int(bars.duplicated(subset=["trade_date", "stock_code"]).sum())
     assert duplicated == 0, f"日线窗口里出现了 {duplicated} 行重复的 (trade_date, stock_code)"
+
+
+def test_heat_history_3d_contract(client):
+    """3D 行业热度：ranks/heats 必须是 industry × date，且排名落在 1..110。"""
+    body = client.get("/api/industry/heat-history?days=40").json()
+    if not body.get("available"):
+        pytest.skip(body.get("hint") or "3D 历史未生成")
+    dates, industries = body["dates"], body["industries"]
+    ranks, heats = body["ranks"], body["heats"]
+    assert dates and industries
+    assert len(ranks) == len(industries) and len(heats) == len(industries)
+    assert all(len(row) == len(dates) for row in ranks)
+    assert all(len(row) == len(dates) for row in heats)
+    values = [v for row in ranks for v in row if v is not None]
+    assert values and min(values) >= 1 and max(values) <= 110
+    component = (ROOT / "frontend/src/components/IndustryHeat3D.vue").read_text(encoding="utf-8")
+    assert "linePath" in component and "heatTicks" in component
+    assert "visibleTop" in component, "动态曲线要能切换显示前 8/12/16 行业"

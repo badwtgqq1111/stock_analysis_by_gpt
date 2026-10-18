@@ -90,7 +90,15 @@ function sortUnpinnedGroups(groups: WatchlistGroup[], key: GroupSortKey): Watchl
 
 export interface WatchlistRow { code: string; name: string; tag: string; local: boolean; source?: string;
   /** 命中多条策略时的计数与首个策略名（标签显示成「策略A +N」） */
-  extra?: number; baseTag?: string }
+  extra?: number; baseTag?: string;
+  /** P2.75 候选池综合排名/分数（没有排序产物的票为 null） */
+  rank?: number | null; score?: number | null;
+  /** 实盘持仓：指定置顶，但保留排名/分数 */
+  isLive?: boolean;
+  /** 当前排序模式下的本地排名/分数（资金流/个股多空会重排） */
+  displayRank?: number | null; displayScore?: number | null;
+  flowScore?: number | null; flow5?: number | null; flow20?: number | null;
+  longshort?: number | null; comboScore?: number | null }
 
 export function groupRows(groups: WatchlistGroup[], key: string): WatchlistRow[] {
   const seen = new Map<string, WatchlistRow>()

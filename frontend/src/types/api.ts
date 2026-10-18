@@ -193,6 +193,7 @@ export interface AutomationStage {
 export interface AutomationSidecar {
   name: string; available: boolean
   updated_at?: string; done_total?: number; target_total?: number
+  pending_total?: number | null; eta_hours?: number | null
   session_processed?: number; rate_per_sec?: number; quarantined?: number
 }
 export interface AutomationAgent { label: string; pid: number | null; running: boolean; last_exit: string }
@@ -622,6 +623,8 @@ export interface LimitUpLadderDay {
   counts: Record<string, number>
   total: number
   max_boards: number
+  /** 隔日统计（全市场，含未涨停）：3天2板/5天3板/10天5板 */
+  window_counts?: { d3_2b: number; d5_3b: number; d10_5b: number }
   promotion: Record<string, LimitUpPromotion>
 }
 
@@ -643,6 +646,12 @@ export interface LimitUpRow {
   market?: string
   industry?: string
   boards: number
+  lu_3d?: number
+  lu_5d?: number
+  lu_10d?: number
+  is_3d2b?: boolean
+  is_5d3b?: boolean
+  is_10d5b?: boolean
   boards_live?: number | null
   bucket: string
   close: number | null
@@ -664,6 +673,9 @@ export interface LimitUpDetail {
   dates: string[]
   counts: Record<string, number>
   counts_label: Record<string, number>
+  /** 今日涨停股中的隔日统计 */
+  window_counts?: { d3_2b: number; d5_3b: number; d10_5b: number }
+  window_counts_label?: Record<string, number>
   total: number
   max_boards: number
   rows: LimitUpRow[]
@@ -818,6 +830,21 @@ export interface IndustryHeatResponse {
   min_n?: number
   notes: string[]
   hint?: string
+}
+
+/** 行业热度 3D 动态排名（时间 × 排名 × 行业）。 */
+export interface IndustryHeatHistoryResponse {
+  available: boolean
+  hint?: string
+  generated_at?: string
+  days?: number
+  top?: number
+  dates: string[]
+  industries: string[]
+  /** ranks[industryIndex][dateIndex]，null=当日无数据 */
+  ranks: (number | null)[][]
+  heats: (number | null)[][]
+  note?: string
 }
 
 export interface IndustryStockRow {
@@ -1177,6 +1204,56 @@ export interface AiPicksSummary {
   hint?: string
 }
 
+// ─── P2.75 候选池二次排序 ───────────────────────────────────────────────────
+export interface CandidateRankRow {
+  rank: number
+  code: string
+  name: string
+  composite: number
+  core_score?: number | null
+  overlay_score?: number | null
+  coverage: number
+  ai_action?: string
+  research_stance?: string
+  wso?: number | null
+  profit_pct?: number | null
+  concentration?: number | null
+  risk_flags?: string | null
+  z_prior?: number | null
+  z_ai?: number | null
+  z_research?: number | null
+  z_wyckoff?: number | null
+  z_chip?: number | null
+  /** 资金流：5d/20d 净流入 ÷ 流通市值；flow_score 为两者截面 z 的均值 */
+  flow_5d_ratio?: number | null
+  flow_20d_ratio?: number | null
+  flow_score?: number | null
+  /** 个股多空（AI 决策 + 研报证据合并）增强分 */
+  longshort_score?: number | null
+  /** 资金流 + 个股多空按权重合成的排序分（默认 50/50） */
+  z_flow?: number | null
+  z_longshort?: number | null
+  flow_longshort_score?: number | null
+}
+export interface CandidateRankResponse {
+  available: boolean
+  date?: string
+  latest_date?: string
+  weights?: Record<string, number>
+  flow_longshort_weights?: Record<string, number>
+  n?: number
+  rows: CandidateRankRow[]
+  reason?: string
+  notes?: string[]
+  validation?: {
+    status: 'passed' | 'failed' | 'missing'
+    mean_ic?: number | null
+    ic_t?: number | null
+    n_dates?: number | null
+    note?: string
+  } | null
+}
+
 // ─── 逐股 Bynewlt 研报多空调研（K 线页）───────────────────────────────────────
 // 数据源：backend/api/stock_research.py；原文证据由 scripts/bynewlt_stock_research.py
 // 从 Bynewlt 研报库取回（ref/引文/机构/日期/页码/来源哈希），多空稿由 agent 逐条核对后写。
@@ -1505,6 +1582,10 @@ export interface LivePerformance {
   weights?: Record<string, number>
   coverage_weight?: number
   notes?: string[]
+  snapshot_asof?: string
+  account?: {
+    start: string; end: string; rows: number; cum_return: number; note?: string
+  } | null
   stats_daily?: LiveCurveStats
   windows?: Record<string, { label: string; stats: LiveCurveStats }>
   daily?: LiveFrequencyBlock
@@ -1711,6 +1792,12 @@ export interface WyckoffCloud {
   threshold?: number
   score?: { wso: number; n_events: number; half_life: number; mapping: string }
   recent_collapsed?: WyckoffEvent[]
+  /** 逐日坍缩事件（与 recent_collapsed 同源，供 K 线悬停浮窗按日期查） */
+  series?: WyckoffEvent[]
+  /** 逐日候选事件前 5 个（悬停浮窗的"事件概率云"精简版） */
+  series_top?: Record<string, WyckoffEvent[]>
+  /** 逐日滚动 WSO */
+  series_wso?: Record<string, number>
   implemented?: string[]
   not_implemented?: string[]
   /** 研报未给构造细节、由本项目口径自定的地方（如实列出） */

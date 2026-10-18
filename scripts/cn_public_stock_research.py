@@ -1040,14 +1040,16 @@ def fetch(args) -> int:
     else:
         targets = targets_from_bynewlt()
     targets = {code: name for code, name in targets.items() if code}
-    if args.limit:
-        targets = dict(list(targets.items())[: args.limit])
     todo = []
     for code, name in targets.items():
         record = stocks.get(code) or {}
-        if not args.refetch and record.get("status") in (ST_FETCHED, ST_NO_FUNDING):
+        # 2026-10-18：已 composed 的票也不该被默认 fetch 重采（此前会白跑 40 分钟重采 61 只）。
+        if not args.refetch and record.get("status") in (ST_FETCHED, ST_NO_FUNDING, ST_COMPOSED):
             continue
         todo.append((code, name or record.get("name", "")))
+    # limit 必须在"跳过已有终态"之后生效；否则每日预算会被前 5 只已完成的票吃掉，永远不前进。
+    if args.limit:
+        todo = todo[: args.limit]
     print(f"目标 {len(todo)} 只（共 {len(targets)}）；学习节流 sleep={args.sleep}s", flush=True)
     done = 0
     for code, name in todo:
@@ -1458,6 +1460,9 @@ def draft(args) -> int:
     if not codes:
         codes = [code for code, record in (state.get("stocks") or {}).items()
                  if record.get("status") == ST_FETCHED]
+    if getattr(args, "only_missing", False):
+        codes = [c for c in codes
+                 if not (DRAFT_DIR / f"{c}.json").exists() and not (DOSSIER_DIR / f"{c}.json").exists()]
     print(f"起草 {len(codes)} 只：{codes}", flush=True)
     for code in codes:
         pack_path = EVIDENCE_DIR / f"{code}.json"
@@ -1492,8 +1497,22 @@ def draft(args) -> int:
 
 
 def promote(args) -> int:
-    """agent 复核后：草稿 → dossier（置 agent_checked）；若提供 --drop-citations 先剔除失效引用。"""
-    code = norm_code(args.code)
+    """草稿 → dossier；`--missing` 批量晋级所有还没有成品的草稿。"""
+    if getattr(args, "missing", False):
+        codes = [p.stem for p in DRAFT_DIR.glob("*.json") if not (DOSSIER_DIR / p.name).exists()]
+    else:
+        codes = [norm_code(getattr(args, "code", "") or "")]
+    codes = [c for c in codes if c]
+    if not codes:
+        print("没有需要晋级的草稿")
+        return 0
+    rc = 0
+    for code in codes:
+        rc = _promote_one(code, str(getattr(args, "level", "agent_checked") or "agent_checked")) or rc
+    return rc
+
+
+def _promote_one(code: str, level: str) -> int:
     path = DRAFT_DIR / f"{code}.json"
     if not path.exists():
         print(f"没有草稿：{path}")
@@ -1501,9 +1520,9 @@ def promote(args) -> int:
     dossier = json.loads(path.read_text(encoding="utf-8"))
     verification = dossier.get("verification") or {}
     dossier["verification"] = {
-        "level": str(getattr(args, "level", "agent_checked") or "agent_checked"),
+        "level": level,
         "method": ("自动引文比对 + agent 逐票复核（数值/口径/结论）"
-                   if str(getattr(args, "level", "agent_checked")) == "agent_checked"
+                   if level == "agent_checked"
                    else "自动引文比对（逐字命中原文）；未逐票人工复核"),
         "verified": verification.get("verified"),
         "checked": verification.get("checked"),
@@ -1553,11 +1572,13 @@ def main() -> int:
     p_draft = sub.add_parser("draft", help="DeepSeek 起草 + 引文自动核对（产生草稿，不直接发布）")
     p_draft.add_argument("--code", default="", help="单票")
     p_draft.add_argument("--codes", default="", help="逗号分隔多票；缺省=全部 fetched")
+    p_draft.add_argument("--only-missing", action="store_true", help="跳过已有草稿/成品的票")
     p_draft.add_argument("--sleep", type=float, default=2.0)
     p_draft.set_defaults(func=draft)
 
     p_promote = sub.add_parser("promote", help="草稿 → dossier（agent 复核后调用）")
-    p_promote.add_argument("--code", required=True)
+    p_promote.add_argument("--code", default="")
+    p_promote.add_argument("--missing", action="store_true", help="批量晋级所有还没有成品的草稿")
     p_promote.add_argument("--level", default="agent_checked",
                            choices=["auto_checked", "agent_checked"],
                            help="未逐票人工复核的批量草稿请用 auto_checked")

@@ -40,6 +40,18 @@
     <button class="btn-ghost btn-sm groups-toggle" :aria-expanded="groupsExpanded" @click="groupsExpanded = !groupsExpanded">
       {{ groupsExpanded ? '收起策略分组' : `展开其余 ${sortedGroups.filter(g => g.key !== 'live_holdings').length} 个分组` }}
     </button>
+    <div class="row-sort" v-if="group !== 'local'">
+      <span class="dim tiny">个股排序</span>
+      <select v-model="rowSort">
+        <option value="composite">综合评分（默认）</option>
+        <option value="combo">资金流 × 个股多空（50/50）</option>
+        <option value="default">策略原始顺序</option>
+      </select>
+      <span class="tiny dim" v-if="rank?.date">评分日 {{ rank.date }}</span>
+      <span class="tiny dim" v-else-if="rank && !rank.available">暂无综合评分</span>
+      <span class="tag bad tiny" v-if="rank?.validation?.status === 'failed'" title="核心层首次历史评估未通过；综合分只作实验排序">未通过验证</span>
+      <span class="tag dim tiny" v-else-if="rank?.validation?.status === 'missing'">未验证</span>
+    </div>
     <div class="group-sort" v-show="groupsExpanded">
       <span class="dim tiny">分组排序</span>
       <select v-model="sortKey">
@@ -65,13 +77,25 @@
 
     <ul class="rows">
       <li v-for="row in visibleRows" :key="row.code" :class="{ active: row.code === modelValue }"
-          v-memo="[row.code, row.name, row.tag, row.local, row.code === modelValue, liveKey(row.code), hoverOn(row.code)]"
+          v-memo="[row.code, row.name, row.tag, row.local, row.rank, row.score, row.displayRank, row.displayScore, row.flowScore, row.longshort, row.isLive, row.code === modelValue, liveKey(row.code), hoverOn(row.code)]"
           :title="`${row.code} ${row.name || '（缺名称）'}${row.tag ? ' · ' + row.tag : ''}`"
           @mouseenter="hoverCode = row.code" @mouseleave="hoverCode = null"
           @focusin="hoverCode = row.code" @focusout="hoverCode = null"
           @click="$emit('update:modelValue', row.code)">
+        <span class="rk mono tiny" v-if="(row.displayRank ?? row.rank) != null"
+              :title="rowSort === 'combo' ? '资金流 × 个股多空排名' : '候选池综合评分排名'">
+          #{{ row.displayRank ?? row.rank }}</span>
         <span class="mono code">{{ row.code }}</span>
         <span class="name">{{ row.name || '—' }}</span>
+        <span class="tag gold tiny live-tag" v-if="row.isLive" title="实盘持仓（指定置顶，仍显示候选池排名）">实盘</span>
+        <span class="score mono tiny" v-if="(row.displayScore ?? row.score) != null"
+              :title="rowSort === 'combo' ? '资金流 × 个股多空合成分（50/50）' : '综合评分（标准分）'">
+          {{ Number(row.displayScore ?? row.score).toFixed(2) }}</span>
+        <span class="score dim tiny" v-else-if="row.isLive" title="实盘持仓不在当日策略候选池里">未入候选</span>
+        <span class="flow tiny" v-if="rowSort === 'combo' && (row.flowScore != null || row.longshort != null)"
+              :title="`资金流 5d ${((row.flow5 ?? 0) * 100).toFixed(2)}% / 20d ${((row.flow20 ?? 0) * 100).toFixed(2)}%（分 ${row.flowScore?.toFixed(2) ?? '—'}）· 个股多空 ${row.longshort?.toFixed(2) ?? '—'}`">
+          资金 {{ row.flowScore?.toFixed(2) ?? '—' }} · 多空 {{ row.longshort?.toFixed(2) ?? '—' }}
+        </span>
         <span class="tag dim tiny" v-if="row.tag">{{ row.tag }}</span>
         <span class="live" v-if="livePrice(row.code) !== null"
               :title="`${liveLabel(row.code)} · ${liveQuoteTime(row.code)}`"
@@ -103,7 +127,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getPaperStatus, getSelection, getStrategyPool } from '@/api/client'
+import { getCandidateRank, getPaperStatus, getSelection, getStrategyPool } from '@/api/client'
 import type { StockSearchHit } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
 import { useLiveQuotes, quoteLabel } from '@/composables/useLiveQuotes'
@@ -113,6 +137,7 @@ import StockSelector from './StockSelector.vue'
 import SelectionDetailCard from './SelectionDetailCard.vue'
 import { groupRows, refreshMark, sortGroups, strategyGroups } from './watchlistStrategies'
 import type { GroupSortKey, WatchlistGroup, WatchlistRow } from './watchlistStrategies'
+import type { CandidateRankResponse } from '@/types/api'
 import { strategyDetail } from './strategyDetail'
 
 const props = defineProps<{
@@ -143,6 +168,21 @@ const currentName = computed(() => props.modelValue ? watchlist.names.value[prop
 const currentIsLocal = computed(() => !!props.modelValue && watchlist.has(props.modelValue))
 watch(() => props.modelValue, () => { searchNotice.value = '' })
 const sortKey = ref<GroupSortKey>('annual')
+/** 个股排序：综合评分（默认）/ 资金流 / 个股多空 / 策略原始顺序 */
+const ROW_SORT_KEY = 'kline.watchlist.rowSort'
+function initialRowSort(): 'composite' | 'combo' | 'default' {
+  try {
+    const saved = localStorage.getItem(ROW_SORT_KEY)
+    if (saved === 'composite' || saved === 'combo' || saved === 'default') return saved
+  } catch { /* 隐私模式 */ }
+  return 'combo'
+}
+const rowSort = ref<'composite' | 'combo' | 'default'>(initialRowSort())
+watch(rowSort, (v) => { try { localStorage.setItem(ROW_SORT_KEY, v) } catch { /* ignore */ } })
+const rank = ref<CandidateRankResponse | null>(null)
+const rankMap = computed(() => new Map((rank.value?.rows || []).map((r) => [r.code, r])))
+const liveHoldingCodes = computed(() => new Set(
+  (groups.value.find((g) => g.key === 'live_holdings')?.rows || []).map((r) => r.code)))
 /** 实盘固定置顶，其余与策略池共用后端年化名次；组内个股仍保持选股顺序。 */
 const sortedGroups = computed(() => sortGroups(groups.value, sortKey.value))
 const verdictNote = computed(() => {
@@ -154,9 +194,44 @@ const visibleRows = computed<WatchlistRow[]>(() => {
   if (group.value === 'local') return local.value.map((code) => ({
     code, name: watchlist.names.value[code] || '', local: true, tag: '自选',
   }))
-  return groupRows(sortedGroups.value, group.value).map((row) => ({
-    ...row, name: row.name || watchlist.names.value[row.code] || '', local: watchlist.has(row.code),
-  }))
+  const rows: WatchlistRow[] = groupRows(sortedGroups.value, group.value).map((row): WatchlistRow => {
+    const r = rankMap.value.get(row.code)
+    return {
+      ...row,
+      name: row.name || watchlist.names.value[row.code] || '',
+      local: watchlist.has(row.code),
+      rank: r?.rank ?? null,
+      score: r?.composite ?? null,
+      flowScore: r?.flow_score ?? null,
+      flow5: r?.flow_5d_ratio ?? null,
+      flow20: r?.flow_20d_ratio ?? null,
+      longshort: r?.longshort_score ?? null,
+      comboScore: r?.flow_longshort_score ?? null,
+      isLive: liveHoldingCodes.value.has(row.code),
+      displayRank: null,
+      displayScore: null,
+    }
+  })
+  // 每种模式在**完整候选池**内排名（实盘也参与排名，只是显示时置顶）
+  const metric = rowSort.value === 'composite' ? 'rank'
+    : rowSort.value === 'combo' ? 'comboScore' : null
+  if (metric) {
+    const valid = rows.filter((r) => (r as any)[metric] != null)
+    valid.sort((a, b) => metric === 'rank'
+      ? Number(a.rank) - Number(b.rank)
+      : Number((b as any)[metric]) - Number((a as any)[metric]))
+    valid.forEach((r, i) => {
+      r.displayRank = i + 1
+      r.displayScore = metric === 'rank' ? r.score : Number((r as any)[metric])
+    })
+  }
+  rows.sort((a, b) => {
+    // 实盘持仓**始终置顶**（所有排序模式都一样），但仍显示它在候选池里的排名/分数
+    if (a.isLive !== b.isLive) return a.isLive ? -1 : 1
+    if (rowSort.value === 'default') return 0
+    return (a.displayRank ?? 1e9) - (b.displayRank ?? 1e9)
+  })
+  return rows
 })
 const emptyText = computed(() => refreshing.value || activeGroup.value?.loading ? '正在加载策略名单…'
   : activeGroup.value?.error ? '名单加载失败，点击刷新重试'
@@ -295,7 +370,11 @@ async function reloadGroups() {
   refreshing.value = true
   poolError.value = ''
   try {
-    const pool = await getStrategyPool()
+    const [pool, rankPayload] = await Promise.all([
+      getStrategyPool(),
+      getCandidateRank().catch(() => null),
+    ])
+    rank.value = rankPayload
     groups.value = [...strategyGroups(pool.strategies, (entry) => {
       const item = pool.strategies.find((x) => x.id === entry.id)
       if (!item) return undefined
@@ -332,6 +411,9 @@ onMounted(async () => {
 .groups-toggle { margin-bottom: 8px; }
 .watchlist .group-sort { flex-wrap: wrap; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .group-sort select { background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--r-2); color: var(--text-primary); font-size: var(--fs-xs); padding: 1px 4px; }
+.row-sort { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0; }
+.row-sort select { background: var(--bg-input); border: 1px solid var(--border-color);
   border-radius: var(--r-2); color: var(--text-primary); font-size: var(--fs-xs); padding: 1px 4px; }
 .g-annual { margin-left: 5px; color: var(--text-secondary); }
 .g-verdict { margin-left: 5px; font-size: 10px; padding: 0 5px; border-radius: var(--r-pill);
@@ -371,6 +453,11 @@ onMounted(async () => {
    于是名称成为**第一个被压到 0px** 的列 —— 实测 83 行里 42 行名称宽度 ≤1px（标签越长越惨）。
    修法：给名称一个下限（4.6em），让**来源标签**去收缩省略；实时价那一格也不再吃满。 */
 .rows .code { color: inherit; flex: 0 0 auto; }
+.rows .rk { color: var(--accent-gold); flex: 0 0 auto; min-width: 2.4em; }
+.rows .score { color: var(--text-secondary); flex: 0 0 auto; min-width: 3.1em; text-align: right; }
+.rows .live-tag { flex: 0 0 auto; }
+.rows .flow { color: var(--text-muted); flex: 0 1 auto; min-width: 0; max-width: 40%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .rows .name { flex: 1 1 auto; min-width: 4.6em; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
 .rows .tag { flex: 0 1 auto; min-width: 0; max-width: 34%; overflow: hidden;

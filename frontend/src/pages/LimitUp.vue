@@ -2,7 +2,7 @@
   <div class="page">
     <PageHeader
       title="连板记录统计"
-      description="一板 / 两板 / 三板 / 四板+ 的每日家数、最高板与<strong>晋级率</strong>（昨日 N 板 → 今日 N+1 板的比例）。历史来自本地日线（离线可算），当日梯队由全市场实时快照和历史日线连续计算；盘中开板即移出，卡片和趋势同源。封板资金等缺失字段留空。"
+      description="一板 / 两板 / 三板 / 四板+ 的每日家数、最高板与<strong>晋级率</strong>（昨日 N 板 → 今日 N+1 板的比例），以及 <strong>3天2板 / 5天3板 / 10天5板</strong> 的隔日统计（窗口内涨停次数达标，不要求连续）。历史来自本地日线（离线可算），当日梯队由全市场实时快照和历史日线连续计算；盘中开板即移出，卡片和趋势同源。封板资金等缺失字段留空。"
     >
       <template #actions>
         <select v-model.number="lookback" class="picker">
@@ -31,6 +31,12 @@
         <StatTile v-for="b in buckets" :key="b.key" :label="b.label"
                   :value="detail?.counts?.[b.key] ?? 0"
                   :sub="promotionText(b.key)" />
+        <StatTile label="3天2板" :value="detail?.window_counts?.d3_2b ?? 0" tone="gold"
+                  sub="今日涨停中含（隔日）" />
+        <StatTile label="5天3板" :value="detail?.window_counts?.d5_3b ?? 0" tone="gold"
+                  sub="今日涨停中含（隔日）" />
+        <StatTile label="10天5板" :value="detail?.window_counts?.d10_5b ?? 0" tone="gold"
+                  sub="今日涨停中含（隔日）" />
       </div>
       <p class="hint tiny" v-if="detail && ladderTotal !== null && detail.total !== ladderTotal">
         本页合计 <b>{{ detail.total }}</b> 只 = 本地日线 {{ ladderTotal }} 只 + 东财涨停池补充
@@ -49,6 +55,19 @@
         </p>
       </div>
 
+      <!-- 隔日统计：不要求连续，3 天 2 板 / 5 天 3 板 / 10 天 5 板（全市场，含未涨停） -->
+      <div class="panel">
+        <h6>
+          隔日连板统计（全市场）
+          <span class="dim tiny">最近 3/5/10 个交易日内涨停次数达标，不要求连续</span>
+        </h6>
+        <SvgCurve :series="windowSeries" :height="210" :labels="ladder.dates" />
+        <p class="hint tiny mt">
+          3天2板 = 近 3 个交易日 ≥2 次涨停；5天3板 = 近 5 日 ≥3 次；10天5板 = 近 10 日 ≥5 次。
+          统计含当日未涨停但窗口内已达标的老龙头，用于观察"断板后仍活跃"的票。
+        </p>
+      </div>
+
       <!-- 明细 -->
       <div class="panel">
         <h6>
@@ -62,7 +81,7 @@
           <table class="data-table">
             <thead>
               <tr>
-                <th>#</th><th>连板</th><th class="text-left">代码</th><th class="text-left">名称</th>
+                <th>#</th><th>连板</th><th>隔日</th><th class="text-left">代码</th><th class="text-left">名称</th>
                 <th class="text-left">行业</th><th>涨跌幅</th><th>收盘</th><th>成交额</th>
                 <th>封板资金</th><th>首封</th><th>炸板</th><th class="text-left">来源</th>
               </tr>
@@ -71,6 +90,12 @@
               <tr v-for="(r, i) in detail?.rows || []" :key="r.stock_code">
                 <td>{{ i + 1 }}</td>
                 <td><span class="tag gold">{{ cn(r.boards) }}板</span></td>
+                <td class="text-left">
+                  <span v-if="r.is_3d2b" class="tag gold tiny">3天2板</span>
+                  <span v-if="r.is_5d3b" class="tag info tiny">5天3板</span>
+                  <span v-if="r.is_10d5b" class="tag bad tiny">10天5板</span>
+                  <span class="dim tiny mono">{{ r.lu_3d ?? 0 }}/{{ r.lu_5d ?? 0 }}/{{ r.lu_10d ?? 0 }}</span>
+                </td>
                 <td class="mono text-left link" @click="gotoKline(r.stock_code)">{{ r.stock_code }}</td>
                 <td class="text-left">
                   {{ r.name }}
@@ -160,6 +185,15 @@ const promotionSeries = computed(() => {
       return rate === null || rate === undefined ? 0 : rate * 100
     }),
   }))
+})
+const windowSeries = computed(() => {
+  const data = ladder.value
+  if (!data) return []
+  return [
+    { name: '3天2板', color: '#ffd166', points: data.series.map((s) => s.window_counts?.d3_2b ?? 0) },
+    { name: '5天3板', color: '#118ab2', points: data.series.map((s) => s.window_counts?.d5_3b ?? 0) },
+    { name: '10天5板', color: '#ef476f', points: data.series.map((s) => s.window_counts?.d10_5b ?? 0) },
+  ]
 })
 
 function promotionText(key: string) {

@@ -76,6 +76,21 @@ def test_incomplete_duplicate_pagination_rejected(monkeypatch):
     assert data is None and 'incomplete' in error
 
 
+def test_tencent_bulk_snapshot_is_price_only_fallback(monkeypatch):
+    basics = pd.DataFrame({'name': ['样本'], 'industry': ['银行']}, index=['000001.SZ'])
+    monkeypatch.setattr(mbs, 'basic_frame', lambda: basics)
+    monkeypatch.setattr(lq, 'tencent_quotes', lambda *a, **kw: ({
+        '000001': {'name': '样本', 'price': 11., 'prev_close': 10., 'open': 10.,
+                   'high': 11., 'low': 9.9, 'volume_lots': 100, 'amount_wan': 11.,
+                   'time': '20261016103000'},
+    }, None))
+    data, error = rt._build_tencent_snapshot()
+    assert error is None and data['source'] == 'tencent_snapshot'
+    assert data['quotes']['000001.SZ']['price'] == 11.
+    assert data['flow_available'] is False
+    assert data['quotes']['000001.SZ']['volume'] == 10000
+
+
 def test_snapshot_failure_not_relabelled_today(monkeypatch):
     monkeypatch.setattr(rt,'_page',lambda n: (_ for _ in ()).throw(ValueError('source down')))
     data=rt.snapshot()
@@ -271,7 +286,7 @@ def test_live_industry_heat_stocks_and_map_share_same_current_frame(client,monke
     monkeypatch.setattr(rt,'bars',lambda *a:frame)
     ihs.cache_clear()
     heat=client.get('/api/industry/heat?live=1').json()
-    assert heat['market']['date']==DAY and heat['market']['source']=='eastmoney_snapshot'
+    assert heat['market']['date']==DAY and heat['market']['source']==snapshot['source']
     assert all(r['heat_delta'] is None for r in heat['rows'])
     stocks=client.get('/api/industry/银行/stocks?live=1').json()
     tree=client.get('/api/industry/heatmap?live=1').json()

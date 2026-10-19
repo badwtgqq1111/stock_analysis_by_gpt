@@ -8,7 +8,8 @@ import type {
   IndustryOverview, IndustryHeatResponse, IndustryStocksResponse,
   IndustryHeatmapResponse,
   LivePerformance, LiveRealtime, AgentActionsResponse, AgentActionRun, MiningContext,
-  ResearchSourcesResponse,
+  ResearchSourcesResponse, MarketOverview, MarketIndexOhlcv, MarketTurnoverSeries, MarketIndexIntraday,
+  LongShortRefreshJob,
 } from '@/types/api'
 
 /** 统一的接口错误：页面只认 `err.message` 与 `err.status`，不用各自解析 axios 的结构。 */
@@ -83,6 +84,30 @@ export async function getOhlcv(
   const { data } = await http.get<OhlcvResponse>(`/stocks/${code}/ohlcv`, {
     params: { days, signals, chips },
   })
+  return data
+}
+
+export async function getMarketOverview(spark = 20): Promise<MarketOverview> {
+  const { data } = await http.get<MarketOverview>('/market/overview', { params: { spark } })
+  return data
+}
+
+export async function getMarketIndexOhlcv(code: string, days: number): Promise<MarketIndexOhlcv> {
+  const { data } = await http.get<MarketIndexOhlcv>(
+    `/market/indices/${encodeURIComponent(code)}/ohlcv`, { params: { days } },
+  )
+  return data
+}
+
+export async function getMarketTurnover(days = 365): Promise<MarketTurnoverSeries> {
+  const { data } = await http.get<MarketTurnoverSeries>('/market/turnover', { params: { days } })
+  return data
+}
+
+export async function getMarketIndexIntraday(code: string): Promise<MarketIndexIntraday> {
+  const { data } = await http.get<MarketIndexIntraday>(
+    `/market/indices/${encodeURIComponent(code)}/intraday`,
+  )
   return data
 }
 
@@ -692,6 +717,21 @@ export async function setStrategyStage(id: string, stage: string) {
 /** 这只票历史上每次被选中时，AI 的多空分析与买入/持有/卖出评价。 */
 export async function getStockAi(code: string, limit = 20): Promise<import('@/types/api').StockAiResponse> {
   const { data } = await http.get(`/stocks/${encodeURIComponent(code)}/ai`, { params: { limit } })
+  return data
+}
+
+/** 单票按需更新：研报取证/合成 + AI 决策（后台任务）。 */
+export async function startLongShortRefresh(code: string): Promise<LongShortRefreshJob> {
+  const { data } = await http.post<LongShortRefreshJob>(
+    `/stocks/${encodeURIComponent(code)}/longshort/refresh`,
+  )
+  return data
+}
+
+export async function getLongShortRefresh(code: string, jobId: string): Promise<LongShortRefreshJob> {
+  const { data } = await http.get<LongShortRefreshJob>(
+    `/stocks/${encodeURIComponent(code)}/longshort/refresh/${encodeURIComponent(jobId)}`,
+  )
   return data
 }
 

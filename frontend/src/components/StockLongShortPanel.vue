@@ -14,8 +14,28 @@
       <span class="dim tiny" v-if="aiLatest && dossier">AI 决策 + 研报证据（已合并）</span>
       <span class="dim tiny" v-else-if="aiLatest">仅 AI 结论（研报暂无）</span>
       <span class="dim tiny" v-else-if="dossier">仅研报证据（AI 暂无）</span>
-      <button class="btn-ghost btn-sm" style="margin-left:auto" :disabled="loading" @click="load()">刷新</button>
+      <span class="ls-actions">
+        <button class="btn-ghost btn-sm" :disabled="loading" @click="load()">刷新</button>
+        <button class="btn btn-sm" :disabled="loading || jobRunning"
+                :title="'重新拉取研报证据并生成 AI 决策；可能消耗 1 次 Bynewlt 额度，未收录时自动改用公开来源'"
+                @click="refreshData">
+          {{ jobRunning ? `更新中 ${job?.percent ?? 0}%` : '更新多空' }}
+        </button>
+      </span>
     </h6>
+
+    <div v-if="job" class="job-box" :class="job.status">
+      <div class="job-line">
+        <span class="job-msg">{{ job.message || '更新中…' }}</span>
+        <span class="mono tiny">{{ job.percent ?? 0 }}%</span>
+      </div>
+      <div class="job-track"><span :style="{ width: (job.percent ?? 0) + '%' }" /></div>
+      <div class="job-steps tiny dim">
+        准备 → 研报取证 → 多空稿 → AI 决策
+        <span v-if="job.status === 'partial'" class="warn-text">· 部分完成</span>
+        <span v-if="job.status === 'failed'" class="down">· {{ job.error || job.message }}</span>
+      </div>
+    </div>
 
     <StateBlock v-if="loading && !ai && !research" state="loading" title="加载个股多空…" />
     <StateBlock v-else-if="error && !ai && !dossier" state="error" title="取不到多空数据" :detail="error" :retry="load" />
@@ -80,16 +100,20 @@
         AI 是决策口径（买/持/卖），研报是原文证据口径；两边冲突时标"分歧"，不强行统一，也不构成投资建议。
         <template v-if="dossier?.caveats"> {{ dossier.caveats }}</template>
       </p>
+      <p class="hint tiny">
+        「更新多空」会先尝试 Bynewlt 研报库（成功检索可能消耗 1 次额度），未收录时自动改用公开来源；
+        进度会显示取证、成稿和 AI 决策三个阶段。
+      </p>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
-import { getStockAi, getStockResearch } from '@/api/client'
+import { getLongShortRefresh, getStockAi, getStockResearch, startLongShortRefresh } from '@/api/client'
 import type {
-  StockAiResponse, StockResearchCitation, StockResearchResponse,
+  LongShortRefreshJob, StockAiResponse, StockResearchCitation, StockResearchResponse,
 } from '@/types/api'
 
 const props = defineProps<{ code: string | null }>()
@@ -98,6 +122,9 @@ const ai = ref<StockAiResponse | null>(null)
 const research = ref<StockResearchResponse | null>(null)
 const loading = ref(false)
 const error = ref('')
+const job = ref<LongShortRefreshJob | null>(null)
+const jobRunning = computed(() => job.value?.status === 'queued' || job.value?.status === 'running')
+let jobTimer: ReturnType<typeof setInterval> | null = null
 let sequence = 0
 
 const aiLatest = computed(() => ai.value?.latest || null)
@@ -158,10 +185,65 @@ async function load() {
   loading.value = false
 }
 
-watch(() => props.code, load, { immediate: true })
+function stopJobPoll() {
+  if (jobTimer) clearInterval(jobTimer)
+  jobTimer = null
+}
+
+async function pollJob(code: string, jobId: string) {
+  try {
+    const next = await getLongShortRefresh(code, jobId)
+    if (props.code !== code) return
+    job.value = next
+    if (!['queued', 'running'].includes(next.status)) {
+      stopJobPoll()
+      await load()
+      if (next.status === 'failed') error.value = next.error || next.message || '更新失败'
+    }
+  } catch (e) {
+    stopJobPoll()
+    error.value = String(e)
+  }
+}
+
+async function refreshData() {
+  const code = props.code
+  if (!code || jobRunning.value) return
+  error.value = ''
+  try {
+    const started = await startLongShortRefresh(code)
+    job.value = started
+    stopJobPoll()
+    if (started.reused && started.status && !['queued', 'running'].includes(started.status)) {
+      await load()
+      return
+    }
+    jobTimer = setInterval(() => { void pollJob(code, started.job_id) }, 1000)
+    void pollJob(code, started.job_id)
+  } catch (e) {
+    error.value = String(e)
+  }
+}
+
+watch(() => props.code, () => {
+  stopJobPoll()
+  job.value = null
+  void load()
+}, { immediate: true })
+onUnmounted(stopJobPoll)
 </script>
 
 <style scoped>
+.ls-actions { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+.job-box { margin: 0 0 var(--sp-2); padding: 7px 9px; border: 1px solid var(--border-color);
+  border-radius: var(--r-2); background: rgba(255, 209, 102, 0.04); }
+.job-box.partial { border-color: var(--state-warn); }
+.job-box.failed { border-color: var(--state-bad); }
+.job-line { display: flex; justify-content: space-between; gap: 8px; font-size: var(--fs-sm); margin-bottom: 4px; }
+.job-msg { color: var(--text-primary); }
+.job-track { height: 5px; background: var(--bg-input); border-radius: 3px; overflow: hidden; }
+.job-track > span { display: block; height: 100%; background: var(--accent-gold); transition: width .3s; }
+.job-steps { margin-top: 4px; }
 .verdict-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }
 .ls-summary { font-size: var(--fs-md); line-height: 1.65; margin: var(--sp-2) 0; }
 .case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); margin: var(--sp-2) 0; }

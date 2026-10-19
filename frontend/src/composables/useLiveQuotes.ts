@@ -36,6 +36,7 @@ export function useLiveQuotes(codes: Ref<string[]>, options: { intervalMs?: numb
   const loading = ref(false)
   const polling = ref(false)
   let timer: ReturnType<typeof setInterval> | null = null
+  let lastProbe = 0
 
   async function reload() {
     const wanted = (codes.value || []).filter(Boolean)
@@ -84,10 +85,17 @@ export function useLiveQuotes(codes: Ref<string[]>, options: { intervalMs?: numb
   function start() {
     stop()
     if (document.hidden || !(codes.value || []).length) return
-    // 只在"实时源应当有数据"的时段轮询；收盘/午休/盘前不轮询（快照仍可手动刷新一次）
-    const phase = session.value?.phase
-    if (phase && phase !== 'am' && phase !== 'pm' && phase !== 'auction') return
-    timer = setInterval(() => { if (!document.hidden) void reload() }, intervalMs)
+    // 常驻心跳：开盘前/午休/收盘后低频探测 session，开盘后自动恢复高频轮询。
+    // 旧实现只在首次 phase=am/pm/auction 时启动；若页面在 09:15 前打开，
+    // phase=closed 后定时器根本不存在，09:30 之后左侧列表就一直停在启动时那一版。
+    timer = setInterval(() => {
+      if (document.hidden) return
+      const phase = session.value?.phase
+      const live = !phase || phase === 'am' || phase === 'pm' || phase === 'auction'
+      if (!live && Date.now() - lastProbe < 30000) return
+      lastProbe = Date.now()
+      void reload()
+    }, Math.max(1000, intervalMs))
     polling.value = true
   }
 
@@ -113,6 +121,18 @@ export function useLiveQuotes(codes: Ref<string[]>, options: { intervalMs?: numb
 /** 页面标签：实时 / 延迟 / 归档（照实标注，不静默降级） */
 export function quoteLabel(quote: IntradayQuote | undefined): string {
   if (!quote || !quote.available || quote.price == null) return '—'
+  // “实时”不能只看 source：缓存/源时间可能已经落后几十秒。
+  // 源时间格式通常是 20261019093753；超过 30s 标延迟，超过 5 分钟标归档。
+  const raw = String((quote as { time?: string }).time || '')
+  const m = raw.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/)
+  if (m) {
+    const stamp = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}+08:00`)
+    if (Number.isFinite(stamp)) {
+      const age = (Date.now() - stamp) / 1000
+      if (age > 300) return '归档'
+      if (age > 30) return '延迟'
+    }
+  }
   // 优先用后端给的 `source_label`（它对源有完整说明）；拿不到再按 source 关键词兜底。
   const label = String((quote as { source_label?: string }).source_label || '')
   if (label) return label

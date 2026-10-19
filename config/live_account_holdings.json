@@ -1,7 +1,8 @@
 {
   "_note": [
+    "本次变更（2026-10-19 09:55）：拓尔思 300229.SZ、中恒集团 600252.SH 清仓；新进宇通客车 600066.SH 500 股 @29.190、山西汾酒 600809.SH 100 股 @119.841；爱美客/东鹏饮料继续持有。来源：中泰证券 App 持仓页截图，由用户提供并人工转录。",
     "实盘账户快照（人工录入）。这是**真实券商账户**的一份截面，不是策略名单。",
-    "来源：中泰证券 App 持仓页截图（2026-10-15 14:09，账户 **0867），由用户提供并手工转录。",
+    "上一版来源：中泰证券 App 持仓页截图（2026-10-15 14:09，账户 **0867），由用户提供并手工转录。",
     "本次变更（2026-10-15）：**苏州银行 002966.SZ 清仓**（截图 0 股 / 成本 0.000，已实现 -199.81）→ **换入中恒集团 600252.SH 5700 股 @2.351**（可用 0 股 = 当日买入）。",
     "为什么单开一份配置而不是塞进 output/paper_trading/account/：那个账户是「策略从空仓 45,000 按当日名单下单」",
     "的前向口径；真实持仓是人工决策 + 已实现亏损的混合，两者混在一起会让净值曲线出现一次无解释跳变，",
@@ -15,56 +16,56 @@
   ],
   "broker": "中泰证券",
   "account_masked": "**0867",
-  "asof": "2026-10-15",
-  "captured_at": "2026-10-15 14:09",
+  "asof": "2026-10-19",
+  "captured_at": "2026-10-19 09:55",
   "captured_by": "用户截图人工转录",
   "currency": "CNY",
-  "cash": 234.4,
+  "cash": 392.62,
   "reported": {
-    "total_assets": 48480.9,
-    "market_value": 48246.0,
-    "available": 234.4,
-    "withdrawable": 234.4,
-    "float_pnl": -757.05,
-    "day_pnl": -217.13,
-    "day_pnl_pct": -0.0045
+    "total_assets": 47996.12,
+    "market_value": 47603.0,
+    "available": 392.62,
+    "withdrawable": 234.91,
+    "float_pnl": -1042.03,
+    "day_pnl": -918.27,
+    "day_pnl_pct": -0.0188
   },
   "positions": [
-    {
-      "stock_code": "300229.SZ",
-      "name": "拓尔思",
-      "shares": 1100,
-      "cost_price": 13.145,
-      "last_price": 12.94,
-      "reported_market_value": 14234.0,
-      "reported_pnl": -225.0
-    },
     {
       "stock_code": "300896.SZ",
       "name": "爱美客",
       "shares": 100,
       "cost_price": 94.43,
-      "last_price": 94.25,
-      "reported_market_value": 9425.0,
-      "reported_pnl": -18.0
+      "last_price": 95.4,
+      "reported_market_value": 9540.0,
+      "reported_pnl": 97.0
     },
     {
-      "stock_code": "600252.SH",
-      "name": "中恒集团",
-      "shares": 5700,
-      "cost_price": 2.351,
-      "last_price": 2.32,
-      "reported_market_value": 13224.0,
-      "reported_pnl": -176.13
+      "stock_code": "600066.SH",
+      "name": "宇通客车",
+      "shares": 500,
+      "cost_price": 29.19,
+      "last_price": 29.16,
+      "reported_market_value": 14580.0,
+      "reported_pnl": -15.15
+    },
+    {
+      "stock_code": "600809.SH",
+      "name": "山西汾酒",
+      "shares": 100,
+      "cost_price": 119.841,
+      "last_price": 119.81,
+      "reported_market_value": 11981.0,
+      "reported_pnl": -3.12
     },
     {
       "stock_code": "605499.SH",
       "name": "东鹏饮料",
       "shares": 100,
       "cost_price": 115.011,
-      "last_price": 113.63,
-      "reported_market_value": 11363.0,
-      "reported_pnl": -138.11
+      "last_price": 115.02,
+      "reported_market_value": 11502.0,
+      "reported_pnl": 0.89
     }
   ],
   "cleared_positions": [
@@ -88,6 +89,18 @@
       "name": "苏州银行",
       "realized_pnl": -199.81,
       "note": "2026-10-15 清仓换中恒集团；截图显示 0 股 / 成本 0.000 / 现价 9.030 / 盈亏 -199.81（含费）"
+    },
+    {
+      "stock_code": "300229.SZ",
+      "name": "拓尔思",
+      "realized_pnl": -819.83,
+      "note": "2026-10-19 清仓；截图显示 0 股、成本 0.000、现价 12.360、盈亏 -819.83（含费）"
+    },
+    {
+      "stock_code": "600252.SH",
+      "name": "中恒集团",
+      "realized_pnl": -301.82,
+      "note": "2026-10-19 清仓；截图显示 0 股、成本 0.000、现价 2.300、盈亏 -301.82（含费）"
     }
   ],
   "recent_trades": {
@@ -153,5 +166,6 @@
       }
     ],
     "cash_check": "卖出 3,612.00 − 买入 13,395.00 + 期初现金 40.55 = −9,742.45 ⇒ 当日另有约 +9.99k 入金，与「总资产 39,174 → 48,481」一致 ⇒ 这解释了为什么两段净值不做拼接（拼接会把入金当收益）"
-  }
+  },
+  "latest_snapshot_note": "2026-10-19 09:55 截图；持仓市值 47,603.00、可用 392.62、总资产 47,996.12。"
 }

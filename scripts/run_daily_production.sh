@@ -308,6 +308,12 @@ $(tail -5 "$LOG_DIR/$stage.log")
   fi
 done
 
+# ── 大盘页面数据（全 A 每日成交额）────────────────────────────────────────────
+# 依赖 clean_panel 完成后的日线；只做页面展示汇总，失败不阻塞选股。
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_MARKET_OVERVIEW:-1}" = "1" ]; then
+  run_data_step market_overview uv run python scripts/build_cn_market_turnover.py
+fi
+
 # ── 研究手臂选股（arm_selection）：不替代生产名单，失败不阻塞当日生产 ──
 # 产物：output/results_cn/arm_latest_selection.{csv,json}（前端「选股结果 → CN 研究手臂」与
 # 流水线页「研究手臂（arm_selection）」tab 都读它）

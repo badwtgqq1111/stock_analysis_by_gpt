@@ -31,7 +31,7 @@
       </template>
     </PageHeader>
 
-    <RealtimeStatus :meta="heat?.realtime" :enabled="liveEnabled" />
+    <RealtimeStatus :meta="heat?.realtime" :enabled="liveEnabled" show-flow />
     <StateBlock v-if="error" state="error" title="取不到行业热度" :detail="error" :retry="() => reload()" />
     <StateBlock v-else-if="!heat" state="loading" title="加载行业热度…" />
     <StateBlock v-else-if="!heat.available" state="empty" title="没有可用的行业热度"
@@ -48,7 +48,12 @@
           <span class="pill">全市场 <b :class="tone(heat.market.ret)">{{ pct(heat.market.ret) }}</b></span>
           <span class="pill">上涨占比 <b>{{ (heat.market.up_ratio * 100).toFixed(1) }}%</b></span>
           <span class="pill">涨停 <b class="up">{{ heat.market.zt_days }}</b> 次</span>
-          <span class="pill">净流入 <b :class="tone(heat.market.net_amount_wan)">{{ fmt(yi(heat.market.net_amount_wan), 1) }} 亿</b></span>
+          <span class="pill" v-if="heat.realtime?.flow_available === false">净流入
+            <b class="muted">—（源不提供）</b></span>
+          <span class="pill" v-else>净流入
+            <b :class="tone(heat.market.net_amount_wan)">{{ fmt(yi(heat.market.net_amount_wan), 1) }} 亿</b></span>
+          <span v-if="heat.realtime?.available && heat.realtime.flow_available === false"
+                class="tag warn">资金流分项暂缺，热度按其余四项</span>
           <span class="pill dim tiny">{{ heat.n_total }} 个行业 · {{ heat.market.n_stocks }} 只成分</span>
           <span class="pill dim tiny" v-if="heat.market.n_unclassified">未分类 {{ heat.market.n_unclassified }} 只（不参与排名）</span>
         </div>
@@ -59,6 +64,7 @@
         <h6>
           行业热度动态曲线
           <span class="dim tiny">当前热度前 N 行业的时间演变 · X=时间 · Y=热度 0~100 · 可播放/悬停</span>
+          <span class="tag dim tiny">历史回溯（非实时）</span>
         </h6>
         <StateBlock v-if="heat3dError" state="error" title="取不到 3D 数据" :detail="heat3dError"
                     :retry="() => loadHeat3d()" />

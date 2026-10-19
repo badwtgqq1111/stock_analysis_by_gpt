@@ -23,6 +23,7 @@ const routes = [
   { path: '/attribution', name: 'attribution', component: () => import('@/pages/Attribution.vue') },
   // 行情（2026-10-09 新增）：每日/周 涨跌与资金流排行、连板梯队、当日分时实时
   { path: '/rankings', name: 'rankings', component: () => import('@/pages/Rankings.vue') },
+  { path: '/market', name: 'market', component: () => import('@/pages/MarketOverview.vue') },
   { path: '/limitup', name: 'limitup', component: () => import('@/pages/LimitUp.vue') },
   { path: '/intraday', name: 'intraday', component: () => import('@/pages/Intraday.vue') },
   { path: '/industry', name: 'industry', component: () => import('@/pages/IndustryHeat.vue') },

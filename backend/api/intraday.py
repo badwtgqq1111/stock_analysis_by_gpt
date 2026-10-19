@@ -241,7 +241,7 @@ MAX_QUOTES_CODES = 40
 
 
 @router.get("/quotes")
-@ttl_cache(2.0, name="intraday_quotes")
+@ttl_cache(1.0, name="intraday_quotes")
 def intraday_quotes(codes: str = Query(..., description="逗号分隔的股票代码")) -> dict:
     """批量最新快照（分时页顶部的快捷条）。腾讯一次请求可带多只，比逐只快得多。"""
     all_codes = [c.strip().upper() for c in str(codes).split(",") if c.strip()]

@@ -89,6 +89,7 @@ const navGroups = [
   {
     label: '行情',
     links: [
+      { to: '/market', label: '大盘行情' },
       { to: '/rankings', label: '涨跌/资金排行' },
       { to: '/industry', label: '行业热度' },
       { to: '/limitup', label: '连板统计' },

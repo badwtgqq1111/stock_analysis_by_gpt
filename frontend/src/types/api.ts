@@ -81,6 +81,67 @@ export interface OhlcvResponse {
   latest: OhlcvLatest
 }
 
+// ─── 大盘指数 / 全市场成交额 ───
+export interface MarketSparkPoint {
+  date: string
+  close: number | null
+}
+
+export interface MarketIndexQuote {
+  code: string
+  name: string
+  date: string | null
+  open: number | null
+  high: number | null
+  low: number | null
+  close: number | null
+  pct_chg: number | null
+  amount_yi: number | null
+  vol: number | null
+  spark: MarketSparkPoint[]
+}
+
+export interface MarketTurnoverPoint {
+  date: string | null
+  amount_yi: number | null
+}
+
+export interface MarketTurnoverBar extends MarketTurnoverPoint {
+  ma20: number | null
+}
+
+export interface MarketTurnoverSeries {
+  available: boolean
+  asof: string | null
+  series: MarketTurnoverBar[]
+  stats: {
+    latest?: number | null
+    ma20?: number | null
+    mean?: number | null
+    max?: number | null
+    min?: number | null
+    n?: number
+  }
+  unit: string
+  source: string
+}
+
+export interface MarketOverview {
+  available: boolean
+  asof: string | null
+  turnover_asof: string | null
+  total_amount_yi: number | null
+  total_amount_yuan: number | null
+  n_stocks: number | null
+  turnover_series: MarketTurnoverPoint[]
+  indices: MarketIndexQuote[]
+  source: Record<string, string>
+}
+
+export interface MarketIndexOhlcv extends OhlcvResponse {
+  amount_unit: string
+}
+
 export interface ChartMarker {
   time: import('lightweight-charts').Time
   position: 'aboveBar' | 'belowBar'
@@ -749,6 +810,22 @@ export interface IntradayResponse {
   notes: string[]
 }
 
+export interface MarketIndexIntraday {
+  available: boolean
+  code: string
+  name: string
+  date: string
+  prev_close: number | null
+  points: IntradayPoint[]
+  latest: Partial<IntradayLatest>
+  source: string
+  source_label?: string
+  reason?: string | null
+  session: SessionPhase
+  live?: { available: boolean; reason: string | null }
+  notes?: string[]
+}
+
 /** 分时可用范围（K 线页点某一天之前先问一次：这天到底有没有分时） */
 export interface IntradayCoverage {
   code: string
@@ -1352,6 +1429,29 @@ export interface StockResearchResponse {
   hint?: string
 }
 
+export interface LongShortRefreshJob {
+  job_id: string
+  code: string
+  name?: string
+  status: 'queued' | 'running' | 'done' | 'partial' | 'failed' | string
+  step: string
+  percent: number
+  message: string
+  error?: string
+  result?: {
+    date?: string
+    bynewlt_status?: string
+    public_status?: string
+    ai_status?: string
+    ai_action?: string | null
+    ai_confidence?: number | null
+    research_note?: string
+  } | null
+  started_at?: string
+  finished_at?: string | null
+  reused?: boolean
+}
+
 // ─── 投研执行台（agent）─────────────────────────────────────────────────────
 // 数据源：backend/api/agent.py；轨迹由 scripts/agent_run.py 写 output/agent_runs/<run_id>/run.json
 export interface AgentFamilyItem {
@@ -1841,6 +1941,8 @@ export interface RealtimeMeta {
   excluded?: number
   coverage?: number
   reason?: string | null
+  source?: string
+  flow_available?: boolean
 }
 
 export interface VolatilityRiskResponse {

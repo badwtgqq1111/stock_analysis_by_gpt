@@ -438,7 +438,7 @@ function startIntradayPoll() {
   // 定时器保留，逐次看时钟；午休/竞价到开盘后会自行恢复，不锁死首次 session.phase。
   liveTimer.value = setInterval(() => {
     if (!document.hidden && intradayPollable(pickedDate.value)) void loadIntraday(pickedDate.value)
-  }, 30000)
+  }, 15000)
 }
 
 function clearIntraday() {

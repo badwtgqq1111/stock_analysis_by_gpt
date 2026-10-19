@@ -9,6 +9,9 @@ preselection 快照逐票一致）。
 产物：`output/results_cn/ai_pick_analysis/<date>.{json,csv}`，
 `scripts/build_selection_ledger.py` 会把它合进选股台账，前端 K 线页与选股日历读同一份。
 
+按需单票更新：`--codes 600066.SH`（不要求该票在当日策略名单里）；此时会把已有的
+Bynewlt/公开研报 dossier 作为 research 上下文一起喂给模型，并覆盖同日同代码旧结论。
+
 --skip-existing：同一天重复触发（每日自动化 19:00/20:30/22:00 的失败重试）时，
 已完成（status=completed）的股票不再重复调用 API，只补还挂着"待分析"的那部分。
 """
@@ -28,6 +31,28 @@ RESULTS = ROOT / "output/results_cn"
 REGISTRY = ROOT / "config/strategies.json"
 OUT = RESULTS / "ai_pick_analysis"
 ACTIONS = {"买入", "持有", "卖出"}
+MANUAL_STRATEGY = "watchlist_manual"
+MANUAL_LABEL = "自选股按需分析"
+BYNEWLT_DOSSIER = RESULTS / "bynewlt_research/dossier"
+PUBLIC_DOSSIER = RESULTS / "cn_public_research/dossier"
+STOCK_BASIC = ROOT / "assets/data/meta/cn_stock_basic.parquet"
+
+
+def _norm(code: str) -> str:
+    text = str(code or "").strip().upper()
+    if not text:
+        return ""
+    if "." in text:
+        number, _, market = text.partition(".")
+        if market in ("SH", "SZ", "BJ"):
+            return f"{number}.{market}"
+    for prefix in ("SH", "SZ", "BJ"):
+        if text.startswith(prefix) and text[len(prefix):].isdigit():
+            return f"{text[len(prefix):]}.{prefix}"
+    if text.isdigit():
+        market = "SH" if text[0] in "69" else ("BJ" if text[0] in "48" else "SZ")
+        return f"{text}.{market}"
+    return text
 
 
 def _value(value):
@@ -38,7 +63,55 @@ def _value(value):
     return value
 
 
-def collect(date: str, registry: Path = REGISTRY, results: Path = RESULTS) -> list[dict]:
+def _name_of(code: str) -> str:
+    try:
+        frame = pd.read_parquet(STOCK_BASIC, columns=["ts_code", "name"])
+        hit = frame[frame["ts_code"].astype(str) == code]
+        return str(hit.iloc[0]["name"]) if not hit.empty else ""
+    except Exception:
+        return ""
+
+
+def _research_context(code: str) -> dict:
+    """把已核对的研报稿压成给 AI 的少量上下文；没有稿就返回空，不伪造。"""
+    for folder in (BYNEWLT_DOSSIER, PUBLIC_DOSSIER):
+        try:
+            payload = json.loads((folder / f"{code}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        return {
+            "stance": payload.get("stance") or "",
+            "summary": payload.get("summary") or "",
+            "bull": [str(x.get("point") or "") for x in (payload.get("bull") or [])[:4]],
+            "bear": [str(x.get("point") or "") for x in (payload.get("bear") or [])[:4]],
+            "risks": [str(x.get("point") or "") for x in (payload.get("risks") or [])[:4]],
+            "source": "bynewlt" if folder == BYNEWLT_DOSSIER else "public_web",
+        }
+    return {}
+
+
+def _manual_pick(code: str, date: str) -> dict:
+    name = _name_of(code)
+    signal = {"strategy": MANUAL_LABEL, "source": "manual_watchlist", "decision_date": date}
+    try:
+        from backend.services.data_service import load_cn_stock_ohlcv
+        bars = load_cn_stock_ohlcv(code, days=90)
+        if bars is not None and not bars.empty:
+            closes = bars["Close"].dropna()
+            signal["last_close"] = float(closes.iloc[-1])
+            if len(closes) >= 21:
+                signal["momentum_20d"] = float(closes.iloc[-1] / closes.iloc[-21] - 1)
+    except Exception:
+        pass
+    return {
+        "stock_code": code, "name": name,
+        "strategies": [MANUAL_STRATEGY], "strategies_zh": [MANUAL_LABEL],
+        "signals": [signal], "research": _research_context(code),
+    }
+
+
+def collect(date: str, registry: Path = REGISTRY, results: Path = RESULTS,
+            codes: set[str] | None = None) -> list[dict]:
     """按决策日和代码去重，保留全部命中策略及可核实的当日字段。
 
     每只票同时带上 `strategies`（注册表 id，前端用它映射中文名）与 `strategies_zh`
@@ -61,6 +134,8 @@ def collect(date: str, registry: Path = REGISTRY, results: Path = RESULTS) -> li
                 continue
             code = str(row.get("stock_code") or "").strip()
             if not code or code == "nan":
+                continue
+            if codes is not None and code not in codes:
                 continue
             item = found.setdefault(code, {"stock_code": code, "name": "", "strategies": [],
                                           "strategies_zh": [], "signals": []})
@@ -90,6 +165,8 @@ def collect(date: str, registry: Path = REGISTRY, results: Path = RESULTS) -> li
                 code = str(row.get("stock_code") or "").strip()
                 if not code:
                     continue
+                if codes is not None and code not in codes:
+                    continue
                 item = found.setdefault(code, {"stock_code": code, "name": "", "strategies": [],
                                                "strategies_zh": [], "signals": []})
                 item["name"] = item["name"] or str(row.get("name") or "")
@@ -102,6 +179,13 @@ def collect(date: str, registry: Path = REGISTRY, results: Path = RESULTS) -> li
                                         "source": "notify",
                                         "rank": row.get("model_rank"), "weight": row.get("target_weight"),
                                         "reason": row.get("reason")})
+    if codes:
+        for code in sorted(codes):
+            if code in found:
+                # 按需更新时，即使是策略名单里的票，也要把刚更新的研报稿喂给 AI。
+                found[code]["research"] = _research_context(code)
+            else:
+                found[code] = _manual_pick(code, date)
     return [found[k] for k in sorted(found)]
 
 
@@ -110,6 +194,8 @@ def _ask(batch: list[dict], date: str, key: str) -> dict[str, dict]:
               "不得编造新闻、财报或未来价格。逐股说明多头依据、空头依据和风险。"
               "提到入选策略时用 stocks 里 strategies_zh 的中文名，不要写英文 id。"
               "action 只能为买入、持有、卖出；资料不足选持有且降低 confidence。"
+              "如果 stock.research 有内容，必须把其中的多空证据与检索摘要纳入判断；"
+              "AI 决策与研报证据冲突时，在 summary 明确写出分歧，不要强行统一。"
               "只返回 JSON 对象，结构为 {analyses:[{stock_code,action,confidence,summary,"
               "bull_case,bear_case,risk_flags,horizon}]}；confidence 为 0 到 1，risk_flags 是字符串数组。"
               "这些是研究意见，不生成订单。")
@@ -175,6 +261,8 @@ def main() -> int:
     ap.add_argument("--fallback-only", action="store_true")
     ap.add_argument("--skip-existing", action="store_true",
                     help="保留已完成的逐股结论，只重新分析还处于待分析状态的股票")
+    ap.add_argument("--codes", default="",
+                    help="逗号分隔的任意自选股；只分析这些代码（可不在策略名单里）")
     args = ap.parse_args()
     try:
         from data.store.scheduler_env import load_scheduler_env
@@ -194,8 +282,17 @@ def main() -> int:
             existing = []
     done = {str(r.get("stock_code")) for r in existing if r.get("status") == "completed"}
 
-    picks = [p for p in collect(args.date) if p["stock_code"] not in done]
-    rows = existing + analyze(args.date, picks, fallback_only=args.fallback_only)
+    wanted = {_norm(c) for c in str(args.codes or "").split(",") if str(c).strip()}
+    if wanted:
+        # 显式点名 = 用户要求更新，即使当天已有 completed 行也重算。
+        done = set()
+    picks = [p for p in collect(args.date, codes=wanted or None) if p["stock_code"] not in done]
+    fresh = analyze(args.date, picks, fallback_only=args.fallback_only)
+    # 按 stock_code 去重：手动更新覆盖同一天旧结论，其他策略行原样保留。
+    merged = {str(r.get("stock_code")): r for r in existing}
+    for row in fresh:
+        merged[str(row.get("stock_code"))] = row
+    rows = list(merged.values())
     rows.sort(key=lambda r: str(r.get("stock_code")))
     path.write_text(json.dumps({"date": args.date, "rows": rows}, ensure_ascii=False, indent=2),
                     encoding="utf-8")

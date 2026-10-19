@@ -38,7 +38,8 @@
                     sub="相对成本价" />
           <StatTile label="当日参考盈亏" :value="money(live.day_pnl ?? null)" :tone="tone(live.day_pnl ?? 0)"
                     :sub="usingQuotePrice ? `现价 vs 昨收（券商同口径）· ${priceBasisLabel}` : '盘后口径'" />
-          <StatTile label="已实现（清仓 3 笔）" :value="money(live.realized_pnl)" :tone="tone(live.realized_pnl ?? 0)" />
+          <StatTile :label="`已实现（清仓 ${live.cleared_positions?.length ?? 0} 笔）`"
+                    :value="money(live.realized_pnl)" :tone="tone(live.realized_pnl ?? 0)" />
           <StatTile label="第一重仓" :value="pct(live.top1_weight)" sub="单票上限 12%" />
         </div>
         <div class="pill-row mt" v-if="live.relative_20d?.return_20d !== undefined">

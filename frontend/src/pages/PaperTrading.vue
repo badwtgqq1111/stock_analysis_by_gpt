@@ -38,7 +38,8 @@
           <StatTile label="账户累计" :value="pct(live.cumulative_return)" :tone="tone(live.cumulative_return ?? 0)"
                     sub="含已实现与未实现" />
           <StatTile label="未实现浮盈" :value="money(live.unrealized_pnl)" :tone="tone(live.unrealized_pnl ?? 0)" />
-          <StatTile label="已实现（3 笔清仓）" :value="money(live.realized_pnl)" :tone="tone(live.realized_pnl ?? 0)"
+          <StatTile :label="`已实现（${live.cleared_positions?.length ?? 0} 笔清仓）`"
+                    :value="money(live.realized_pnl)" :tone="tone(live.realized_pnl ?? 0)"
                     sub="沪电/裕同/士兰微" />
         </div>
         <div class="pill-row" v-if="live.relative_20d?.return_20d !== undefined">
@@ -377,6 +378,7 @@ import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
 import StatTile from '@/components/ui/StatTile.vue'
 import SvgCurve from '@/components/ui/SvgCurve.vue'
+import { useMarketPoll } from '@/composables/useMarketPoll'
 
 const router = useRouter()
 const data = ref<PaperStatus | null>(null)
@@ -387,7 +389,11 @@ async function reload() {
   // 长样本口径单独取：它属于"另一条口径"，取不到也不该让整页失败
   try { forward.value = await getForwardValidation() } catch { forward.value = null }
 }
+async function reloadLive() {
+  try { data.value = await getPaperStatus(); error.value = '' } catch (e) { error.value = String(e) }
+}
 onMounted(reload)
+useMarketPoll(reloadLive, () => true)
 function gotoStock(code: string) { if (code) router.push({ path: '/kline', query: { code } }) }
 
 function md(t: string) {

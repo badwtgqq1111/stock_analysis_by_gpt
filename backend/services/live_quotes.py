@@ -194,7 +194,7 @@ def intraday_minute(code: str, period: str = "1") -> tuple[pd.DataFrame | None, 
         frame = frame.dropna(subset=["clock"]).sort_values("clock")
         return frame, None
 
-    return _cached(("minute", symbol, period), 60.0, build)
+    return _cached(("minute", symbol, period), 15.0, build, error_ttl=8.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,7 +312,7 @@ def tencent_minute(code: str) -> tuple[pd.DataFrame | None, str | None]:
             return None, f"{symbol} 腾讯分时无有效行"
         return pd.DataFrame(records), None
 
-    return _cached(("tx_minute", symbol), 8.0, build, error_ttl=8.0)
+    return _cached(("tx_minute", symbol), 4.0, build, error_ttl=8.0)
 
 
 def tencent_kline(code: str, period: str = "m5", count: int = 320) -> tuple[pd.DataFrame | None, str | None]:
@@ -400,5 +400,5 @@ def tencent_quotes(codes: list[str], timeout: float = 12.0, attempts: int = 2) -
             }
         return payload, None
 
-    payload, error = _cached(("tx_quotes", joined), 8.0, build, error_ttl=8.0)
+    payload, error = _cached(("tx_quotes", joined), 2.0, build, error_ttl=4.0)
     return payload or {}, error

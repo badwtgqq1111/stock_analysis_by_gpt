@@ -27,7 +27,7 @@
         <span class="hr-k">振幅</span><span class="hr-v mono">{{ hoverPanel.amplitude }}</span>
         <span class="hr-k">量</span><span class="hr-v mono">{{ hoverPanel.volume }}</span>
       </span>
-      <span class="hr-group">
+      <span class="hr-group" v-if="!simple">
         <span class="hr-k">威科夫</span>
         <template v-if="hoverPanel.wkLabel">
           <span class="hr-v" :class="hoverPanel.wkSide > 0 ? 'tt-up' : 'tt-down'">{{ hoverPanel.wkLabel }}</span>
@@ -37,7 +37,7 @@
         </template>
         <span v-else class="hr-v dim">当日无坍缩事件</span>
       </span>
-      <div class="wk-card" v-if="hoverPanel.wkRange || hoverPanel.wkTop.length">
+      <div class="wk-card" v-if="!simple && (hoverPanel.wkRange || hoverPanel.wkTop.length)">
         <div class="wk-row"><span class="wk-k">区间</span><span>{{ hoverPanel.wkRange }}</span></div>
         <div class="wk-row"><span class="wk-k">位置</span><span>{{ hoverPanel.wkPos }}</span></div>
         <div class="wk-row" v-if="hoverPanel.wkTop.length">
@@ -56,14 +56,16 @@
     </div>
     <!-- 入选记号的可交互命中区（2026-10-15）：lightweight-charts 的 marker 画在 canvas 上，
          没有 DOM 也没有 hover 事件 ⇒ 在图下方铺一层透明"热区"，悬停/聚焦就出明细卡。 -->
-    <button v-for="hb in hitboxes" :key="hb.date" type="button" class="sel-hit"
-            :style="{ left: hb.x + 'px' }" :title="`${hb.date}：入选 ${hb.hits} 条（悬停看明细）`"
-            :aria-label="`${hb.date} 入选 ${hb.hits} 条策略，悬停或聚焦看明细`"
-            @mouseenter="onHitEnter(hb.date)" @mouseleave="onHitLeave(hb.date)"
-            @focus="onHitEnter(hb.date)" @blur="onHitLeave(hb.date)"
-            @click="emit('pick', hb.date)"></button>
+    <template v-if="!simple">
+      <button v-for="hb in hitboxes" :key="hb.date" type="button" class="sel-hit"
+              :style="{ left: hb.x + 'px' }" :title="`${hb.date}：入选 ${hb.hits} 条（悬停看明细）`"
+              :aria-label="`${hb.date} 入选 ${hb.hits} 条策略，悬停或聚焦看明细`"
+              @mouseenter="onHitEnter(hb.date)" @mouseleave="onHitLeave(hb.date)"
+              @focus="onHitEnter(hb.date)" @blur="onHitLeave(hb.date)"
+              @click="emit('pick', hb.date)"></button>
+    </template>
     <!-- 悬停在入选记号上 → 当天入选明细（策略中文名 / rank / 权重 / T+5）；与迷你日历条同一张卡 -->
-    <SelectionDetailCard v-if="selDetail.date" ref="popRef" flat class="sel-pop"
+    <SelectionDetailCard v-if="!simple && selDetail.date" ref="popRef" flat class="sel-pop"
                          :style="{ left: selDetail.x + 'px', top: selDetail.y + 'px' }"
                          :date="selDetail.date" :rows="selDetail.rows" :names="selectionNames"
                          :month="selectionMonth" />
@@ -105,6 +107,8 @@ const props = defineProps<{
   wyckoffWso?: Record<string, number>
   /** 当前结构（只在最新一根显示，历史根没有当时的快照） */
   wyckoffStructure?: string
+  /** 指数/大盘模式：隐藏威科夫、入选记号与个股交互，只保留 OHLCV + 均线 */
+  simple?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -201,25 +205,27 @@ function fillTooltip(dp: OhlcvDataPoint) {
   hoverPanel.changePct = dp.change_pct != null ? (dp.change_pct >= 0 ? '+' : '') + dp.change_pct.toFixed(2) + '%' : '-'
   hoverPanel.amplitude = dp.amplitude != null ? dp.amplitude.toFixed(2) + '%' : '-'
   hoverPanel.volume = fmtVol(dp.volume)
-  const wk = props.wyckoffSeries?.[dp.time]
-  hoverPanel.wkLabel = wk?.label || ''
-  hoverPanel.wkSide = wk?.side || 0
-  hoverPanel.wkProb = wk?.prob || 0
-  const bars = props.data?.data || []
-  const idx = bars.findIndex((b) => b.time === dp.time)
-  if (idx >= 0) {
-    const win = bars.slice(Math.max(0, idx - 59), idx + 1)
-    const hi = Math.max(...win.map((b) => b.high))
-    const lo = Math.min(...win.map((b) => b.low))
-    const net = win.length > 1 ? dp.close / win[0].close - 1 : 0
-    const width = lo > 0 ? (hi - lo) / lo : 0
-    hoverPanel.wkRange = `${win.length}日 ${lo.toFixed(2)}~${hi.toFixed(2)}（宽${(width * 100).toFixed(1)}%，净${(net * 100).toFixed(1)}%）`
-    const back = idx >= 120 ? bars[idx - 120].close : null
-    const pos = back ? dp.close / back - 1 : null
-    hoverPanel.wkPos = pos == null ? '—' : `近120日 ${(pos * 100).toFixed(1)}% → ${pos < 0 ? '吸筹/底部区域' : '派发/顶部区域'}`
-    hoverPanel.wkTop = props.wyckoffTop?.[dp.time] || []
-    hoverPanel.wkWso = props.wyckoffWso?.[dp.time] ?? null
-    hoverPanel.wkStruct = idx === bars.length - 1 ? (props.wyckoffStructure || '') : ''
+  if (!props.simple) {
+    const wk = props.wyckoffSeries?.[dp.time]
+    hoverPanel.wkLabel = wk?.label || ''
+    hoverPanel.wkSide = wk?.side || 0
+    hoverPanel.wkProb = wk?.prob || 0
+    const bars = props.data?.data || []
+    const idx = bars.findIndex((b) => b.time === dp.time)
+    if (idx >= 0) {
+      const win = bars.slice(Math.max(0, idx - 59), idx + 1)
+      const hi = Math.max(...win.map((b) => b.high))
+      const lo = Math.min(...win.map((b) => b.low))
+      const net = win.length > 1 ? dp.close / win[0].close - 1 : 0
+      const width = lo > 0 ? (hi - lo) / lo : 0
+      hoverPanel.wkRange = `${win.length}日 ${lo.toFixed(2)}~${hi.toFixed(2)}（宽${(width * 100).toFixed(1)}%，净${(net * 100).toFixed(1)}%）`
+      const back = idx >= 120 ? bars[idx - 120].close : null
+      const pos = back ? dp.close / back - 1 : null
+      hoverPanel.wkPos = pos == null ? '—' : `近120日 ${(pos * 100).toFixed(1)}% → ${pos < 0 ? '吸筹/底部区域' : '派发/顶部区域'}`
+      hoverPanel.wkTop = props.wyckoffTop?.[dp.time] || []
+      hoverPanel.wkWso = props.wyckoffWso?.[dp.time] ?? null
+      hoverPanel.wkStruct = idx === bars.length - 1 ? (props.wyckoffStructure || '') : ''
+    }
   }
   legend.chgUp = hoverPanel.chgUp
   legend.changePct = hoverPanel.changePct
@@ -413,7 +419,7 @@ function rebuildSelectionIndex() {
 /** marker 画在 canvas 上、没有 DOM ⇒ 在蜡烛窗格底部铺一层透明命中区：
  *  x 坐标随时间轴平移/缩放重算；宽度按格子宽度的一半（翻页变窄时不会互相盖住）。 */
 function updateHitboxes() {
-  if (!chart || !candleSeries || !props.selectionMarks?.length) { hitboxes.value = []; return }
+  if (props.simple || !chart || !candleSeries || !props.selectionMarks?.length) { hitboxes.value = []; return }
   rebuildSelectionIndex()
   const xByDate = new Map<string, number>()
   for (const m of props.selectionMarks) {
@@ -443,6 +449,7 @@ function updateHitboxes() {
 /** 从光标位置（相对容器）算出最近的入选日；不在任何入选日记号附近就清掉浮层。
  *  `x`/`y` 都传 null 表示"关掉"（鼠标离开图区时用）。 */
 function refreshSelectionDetail(point: { x: number | null; y: number | null }) {
+  if (props.simple) { hideSelectionDetail(); return }
   if (point.x == null || point.y == null) { hideSelectionDetail(); return }
   if (!props.selectionMarks?.length) { hideSelectionDetail(); return }
   const date = nearestSelectionDate(point.x, hitHalfWidth + 4)

@@ -66,7 +66,7 @@ export function useKlineData() {
     if (timer) clearTimeout(timer)
     timer = setTimeout(fetchData, 200)
   })
-  const poll = setInterval(() => { clock.value = Date.now(); void fetchLive() }, 10000)
+  const poll = setInterval(() => { clock.value = Date.now(); void fetchLive() }, 5000)
   onUnmounted(() => { ++sequence; ++liveSequence; clearInterval(poll); if (timer) clearTimeout(timer) })
   return { data, isLoading, error, stockCode, days, showSignals, showChips, refresh: fetchData }
 }

@@ -57,7 +57,7 @@ def _page(page):
     return data
 
 
-def _build_snapshot():
+def _build_eastmoney_snapshot():
     now = lq.now_cn(); day = now.strftime('%Y-%m-%d')
     try:
         first = _page(1); total = int(first['total'])
@@ -100,6 +100,89 @@ def _build_snapshot():
                 'quotes': quotes, 'reason': None}, None
     except Exception as exc:
         return None, f'{type(exc).__name__}: {exc}'[:250]
+
+
+def _build_tencent_snapshot():
+    """东财 clist 被代理掐断时的全市场快照。
+
+    腾讯 `qt.gtimg.cn/q=` 一次可带多只（实测 400 只 ~0.3s），但没有主力净额；
+    因此这份快照只供涨跌/行业热度/涨停等价格类页面使用，`flow_available=False`。
+    """
+    now = lq.now_cn(); day = now.strftime('%Y-%m-%d')
+    basics = mbs.basic_frame()
+    codes = [str(c) for c in basics.index if str(c).upper().endswith(('.SH', '.SZ', '.BJ'))]
+    if not codes:
+        return None, '本地基础表没有 A 股代码'
+    batches = [codes[i:i + 300] for i in range(0, len(codes), 300)]
+    quotes: dict[str, dict] = {}
+    errors: list[str] = []
+
+    def fetch(batch):
+        try:
+            payload, error = lq.tencent_quotes(batch, timeout=5.0, attempts=1)
+            return payload or {}, error
+        except Exception as exc:  # noqa: BLE001
+            return {}, f'{type(exc).__name__}: {exc}'
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for payload, error in pool.map(fetch, batches):
+            if error:
+                errors.append(error)
+            quotes.update(payload)
+
+    parsed: dict[str, dict] = {}
+    times: list[datetime] = []
+    for code, q in quotes.items():
+        ts = lq.to_ts_code(code)
+        try:
+            stamp = (datetime.strptime(str(q.get('time') or ''), '%Y%m%d%H%M%S')
+                     .replace(tzinfo=lq.CN_TZ)) if q.get('time') else None
+        except ValueError:
+            stamp = None
+        if stamp is None or stamp.strftime('%Y-%m-%d') != day:
+            continue
+        if (now - stamp).total_seconds() < -60:
+            continue
+        if lq.trading_phase(now)['live'] and (now - stamp).total_seconds() > 180:
+            continue
+        price, prev = number(q.get('price')), number(q.get('prev_close'))
+        volume = number(q.get('volume_lots'))
+        if price is None or prev is None or price <= 0 or prev <= 0 or volume is None:
+            continue
+        parsed[ts] = {
+            'stock_code': ts, 'name': str(q.get('name') or ''),
+            'price': price, 'prev_close': prev,
+            'open': number(q.get('open')), 'high': number(q.get('high')),
+            'low': number(q.get('low')), 'volume': volume * 100,
+            'amount': (number(q.get('amount_wan')) or 0) * 10000,
+            'net_amount': None, 'time': stamp.strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        times.append(stamp)
+    expected = len(codes)
+    coverage = len(parsed) / expected if expected else 0
+    if not parsed or coverage < 0.80:
+        return None, f'腾讯快照覆盖不足：{len(parsed)}/{expected}；' + ('; '.join(errors[-2:]) if errors else '')
+    return {
+        'available': True, 'date': day,
+        'asof': max(times).strftime('%Y-%m-%d %H:%M:%S'),
+        'oldest_asof': min(times).strftime('%Y-%m-%d %H:%M:%S'),
+        'source': 'tencent_snapshot', 'expected': expected, 'received': len(quotes),
+        'valid': len(parsed), 'coverage': round(coverage, 4),
+        'excluded': expected - len(parsed), 'flow_valid': 0, 'flow_available': False,
+        'quotes': parsed, 'reason': None,
+    }, None
+
+
+def _build_snapshot():
+    """Eastmoney first; Tencent bulk snapshot is the price-only fallback."""
+    em, em_error = _build_eastmoney_snapshot()
+    if em:
+        return em, None
+    tx, tx_error = _build_tencent_snapshot()
+    if tx:
+        tx['fallback_from'] = 'eastmoney_clist_unavailable'
+        return tx, None
+    return None, f'eastmoney: {em_error}; tencent: {tx_error}'[:500]
 
 
 def snapshot():
@@ -146,7 +229,7 @@ def industry_frame(period, snap):
         flow = pd.concat([hist,flow],ignore_index=True)
         frame = ihs._build_frame(period, source='moneyflow_dc', bars_override=bars(70,snap), flow_override=flow)
         if frame.get('available'):
-            frame['market']['source'] = 'eastmoney_snapshot'
+            frame['market']['source'] = snap.get('source') or 'realtime_snapshot'
         return frame
     return versioned(('industry', period), snap['asof'], build)
 

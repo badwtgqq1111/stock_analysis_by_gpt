@@ -33,7 +33,7 @@
             <option value="in">净流入榜</option>
             <option value="out">净流出榜</option>
           </select>
-          <select v-model="source" class="picker" :disabled="liveEnabled"><option v-if="liveEnabled" :value="source">当日实时：东财主力净额</option>
+          <select v-model="source" class="picker" :disabled="flowLiveAvailable"><option v-if="flowLiveAvailable" :value="source">当日实时：东财主力净额</option>
             <option v-for="s in overview?.moneyflow_sources || []" :key="s.key" :value="s.key">{{ s.label }}</option>
           </select>
           <input v-model="flowDate" type="date" class="picker" :max="cnToday()" aria-label="资金流排行历史日期" />
@@ -54,7 +54,7 @@
         <span class="pill dim tiny" v-if="session">行情状态 <b>{{ sessionLabel }}</b> · {{ session?.now }}</span>
       </div>
 
-      <RealtimeStatus :meta="current?.realtime" :enabled="liveEnabled" />
+      <RealtimeStatus :meta="current?.realtime" :enabled="liveEnabled" :show-flow="view === 'moneyflow'" />
       <StateBlock v-if="error" state="error" title="排行取数失败" :detail="error" :retry="() => reload()" />
       <StateBlock v-else-if="!current" state="loading" title="加载排行…" />
 
@@ -122,6 +122,8 @@
           <div class="pill-row">
             <span class="pill">数据日 <b>{{ flowData?.date }}</b></span>
             <span class="pill">口径 <b>{{ flowData?.source_label }}</b></span>
+            <span v-if="flowData?.realtime?.available && flowData.realtime.flow_available === false"
+                  class="tag warn">资金流实时源不可用，当前显示归档</span>
             <span class="pill">净流入 <b class="up">{{ stats.n_in ?? '—' }}</b></span>
             <span class="pill">净流出 <b class="down">{{ stats.n_out ?? '—' }}</b></span>
             <span class="pill">全市场合计 <b :class="tone(stats.sum_net_yi)">{{ fmt(stats.sum_net_yi, 1) }} 亿</b></span>
@@ -213,6 +215,8 @@ const error = ref('')
 const loading = ref(false)
 
 const current = computed(() => (view.value === 'change' ? changeData.value : flowData.value))
+const flowLiveAvailable = computed(() =>
+  Boolean(flowData.value?.realtime?.available && flowData.value?.realtime?.flow_available))
 const stats = computed<Record<string, any>>(() => (current.value?.stats as Record<string, any>) || {})
 const sessionLabel = computed(() => {
   const map: Record<string, string> = { auction: '集合竞价', am: '上午盘', lunch: '午间休市', pm: '下午盘', closed: '已收盘' }

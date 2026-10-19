@@ -7,6 +7,9 @@
       <span v-if="auctionPoints.length" class="dim tiny">分钟采样，非逐笔/L2委托</span>
       <span class="dim tiny">共 {{ points.length }} 个连续交易点</span>
       <span v-if="auctionPoints.length" class="gold">集合竞价 {{ auctionPoints.length }} 点 · 指示价/开盘结果</span>
+      <span v-if="auctionPoints.length && auctionSource === 'tencent_preopen_snapshot'" class="gold">
+        竞价：腾讯快照（东财不可达）
+      </span>
       <span v-else-if="code" class="dim tiny">集合竞价：{{ auctionReason || '加载中…' }}</span>
     </div>
 
@@ -19,6 +22,8 @@
         <line :x1="xOf('09:30')" :x2="xOf('09:30')" y1="0" :y2="H" stroke="var(--accent-gold)" stroke-dasharray="3 3" />
         <polyline v-if="auctionLine" :points="auctionLine" fill="none" stroke="var(--accent-gold)"
                   stroke-width="1.5" stroke-dasharray="3 2" vector-effect="non-scaling-stroke" />
+        <circle v-if="auctionDot" :cx="auctionDot.x" :cy="auctionDot.y" r="3.2"
+                fill="var(--accent-gold)" />
         <!-- 前收基准线 -->
         <line v-if="prevY !== null" x1="0" x2="1000" :y1="prevY" :y2="prevY"
               stroke="var(--text-dim)" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke" />
@@ -27,6 +32,8 @@
         <polyline v-if="priceLine" :points="priceLine" fill="none"
                   :stroke="up ? 'var(--accent-up)' : 'var(--accent-down)'"
                   stroke-width="1.6" vector-effect="non-scaling-stroke" />
+        <circle v-if="lastDot" :cx="lastDot.x" :cy="lastDot.y" r="3.2"
+                :fill="up ? 'var(--accent-up)' : 'var(--accent-down)'" />
         <!-- 均价线 -->
         <polyline v-if="avgLine" :points="avgLine" fill="none" stroke="var(--accent-gold)"
                   stroke-width="1.2" vector-effect="non-scaling-stroke" />
@@ -72,6 +79,7 @@ const props = withDefaults(
 
 const auctionRaw = ref<IntradayPoint[]>([])
 const auctionPrev = ref<number | null>(null)
+const auctionSource = ref('')
 const auctionPoints = computed(() => {
   const factor = props.prevClose && auctionPrev.value ? props.prevClose / auctionPrev.value : 1
   return auctionRaw.value.map(p => ({ ...p, price: p.price == null ? null : p.price * factor,
@@ -93,12 +101,14 @@ async function loadAuction() {
     if (request !== auctionRequest || code !== props.code) return
     auctionRaw.value = data.available ? data.points : []
     auctionPrev.value = data.prev_close || null
+    auctionSource.value = data.source || ''
     auctionReason.value = data.available ? '' : data.reason || '该日无采样记录'
   } catch (e) { if (request === auctionRequest) auctionReason.value = String(e) }
   finally { if (request === auctionRequest) auctionPending = false }
 }
 watch(() => [props.code, props.date], () => {
   ++auctionRequest; auctionRaw.value = []; auctionPrev.value = null; auctionReason.value = ''
+  auctionSource.value = ''
   auctionPending = false; void loadAuction()
 }, { immediate: true })
 const auctionTimer = setInterval(() => {
@@ -162,6 +172,11 @@ const priceLine = computed(() => {
 })
 
 const auctionLine = computed(() => auctionPoints.value.filter(p => p.price !== null).map(p => `${xOf(p.clock).toFixed(1)},${yOf(p.price as number).toFixed(1)}`).join(' '))
+const auctionDot = computed(() => {
+  const rows = auctionPoints.value.filter(x => x.price !== null)
+  const p = rows[rows.length - 1]
+  return p ? { x: xOf(p.clock), y: yOf(p.price as number) } : null
+})
 const priceArea = computed(() => {
   if (regular.value.length < 2) return ''
   const base = props.prevClose ? yOf(props.prevClose) : priceH.value
@@ -174,6 +189,11 @@ const avgLine = computed(() => {
   const rows = regular.value.filter((p) => p.avg !== null)
   if (rows.length < 2) return ''
   return rows.map((p) => `${xOf(p.clock).toFixed(1)},${yOf(p.avg as number).toFixed(1)}`).join(' ')
+})
+
+const lastDot = computed(() => {
+  const p = regular.value[regular.value.length - 1]
+  return p ? { x: xOf(p.clock), y: yOf(p.price as number) } : null
 })
 
 const prevY = computed(() => (props.prevClose ? yOf(props.prevClose) : null))

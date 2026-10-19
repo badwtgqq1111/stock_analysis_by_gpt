@@ -72,6 +72,7 @@ def _strategy_names() -> dict[str, str]:
     except (OSError, json.JSONDecodeError):
         return {}
     names: dict[str, str] = {}
+    names["watchlist_manual"] = "自选股按需分析"
     for item in items:
         if not item.get("id"):
             continue

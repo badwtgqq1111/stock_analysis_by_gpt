@@ -114,6 +114,18 @@ def norm_code(raw: str) -> str:
     return text
 
 
+def lookup_name(code: str) -> str:
+    """任意自选股：从基础表补名称；缺失就留空，不把代码当公司名硬查。"""
+    try:
+        import pandas as pd
+        path = ROOT / "assets/data/meta/cn_stock_basic.parquet"
+        frame = pd.read_parquet(path, columns=["ts_code", "name"])
+        hit = frame[frame["ts_code"].astype(str) == code]
+        return str(hit.iloc[0]["name"]) if not hit.empty else ""
+    except Exception:
+        return ""
+
+
 # ─── 名单采集（与 K 线页自选股分组同一口径）────────────────────────────────
 
 def collect_picks() -> dict[str, dict]:
@@ -276,6 +288,14 @@ def fetch(args) -> int:
 
     if args.codes:
         wanted = {norm_code(c) for c in args.codes.split(",") if c.strip()}
+        # 任意自选股不在策略名单里也要能按需调研：显式点名的代码补进台账。
+        for code in sorted(wanted):
+            if code and code not in stocks:
+                stocks[code] = {
+                    "status": ST_QUEUED, "calls_used": 0, "requests": [],
+                    "name": lookup_name(code), "strategies": ["watchlist_manual"],
+                    "priority": 0, "manual": True,
+                }
         queue = sorted(c for c in wanted if c in stocks)
         missing = wanted - set(queue)
         if missing:

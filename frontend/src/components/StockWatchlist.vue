@@ -3,6 +3,7 @@
     <h6>
       自选股
       <span class="dim tiny">{{ local.length }} 自选 / {{ visibleRows.length }} 显示</span>
+      <span class="dim tiny live-updated">{{ liveUpdatedText }}</span>
       <button class="btn-ghost btn-sm" :disabled="refreshing" @click="reloadGroups">刷新</button>
       <button class="btn-ghost btn-sm add-btn" @click="clearAll" v-if="local.length" title="清空本地自选">清空</button>
     </h6>
@@ -252,10 +253,14 @@ const poolNames = computed<Record<string, string>>(() => {
   for (const g of groups.value) if (g.label) map[g.key] = g.label
   return map
 })
-const live = useLiveQuotes(liveCodes, { intervalMs: 4000 })
-const liveUpdatedText = computed(() => (live.updatedAt.value
-  ? `更新于 ${live.updatedAt.value.toLocaleTimeString('zh-CN')}${live.polling.value ? '（轮询中）' : ''}`
-  : '尚未取到'))
+const live = useLiveQuotes(liveCodes, { intervalMs: 3000 })
+const liveUpdatedText = computed(() => {
+  if (!live.updatedAt.value) return '尚未取到'
+  const phase = live.session.value?.phase
+  const livePhase = phase === 'am' || phase === 'pm' || phase === 'auction'
+  const state = live.polling.value ? (livePhase ? '轮询中' : '等待开盘') : ''
+  return `更新于 ${live.updatedAt.value.toLocaleTimeString('zh-CN')}${state ? `（${state}）` : ''}`
+})
 
 /**
  * v-memo 的比较键：价格/涨跌/来源/行情时间**任一变化**才重渲染这一行（否则整行跳过）。
@@ -430,6 +435,7 @@ onMounted(async () => {
 .groups { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--sp-2); }
 /* 悬停摘要浮层：贴在列表右侧（列表自己 overflow:auto，浮层必须在 <ul> 外面才不被裁） */
 .watchlist { position: relative; overflow: visible; }
+.live-updated { margin-left: 2px; white-space: nowrap; }
 .row-pop { position: absolute; z-index: 30; top: 6px; left: 100%; margin-left: 8px; }
 .row-pop-note { position: absolute; z-index: 30; top: 6px; left: 100%; margin-left: 8px;
   background: #151b23; border: 1px solid var(--border-color); border-radius: 6px; padding: 6px 8px;

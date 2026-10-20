@@ -52,12 +52,13 @@ def test_strategy_meta_covers_known_sources(client):
 # ─── 2. 个股资料包 ─────────────────────────────────────────────────────────
 def test_stock_bundle_sections(client):
     body = client.get("/api/stocks/000001.SZ/bundle").json()
-    for key in ("profile", "valuation", "financials", "flow", "lhb", "limits",
+    for key in ("profile", "valuation", "financials", "research", "news", "flow", "lhb", "limits",
                 "selections", "announcements", "links"):
         assert key in body, key
     assert body["profile"]["name"], "档案必须有名称"
     assert body["links"]["kline"].startswith("/#/kline?code=")
     assert any(k in body["links"] for k in ("eastmoney", "ths", "xueqiu", "cninfo")), "要有外站链接兜底新闻"
+    assert body["links"]["news_eastmoney"] and body["links"]["news_ths"] and body["links"]["news_xueqiu"]
     # 财务/资金是核心维度，不能整体缺失（数据在仓库里）
     assert body["financials"]["available"], body["financials"].get("reason")
     assert body["flow"]["available"], body["flow"].get("reason")

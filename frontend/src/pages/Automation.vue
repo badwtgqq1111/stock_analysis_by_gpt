@@ -282,7 +282,9 @@ async function triggerFull() {
   triggerError.value = ''
   try {
     const result = await triggerAutomation({ trade_date: triggerDate.value, force: true })
-    triggerMessage.value = `已触发 ${result.trade_date} 全链路，pid=${result.pid}，日志：${result.log}`
+    triggerMessage.value = result.mode === 'historical'
+      ? `已触发 ${result.trade_date} 历史补跑（数据→特征→选股→台账），pid=${result.pid}，日志：${result.log}`
+      : `已触发 ${result.trade_date} 全链路，pid=${result.pid}，日志：${result.log}`
     window.setTimeout(() => { void reload() }, 1500)
   } catch (e) {
     triggerError.value = String(e)

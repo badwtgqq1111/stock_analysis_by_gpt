@@ -28,6 +28,8 @@ router = APIRouter(prefix="/api/stocks", tags=["stock-info"])
 
 _CACHE: dict[str, tuple[float, object]] = {}
 NEWS_TTL = 600.0
+RESEARCH_STORE = ROOT / "output/results_cn/bynewlt_research"
+PUBLIC_STORE = ROOT / "output/results_cn/cn_public_research"
 
 
 def _cached(key: str, ttl: float, builder):
@@ -264,6 +266,71 @@ def _announcements(code: str, months: int = 6) -> dict:
                 "rows": [], "source": "巨潮资讯"}
 
 
+def _research_block(code: str) -> dict:
+    """研报多空稿：Bynewlt 优先，缺则公开来源。只读盘，不触发计费请求。"""
+    for store, source in ((RESEARCH_STORE, "bynewlt"), (PUBLIC_STORE, "public_web")):
+        path = store / "dossier" / f"{code}.json"
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        return {
+            "available": True,
+            "source": source,
+            "updated_at": payload.get("updated_at") or payload.get("promoted_at"),
+            "stance": payload.get("stance") or "证据不足",
+            "summary": payload.get("summary") or "",
+            "bull": [str(x.get("point") or "") for x in (payload.get("bull") or [])[:6]],
+            "bear": [str(x.get("point") or "") for x in (payload.get("bear") or [])[:6]],
+            "risks": [str(x.get("point") or "") for x in (payload.get("risks") or [])[:6]],
+            "ratings": (payload.get("ratings") or [])[:8],
+            "citations": (payload.get("citations") or [])[:12],
+            "window": payload.get("window") or "",
+            "caveats": payload.get("caveats") or "",
+            "verification": payload.get("verification") or {},
+        }
+    return {
+        "available": False,
+        "reason": "还没有合成研报稿；在 K 线页「个股多空」点「更新多空」，或先跑 bynewlt/public research fetch + draft + promote。",
+    }
+
+
+def _news_block(code: str) -> dict:
+    """公开来源新闻证据。Bynewlt 只做研报/公告证据，新闻来自公开来源兜底。"""
+    path = PUBLIC_STORE / "evidence" / f"{code}.json"
+    if not path.exists():
+        return {"available": False, "rows": [], "reason": "还没有公开来源新闻证据",
+                "source": "公开来源（东财 / 巨潮 / searxng）"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"available": False, "rows": [], "reason": "新闻证据文件损坏",
+                "source": "公开来源（东财 / 巨潮 / searxng）"}
+    rows = []
+    for item in payload.get("news") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append({
+            "date": str(item.get("date") or "")[:10],
+            "title": str(item.get("title") or ""),
+            "url": str(item.get("url") or ""),
+            "source": str(item.get("source") or item.get("org") or "公开来源"),
+            "text_ok": bool(item.get("text_ok")),
+            "summary": str(item.get("summary") or item.get("text") or "")[:240],
+        })
+    rows.sort(key=lambda x: x["date"], reverse=True)
+    return {
+        "available": bool(rows),
+        "rows": rows[:30],
+        "n": len(rows),
+        "fetched_at": payload.get("fetched_at"),
+        "source": "公开来源（东财 / 巨潮 / searxng）",
+        "reason": None if rows else "公开证据里没有新闻条目",
+    }
+
+
 @router.get("/{code}/wyckoff")
 def stock_wyckoff(code: str, days: int = Query(250, ge=60, le=2000),
                   box_pct: float = Query(0.02, ge=0.005, le=0.10),
@@ -319,6 +386,8 @@ def stock_bundle(code: str, days: int = Query(60, ge=20, le=250)) -> dict:
         "profile": profile,
         "valuation": _valuation_block(ts_code),
         "financials": _financial_block(ts_code),
+        "research": _research_block(ts_code),
+        "news": _news_block(ts_code),
         "flow": _flow_block(ts_code),
         "lhb": _lhb_block(ts_code),
         "limits": _limit_block(ts_code, days),
@@ -329,10 +398,14 @@ def stock_bundle(code: str, days: int = Query(60, ge=20, le=250)) -> dict:
             "ths": f"https://basic.10jqka.com.cn/{six}/",
             "xueqiu": f"https://xueqiu.com/S/{'SH' if ts_code.endswith('.SH') else 'SZ' if ts_code.endswith('.SZ') else 'BJ'}{six}",
             "cninfo": f"http://www.cninfo.com.cn/new/disclosure/stock?stockCode={six}",
+            "news_eastmoney": f"https://so.eastmoney.com/news/s?keyword={six}",
+            "news_ths": f"https://news.10jqka.com.cn/tag/{six}/",
+            "news_xueqiu": f"https://xueqiu.com/k?q={six}",
             "kline": f"/#/kline?code={ts_code}",
         },
         "notes": [
-            "新闻：本仓库没有本地新闻源，给的是东财/同花顺/雪球外站链接（前端标注外站）。",
+            "新闻：优先展示公开来源证据里的新闻条目；没有时给东财/同花顺/雪球外站链接，不伪造本地新闻。",
+            "研报：优先 Bynewlt dossier，缺则公开来源 dossier；只读盘，不在页面触发计费。",
             "公告：巨潮资讯实时抓取，10 分钟缓存。",
             "资金流为 tushare 口径（另有东财/同花顺两口径各给最新一天）。",
         ],

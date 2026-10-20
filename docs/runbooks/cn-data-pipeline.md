@@ -1522,3 +1522,18 @@ esac
 - 也可以直接编辑 `config/scheduler_env.sh` 追加 `export KEY=VALUE`；
 - 验证调度环境是否完整（模拟 launchd 的干净环境）：
   `env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash scripts/run_daily_production.sh --dry-run --force`
+
+## 历史交易日补跑
+
+`run_daily_production.sh` 的 `DAILY_TRADE_DATE` 只控制日志/报告目录，不控制行情窗口。
+如果要把**已过去的一个交易日**真正补进策略名单和选股日历，用：
+
+```bash
+uv run python scripts/run_historical_catchup.py --date 2026-10-19
+```
+
+它会把临时配置的 `[pipeline].end_date` 和 `[moneyflow].end_date` 固定到目标日，
+依次跑 `daily_bars → moneyflow → regime → features → clean_panel → model_scores
+→ preselection → pk`，再重建 `selection_ledger.parquet`。
+
+前端「自动化 → 手动触发」选择历史日期时，后端会自动走这个脚本，而不是普通日更 runner。

@@ -45,7 +45,7 @@
           <a class="btn-ghost btn-sm" :href="bundle.links?.ths" target="_blank" rel="noopener">同花顺 F10 ↗</a>
           <a class="btn-ghost btn-sm" :href="bundle.links?.xueqiu" target="_blank" rel="noopener">雪球 ↗</a>
           <a class="btn-ghost btn-sm" :href="bundle.links?.cninfo" target="_blank" rel="noopener">巨潮公告 ↗</a>
-          <span class="dim tiny">新闻：本仓库无本地新闻源，用上面的外站（东财/同花顺/雪球）</span>
+          <span class="dim tiny">新闻/研报见上方 tab；本地证据不足时用外站（东财/同花顺/雪球/巨潮）</span>
         </div>
       </template>
 
@@ -66,6 +66,82 @@
           </tbody>
         </table>
         <div v-else class="empty tiny">{{ bundle.financials?.reason || '无财务数据' }}</div>
+        <p class="hint tiny">财报字段来自本地 PIT 财务面板（按报告期/披露日）；公告原文见「公告」tab 或巨潮链接。</p>
+      </template>
+
+      <!-- 研报：Bynewlt 优先，缺则公开来源 dossier -->
+      <template v-else-if="tab === 'research'">
+        <template v-if="bundle.research?.available">
+          <div class="pill-row">
+            <span class="pill">立场 <b class="gold">{{ bundle.research.stance || '证据不足' }}</b></span>
+            <span class="pill">来源 <b>{{ bundle.research.source === 'public_web' ? '公开来源' : 'Bynewlt' }}</b></span>
+            <span class="pill" v-if="bundle.research.updated_at">更新 {{ String(bundle.research.updated_at).slice(0, 10) }}</span>
+            <span class="pill dim tiny" v-if="bundle.research.window">{{ bundle.research.window }}</span>
+          </div>
+          <p class="ls-summary" v-if="bundle.research.summary">{{ bundle.research.summary }}</p>
+          <div class="case-grid">
+            <div class="case bull">
+              <b>多头依据</b>
+              <ul v-if="bundle.research.bull?.length">
+                <li v-for="(p, i) in bundle.research.bull" :key="'rb' + i">{{ p }}</li>
+              </ul>
+              <p v-else class="dim">—</p>
+            </div>
+            <div class="case bear">
+              <b>空头依据</b>
+              <ul v-if="bundle.research.bear?.length">
+                <li v-for="(p, i) in bundle.research.bear" :key="'rs' + i">{{ p }}</li>
+              </ul>
+              <p v-else class="dim">—</p>
+            </div>
+          </div>
+          <p class="risk" v-if="bundle.research.risks?.length"><b>风险：</b>{{ bundle.research.risks.join('；') }}</p>
+          <table class="data-table tiny" v-if="bundle.research.ratings?.length">
+            <thead><tr><th>机构</th><th>评级</th><th>目标价</th><th>日期</th></tr></thead>
+            <tbody>
+              <tr v-for="(r, i) in bundle.research.ratings" :key="'rr' + i">
+                <td>{{ r.broker || '—' }}</td><td>{{ r.rating || '—' }}</td>
+                <td>{{ r.target_price || '—' }}</td><td class="mono">{{ r.date || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <details class="cites" v-if="bundle.research.citations?.length">
+            <summary>引用明细（{{ bundle.research.citations.length }} 条）</summary>
+            <div class="cite-row" v-for="(c, i) in bundle.research.citations" :key="'rc' + i">
+              <span class="cite-id mono">[{{ c.id || i + 1 }}]</span>
+              <div>
+                <p class="cite-quote">{{ c.quote }}</p>
+                <p class="cite-quote zh" v-if="c.quote_zh">{{ c.quote_zh }}</p>
+                <p class="dim tiny">{{ [c.broker, c.reportTitle || c.title, c.reportDate || c.date].filter(Boolean).join(' · ') }}
+                  <span v-if="c.page">· p{{ c.page }}</span></p>
+              </div>
+            </div>
+          </details>
+          <p class="hint tiny">研报是原文证据口径，和 AI 决策口径分开；完整合并在下方「个股多空」面板。</p>
+        </template>
+        <div v-else class="empty tiny">{{ bundle.research?.reason || '暂无研报稿' }}</div>
+      </template>
+
+      <!-- 新闻：公开来源证据；没有时给外站搜索 -->
+      <template v-else-if="tab === 'news'">
+        <ul class="news" v-if="(bundle.news?.rows || []).length">
+          <li v-for="(n, i) in bundle.news.rows" :key="'n' + i">
+            <span class="mono dim tiny">{{ n.date || '—' }}</span>
+            <a v-if="n.url" :href="n.url" target="_blank" rel="noopener">{{ n.title || n.url }}</a>
+            <span v-else>{{ n.title || '—' }}</span>
+            <span class="tag tiny" :class="n.text_ok ? 'ok' : 'dim'">{{ n.text_ok ? '全文' : '摘要' }}</span>
+            <span class="dim tiny">{{ n.source || '' }}</span>
+          </li>
+        </ul>
+        <div v-else class="empty tiny">{{ bundle.news?.reason || '暂无本地新闻证据' }}</div>
+        <p class="hint tiny">
+          来源：{{ bundle.news?.source || '公开来源' }}。本地没有独立新闻抓取器；没有证据时请用外站搜索，不伪造新闻。
+        </p>
+        <div class="pill-row">
+          <a class="btn-ghost btn-sm" :href="bundle.links?.news_eastmoney" target="_blank" rel="noopener">东财新闻搜索 ↗</a>
+          <a class="btn-ghost btn-sm" :href="bundle.links?.news_ths" target="_blank" rel="noopener">同花顺资讯 ↗</a>
+          <a class="btn-ghost btn-sm" :href="bundle.links?.news_xueqiu" target="_blank" rel="noopener">雪球搜索 ↗</a>
+        </div>
       </template>
 
       <!-- 资金流 -->
@@ -129,7 +205,7 @@
       </template>
 
       <!-- 公告 -->
-      <template v-else>
+      <template v-else-if="tab === 'announcements'">
         <ul class="news" v-if="(bundle.announcements?.rows || []).length">
           <li v-for="(n, i) in bundle.announcements.rows" :key="i">
             <span class="mono dim tiny">{{ n.date }}</span>
@@ -162,14 +238,16 @@ function openInKline(day: string) {
   void router.push({ path: '/kline', query: { code: props.code, date: day } })
 }
 const error = ref('')
-const tab = ref<'profile' | 'financials' | 'flow' | 'lhb' | 'selection' | 'news'>('profile')
+const tab = ref<'profile' | 'financials' | 'research' | 'news' | 'flow' | 'lhb' | 'selection' | 'announcements'>('profile')
 const tabs = [
   { key: 'profile', label: '概况' },
-  { key: 'financials', label: '财务' },
+  { key: 'financials', label: '财报' },
+  { key: 'research', label: '研报' },
+  { key: 'news', label: '新闻' },
   { key: 'flow', label: '资金' },
   { key: 'lhb', label: '龙虎榜' },
   { key: 'selection', label: '选股记录' },
-  { key: 'news', label: '公告' },
+  { key: 'announcements', label: '公告' },
 ] as const
 
 const flowBars = computed<Bar[]>(() => {
@@ -213,6 +291,21 @@ tr.rec-row:hover { background: rgba(255, 255, 255, 0.05); }
 .news li { display: flex; gap: var(--sp-2); padding: 4px 0; border-bottom: 1px solid var(--border-soft); font-size: var(--fs-sm); }
 .news a { color: var(--accent-blue); text-decoration: none; }
 .news a:hover { text-decoration: underline; }
+.ls-summary { font-size: var(--fs-md); line-height: 1.65; margin: var(--sp-2) 0; }
+.case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); margin: var(--sp-2) 0; }
+.case { border: 1px solid var(--border-color); border-radius: var(--r-2); padding: var(--sp-2);
+  background: rgba(255, 255, 255, 0.02); }
+.case.bull > b { color: var(--accent-up); }
+.case.bear > b { color: var(--accent-down); }
+.case ul { margin: 4px 0 0; padding-left: 16px; }
+.case li { font-size: var(--fs-sm); line-height: 1.6; margin: 3px 0; }
+.risk { color: var(--accent-gold); font-size: var(--fs-sm); }
+.cites { margin-top: var(--sp-2); }
+.cite-row { display: flex; gap: var(--sp-2); padding: 6px 0; border-bottom: 1px dashed var(--border-color); }
+.cite-id { color: var(--accent-gold); }
+.cite-quote { font-size: var(--fs-sm); line-height: 1.55; margin: 0 0 2px; }
+.cite-quote.zh { color: var(--text-muted); }
+@media (max-width: 760px) { .case-grid { grid-template-columns: 1fr; } }
 .gold { color: var(--accent-gold); }
 .kv { margin: var(--sp-2) 0; }
 </style>

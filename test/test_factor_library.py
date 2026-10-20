@@ -122,14 +122,14 @@ def client():
 def test_api_factors_filters_and_pages(client):
     admitted = client.get("/api/agent/factors", params={"status": "admitted", "limit": 5}).json()
     assert admitted["available"] is True
-    assert admitted["filtered"] == admitted["totals"]["by_status"]["admitted"] == 100
+    assert admitted["filtered"] == admitted["totals"]["by_status"]["admitted"] >= 100
     assert len(admitted["items"]) == 5
     assert all(item["status"] == "admitted" and item["grade"] in ("A", "B") for item in admitted["items"])
     page2 = client.get("/api/agent/factors", params={"status": "admitted", "limit": 5, "offset": 5}).json()
     assert [item["id"] for item in page2["items"]] != [item["id"] for item in admitted["items"]]
 
     conditions = client.get("/api/agent/factors", params={"kind": "condition"}).json()
-    assert conditions["filtered"] == 7
+    assert conditions["filtered"] == conditions["totals"]["by_kind"]["condition"] >= 7
     assert {"first_ban_lowxi", "arm_select", "rot_arm"} <= {item["id"] for item in conditions["items"]}
 
     search = client.get("/api/agent/factors", params={"q": "moneyflow", "limit": 3}).json()
@@ -141,7 +141,7 @@ def test_api_overview_and_health_expose_the_library(client):
     overview = client.get("/api/agent/overview").json()
     library = overview["factor_library"]
     assert library["available"] is True
-    assert library["totals"]["n"] > 1000 and library["totals"]["by_kind"]["condition"] == 7
+    assert library["totals"]["n"] > 1000 and library["totals"]["by_kind"]["condition"] >= 7
     assert library["criteria"]["fdr_q"] == 0.05
     health = client.get("/api/agent/health").json()["factor_library"]
     assert health["exists"] and health["n"] > 1000

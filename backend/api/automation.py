@@ -25,6 +25,7 @@ import os
 import re
 import statistics
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -108,7 +109,7 @@ def _latest_market_date() -> str | None:
 
 def _runner_processes() -> list[int]:
     try:
-        proc = subprocess.run(["pgrep", "-f", "run_daily_production.sh"],
+        proc = subprocess.run(["pgrep", "-f", "run_daily_production.sh|run_historical_catchup.py"],
                               capture_output=True, text=True, timeout=5)
     except Exception:
         return []
@@ -120,6 +121,7 @@ _DATA_OK = re.compile(r"data-step=(\S+) ok \((\d+)s\)")
 _DATA_BAD = re.compile(r"data-step=(\S+) FAILED")
 _STAGE_OK = re.compile(r"stage=(\S+) ok \((\d+)s\)")
 _STAGE_BAD = re.compile(r"stage=(\S+) FAILED")
+_STAGE_START = re.compile(r"stage=(\S+) start")
 _ARM_OK = re.compile(r"arm-selection ok \((\d+)s\)")
 _ARM_BAD = re.compile(r"arm-selection FAILED")
 _INTRA_OK = re.compile(r"intraday-refresh ok \((\d+)s\)")
@@ -251,6 +253,9 @@ def _parse_run(log_dir: Path) -> dict:
     finished = False
     failed = None
     for ts, body in lines[start_idx + 1:]:
+        m = _STAGE_START.search(body)
+        if m:
+            steps[m.group(1)] = {"status": "running", "started_at": ts}
         for rx, status in ((_DATA_OK, "ok"), (_STAGE_OK, "ok"),
                            (_DATA_BAD, "failed"), (_STAGE_BAD, "failed")):
             m = rx.search(body)
@@ -304,6 +309,8 @@ def _running_stage(log_dir: Path, steps: dict, started_at: str | None = None) ->
             started_ts = None
     running = None
     for _group, name in STAGE_ORDER:
+        if steps.get(name, {}).get("status") == "running":
+            running = name
         if steps.get(name, {}).get("status") in ("ok", "failed"):
             continue
         path = _stage_log_path(log_dir, name)
@@ -492,7 +499,9 @@ def build_status() -> dict:
     # 进程已经不在的锁是**陈旧锁**（trap 没跑到、或进程被杀）。仍然展示会让页面
     # 显示一个"已死的 pid"，所以只在存活时报出来，并单独给 lock_stale 标记。
     lock_pid = lock_pid_raw if lock_alive else None
-    active = bool(lock_alive)
+    # 历史补跑（run_historical_catchup.py）不拿 run_daily_production.sh 的锁；
+    # 用进程探测把它算进 active，否则页面会显示 idle。
+    active = bool(lock_alive or _runner_processes())
 
     rows = []
     eta_remaining = 0.0
@@ -650,15 +659,31 @@ def trigger_full_pipeline(req: TriggerRequest):
         datetime.strptime(trade_date, "%Y-%m-%d")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="trade_date 格式必须为 YYYY-MM-DD") from exc
+    target_day = datetime.strptime(trade_date, "%Y-%m-%d").date()
+    try:
+        from data.model import get_market_calendar
+        if not get_market_calendar("CN").is_trading_day(target_day):
+            raise HTTPException(status_code=422, detail=f"{trade_date} 不是 A 股交易日，不能补跑")
+    except HTTPException:
+        raise
+    except Exception:
+        # 日历不可用时退回工作日判断，至少挡住周末。
+        if target_day.weekday() >= 5:
+            raise HTTPException(status_code=422, detail=f"{trade_date} 是周末，不能补跑")
 
     log_dir = DAILY_DIR / trade_date
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "manual_trigger.log"
     env = os.environ.copy()
     env["DAILY_TRADE_DATE"] = trade_date
-    command = ["/bin/bash", str(ROOT / "scripts/run_daily_production.sh")]
-    if req.force:
-        command.append("--force")
+    historical = target_day < datetime.now().date()
+    if historical:
+        command = [sys.executable, str(ROOT / "scripts/run_historical_catchup.py"),
+                   "--date", trade_date]
+    else:
+        command = ["/bin/bash", str(ROOT / "scripts/run_daily_production.sh")]
+        if req.force:
+            command.append("--force")
     with log_path.open("ab") as log_handle:
         proc = subprocess.Popen(
             command, cwd=ROOT, env=env,
@@ -667,6 +692,7 @@ def trigger_full_pipeline(req: TriggerRequest):
         )
     record = {
         "trade_date": trade_date,
+        "mode": "historical" if historical else "daily",
         "pid": proc.pid,
         "force": bool(req.force),
         "command": " ".join(command),

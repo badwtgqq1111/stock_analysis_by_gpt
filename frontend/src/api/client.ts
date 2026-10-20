@@ -354,7 +354,7 @@ export async function getAutomationStatus(): Promise<AutomationStatus> {
 
 export async function triggerAutomation(body: {
   trade_date?: string; force?: boolean
-}): Promise<{ ok: boolean; pid: number; trade_date: string; log: string }> {
+}): Promise<{ ok: boolean; pid: number; trade_date: string; log: string; mode?: 'daily' | 'historical' }> {
   const resp = await fetch('/api/automation/trigger', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

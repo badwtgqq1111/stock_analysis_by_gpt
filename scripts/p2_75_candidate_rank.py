@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT))
 
 from backend.services.data_service import load_cn_stock_ohlcv  # noqa: E402
 from backend.services import wyckoff_service as wy  # noqa: E402
+from backend.services import selection_sources  # noqa: E402
 
 AI_DIR = ROOT / "output/results_cn/ai_pick_analysis"
 REGISTRY = ROOT / "config/strategies.json"
@@ -60,7 +61,12 @@ def load_universe(date: str) -> dict[str, dict]:
 
     2026-10-18 事故：侧栏 124 只，综合排名只有 109 只 —— 因为排序只读了 AI 名单，
     而 box/wyckoff/moneyflow/donchian 等名单是在 AI 之后才刷新的。这里直接按
-    `config/strategies.json` 的 history_dir/selection_source 取最新 CSV，和侧栏一致。
+    `config/strategies.json` 的 history_dir/selection_source 取名单，和侧栏一致。
+
+    2026-10-20 事故：`cn_ensemble` 的 history 文件只存 PK 后 6 只，侧栏却把
+    preselected 8 只与 selected 6 只合并；结果 301230.SZ 在侧栏可见、排名里没有。
+    当源的最新交易日正好等于目标日时，优先走 `selection_sources.load_source`，
+    复用 `/api/selection` 的合并口径；历史日则仍读当日 history，避免未来数据泄漏。
     """
     registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
     picks: dict[str, dict] = {}
@@ -69,25 +75,38 @@ def load_universe(date: str) -> dict[str, dict]:
         source = s.get("selection_source")
         if not history or not source or s.get("stage") == "retired":
             continue
-        folder = (ROOT / history) if not Path(history).is_absolute() else Path(history)
-        files = sorted(folder.glob("*.csv"))
-        if not files:
-            continue
-        preferred = folder / f"{date}.csv"
-        path = preferred if preferred.exists() else files[-1]
+        rows = []
         try:
-            frame = pd.read_csv(path)
-        except (OSError, ValueError):
-            continue
-        col = "stock_code" if "stock_code" in frame.columns else ("code" if "code" in frame.columns else frame.columns[0])
-        name_col = "stock_name" if "stock_name" in frame.columns else ("name" if "name" in frame.columns else None)
-        for _, row in frame.iterrows():
-            code = str(row.get(col) or "").strip().upper()
+            live = selection_sources.load_source(source)
+        except Exception:
+            live = None
+        if live and str(live.get("trade_date") or "") == date:
+            rows = [(str(r.get("stock_code") or "").strip().upper(), str(r.get("stock_name") or ""))
+                    for r in live.get("rows") or []]
+        else:
+            folder = (ROOT / history) if not Path(history).is_absolute() else Path(history)
+            files = sorted(folder.glob("*.csv"))
+            if not files:
+                continue
+            preferred = folder / f"{date}.csv"
+            path = preferred if preferred.exists() else files[-1]
+            try:
+                frame = pd.read_csv(path)
+            except (OSError, ValueError):
+                continue
+            col = "stock_code" if "stock_code" in frame.columns else (
+                "code" if "code" in frame.columns else frame.columns[0])
+            name_col = "stock_name" if "stock_name" in frame.columns else (
+                "name" if "name" in frame.columns else None)
+            rows = [(str(row.get(col) or "").strip().upper(),
+                     str(row.get(name_col) or "") if name_col else "")
+                    for _, row in frame.iterrows()]
+        for code, name in rows:
             if not code:
                 continue
             entry = picks.setdefault(code, {"name": "", "strategies": []})
-            if name_col and not entry["name"]:
-                entry["name"] = str(row.get(name_col) or "")
+            if name and not entry["name"]:
+                entry["name"] = name
             if s["id"] not in entry["strategies"]:
                 entry["strategies"].append(s["id"])
     return picks
@@ -235,15 +254,25 @@ def _wyckoff_score(bars: pd.DataFrame) -> tuple[float | None, float | None, floa
     return 0.5 * float(wso) + 0.3 * event + 0.2 * position, float(wso), pos
 
 
-def rank(date: str, top: int = 30) -> dict:
+def _load_ai_rows(date: str) -> tuple[dict[str, dict], dict]:
+    """AI 是可选增强层：当日 AI 任务失败时仍应生成排名，只降低 coverage。"""
     path = AI_DIR / f"{date}.json"
     if not path.exists():
-        raise SystemExit(f"没有 AI 名单：{path}")
-    rows = json.loads(path.read_text(encoding="utf-8"))["rows"]
-    ai_map = {str(r.get("stock_code")): r for r in rows}
+        return {}, {"available": False, "path": str(path), "reason": "没有当日 AI 名单"}
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8")).get("rows") or []
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, {"available": False, "path": str(path), "reason": f"AI 名单读取失败：{exc}"}
+    return {str(r.get("stock_code")): r for r in rows}, {
+        "available": True, "path": str(path), "rows": len(rows)}
+
+
+def rank(date: str, top: int = 30) -> dict:
+    ai_map, ai_meta = _load_ai_rows(date)
     picks = load_universe(date)
-    # 以侧栏并集为准；AI 名单只提供 AI 分量
-    universe = sorted(set(picks) | set(ai_map))
+    # 以侧栏策略并集为准；AI 名单只提供 AI 分量。
+    # 手工分析（watchlist_manual）不在策略侧栏里，不能因此被塞进综合排名。
+    universe = sorted(picks)
     records = []
     for code in universe:
         row = ai_map.get(code) or {}
@@ -367,6 +396,7 @@ def rank(date: str, top: int = 30) -> dict:
         "date": date,
         "weights": WEIGHTS,
         "flow_longshort_weights": FLOW_LONGSHORT_WEIGHTS,
+        "ai_source": ai_meta,
         "n": int(len(frame)),
         "rows": frame.replace({np.nan: None}).to_dict(orient="records"),
         "notes": [

@@ -256,6 +256,13 @@ export interface AutomationSidecar {
   updated_at?: string; done_total?: number; target_total?: number
   pending_total?: number | null; eta_hours?: number | null
   session_processed?: number; rate_per_sec?: number; quarantined?: number
+  manual?: {
+    available: boolean; running: boolean; source: 'manual' | 'pipeline' | 'idle'
+    pid?: number | null; started_at?: string | null; finished_at?: string | null
+    exit_code?: number | null; duration_seconds?: number | null; log?: string | null
+    session_seconds?: number | null; reset_quarantine?: boolean | null
+    last_line?: string
+  }
 }
 export interface AutomationAgent { label: string; pid: number | null; running: boolean; last_exit: string }
 export interface AutomationCompletenessCheck {

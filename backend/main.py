@@ -25,6 +25,7 @@ from backend.api.attribution import router as attribution_router
 from backend.api.forward import router as forward_router
 from backend.api.rankings import router as rankings_router
 from backend.api.limitup import router as limitup_router
+from backend.api.lhb import router as lhb_router
 from backend.api.intraday import router as intraday_router
 from backend.api.industry import router as industry_router
 from backend.api.stock_info import router as stock_info_router
@@ -81,6 +82,7 @@ app.include_router(attribution_router)
 app.include_router(forward_router)
 app.include_router(rankings_router)
 app.include_router(limitup_router)
+app.include_router(lhb_router)
 app.include_router(intraday_router)
 app.include_router(industry_router)
 app.include_router(stock_info_router)

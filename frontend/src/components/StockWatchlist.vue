@@ -4,9 +4,19 @@
       自选股
       <span class="dim tiny">{{ local.length }} 自选 / {{ visibleRows.length }} 显示</span>
       <span class="dim tiny live-updated">{{ liveUpdatedText }}</span>
-      <button class="btn-ghost btn-sm" :disabled="refreshing" @click="reloadGroups">刷新</button>
+      <button class="btn-ghost btn-sm" :disabled="refreshing || historicalLoading" @click="refreshWatchlist">刷新</button>
       <button class="btn-ghost btn-sm add-btn" @click="clearAll" v-if="local.length" title="清空本地自选">清空</button>
     </h6>
+
+    <div class="history-row">
+      <span class="dim tiny">历史名单</span>
+      <input v-model="historyDate" type="date" class="history-date" :max="today" aria-label="回顾历史策略名单" />
+      <button v-if="historyDate" class="btn-ghost btn-sm" @click="historyDate = ''">回到最新</button>
+      <span v-if="historicalLoading" class="tiny dim">加载历史名单…</span>
+      <span v-else-if="historyDate" class="tiny dim">正在回顾 {{ historyDate }}</span>
+      <span v-if="historicalError" class="tiny warn-text">{{ historicalError }}</span>
+      <span v-else-if="historicalMessage" class="tiny dim">{{ historicalMessage }}</span>
+    </div>
 
     <section class="stock-discovery" aria-label="搜索与自选">
       <label class="search-label">全市场搜股</label>
@@ -34,14 +44,14 @@
         }}<span v-if="g.key === 'live_holdings'" class="tiny"> · 置顶</span
         ><span v-if="g.key !== 'paper'" class="g-annual tiny">年化 {{ g.annual_rank ? (g.annual_rank.value * 100).toFixed(2) + '%' : '—' }}</span
         ><span v-if="g.verdict" class="g-verdict" :class="g.verdict.tone">{{ g.verdict.label }}</span
-        ><span v-if="markOf(g)" class="g-refresh" :class="markOf(g)!.tone">{{ markOf(g)!.icon }}</span
+        ><span v-if="!isHistory && markOf(g)" class="g-refresh" :class="markOf(g)!.tone">{{ markOf(g)!.icon }}</span
         ><span class="dim tiny"> {{ g.loading ? '…' : g.rows.length }}</span>
       </button>
     </div>
     <button class="btn-ghost btn-sm groups-toggle" :aria-expanded="groupsExpanded" @click="groupsExpanded = !groupsExpanded">
       {{ groupsExpanded ? '收起策略分组' : `展开其余 ${sortedGroups.filter(g => g.key !== 'live_holdings').length} 个分组` }}
     </button>
-    <div class="row-sort" v-if="group !== 'local'">
+    <div class="row-sort" v-if="group !== 'local' && !isHistory">
       <span class="dim tiny">个股排序</span>
       <select v-model="rowSort">
         <option value="composite">综合评分（默认）</option>
@@ -82,7 +92,7 @@
           :title="`${row.code} ${row.name || '（缺名称）'}${row.tag ? ' · ' + row.tag : ''}`"
           @mouseenter="hoverCode = row.code" @mouseleave="hoverCode = null"
           @focusin="hoverCode = row.code" @focusout="hoverCode = null"
-          @click="$emit('update:modelValue', row.code)">
+          @click="selectWatchRow(row)">
         <span class="rk mono tiny" v-if="(row.displayRank ?? row.rank) != null"
               :title="rowSort === 'combo' ? '资金流 × 个股多空排名' : '候选池综合评分排名'">
           #{{ row.displayRank ?? row.rank }}</span>
@@ -92,7 +102,7 @@
         <span class="score mono tiny" v-if="(row.displayScore ?? row.score) != null"
               :title="rowSort === 'combo' ? '资金流 × 个股多空合成分（50/50）' : '综合评分（标准分）'">
           {{ Number(row.displayScore ?? row.score).toFixed(2) }}</span>
-        <span class="score dim tiny" v-else-if="row.isLive" title="实盘持仓不在当日策略候选池里">未入候选</span>
+        <span class="score dim tiny" v-else-if="row.isLive && !isHistory" title="实盘持仓不在当日策略候选池里">未入候选</span>
         <span class="flow tiny" v-if="rowSort === 'combo' && (row.flowScore != null || row.longshort != null)"
               :title="`资金流 5d ${((row.flow5 ?? 0) * 100).toFixed(2)}% / 20d ${((row.flow20 ?? 0) * 100).toFixed(2)}%（分 ${row.flowScore?.toFixed(2) ?? '—'}）· 个股多空 ${row.longshort?.toFixed(2) ?? '—'}`">
           资金 {{ row.flowScore?.toFixed(2) ?? '—' }} · 多空 {{ row.longshort?.toFixed(2) ?? '—' }}
@@ -126,9 +136,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getCandidateRank, getPaperStatus, getSelection, getStrategyPool } from '@/api/client'
+import { getCandidateRank, getPaperStatus, getSelection, getStrategyHistory, getStrategyPool } from '@/api/client'
 import type { StockSearchHit } from '@/api/client'
 import { useWatchlist } from '@/composables/useWatchlist'
 import { useLiveQuotes, quoteLabel } from '@/composables/useLiveQuotes'
@@ -157,6 +167,11 @@ const local = watchlist.codes
 const groups = ref<WatchlistGroup[]>([])
 const group = ref('all')
 const refreshing = ref(false)
+const historyDate = ref('')
+const historicalLoading = ref(false)
+const historicalMessage = ref('')
+const historicalError = ref('')
+const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
 const poolError = ref('')
 const activeGroup = computed(() => groups.value.find((g) => g.key === group.value))
 /** 分组上的名单刷新标记（数据来自每日名单刷新契约，与策略池同一份产物） */
@@ -182,6 +197,7 @@ const rowSort = ref<'composite' | 'combo' | 'default'>(initialRowSort())
 watch(rowSort, (v) => { try { localStorage.setItem(ROW_SORT_KEY, v) } catch { /* ignore */ } })
 const rank = ref<CandidateRankResponse | null>(null)
 const rankMap = computed(() => new Map((rank.value?.rows || []).map((r) => [r.code, r])))
+const isHistory = computed(() => Boolean(historyDate.value))
 const liveHoldingCodes = computed(() => new Set(
   (groups.value.find((g) => g.key === 'live_holdings')?.rows || []).map((r) => r.code)))
 /** 实盘固定置顶，其余与策略池共用后端年化名次；组内个股仍保持选股顺序。 */
@@ -196,7 +212,7 @@ const visibleRows = computed<WatchlistRow[]>(() => {
     code, name: watchlist.names.value[code] || '', local: true, tag: '自选',
   }))
   const rows: WatchlistRow[] = groupRows(sortedGroups.value, group.value).map((row): WatchlistRow => {
-    const r = rankMap.value.get(row.code)
+    const r = isHistory.value ? undefined : rankMap.value.get(row.code)
     return {
       ...row,
       name: row.name || watchlist.names.value[row.code] || '',
@@ -208,14 +224,18 @@ const visibleRows = computed<WatchlistRow[]>(() => {
       flow20: r?.flow_20d_ratio ?? null,
       longshort: r?.longshort_score ?? null,
       comboScore: r?.flow_longshort_score ?? null,
+      histClose: row.histClose ?? null,
+      histPct: row.histPct ?? null,
+      histAmount: row.histAmount ?? null,
       isLive: liveHoldingCodes.value.has(row.code),
       displayRank: null,
       displayScore: null,
     }
   })
   // 每种模式在**完整候选池**内排名（实盘也参与排名，只是显示时置顶）
-  const metric = rowSort.value === 'composite' ? 'rank'
-    : rowSort.value === 'combo' ? 'comboScore' : null
+  const metric = isHistory.value ? null
+    : rowSort.value === 'composite' ? 'rank'
+      : rowSort.value === 'combo' ? 'comboScore' : null
   if (metric) {
     const valid = rows.filter((r) => (r as any)[metric] != null)
     valid.sort((a, b) => metric === 'rank'
@@ -229,17 +249,19 @@ const visibleRows = computed<WatchlistRow[]>(() => {
   rows.sort((a, b) => {
     // 实盘持仓**始终置顶**（所有排序模式都一样），但仍显示它在候选池里的排名/分数
     if (a.isLive !== b.isLive) return a.isLive ? -1 : 1
-    if (rowSort.value === 'default') return 0
+    if (isHistory.value || rowSort.value === 'default') return 0
     return (a.displayRank ?? 1e9) - (b.displayRank ?? 1e9)
   })
   return rows
 })
 const emptyText = computed(() => refreshing.value || activeGroup.value?.loading ? '正在加载策略名单…'
   : activeGroup.value?.error ? '名单加载失败，点击刷新重试'
+  : isHistory.value ? `${activeGroup.value?.label || '该策略'} 在 ${historyDate.value} 没有历史名单`
   : group.value === 'local' ? '还没有自选股：用搜索或策略分组添加'
   : '当前分组暂无每日名单')
 
 // ── 实时快照（数据驱动 UI）：只轮询**当前可见**的自选（交易时段 + 页面可见才轮询） ──
+// 历史日期只切换“名单口径”；左侧每只股票的报价始终取实时行情。
 const liveCodes = computed(() => visibleRows.value.map((row) => row.code))
 
 /** 悬停那一行（鼠标或键盘聚焦都算）：用来出"入选摘要"浮层（2026-10-15 第九十八轮） */
@@ -331,6 +353,17 @@ function viewStock(code: string) {
   searchNotice.value = ''
   emit('update:modelValue', code)
 }
+function selectWatchRow(row: WatchlistRow) {
+  emit('update:modelValue', row.code)
+  if (!historyDate.value) return
+  void nextTick().then(() => router.replace({
+    query: {
+      ...router.currentRoute.value.query,
+      code: row.code,
+      date: historyDate.value,
+    },
+  }))
+}
 function addCurrent() {
   if (!props.modelValue) return
   const existed = watchlist.has(props.modelValue)
@@ -342,7 +375,9 @@ function addCurrent() {
 async function toggleGroup(key: string) {
   group.value = key
   const target = groups.value.find((g) => g.key === key)
-  if (target && !target.loading && (!target.rows.length || target.error)) await loadGroup(key)
+  if (!isHistory.value && target && !target.loading && (!target.rows.length || target.error)) {
+    await loadGroup(key)
+  }
 }
 
 async function loadGroup(key: string) {
@@ -398,6 +433,75 @@ async function reloadGroups() {
   } finally { refreshing.value = false }
 }
 
+let historyRequest = 0
+async function loadHistorical(day: string) {
+  const request = ++historyRequest
+  historicalLoading.value = true
+  historicalError.value = ''
+  historicalMessage.value = ''
+  try {
+    // 页面首次加载时 groups 仍在并发拉取；此时若用户立刻选历史日期，
+    // 必须先等最新名单那轮结束，否则它会在历史结果之后覆盖回来。
+    if (!groups.value.length) {
+      if (refreshing.value) {
+        while (refreshing.value) {
+          await new Promise((resolve) => window.setTimeout(resolve, 100))
+          if (request !== historyRequest) return
+        }
+      }
+      if (!groups.value.length) await reloadGroups()
+    }
+    if (request !== historyRequest) return
+    const detail = await getStrategyHistory(day)
+    if (request !== historyRequest) return
+    const rowsByStrategy = new Map(detail.strategies.map((s) => [s.id, s.rows || []]))
+    const withData = new Set<string>()
+    for (const g of groups.value) {
+      const merged = new Map<string, { code: string; name: string }>()
+      for (const row of rowsByStrategy.get(g.key) || []) {
+        if (!row.code) continue
+        const existing = merged.get(row.code)
+        if (!existing || (!existing.name && row.name)) merged.set(row.code, row)
+      }
+      g.rows = [...merged.values()]
+      g.date = day
+      g.error = ''
+      g.refresh = null
+      if (g.rows.length) withData.add(g.key)
+    }
+    const total = new Set(groups.value.flatMap((g) => g.rows.map((r) => r.code))).size
+    historicalMessage.value = `${day}：${total} 只 / ${withData.size} 个策略组有名单`
+  } catch {
+    if (request !== historyRequest) return
+    for (const g of groups.value) {
+      g.rows = []
+      g.date = day
+      g.refresh = null
+    }
+    historicalError.value = `${day} 没有可回顾的策略台账`
+  } finally {
+    if (request === historyRequest) historicalLoading.value = false
+  }
+}
+
+function refreshWatchlist() {
+  if (historyDate.value) void loadHistorical(historyDate.value)
+  else void reloadGroups()
+}
+
+watch(historyDate, (day) => {
+  if (day) {
+    if (['local', 'paper', 'live_holdings'].includes(group.value)) group.value = 'all'
+    void loadHistorical(day)
+  }
+  else if (groups.value.length) {
+    ++historyRequest
+    historicalLoading.value = false
+    historicalMessage.value = ''
+    void reloadGroups()
+  }
+})
+
 function clearAll() {
   watchlist.clear()
 }
@@ -413,6 +517,9 @@ onMounted(async () => {
 .search-label { display: block; font-weight: 600; margin-bottom: 6px; }
 .search-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .current-stock { overflow-wrap: anywhere; }
+.history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: var(--sp-2); }
+.history-date { background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--r-2);
+  color: var(--text-primary); font-size: var(--fs-xs); padding: 2px 5px; }
 .groups-toggle { margin-bottom: 8px; }
 .watchlist .group-sort { flex-wrap: wrap; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .group-sort select { background: var(--bg-input); border: 1px solid var(--border-color);

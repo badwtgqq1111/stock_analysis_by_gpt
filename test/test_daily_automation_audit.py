@@ -150,3 +150,103 @@ def test_audit_doc_and_preflight_registered():
         assert key in text, f"审计文档要覆盖 {key}"
     daily = (ROOT / "scripts/run_daily_production.sh").read_text(encoding="utf-8")
     assert "test_daily_automation_audit.py" in daily, "新测试要进预检清单"
+
+
+def test_historical_catchup_plan_includes_all_data_steps():
+    """历史补跑必须与每日生产同口径，不能漏掉五个数据补齐步骤。"""
+    import importlib.util
+
+    path = ROOT / "scripts/run_historical_catchup.py"
+    spec = importlib.util.spec_from_file_location("historical_catchup_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    plan = module._plan("2026-10-19", Path("/tmp/historical_config.toml"))
+    labels = [label for _kind, label, _args in plan]
+    assert labels[:5] == ["benchmark", "fundamental", "macro", "financials", "financials_merge"]
+    assert labels.index("arm-selection") < labels.index("strategy-lists")
+    assert labels.index("strategy-lists") < labels.index("candidate_rank")
+    assert labels.index("candidate_rank") < labels.index("candidate_rank_ledger")
+    assert labels.index("candidate_rank_ledger") < labels.index("ledger-final")
+    assert labels[-2:] == ["ledger-final", "market_overview"]
+    assert any(kind == "data" and label == "market_overview" for kind, label, _args in plan)
+
+
+def test_parse_run_clears_failure_after_successful_retry(tmp_path):
+    """同一天先失败、随后补跑成功的阶段，不应继续把页面标成 failed。"""
+    from backend.api import automation
+
+    (tmp_path / "run.log").write_text(
+        "2026-10-20 10:00:00 start daily production trade_date=2026-10-19 "
+        "force=1 dry_run=0 skip_retrain=0 historical=1\n"
+        "2026-10-20 10:01:00 stage=strategy-lists start\n"
+        "2026-10-20 10:02:00 stage=strategy-lists FAILED exit=1\n"
+        "2026-10-20 11:00:00 data-step=fundamental start\n"
+        "2026-10-20 11:10:00 data-step=fundamental ok (600s)\n"
+        "2026-10-20 11:11:00 stage=strategy-lists start\n"
+        "2026-10-20 11:12:00 stage=strategy-lists ok (60s)\n"
+        "2026-10-20 11:12:01 done: 2026-10-19 生产完成（历史补跑）\n",
+        encoding="utf-8",
+    )
+    parsed = automation._parse_run(tmp_path)
+    assert parsed["finished"] is True
+    assert parsed["failed"] is None
+    assert parsed["steps"]["strategy-lists"]["status"] == "ok"
+    assert parsed["steps"]["fundamental"]["status"] == "ok"
+
+
+def test_intraday_manual_trigger_rejects_concurrent_run(monkeypatch):
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    from backend.api import automation
+
+    monkeypatch.setattr(automation, "_runner_processes", lambda: [])
+    monkeypatch.setattr(automation, "_lock_holder", lambda: None)
+    monkeypatch.setattr(automation, "_intraday_pids", lambda: [12345])
+    with TestClient(app) as client:
+        response = client.post("/api/automation/intraday-sync", json={})
+    assert response.status_code == 409
+    assert "已在运行" in response.json()["detail"]
+
+
+def test_intraday_manual_trigger_spawns_detached_sync(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    from backend.api import automation
+
+    class FakeProc:
+        pid = 54321
+
+        def wait(self):
+            return 0
+
+    seen = {}
+
+    def fake_popen(command, **kwargs):
+        seen["command"] = command
+        seen["env"] = kwargs["env"]
+        return FakeProc()
+
+    monkeypatch.setattr(automation, "_runner_processes", lambda: [])
+    monkeypatch.setattr(automation, "_lock_holder", lambda: None)
+    monkeypatch.setattr(automation, "_intraday_pids", lambda: [])
+    monkeypatch.setattr(automation, "INTRADAY_MANUAL_RECORD", tmp_path / "intraday_manual.json")
+    monkeypatch.setattr(automation, "INTRADAY_MANUAL_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(automation.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(automation, "_reap_intraday", lambda proc, record: None)
+    with TestClient(app) as client:
+        response = client.post("/api/automation/intraday-sync",
+                               json={"session_seconds": 900, "reset_quarantine": True})
+    assert response.status_code == 202
+    body = response.json()
+    assert body["pid"] == 54321 and body["session_seconds"] == 900
+    assert "sync_cn_intraday_full.py" in " ".join(seen["command"])
+    assert "--reset-quarantine" in seen["command"]
+    assert seen["env"]["NO_PROXY"] == "*"
+
+
+def test_intraday_manual_button_is_wired():
+    page = (ROOT / "frontend/src/pages/Automation.vue").read_text(encoding="utf-8")
+    client = (ROOT / "frontend/src/api/client.ts").read_text(encoding="utf-8")
+    assert "手动补跑分时" in page and "triggerIntraday" in page
+    assert "intradayBusy" in page and "intradayManual?.running" in page
+    assert "/api/automation/intraday-sync" in client and "triggerIntradaySync" in client

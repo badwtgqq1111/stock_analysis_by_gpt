@@ -34,7 +34,7 @@ def test_registry_covers_every_page():
     rows = _audit_module()._freshness_checks()
     pages = " ".join(r["page"] for r in rows)
     for expected in ("选股结果", "选股日历", "选股归因", "K 线", "榜单", "回测绩效",
-                     "数据流水线", "自动化进度", "模拟盘", "同花顺导出", "分时", "个股资料"):
+                     "数据流水线", "自动化进度", "模拟盘", "同花顺导出", "分时", "个股资料", "龙虎榜"):
         assert expected in pages, f"体检清单缺页面：{expected}"
     assert len(rows) >= 14, "页面登记太少，容易漏检"
     for row in rows:

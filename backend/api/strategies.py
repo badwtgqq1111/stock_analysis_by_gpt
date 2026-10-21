@@ -15,8 +15,10 @@ import importlib.util
 import json
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -30,6 +32,8 @@ SYNC_SCRIPT = ROOT / "scripts/sync_strategy_pool.py"
 # 它是「所有前端消费同一份刷新状态」的单一来源：策略池 / 选股结果 / 选股日历 / K 线自选都读它。
 LISTS_STATUS = ROOT / "output/results_cn/strategy_lists/status.json"
 LISTS_STATUS_MD = ROOT / "output/results_cn/strategy_lists/STATUS.md"
+STRATEGY_CONFIG = ROOT / "config/strategies.json"
+CLEAN_BARS = ROOT / "assets/data/clean/ohlcv/market=CN"
 ATTENTION_STATUS = ("stale", "timeout", "failed")
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
@@ -46,6 +50,154 @@ def volatility_risk(date: str | None = None, variant: str = "cn_ensemble_volcap"
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (OSError, KeyError, ValueError, AttributeError) as exc:
         raise HTTPException(status_code=503, detail="研究风险产物不完整，请检查研究任务日志") from exc
+
+
+def _clean_text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in ("", "nan", "none", "null", "nat") else text
+
+
+def _asof_quotes(date: str, codes: list[str]) -> dict[str, dict]:
+    """Decision-day close/pct/amount for watchlist rows, in one Arrow scan."""
+    if not codes:
+        return {}
+    import pyarrow.dataset as ds
+
+    target = pd.Timestamp(date)
+    start = target - pd.Timedelta(days=14)
+    files = [
+        str(p) for p in CLEAN_BARS.glob(
+            f"exchange=*/asset_type=equity/frequency=daily/adjust=qfq/year={target.year}/*.parquet")
+    ]
+    if not files:
+        return {}
+    try:
+        table = ds.dataset(files, format="parquet").to_table(
+            columns=["trade_date", "stock_code", "close", "amount", "turnover"],
+            filter=(
+                (ds.field("trade_date") >= start)
+                & (ds.field("trade_date") <= target)
+                & ds.field("stock_code").isin(codes)
+            ),
+        )
+    except Exception:
+        return {}
+    frame = table.to_pandas()
+    if frame.empty:
+        return {}
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+    out: dict[str, dict] = {}
+    for code, group in frame.sort_values("trade_date").groupby("stock_code"):
+        if group.empty:
+            continue
+        last = group.iloc[-1]
+        prev = group.iloc[-2] if len(group) >= 2 else None
+        close = float(last["close"]) if pd.notna(last["close"]) else None
+        pct = None
+        if close is not None and prev is not None and pd.notna(prev["close"]) and float(prev["close"]):
+            pct = (close / float(prev["close"]) - 1.0) * 100.0
+        out[str(code)] = {
+            "close": close,
+            "pct_chg": pct,
+            "amount": float(last["amount"]) if pd.notna(last["amount"]) else None,
+            "turnover": float(last["turnover"]) if pd.notna(last["turnover"]) else None,
+        }
+    return out
+
+
+@router.get("/history")
+def strategy_history(date: str) -> dict:
+    """某决策日、**按策略 id** 返回 K 线左侧可回看的历史名单。
+
+    两个来源合并：
+      * 有 `ledger_sources` 的策略：读选股台账（能保留 preselected + PK 的合并口径）；
+      * 其余研究策略：读各自的 `history_dir/<date>.csv`（例如波动率影子策略）。
+    返回结构直接以策略 id 为键，前端不再需要猜 ledger source 与策略的对应关系。
+    """
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="date 必须为 YYYY-MM-DD") from exc
+    if not STRATEGY_CONFIG.exists():
+        raise HTTPException(status_code=500, detail="缺少 config/strategies.json")
+    try:
+        config = json.loads(STRATEGY_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"策略配置读取失败：{exc}") from exc
+
+    from backend.api.calendar import _load as load_ledger
+    ledger = load_ledger()
+    if not ledger.empty:
+        day = ledger[ledger["decision_date"].astype(str) == date]
+    else:
+        day = pd.DataFrame()
+    by_source: dict[str, list[dict]] = {}
+    if not day.empty:
+        for source, group in day.groupby("source"):
+            by_source[str(source)] = [
+                {"code": str(r.get("stock_code") or ""), "name": _clean_text(r.get("name"))}
+                for _, r in group.iterrows() if r.get("stock_code")
+            ]
+
+    out = []
+    for spec in config.get("strategies") or []:
+        if not spec.get("selection_source") or spec.get("stage") == "retired":
+            continue
+        merged: dict[str, dict] = {}
+        for source in spec.get("ledger_sources") or []:
+            for row in by_source.get(str(source), []):
+                if row["code"]:
+                    merged.setdefault(row["code"], row)
+
+        history_dir = spec.get("history_dir")
+        if history_dir:
+            folder = (ROOT / history_dir) if not Path(history_dir).is_absolute() else Path(history_dir)
+            path = folder / f"{date}.csv"
+            if path.exists():
+                try:
+                    frame = pd.read_csv(path)
+                    code_col = "stock_code" if "stock_code" in frame.columns else (
+                        "code" if "code" in frame.columns else frame.columns[0])
+                    name_col = "stock_name" if "stock_name" in frame.columns else (
+                        "name" if "name" in frame.columns else None)
+                    for _, r in frame.iterrows():
+                        code = str(r.get(code_col) or "").strip().upper()
+                        if not code:
+                            continue
+                        name = _clean_text(r.get(name_col)) if name_col else ""
+                        if code not in merged or (not merged[code].get("name") and name):
+                            merged[code] = {"code": code, "name": name}
+                except (OSError, ValueError):
+                    pass
+
+        out.append({
+            "id": spec.get("id"),
+            "name": spec.get("name") or spec.get("id"),
+            "selection_source": spec.get("selection_source"),
+            "ledger_sources": spec.get("ledger_sources") or [],
+            "date": date,
+            "rows": list(merged.values()),
+        })
+
+    all_codes = sorted({r["code"] for row in out for r in row["rows"]})
+    quotes = _asof_quotes(date, all_codes)
+    for row in out:
+        for item in row["rows"]:
+            item.update(quotes.get(item["code"], {}))
+
+    return {
+        "date": date,
+        "strategies": out,
+        "n_strategies": sum(1 for row in out if row["rows"]),
+        "n_codes": len({r["code"] for row in out for r in row["rows"]}),
+    }
 
 
 def _sync_module():

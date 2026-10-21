@@ -19,7 +19,10 @@ export interface WatchlistGroup {
   source: string
   stage: string
   date: string | null
-  rows: { code: string; name: string }[]
+  /** 选股台账里的来源名；历史回顾用它与 /api/calendar/day 对齐 */
+  ledgerSources?: string[]
+  rows: { code: string; name: string; close?: number | null; pct_chg?: number | null;
+    amount?: number | null; turnover?: number | null }[]
   loading: boolean
   error: string
   verdict?: GroupVerdict
@@ -32,6 +35,7 @@ export interface WatchlistGroup {
 export function strategyGroups(
   entries: {
     id: string; name: string; selection_source?: string; stage: string
+    ledger_sources?: string[]
     stage_label?: string; summary?: string; latest_date?: string | null
     refresh?: StrategyListRefresh | null
     annual_rank?: StrategyPoolEntry['annual_rank']; annual_rank_reason?: string
@@ -40,7 +44,8 @@ export function strategyGroups(
 ): WatchlistGroup[] {
   return entries.filter((s) => Boolean(s.selection_source) && s.stage !== 'retired').map((s) => ({
     key: s.id, label: s.name, source: s.selection_source!, stage: s.stage_label || s.stage,
-    note: s.summary || s.name, date: s.latest_date || null, rows: [], loading: false, error: '',
+    note: s.summary || s.name, date: s.latest_date || null,
+    ledgerSources: s.ledger_sources || [], rows: [], loading: false, error: '',
     verdict: verdictOf ? verdictOf(s) : undefined,
     refresh: s.refresh ?? null, annual_rank: s.annual_rank, annual_rank_reason: s.annual_rank_reason,
   }))
@@ -98,7 +103,9 @@ export interface WatchlistRow { code: string; name: string; tag: string; local: 
   /** 当前排序模式下的本地排名/分数（资金流/个股多空会重排） */
   displayRank?: number | null; displayScore?: number | null;
   flowScore?: number | null; flow5?: number | null; flow20?: number | null;
-  longshort?: number | null; comboScore?: number | null }
+  longshort?: number | null; comboScore?: number | null;
+  /** 历史回顾：决策日收盘 / 当日涨跌 / 成交额，与回看日期对齐 */
+  histClose?: number | null; histPct?: number | null; histAmount?: number | null }
 
 export function groupRows(groups: WatchlistGroup[], key: string): WatchlistRow[] {
   const seen = new Map<string, WatchlistRow>()
@@ -112,7 +119,10 @@ export function groupRows(groups: WatchlistGroup[], key: string): WatchlistRow[]
         existing.extra = extra
         existing.tag = `${existing.baseTag || existing.tag} +${extra}`
         if (!existing.name) existing.name = item.name
-      } else seen.set(item.code, { ...item, tag: g.label, baseTag: g.label, local: false, source: g.source } as WatchlistRow)
+      } else seen.set(item.code, {
+        ...item, tag: g.label, baseTag: g.label, local: false, source: g.source,
+        histClose: item.close ?? null, histPct: item.pct_chg ?? null, histAmount: item.amount ?? null,
+      } as WatchlistRow)
     }
   }
   return [...seen.values()]

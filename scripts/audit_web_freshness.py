@@ -224,7 +224,7 @@ def _freshness_checks() -> list[dict]:
     add("策略池", "daily", _strategy_pool_min_date(),
         "sync_strategy_pool（生产策略的最新交易日取最小值 —— 有一个落后就算不达标）",
         "output/strategy_pool/strategy_pool.json")
-    add("个股资料（龙虎榜）", "daily", _parquet_max(ROOT / "assets/data/derived/cn_lhb/lhb_daily.parquet", "trade_date"),
+    add("个股资料 / 龙虎榜", "daily", _parquet_max(ROOT / "assets/data/derived/cn_lhb/lhb_daily.parquet", "trade_date"),
         "sync_cn_lhb", "assets/data/derived/cn_lhb/lhb_daily.parquet")
     add("个股资料（概念成分）", "event", _parquet_max(ROOT / "assets/data/meta/cn_board_membership.parquet", "code")
         and datetime.fromtimestamp((ROOT / "assets/data/meta/cn_board_membership.parquet").stat().st_mtime).strftime("%Y-%m-%d"),

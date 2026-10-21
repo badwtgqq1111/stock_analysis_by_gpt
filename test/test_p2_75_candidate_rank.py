@@ -52,3 +52,12 @@ def test_chip_stats_are_bounded():
     assert stats["p5"] <= stats["avg_cost"] <= stats["p95"]
     assert stats["concentration"] > 0
     assert stats["peak"] > 0
+
+
+def test_missing_ai_file_is_optional(tmp_path, monkeypatch):
+    """AI 任务失败不能把整个排名打断：缺 AI 时仍返回空 AI 分量和可用状态。"""
+    module = _module()
+    monkeypatch.setattr(module, "AI_DIR", tmp_path)
+    rows, meta = module._load_ai_rows("2026-10-20")
+    assert rows == {}
+    assert meta["available"] is False

@@ -174,6 +174,24 @@
             <StatTile label="实测速率" :value="intradayRows[2].value" :sub="intradayRows[2].sub" />
             <StatTile label="财务 / 财报回补" :value="finRows[0].value" :sub="finRows[0].sub" />
           </div>
+          <div class="intraday-actions">
+            <button class="btn-primary btn-sm" :disabled="intradayTriggering || intradayBusy || isRunning"
+                    :title="isRunning ? '每日流水线运行中，暂不手动补分时' : '重置隔离计数，重新抓取缺失的 5 分钟数据'"
+                    @click="triggerIntraday">
+              {{ intradayTriggering ? '启动中…' : intradayBusy ? '分时同步中…' : '手动补跑分时' }}
+            </button>
+            <span class="tiny dim">重置隔离计数；最多运行 60 分钟，进度每 5 秒刷新</span>
+          </div>
+          <p v-if="intradayMessage" class="hint tiny ok-text">{{ intradayMessage }}</p>
+          <p v-if="intradayError" class="hint tiny warn-text">{{ intradayError }}</p>
+          <p v-if="intradayManual?.running" class="hint tiny">
+            正在补分时：pid={{ intradayManual.pid }}，开始于 {{ hhmmss(intradayManual.started_at) }}
+            <template v-if="intradayManual.last_line">｜{{ intradayManual.last_line }}</template>
+          </p>
+          <p v-else-if="intradayManual?.finished_at" class="hint tiny dim">
+            上次手动补跑完成于 {{ hhmmss(intradayManual.finished_at) }}，
+            exit={{ intradayManual.exit_code ?? '—' }}，耗时 {{ human(intradayManual.duration_seconds) }}
+          </p>
           <p class="hint tiny">
             分时"已补齐到最新交易日的只数"要读 4,500+ 个 parquet（约 15 秒），不放进轮询路径；
             它以 <b>数据完整性体检</b> 的快照为准（见下）。
@@ -229,7 +247,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { getAutomationStatus, getWebFreshness, triggerAutomation } from '@/api/client'
+import { getAutomationStatus, getWebFreshness, triggerAutomation, triggerIntradaySync } from '@/api/client'
 import type { AutomationStage, AutomationStatus } from '@/types/api'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StateBlock from '@/components/ui/StateBlock.vue'
@@ -241,9 +259,12 @@ const freshness = ref<any>(null)
 const error = ref('')
 const loading = ref(false)
 const triggering = ref(false)
+const intradayTriggering = ref(false)
 const triggerDate = ref('')
 const triggerMessage = ref('')
 const triggerError = ref('')
+const intradayMessage = ref('')
+const intradayError = ref('')
 const pollSeconds = 5
 let timer: ReturnType<typeof setInterval> | null = null
 
@@ -290,6 +311,24 @@ async function triggerFull() {
     triggerError.value = String(e)
   } finally {
     triggering.value = false
+  }
+}
+
+const intradayManual = computed(() => status.value?.intraday?.manual)
+const intradayBusy = computed(() => Boolean(intradayManual.value?.running))
+
+async function triggerIntraday() {
+  intradayTriggering.value = true
+  intradayMessage.value = ''
+  intradayError.value = ''
+  try {
+    const result = await triggerIntradaySync({ session_seconds: 3600, reset_quarantine: true })
+    intradayMessage.value = `已触发分时补跑，pid=${result.pid}，最多 60 分钟；日志：${result.log}`
+    await reload()
+  } catch (e) {
+    intradayError.value = String(e)
+  } finally {
+    intradayTriggering.value = false
   }
 }
 
@@ -382,6 +421,7 @@ const finRows = computed(() => {
 .trigger-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
 .trigger-controls { display: flex; align-items: center; gap: var(--sp-2); }
 .trigger-controls input { width: 150px; }
+.intraday-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: var(--sp-2) 0; }
 .ok-text { color: var(--state-ok); }
 .ov-main { flex: 1; min-width: 0; }
 .ov-line { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }

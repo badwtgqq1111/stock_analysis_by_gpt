@@ -365,6 +365,22 @@ export async function triggerAutomation(body: {
   return payload
 }
 
+export async function triggerIntradaySync(body?: {
+  session_seconds?: number; reset_quarantine?: boolean
+}): Promise<{
+  ok: boolean; pid: number; started_at: string; session_seconds: number
+  reset_quarantine: boolean; log: string
+}> {
+  const resp = await fetch('/api/automation/intraday-sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_seconds: 3600, reset_quarantine: true, ...body }),
+  })
+  const payload = await resp.json().catch(() => ({}))
+  if (!resp.ok) throw new Error(payload?.detail || `HTTP ${resp.status}`)
+  return payload
+}
+
 // ─── 组合绩效（对照聚宽收益概述）───
 export async function getPerformanceSummary(): Promise<PerformanceSummary> {
   const resp = await fetch('/api/performance')
@@ -533,6 +549,36 @@ export async function getMoneyflowRanking(params: MoneyflowParams): Promise<Rank
   return (await resp.json()) as RankingsMoneyflowResponse
 }
 
+// ─── 龙虎榜 ───
+export interface LhbRow {
+  trade_date: string; stock_code: string; name: string; industry: string
+  close: number | null; pct_chg: number | null
+  net_amount: number | null; buy_amount: number | null; sell_amount: number | null
+  lhb_amount: number | null; net_pct: number | null; turnover: number | null
+  float_mv: number | null; reason: string
+  inst_buyers: number | null; inst_sellers: number | null
+  inst_net_amount: number | null; inst_net_pct: number | null
+}
+export interface LhbDaily {
+  available: boolean; reason?: string
+  date?: string; dates?: string[]; generated_at?: string
+  summary?: {
+    n_records: number; n_stocks: number; n_up: number; n_down: number
+    n_net_buy: number; n_net_sell: number; n_institution: number
+    total_net_amount: number | null; total_lhb_amount: number | null
+    total_inst_net: number | null
+  }
+  rows: LhbRow[]
+}
+
+export async function getLhbDaily(date = '', limit = 500): Promise<LhbDaily> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (date) query.set('date', date)
+  const resp = await fetch(`/api/lhb/daily?${query}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return (await resp.json()) as LhbDaily
+}
+
 // ─── 连板记录统计 ───
 export async function getLimitUpLadder(lookback: number, date = '', live = false): Promise<LimitUpLadder> {
   const query = new URLSearchParams({ lookback: String(lookback), date, live: live ? '1' : '0' })
@@ -681,6 +727,18 @@ export interface StrategyCandidateInput {
 
 export async function getStrategyPool(refresh = true): Promise<import('@/types/api').StrategyPoolResponse> {
   const { data } = await http.get('/strategies', { params: { refresh } })
+  return data
+}
+
+export interface StrategyHistoryEntry {
+  id: string; name: string; selection_source: string
+  ledger_sources: string[]; date: string
+  rows: { code: string; name: string }[]
+}
+export async function getStrategyHistory(date: string): Promise<{
+  date: string; strategies: StrategyHistoryEntry[]; n_strategies: number; n_codes: number
+}> {
+  const { data } = await http.get('/strategies/history', { params: { date } })
   return data
 }
 

@@ -285,3 +285,20 @@ def test_intraday_coverage_reports_ranges(client):
         assert store["n_dates"] == len(body["store_dates"]) > 0
         assert store["first_date"] <= store["last_date"]
         assert body["store_dates"] == sorted(body["store_dates"])
+
+
+def test_lhb_daily_api_and_page_are_wired(client):
+    body = client.get("/api/lhb/daily").json()
+    assert body["available"] is True
+    assert body["date"] and body["dates"] == sorted(body["dates"], reverse=True)
+    assert body["rows"] and body["summary"]["n_stocks"] > 0
+    first = body["rows"][0]
+    assert {"stock_code", "name", "net_amount", "reason", "inst_net_amount"} <= set(first)
+    # 同一只票可能因多个原因出现多行；汇总必须按股票去重而不是把原因金额相加
+    assert body["summary"]["n_stocks"] <= body["summary"]["n_records"]
+
+    page = (ROOT / "frontend/src/pages/Lhb.vue").read_text(encoding="utf-8")
+    router = (ROOT / "frontend/src/router/index.ts").read_text(encoding="utf-8")
+    nav = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")
+    assert "getLhbDaily" in page and "龙虎榜" in page and "上榜原因" in page
+    assert "path: '/lhb'" in router and "{ to: '/lhb', label: '龙虎榜' }" in nav

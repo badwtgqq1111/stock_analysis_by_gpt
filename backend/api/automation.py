@@ -26,6 +26,7 @@ import re
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,8 @@ LOCK_DIR = DAILY_DIR / ".lock"
 INTRADAY_PROGRESS = ROOT / "assets/data/raw/intraday_baostock/_sync/progress.json"
 FIN_PROGRESS = ROOT / "assets/data/raw/financials_relay/_sync/progress.json"
 COMPLETENESS_JSON = ROOT / "output/data_quality/data_completeness.json"
+INTRADAY_MANUAL_RECORD = DAILY_DIR / "intraday_manual.json"
+INTRADAY_MANUAL_LOG_DIR = DAILY_DIR / "intraday_manual"
 
 # 执行顺序与 run_daily_production.sh 保持一致（数据补齐 → 主阶段 → 收尾）
 STAGE_ORDER = [
@@ -60,6 +63,7 @@ STAGE_ORDER = [
     ("main", "paper_outcomes"),
     ("tail", "arm_selection"),
     ("tail", "intraday-refresh"),
+    ("tail", "candidate_rank"),
     ("tail", "data-completeness"),
 ]
 STAGE_LABEL = {
@@ -70,27 +74,37 @@ STAGE_LABEL = {
     "financials_merge": "数据补齐 · 财务合并",
     "arm_selection": "研究手臂选股",
     "intraday-refresh": "分时增量补齐",
+    "candidate_rank": "候选池综合排名",
     "data-completeness": "数据完整性体检",
 }
 
 # 数据补齐全走 `run_data_step`，日志名是 `data_<step>.log`；分时刷新是 `intraday_refresh.log`。
 # 不映射的话，最长的 fundamental（实测 ~39 分钟）在页面上完全没有"当前阶段"，进度条当然不动。
 STAGE_LOG_ALIAS = {
+    "benchmark": "data_benchmark.log",
     "fundamental": "data_fundamental.log",
     "macro": "data_macro.log",
     "financials": "data_financials.log",
     "financials_merge": "data_financials_merge.log",
     "intraday-refresh": "intraday_refresh.log",
+    "candidate_rank": "data_candidate_rank.log",
 }
 # 这些是流水账，不是阶段日志（不能当成"当前阶段"）
 NON_STAGE_LOGS = {"run.log", "preflight.log", "ready_gate.log", "manual_trigger.log"}
 
 router = APIRouter(prefix="/api/automation", tags=["automation"])
+_TRIGGER_LOCK = threading.Lock()
+_INTRADAY_CHILDREN: dict[int, subprocess.Popen] = {}
 
 
 class TriggerRequest(BaseModel):
     trade_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     force: bool = True
+
+
+class IntradayTriggerRequest(BaseModel):
+    session_seconds: int = Field(default=3600, ge=300, le=7200)
+    reset_quarantine: bool = True
 
 
 def _latest_market_date() -> str | None:
@@ -117,6 +131,7 @@ def _runner_processes() -> list[int]:
 
 _TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(.*)$")
 _START = re.compile(r"start daily production trade_date=(\S+).*dry_run=(\d)")
+_DATA_START = re.compile(r"data-step=(\S+) start")
 _DATA_OK = re.compile(r"data-step=(\S+) ok \((\d+)s\)")
 _DATA_BAD = re.compile(r"data-step=(\S+) FAILED")
 _STAGE_OK = re.compile(r"stage=(\S+) ok \((\d+)s\)")
@@ -251,9 +266,9 @@ def _parse_run(log_dir: Path) -> dict:
     started_at = lines[start_idx][0]
     steps: dict[str, dict] = {}
     finished = False
-    failed = None
+    failed_order: list[str] = []
     for ts, body in lines[start_idx + 1:]:
-        m = _STAGE_START.search(body)
+        m = _DATA_START.search(body) or _STAGE_START.search(body)
         if m:
             steps[m.group(1)] = {"status": "running", "started_at": ts}
         for rx, status in ((_DATA_OK, "ok"), (_STAGE_OK, "ok"),
@@ -264,8 +279,11 @@ def _parse_run(log_dir: Path) -> dict:
                 entry = {"status": status, "finished_at": ts}
                 if status == "ok":
                     entry["seconds"] = int(m.group(2))
+                    if name in failed_order:
+                        failed_order.remove(name)
                 else:
-                    failed = failed or name
+                    if name not in failed_order:
+                        failed_order.append(name)
                 steps[name] = entry
                 break
         m = _ARM_OK.search(body)
@@ -285,7 +303,8 @@ def _parse_run(log_dir: Path) -> dict:
             finished = True
     last_ts = lines[-1][0] if lines else None
     return {"trade_date": trade_date, "started_at": started_at, "steps": steps,
-            "finished": finished, "failed": failed, "last_log_at": last_ts}
+            "finished": finished, "failed": failed_order[0] if failed_order else None,
+            "last_log_at": last_ts}
 
 
 def _running_stage(log_dir: Path, steps: dict, started_at: str | None = None) -> str | None:
@@ -336,11 +355,65 @@ def _pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
     try:
-        import os
         os.kill(pid, 0)
         return True
     except OSError:
         return False
+
+
+def _intraday_pids() -> list[int]:
+    """Any intraday sync process, including the one started by daily production."""
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "scripts/sync_cn_intraday_full.py"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return []
+    return [int(x) for x in proc.stdout.split() if x.isdigit() and int(x) != os.getpid()]
+
+
+def _read_intraday_record() -> dict:
+    try:
+        payload = json.loads(INTRADAY_MANUAL_RECORD.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_intraday_record(record: dict) -> None:
+    INTRADAY_MANUAL_RECORD.parent.mkdir(parents=True, exist_ok=True)
+    temp = INTRADAY_MANUAL_RECORD.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(INTRADAY_MANUAL_RECORD)
+
+
+def _intraday_manual_state() -> dict:
+    record = _read_intraday_record()
+    pids = _intraday_pids()
+    record_pid = record.get("pid")
+    record_alive = _pid_alive(int(record_pid)) if str(record_pid or "").isdigit() else False
+    running = bool(pids or record_alive)
+    log_path = ROOT / record["log"] if record.get("log") else None
+    last_line = ""
+    if log_path is not None:
+        tail = _read_tail(log_path, max_bytes=8000).replace("\r", "\n")
+        lines = [line.strip() for line in tail.splitlines() if line.strip()]
+        last_line = lines[-1][:300] if lines else ""
+    return {
+        "available": bool(record or pids),
+        "running": running,
+        "source": "manual" if record_alive else ("pipeline" if pids else "idle"),
+        "pid": record_pid if record_alive else (pids[0] if pids else None),
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "exit_code": record.get("exit_code"),
+        "duration_seconds": record.get("duration_seconds"),
+        "log": record.get("log"),
+        "session_seconds": record.get("session_seconds"),
+        "reset_quarantine": record.get("reset_quarantine"),
+        "last_line": last_line,
+    }
 
 
 def _agents() -> list[dict]:
@@ -613,7 +686,10 @@ def build_status() -> dict:
             "eta_seconds": int(eta_remaining) if active else None,
             "stages": rows,
         },
-        "intraday": _sidecar_progress(INTRADAY_PROGRESS, "分时 5min 增量"),
+        "intraday": {
+            **_sidecar_progress(INTRADAY_PROGRESS, "分时 5min 增量"),
+            "manual": _intraday_manual_state(),
+        },
         "financials": _sidecar_progress(FIN_PROGRESS, "财务 / 财报回补"),
         "completeness": completeness,
         "agents": _agents(),
@@ -636,6 +712,89 @@ def automation_completeness():
     payload["age_seconds"] = int(
         (datetime.now() - datetime.fromtimestamp(COMPLETENESS_JSON.stat().st_mtime)).total_seconds())
     return payload
+
+
+def _reap_intraday(proc: subprocess.Popen, record: dict) -> None:
+    exit_code = proc.wait()
+    _INTRADAY_CHILDREN.pop(proc.pid, None)
+    with _TRIGGER_LOCK:
+        current = _read_intraday_record()
+        if current.get("pid") != proc.pid:
+            return
+        finished = datetime.now()
+        try:
+            elapsed = int((finished - datetime.fromisoformat(str(current["started_at"]))).total_seconds())
+        except (KeyError, TypeError, ValueError):
+            elapsed = None
+        current.update({
+            "finished_at": finished.isoformat(timespec="seconds"),
+            "exit_code": int(exit_code),
+            "duration_seconds": elapsed,
+        })
+        _write_intraday_record(current)
+
+
+@router.post("/intraday-sync", status_code=202)
+def trigger_intraday_sync(req: IntradayTriggerRequest):
+    """Manually run the incremental 5-minute sync.
+
+    This is intentionally separate from the full daily trigger: intraday data is
+    slow and sometimes has a few quarantined symbols left after the scheduled
+    run.  The button can retry those without rerunning models or selections.
+    """
+    with _TRIGGER_LOCK:
+        if _runner_processes():
+            raise HTTPException(status_code=409, detail="每日流水线正在运行，请等它结束再补分时")
+        lock_pid = _lock_holder()
+        if _pid_alive(lock_pid):
+            raise HTTPException(status_code=409, detail=f"流水线锁仍被 pid={lock_pid} 持有")
+        if _intraday_pids():
+            raise HTTPException(status_code=409, detail="分时同步已在运行，请等待当前任务结束")
+        previous = _read_intraday_record()
+        try:
+            previous_pid = int(previous.get("pid"))
+        except (TypeError, ValueError):
+            previous_pid = None
+        if _pid_alive(previous_pid):
+            raise HTTPException(status_code=409, detail="上一次手动分时补跑仍在运行")
+
+        started = datetime.now()
+        stamp = started.strftime("%Y%m%d_%H%M%S")
+        INTRADAY_MANUAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = INTRADAY_MANUAL_LOG_DIR / f"{stamp}.log"
+        command = [
+            sys.executable, str(ROOT / "scripts/sync_cn_intraday_full.py"),
+            "--refresh", "--session-seconds", str(req.session_seconds),
+        ]
+        if req.reset_quarantine:
+            command.append("--reset-quarantine")
+        env = {
+            **os.environ,
+            "NO_PROXY": "*", "no_proxy": "*",
+        }
+        with log_path.open("ab") as log_handle:
+            proc = subprocess.Popen(
+                command, cwd=ROOT, env=env,
+                stdout=log_handle, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        record = {
+            "pid": proc.pid,
+            "started_at": started.isoformat(timespec="seconds"),
+            "finished_at": None,
+            "exit_code": None,
+            "duration_seconds": None,
+            "session_seconds": req.session_seconds,
+            "reset_quarantine": bool(req.reset_quarantine),
+            "command": " ".join(command),
+            "log": (str(log_path.relative_to(ROOT))
+                    if log_path.is_relative_to(ROOT) else str(log_path)),
+        }
+        _write_intraday_record(record)
+        _INTRADAY_CHILDREN[proc.pid] = proc
+
+    threading.Thread(target=_reap_intraday, args=(proc, record), daemon=True).start()
+    return {"ok": True, **record}
 
 
 @router.post("/trigger")

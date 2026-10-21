@@ -25,6 +25,7 @@ const routes = [
   { path: '/rankings', name: 'rankings', component: () => import('@/pages/Rankings.vue') },
   { path: '/market', name: 'market', component: () => import('@/pages/MarketOverview.vue') },
   { path: '/limitup', name: 'limitup', component: () => import('@/pages/LimitUp.vue') },
+  { path: '/lhb', name: 'lhb', component: () => import('@/pages/Lhb.vue') },
   { path: '/intraday', name: 'intraday', component: () => import('@/pages/Intraday.vue') },
   { path: '/industry', name: 'industry', component: () => import('@/pages/IndustryHeat.vue') },
   // 投研执行台（2026-10-11）：两族/四层状态 + 运行轨迹 + 可编辑的提示词（默认角色「量化领域专家」）

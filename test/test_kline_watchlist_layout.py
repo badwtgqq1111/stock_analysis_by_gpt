@@ -179,3 +179,47 @@ def test_candidate_rank_api_serves_latest(client):
     assert body["available"] is True
     assert body["rows"], "二次排序产物不能为空"
     assert {"rank", "code", "composite", "coverage"} <= set(body["rows"][0])
+
+
+def test_candidate_rank_covers_every_visible_strategy_row(client):
+    """K 线左侧能看到的每一只策略股，都必须能在综合排名里找到。"""
+    rank = client.get("/api/candidate-rank").json()
+    ranked = {row["code"] for row in rank["rows"]}
+    pool = client.get("/api/strategies", params={"refresh": "false"}).json()
+    visible: set[str] = set()
+    for strategy in pool.get("strategies", []):
+        source = strategy.get("selection_source")
+        if not source or strategy.get("stage") == "retired":
+            continue
+        payload = client.get("/api/selection", params={"source": source}).json()
+        visible.update(str(row["stock_code"]) for row in payload.get("rows", [])
+                       if row.get("stock_code"))
+    assert visible, "策略池没有可取名单"
+    assert not (visible - ranked), f"侧栏有、排名缺失：{sorted(visible - ranked)}"
+
+
+def test_watchlist_has_historical_ledger_mode():
+    """K 线左侧必须能按历史决策日回看，而不是永远只拉最新 selection_source。"""
+    text = WATCHLIST.read_text(encoding="utf-8")
+    assert "getStrategyHistory" in text and "historyDate" in text
+    assert "loadHistorical" in text and "rowsByStrategy" in text
+    assert "history-date" in text and "回到最新" in text
+    assert "isHistory" in text and "!isHistory" in text
+    # 历史日期只切换名单；左侧报价仍必须是实时行情，不能被 isHistory 关掉
+    assert 'v-if="livePrice(row.code) !== null"' in text
+    assert "isHistory.value ? []" not in text
+
+
+def test_strategy_history_api_supports_watchlist_review(client):
+    summary = client.get("/api/calendar/summary").json()
+    if not summary.get("dates"):
+        pytest.skip("选股台账为空")
+    date = summary["dates"][-1]
+    body = client.get("/api/strategies/history", params={"date": date}).json()
+    assert body["date"] == date
+    assert body["n_strategies"] > 0 and body["n_codes"] > 0
+    by_id = {s["id"]: s for s in body["strategies"]}
+    assert by_id["cn_ensemble"]["rows"], "生产名单历史不能为空"
+    assert by_id["arm_select"]["rows"], "研究手臂历史不能为空"
+    assert {"code", "name"} <= set(by_id["cn_ensemble"]["rows"][0])
+    assert {"close", "pct_chg", "amount"} <= set(by_id["cn_ensemble"]["rows"][0])

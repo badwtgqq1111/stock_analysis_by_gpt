@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -31,27 +32,50 @@ def _log(path: Path, message: str) -> None:
     print(line, end="", flush=True)
 
 
-def _run(log_path: Path, label: str, args: list[str], timeout: int = 8 * 3600) -> None:
+def _run(
+    log_path: Path,
+    label: str,
+    args: list[str],
+    *,
+    kind: str = "stage",
+    timeout: int = 8 * 3600,
+    allow_failure: bool = False,
+    env: dict[str, str] | None = None,
+) -> int:
+    """Run one step and write the same markers as run_daily_production.sh.
+
+    The automation page distinguishes data preparation (`data-step=`) from the
+    main pipeline (`stage=`).  Historical catch-up used to log every step as a
+    stage and put data output in `<label>.log`, so the five data steps appeared
+    as "not included in this run" even after they had completed.
+    """
     started = datetime.now()
-    _log(log_path, f"stage={label} start")
-    stage_log = log_path.parent / f"{label}.log"
+    marker = "data-step" if kind == "data" else "stage"
+    _log(log_path, f"{marker}={label} start")
+    log_name = f"data_{label}.log" if kind == "data" else f"{label}.log"
+    stage_log = log_path.parent / log_name
     try:
         with stage_log.open("ab") as fh:
-            proc = subprocess.run([sys.executable, *args], cwd=ROOT, timeout=timeout,
+            proc = subprocess.run([sys.executable, *args], cwd=ROOT, timeout=timeout, env=env,
                                   stdout=fh, stderr=subprocess.STDOUT, text=True)
     except subprocess.TimeoutExpired as exc:
-        _log(log_path, f"stage={label} FAILED timeout={timeout}s")
+        _log(log_path, f"{marker}={label} FAILED timeout={timeout}s")
+        if allow_failure:
+            return 124
         raise SystemExit(124) from exc
     if proc.returncode != 0:
         try:
             tail = stage_log.read_text(encoding="utf-8", errors="replace")[-2000:]
         except OSError:
             tail = ""
-        _log(log_path, f"stage={label} FAILED exit={proc.returncode}")
+        _log(log_path, f"{marker}={label} FAILED exit={proc.returncode}")
         _log(log_path, tail)
+        if allow_failure:
+            return proc.returncode
         raise SystemExit(proc.returncode)
     seconds = int((datetime.now() - started).total_seconds())
-    _log(log_path, f"stage={label} ok ({seconds}s)")
+    _log(log_path, f"{marker}={label} ok ({seconds}s)")
+    return 0
 
 
 def main() -> int:
@@ -63,7 +87,11 @@ def main() -> int:
     target = datetime.strptime(day, "%Y-%m-%d").date()
     log_path = RUNS / day / "run.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    _log(log_path, f"start daily production trade_date={day} force=1 dry_run=0 skip_retrain=0 historical=1")
+    _log(
+        log_path,
+        f"start daily production trade_date={day} force=1 "
+        f"dry_run={1 if args.dry_run else 0} skip_retrain=0 historical=1",
+    )
 
     # 不把 fundamental/financials 的 end_date 强行改成目标日：它们按公告日拉取，目标日只控制行情/特征窗口。
     temp = RUNS / day / "historical_config.toml"
@@ -83,21 +111,68 @@ def main() -> int:
     temp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if args.dry_run:
         _log(log_path, f"dry-run config={temp.relative_to(ROOT)}")
+        for kind, label, args in _plan(day, temp):
+            prefix = "data-step" if kind == "data" else "stage"
+            _log(log_path, f"{prefix}={label} would run: {' '.join(args)}")
         return 0
 
-    stages = ["daily_bars", "moneyflow", "regime", "features", "clean_panel",
-              "model_scores", "preselection", "pk", "exits", "paper_account", "paper_outcomes"]
-    for stage in stages:
-        _run(log_path, stage, ["scripts/run_cn_pipeline.py", "--stage", stage,
-                               "--config", str(temp), "--force-rebalance"])
+    soft_failures: list[str] = []
+    for kind, label, args in _plan(day, temp):
+        # Strategy-list verification returns 1 when any list remains stale.  Keep
+        # going through the second ledger rebuild so every successfully refreshed
+        # list is still visible on the calendar, then report the failure at the end.
+        allow_failure = label == "strategy-lists"
+        env = {**os.environ, "NO_PROXY": "*", "no_proxy": "*"} if label == "intraday-refresh" else None
+        rc = _run(log_path, label, args, kind=kind, allow_failure=allow_failure, env=env)
+        if rc:
+            soft_failures.append(f"{label}={rc}")
 
-    # 主台账 / 日历：正常生产路径已经写到目标日，重建后日历即可见。
-    _run(log_path, "archive-selection", ["scripts/archive_cn_selection.py"])
-    _run(log_path, "ledger", ["scripts/build_selection_ledger.py"])
-    _run(log_path, "strategy-lists", ["scripts/refresh_strategy_lists.py", "--print"])
-    _run(log_path, "market-overview", ["scripts/build_cn_market_turnover.py"])
-    _log(log_path, f"done: {day} 历史补跑完成")
+    if soft_failures:
+        raise SystemExit(f"历史补跑仍有失败步骤: {', '.join(soft_failures)}")
+    _log(log_path, f"done: {day} 生产完成（历史补跑）")
     return 0
+
+
+def _plan(day: str, config: Path) -> list[tuple[str, str, list[str]]]:
+    """Complete production-equivalent step plan, including data preparation."""
+    steps: list[tuple[str, str, list[str]]] = [
+        ("data", "benchmark", ["scripts/backfill_cn_benchmark.py", "--end", day.replace("-", "")]),
+        ("data", "fundamental", ["scripts/run_cn_pipeline.py", "--stage", "fundamental",
+                                 "--config", str(config), "--force-rebalance"]),
+        ("data", "macro", ["scripts/sync_cn_macro.py"]),
+        ("data", "financials", ["scripts/backfill_cn_financials.py", "--refresh",
+                                "--session-seconds", "1800"]),
+        ("data", "financials_merge", ["scripts/backfill_cn_financials.py", "--merge"]),
+    ]
+    for stage in ("daily_bars", "moneyflow", "regime", "features", "clean_panel",
+                  "model_scores", "preselection", "pk", "exits", "paper_account",
+                  "paper_outcomes"):
+        steps.append(("stage", stage, ["scripts/run_cn_pipeline.py", "--stage", stage,
+                                       "--config", str(config), "--force-rebalance"]))
+    steps.extend([
+        ("stage", "archive-selection", ["scripts/archive_cn_selection.py"]),
+        ("stage", "ledger-first", ["scripts/build_selection_ledger.py"]),
+        # arm_select reads the refreshed v4 sleeve panel; refresh must precede it.
+        ("stage", "sleeve_features", ["scripts/build_sleeve_features_long.py", "--end", day]),
+    ])
+    for step in ("panel_extend_v2.py", "panel_extend_v3.py", "panel_merge_intraday.py",
+                 "build_panel_v4_delisted.py"):
+        steps.append(("stage", step.removesuffix(".py"), ["scripts/" + step]))
+    steps.extend([
+        ("stage", "arm-selection", ["scripts/run_cn_pipeline.py", "--stage", "arm_selection",
+                                    "--config", str(config), "--force-rebalance"]),
+        ("stage", "intraday-refresh", ["scripts/sync_cn_intraday_full.py", "--refresh",
+                                       "--session-seconds", "1800"]),
+        ("stage", "data-completeness", ["scripts/data_completeness_report.py"]),
+        ("stage", "strategy-lists", ["scripts/refresh_strategy_lists.py", "--date", day, "--print"]),
+        ("data", "candidate_rank", ["scripts/p2_75_candidate_rank.py", "--date", day]),
+        ("data", "candidate_rank_ledger", ["scripts/p2_75_rank_ledger.py", "--update"]),
+        # List refresh writes new selection_history files; rebuild the ledger again
+        # so the calendar reflects those newly refreshed lists on the target date.
+        ("stage", "ledger-final", ["scripts/build_selection_ledger.py"]),
+        ("data", "market_overview", ["scripts/build_cn_market_turnover.py"]),
+    ])
+    return steps
 
 
 if __name__ == "__main__":

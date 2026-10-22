@@ -34,6 +34,7 @@ STRATEGY_META = {
     "arm_concept": {"label": "行业轮动（概念/板块手臂）", "group": "行业轮动"},
     "rot_arm": {"label": "行业轮动（MST 大类 + 7 因子等权）", "group": "行业轮动"},
     "box_arm": {"label": "箱体突破回踩（结构型候选）", "group": "打板/低吸"},
+    "rbreaker_arm": {"label": "R-Breaker（A股T+1长仓适配）", "group": "突破/反转"},
     "first_ban_lowxi": {"label": "首板低吸（社区策略·反例档案）", "group": "打板/低吸"},
     "jq_multi_factor": {"label": "聚宽多因子（低市值+高ROE）", "group": "多因子策略"},
     "jq_roe_roa": {"label": "动态诊断候选：ROE＋0.25×ROA", "group": "多因子策略"},

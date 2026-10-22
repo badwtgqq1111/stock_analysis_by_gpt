@@ -38,6 +38,32 @@ CONFIG = ROOT / "config/strategies.json"
 OUT = ROOT / "output/results_cn/strategy_lists"
 DEFAULT_MAX_MINUTES = 20
 DATE_COLUMNS = ("trade_date", "decision_date", "asof_date")
+DEPENDENCY_FILES = {
+    "benchmark": ROOT / "assets/data/meta/cn_benchmark_daily.parquet",
+    "daily_bars": ROOT / "assets/data/meta/cn_market_turnover.parquet",
+    "moneyflow": ROOT / "assets/data/derived/cn_moneyflow_features.parquet",
+    "sleeve_panel": ROOT / "assets/data/meta/cn_sleeve_features_long_v4.parquet",
+    "boards": ROOT / "assets/data/meta/cn_board_membership.parquet",
+}
+STRATEGY_DEPENDENCIES = {
+    "cn_ensemble": ["benchmark", "daily_bars"],
+    "arm_select": ["benchmark", "daily_bars", "sleeve_panel"],
+    "arm_concept": ["benchmark", "daily_bars", "boards"],
+    "jq_multi_factor_size_roe": ["benchmark"],
+    "jq_roe_roa_diagnostic": ["benchmark"],
+    "rot_arm": ["benchmark", "daily_bars", "boards"],
+    "first_ban_lowxi": ["daily_bars"],
+    "box_arm": ["daily_bars"],
+    "box_squeeze_arm": ["daily_bars"],
+    "wyckoff_arm": ["daily_bars"],
+    "moneyflow_arm": ["daily_bars", "moneyflow"],
+    "mainforce_arm": ["daily_bars", "moneyflow"],
+    "donchian_breakout": ["daily_bars"],
+    "rbreaker_arm": ["daily_bars"],
+    "cn_ensemble_volcap": ["benchmark", "daily_bars", "sleeve_panel"],
+    "arm_select_volrisk": ["benchmark", "daily_bars", "sleeve_panel"],
+}
+_DEP_CACHE: dict[str, tuple[float, str | None]] = {}
 
 
 def _rel(path: Path | None) -> str | None:
@@ -97,6 +123,56 @@ def file_date(path: Path | None, columns: list[str] | None = None) -> str | None
     return str(pd.to_datetime(frame[column]).max().date())
 
 
+def code_set(path: Path | None) -> tuple[str, ...]:
+    """股票集合指纹；只比较代码，不比较日期/分数/顺序。"""
+    if path is None or not path.exists():
+        return ()
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return ()
+    col = next((c for c in ("stock_code", "code", "ts_code") if c in frame.columns), None)
+    if col is None:
+        return ()
+    return tuple(sorted(frame[col].dropna().astype(str).str.strip().str.upper().unique()))
+
+
+def _dependency_latest(name: str) -> str | None:
+    path = DEPENDENCY_FILES.get(name)
+    if path is None or not path.exists():
+        return None
+    key = f"{name}:{path}"
+    mtime = path.stat().st_mtime
+    cached = _DEP_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        if name == "boards":
+            frame = pd.read_parquet(path, columns=["retrieved_at"])
+            values = pd.to_datetime(frame["retrieved_at"], errors="coerce").dropna()
+        else:
+            frame = pd.read_parquet(path, columns=["trade_date"])
+            values = pd.to_datetime(frame["trade_date"], errors="coerce").dropna()
+        latest = str(values.max().date()) if len(values) else None
+    except Exception:
+        latest = None
+    _DEP_CACHE[key] = (mtime, latest)
+    return latest
+
+
+def strategy_dependencies(spec: dict, target_date: str | None) -> list[dict]:
+    out = []
+    for name in STRATEGY_DEPENDENCIES.get(str(spec.get("id") or ""), []):
+        latest = _dependency_latest(name)
+        out.append({
+            "name": name,
+            "latest": latest,
+            "required": target_date,
+            "ok": bool(target_date and latest and latest >= target_date),
+        })
+    return out
+
+
 def history_latest(spec: dict) -> tuple[str | None, Path | None]:
     rel = spec.get("history_dir") or ""
     if not rel:
@@ -108,6 +184,21 @@ def history_latest(spec: dict) -> tuple[str | None, Path | None]:
     if not files:
         return None, folder
     return files[-1].stem, folder / files[-1].name
+
+
+def previous_history_codes(spec: dict, before_date: str | None) -> tuple[tuple[str, ...], str | None]:
+    """上一份**早于当前名单日**的历史名单；用于判断换股而不是判断是否重跑。"""
+    rel = spec.get("history_dir") or ""
+    if not rel or not before_date:
+        return (), None
+    folder = ROOT / rel
+    if not folder.exists():
+        return (), None
+    files = [p for p in sorted(folder.glob("*.csv")) if p.stem < before_date]
+    if not files:
+        return (), None
+    path = files[-1]
+    return code_set(path), path.stem
 
 
 def ensure_archive(spec: dict, date: str, top: Path | None) -> tuple[bool, str]:
@@ -138,6 +229,8 @@ def refresh_one(spec: dict, target_date: str | None, *, print_log: bool) -> dict
         "command": spec.get("entry") or "", "selection_source": spec.get("selection_source") or "",
         "file": _rel(top),
         "date_before": top_date_before, "history_before": hist_date_before,
+        "codes_changed": None, "previous_date": None,
+        "dependencies": [], "blocked_by": [],
         "target_date": target_date, "status": "skipped", "reason": refresh.get("reason", ""),
         "elapsed_seconds": 0.0, "rows": None, "date_after": top_date_before, "history_after": hist_date_before,
         "log": None,
@@ -145,6 +238,16 @@ def refresh_one(spec: dict, target_date: str | None, *, print_log: bool) -> dict
 
     if mode == "skip":
         row["reason"] = refresh.get("reason") or "声明为 skip（无独立名单）"
+        return row
+
+    dependencies = strategy_dependencies(spec, target_date)
+    row["dependencies"] = dependencies
+    blocked = [d["name"] for d in dependencies if not d["ok"]]
+    if blocked:
+        row["blocked_by"] = blocked
+        detail = "、".join(f"{d['name']}={d['latest'] or '缺'}" for d in dependencies if not d["ok"])
+        row.update(status="blocked",
+                   reason=f"依赖数据未到 {target_date}：{detail}；本策略没有执行")
         return row
     if not row["command"]:
         row.update(status="failed", reason="声明为 run/archive 但没有 entry 命令")
@@ -197,21 +300,30 @@ def refresh_one(spec: dict, target_date: str | None, *, print_log: bool) -> dict
         row["archive_note"] = note
     row["status"] = "updated" if (mode == "run" and date_after != top_date_before) or (
         mode == "archive" and hist_after != hist_date_before) else "already_fresh"
+    codes_after = code_set(top)
+    prev_codes, prev_date = previous_history_codes(spec, date_after)
+    row["previous_date"] = prev_date
+    row["codes_changed"] = codes_after != prev_codes if codes_after and prev_codes else None
     row["reason"] = row.get("reason") or f"{mode} 完成"
+    if row["status"] in ("updated", "already_fresh") and row["codes_changed"] is False:
+        row["reason"] += "；已重跑，股票集合与上次相同"
     return row
 
 
 def to_md(payload: dict) -> str:
-    icon = {"updated": "✅", "already_fresh": "✅", "no_signal": "➖", "stale": "⚠️",
+    icon = {"updated": "✅", "already_fresh": "✅", "no_signal": "➖", "blocked": "⛔", "stale": "⚠️",
             "timeout": "⏱️", "failed": "❌", "skipped": "⏭️"}
     lines = [f"# 策略名单刷新状态 · {payload['generated_at']}", "",
              f"- 目标交易日：**{payload['target_date'] or '—'}**｜共 {len(payload['rows'])} 条策略", "",
-             "| 策略 | 阶段 | 模式 | 状态 | 名单日期 | 条数 | 耗时 | 说明 |", "|---|---|---|---|---|---|---|---|"]
+             "| 策略 | 阶段 | 模式 | 状态 | 名单日期 | 条数 | 名单变化 | 依赖 | 耗时 | 说明 |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for row in payload["rows"]:
         lines.append(f"| `{row['id']}` | {row['stage']} | {row['mode']} | {icon[row['status']]} {row['status']} | "
                      f"{row['date_after'] or '—'} | {row['rows'] if row['rows'] is not None else '—'} | "
+                     f"{('是' if row.get('codes_changed') else '否') if row.get('codes_changed') is not None else '—'} | "
+                     f"{('阻塞:' + ','.join(row['blocked_by'])) if row.get('blocked_by') else 'ok'} | "
                      f"{row['elapsed_seconds']}s | {row['reason']} |")
-    bad = [row["id"] for row in payload["rows"] if row["status"] in ("stale", "timeout", "failed")]
+    bad = [row["id"] for row in payload["rows"] if row["status"] in ("blocked", "stale", "timeout", "failed")]
     quiet = [row["id"] for row in payload["rows"] if row["status"] == "no_signal"]
     lines += ["", f"**需要关注**：{'、'.join(bad) if bad else '无'}",
               f"**当日无信号（正常）**：{'、'.join(quiet) if quiet else '无'}", "",
@@ -254,7 +366,7 @@ def main() -> int:
                   f"{row['elapsed_seconds']}s {row['reason'][:60]}")
     payload = {"generated_at": datetime.now().isoformat(timespec="seconds"), "target_date": target, "rows": rows,
                "counts": {status: sum(1 for r in rows if r["status"] == status)
-                          for status in ("updated", "already_fresh", "no_signal", "stale", "timeout",
+                          for status in ("updated", "already_fresh", "no_signal", "blocked", "stale", "timeout",
                                          "failed", "skipped")}}
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "status.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

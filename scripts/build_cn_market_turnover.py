@@ -4,12 +4,15 @@
 
 输入：`assets/data/clean/ohlcv/market=CN/.../frequency=daily/adjust=qfq/year=*/`
 输出：`assets/data/meta/cn_market_turnover.parquet`
-列：trade_date, amount_yuan, volume, n_stocks
+列：trade_date, amount_yuan, volume, n_stocks, n_priced,
+    up_count, down_count, flat_count, up5_count, down5_count,
+    median_pct_chg, up_ratio
 
 口径：
 - amount 为 clean 日线的原始成交额，单位按现有数据契约为**元**；
 - 不做复权换算（成交额本身就是名义金额，不是价格）；
 - n_stocks = 当日有正成交额的股票数，停牌/无成交不计入；
+- up/down/flat = 当日有前收且有成交的股票涨跌家数；
 - 只聚合 equity 分区，不把指数代码混进来。
 """
 from __future__ import annotations
@@ -43,13 +46,13 @@ def main() -> int:
         raise SystemExit(f"没有找到日线文件：{BARS}")
 
     table = ds.dataset([str(p) for p in files], format="parquet").to_table(
-        columns=["trade_date", "stock_code", "amount", "volume"])
+        columns=["trade_date", "stock_code", "close", "amount", "volume"])
     df = table.to_pandas()
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df.dropna(subset=["trade_date", "stock_code"])
-    df = df[df["amount"].fillna(0) > 0]
 
     # clean/ohlcv 里混有指数代码（000001.SH 等）。不滤掉会把指数成交额
     # 和个股成交额相加，2026-03 的曲线会出现 28 万亿级假尖峰。
@@ -62,15 +65,27 @@ def main() -> int:
     )
     dropped = int((~equity).sum())
     df = df[equity]
+    df = df.sort_values(["stock_code", "trade_date"])
+    df["prev_close"] = df.groupby("stock_code", sort=False)["close"].shift(1)
+    df["pct_chg"] = df["close"] / df["prev_close"] - 1.0
+    df = df[df["amount"].fillna(0) > 0].copy()
 
     grouped = (
         df.groupby("trade_date", as_index=False)
         .agg(amount_yuan=("amount", "sum"),
              volume=("volume", "sum"),
-             n_stocks=("stock_code", "nunique"))
+             n_stocks=("stock_code", "nunique"),
+             n_priced=("pct_chg", "count"),
+             up_count=("pct_chg", lambda s: int((s > 1e-8).sum())),
+             down_count=("pct_chg", lambda s: int((s < -1e-8).sum())),
+             flat_count=("pct_chg", lambda s: int((s.abs() <= 1e-8).sum())),
+             up5_count=("pct_chg", lambda s: int((s >= 0.05).sum())),
+             down5_count=("pct_chg", lambda s: int((s <= -0.05).sum())),
+             median_pct_chg=("pct_chg", "median"))
         .sort_values("trade_date")
     )
     grouped["amount_yi"] = grouped["amount_yuan"] / 1e8
+    grouped["up_ratio"] = grouped["up_count"] / grouped["n_priced"].replace(0, pd.NA)
     grouped.to_parquet(OUT, index=False)
     print(
         f"[market-turnover] {OUT.relative_to(ROOT)} | {len(grouped):,} 行 | "

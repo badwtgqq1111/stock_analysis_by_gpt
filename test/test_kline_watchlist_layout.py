@@ -214,7 +214,14 @@ def test_strategy_history_api_supports_watchlist_review(client):
     summary = client.get("/api/calendar/summary").json()
     if not summary.get("dates"):
         pytest.skip("选股台账为空")
-    date = summary["dates"][-1]
+    sources_by_date: dict[str, set[str]] = {}
+    for row in summary.get("by_date") or []:
+        day = str(row.get("decision_date") or "")[:10]
+        if day:
+            sources_by_date.setdefault(day, set()).add(str(row.get("source") or ""))
+    valid = [day for day, sources in sources_by_date.items()
+             if ({"notify", "preselected"} & sources) and "arm" in sources]
+    date = max(valid) if valid else summary["dates"][-1]
     body = client.get("/api/strategies/history", params={"date": date}).json()
     assert body["date"] == date
     assert body["n_strategies"] > 0 and body["n_codes"] > 0

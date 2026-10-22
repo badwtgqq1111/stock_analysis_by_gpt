@@ -46,7 +46,9 @@ COST = 2 * 15.5 / 1e4
 
 
 def build_signals(bars: pd.DataFrame, consolidation_amp: float = 0.45,
-                  pullback_min: float = 0.03, retest_band: float = 0.03) -> pd.DataFrame:
+                  pullback_min: float = 0.03, retest_band: float = 0.03,
+                  max_range_ratio: float = 1.0,
+                  max_pre_amp20: float = 1.0) -> pd.DataFrame:
     """在日线上向量化标出「横盘 → 首板突破 → 回调 → 回踩」四步。"""
     bars = bars.sort_values(["stock_code", "trade_date"]).copy()
     # `lowxi.bars_window()` 只给 OHLC + 我们自算的 prev_close —— pct_chg 要自己算
@@ -55,6 +57,9 @@ def build_signals(bars: pd.DataFrame, consolidation_amp: float = 0.45,
     bars["hi60"] = g["high"].transform(lambda s: s.rolling(60, min_periods=40).max().shift(1))
     bars["lo60"] = g["low"].transform(lambda s: s.rolling(60, min_periods=40).min())
     bars["amp60"] = bars["hi60"] / bars["lo60"] - 1
+    bars["hi20_prev"] = g["high"].transform(lambda s: s.rolling(20, min_periods=15).max().shift(1))
+    bars["lo20_prev"] = g["low"].transform(lambda s: s.rolling(20, min_periods=15).min().shift(1))
+    bars["amp20_prev"] = bars["hi20_prev"] / bars["lo20_prev"] - 1
     bars["zt"] = (bars["pct_chg"] >= 0.095).astype(int)     # 近似涨停（主板 10%，创业板/科创另算，见 note）
     bars["zt60"] = g["zt"].transform(lambda s: s.rolling(60, min_periods=40).sum().shift(1))
     bars["prev_zt"] = g["zt"].shift(1).fillna(0)
@@ -68,7 +73,7 @@ def build_signals(bars: pd.DataFrame, consolidation_amp: float = 0.45,
     # 首板突破后的 1~5 日：回调且回踩到箱体上沿附近（不破）
     rows = []
     view = bars[["stock_code", "trade_date", "first_breakout", "level", "close", "high", "low",
-                 "open", "hi60", "amp60", "consolidated", "board_first", "breakout"]]
+                 "open", "hi60", "amp60", "amp20_prev", "consolidated", "board_first", "breakout"]]
     for code, frame in view.groupby("stock_code", sort=False):
         index = frame.index.to_numpy()
         hits = np.where(frame["first_breakout"].to_numpy())[0]
@@ -84,9 +89,21 @@ def build_signals(bars: pd.DataFrame, consolidation_amp: float = 0.45,
                 drawdown = row["close"] / entry_close - 1
                 in_band = -retest_band <= (row["close"] / level - 1) <= 0.01
                 if drawdown <= -pullback_min and in_band:
+                    pre_amp20 = float(frame["amp20_prev"].iloc[position])
+                    level_amp = float(frame["amp60"].iloc[position])
+                    # 用户口径（2026-10-22）：箱体突破要发生在**低波动 → 高波动**的拐点，
+                    # 而不是在一段已经走完的趋势末端。两个条件分开卡：
+                    #   * 相对压缩：突破前 20 日振幅 ≤ 60 日振幅 × ratio（箱体在收口）
+                    #   * 绝对低波：突破前 20 日振幅 ≤ max_pre_amp20（低波阶段本身不能太宽）
+                    if max_range_ratio < 1.0 and pre_amp20 > level_amp * max_range_ratio:
+                        break
+                    if max_pre_amp20 < 1.0 and pre_amp20 > max_pre_amp20:
+                        break
                     rows.append({"stock_code": code, "breakout_date": frame["trade_date"].iloc[position],
                                  "retest_date": row["trade_date"], "offset": offset,
-                                 "level": float(level), "consolidated_amp": float(frame["amp60"].iloc[position])})
+                                 "level": float(level), "consolidated_amp": level_amp,
+                                 "pre_amp20": pre_amp20,
+                                 "range_ratio": (pre_amp20 / level_amp if level_amp else None)})
                     break
     return pd.DataFrame(rows)
 

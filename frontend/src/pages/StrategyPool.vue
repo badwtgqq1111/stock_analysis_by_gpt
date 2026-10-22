@@ -98,6 +98,7 @@
                   <span class="si-name">{{ s.name }}</span>
                   <span v-if="s.factor_design" class="tiny dim">{{ s.factor_design.family_id }} · {{ s.factor_design.decision_type }} / {{ s.factor_design.implementation_version }}</span>
                   <span class="tag" :class="detailOf(s).identity.groupClass">{{ s.group }}</span>
+                  <span v-if="s.variant_of" class="tag dim tiny">变体 · {{ s.variant_of }}</span>
                 </div>
                 <div class="si-row">
                   <span class="stage-badge" :class="detailOf(s).identity.stageClass">
@@ -125,8 +126,9 @@
                   · 快照 {{ detailOf(s).freshness.nSnapshots }}
                 </div>
                 <div class="si-row tiny" v-if="s.refresh">
-                  <span class="tag tiny" :class="refreshTone(s.refresh.status)">
-                    {{ refreshIcon(s.refresh.status) }} 名单刷新 {{ refreshLabel(s.refresh.status) }}
+                  <span class="tag tiny" :class="refreshTone(s.refresh.status)" :title="s.refresh.reason">
+                    {{ refreshIcon(s.refresh.status) }}
+                    {{ s.refresh.codes_changed === false ? '已重跑 · 名单未变' : '名单刷新 ' + refreshLabel(s.refresh.status) }}
                   </span>
                   <span class="dim">{{ s.refresh.date_after || '—' }}</span>
                 </div>
@@ -142,6 +144,9 @@
             <div class="dh-top">
               <h5>{{ current.identity.name }}</h5>
               <span class="tag" :class="current.identity.groupClass">{{ current.identity.group }}</span>
+              <span v-if="entryById(current.identity.id)?.variant_of" class="tag dim tiny">
+                变体 · {{ entryById(current.identity.id)?.variant_of }}
+              </span>
               <span class="stage-badge" :class="current.identity.stageClass">{{ current.identity.stageLabel }}</span>
               <span class="tag" :class="toneTag(current.verdict.headline.tone)">
                 {{ current.verdict.headline.label }}</span>
@@ -272,7 +277,9 @@
                 <span class="tiny" v-if="refreshOf(current.identity.id)">
                   <span class="tag tiny" :class="refreshTone(refreshOf(current.identity.id)!.status)">
                     {{ refreshIcon(refreshOf(current.identity.id)!.status) }}
-                    {{ refreshLabel(refreshOf(current.identity.id)!.status) }}</span>
+                    {{ refreshOf(current.identity.id)!.codes_changed === false
+                      ? '已重跑 · 名单未变'
+                      : refreshLabel(refreshOf(current.identity.id)!.status) }}</span>
                   · 名单 {{ refreshOf(current.identity.id)!.date_after || '—' }}
                   · 历史 {{ refreshOf(current.identity.id)!.history_after || '—' }}
                   · {{ refreshOf(current.identity.id)!.rows ?? '—' }} 只
@@ -531,14 +538,14 @@ function refreshOf(id: string): StrategyListRefresh | null | undefined {
 
 const REFRESH_LABEL: Record<string, string> = {
   updated: '已更新', already_fresh: '已是最新', no_signal: '当日无信号', stale: '落后',
-  timeout: '超时', failed: '失败', skipped: '按需（跳过）',
+  blocked: '依赖未就绪', timeout: '超时', failed: '失败', skipped: '按需（跳过）',
 }
 const REFRESH_ICON: Record<string, string> = {
-  updated: '✅', already_fresh: '✅', no_signal: '➖', stale: '⚠️', timeout: '⏱️',
+  updated: '✅', already_fresh: '✅', no_signal: '➖', blocked: '⛔', stale: '⚠️', timeout: '⏱️',
   failed: '❌', skipped: '⏭️',
 }
 const REFRESH_TONE: Record<string, string> = {
-  updated: 'ok', already_fresh: 'ok', no_signal: 'dim', stale: 'warn', timeout: 'warn',
+  updated: 'ok', already_fresh: 'ok', no_signal: 'dim', blocked: 'bad', stale: 'warn', timeout: 'warn',
   failed: 'bad', skipped: 'dim',
 }
 const refreshLabel = (status: string) => REFRESH_LABEL[status] ?? status

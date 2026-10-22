@@ -18,6 +18,9 @@
 用法：
   uv run python scripts/select_box_breakout_arm.py                     # 默认 weekly、最多 5 只
   uv run python scripts/select_box_breakout_arm.py --cadence daily --holdings 10
+  # 2026-10-22 低波拐点变体（不覆盖原 box_arm）：
+  uv run python scripts/select_box_breakout_arm.py --arm-id box_squeeze_arm \
+      --consolidation-amp 0.25 --max-range-ratio 0.5 --max-pre-amp20 0.10
 """
 from __future__ import annotations
 
@@ -45,10 +48,13 @@ COST_ONE_WAY = 15.5 / 1e4
 
 
 def build_picks(start: str, cadence: str, holdings: int,
-                consolidation_amp: float, pullback_min: float, retest_band: float) -> pd.DataFrame:
+                consolidation_amp: float, pullback_min: float, retest_band: float,
+                max_range_ratio: float = 1.0, max_pre_amp20: float = 1.0) -> pd.DataFrame:
     """回踩日 → 名单（每周/每日节奏，按箱体振幅升序 = 越窄的横盘越优先）。"""
     bars = box.forward_returns(lowxi.bars_window(start))
-    events = box.build_signals(bars, consolidation_amp, pullback_min, retest_band)
+    events = box.build_signals(bars, consolidation_amp, pullback_min, retest_band,
+                               max_range_ratio=max_range_ratio,
+                               max_pre_amp20=max_pre_amp20)
     if events.empty:
         raise SystemExit("没有结构型信号：检查参数与日线数据")
     merged = events.merge(
@@ -85,14 +91,23 @@ def main() -> int:
     ap.add_argument("--start", default="2016-01-01")
     ap.add_argument("--cadence", default="weekly", choices=["weekly", "daily"])
     ap.add_argument("--holdings", type=int, default=5)
+    ap.add_argument("--arm-id", default="box_arm", help="产物前缀；squeeze 变体用 box_squeeze_arm")
     ap.add_argument("--consolidation-amp", type=float, default=0.45)
+    ap.add_argument("--max-range-ratio", type=float, default=1.0,
+                    help="突破前20日振幅 / 60日振幅上限；<1 = 压缩箱体")
+    ap.add_argument("--max-pre-amp20", type=float, default=1.0,
+                    help="突破前20日振幅绝对值上限；0.10 = 低波箱体上下价差不超过 10%%")
     ap.add_argument("--pullback-min", type=float, default=0.03)
     ap.add_argument("--retest-band", type=float, default=0.03)
     ap.add_argument("--skip-sensitivity", action="store_true", help="跳过相邻口径敏感性对照（默认跑）")
     args = ap.parse_args()
 
     picks = build_picks(args.start, args.cadence, args.holdings, args.consolidation_amp,
-                        args.pullback_min, args.retest_band)
+                        args.pullback_min, args.retest_band, args.max_range_ratio,
+                        args.max_pre_amp20)
+    history_dir = OUT / f"{args.arm_id}_history"
+    curve_dir = (ROOT / "output/research/box_breakout/curve" if args.arm_id == "box_arm"
+                 else ROOT / "output/research/box_breakout" / args.arm_id / "curve")
     print(f"[box-arm] 决策日 {picks['retest_date'].nunique()} 个 / 逐笔 {len(picks)} 笔"
           f"（{args.cadence}，最多 {args.holdings} 只/期）", flush=True)
 
@@ -101,9 +116,6 @@ def main() -> int:
         lambda g: pd.Series({"ret": g["open_next_ret"].head(args.holdings).mean(),
                              "n": int(len(g))}), include_groups=False).reset_index()
     daily["retest_date"] = pd.to_datetime(daily["retest_date"])
-    buy_dates = pd.to_datetime(picks["next_date"] if "next_date" in picks else picks["retest_date"])
-    del buy_dates
-    bench = box.lowxi.benchmark() if hasattr(box.lowxi, "benchmark") else None
     raw = pd.read_parquet(ROOT / "assets/data/meta/cn_benchmark_daily.parquet")
     bench = raw[raw.ts_code == "000905.SH"].copy()
     bench["trade_date"] = pd.to_datetime(bench["trade_date"])
@@ -123,13 +135,13 @@ def main() -> int:
     nav = (1 + net).cumprod()
     bnav = bench.reindex(frame.index)
     bnav = bnav / bnav.iloc[0]
-    CURVE_DIR.mkdir(parents=True, exist_ok=True)
+    curve_dir.mkdir(parents=True, exist_ok=True)
     out = pd.DataFrame({"asof_date": [str(d.date()) for d in frame.index],
                         "nav": nav.to_numpy(), "csi500": bnav.to_numpy(), "n_picks": frame["n"].to_numpy()})
-    out.to_csv(CURVE_DIR / "nav_engine.csv", index=False)
+    out.to_csv(curve_dir / "nav_engine.csv", index=False)
 
     # ── 名单 ──
-    HISTORY.mkdir(parents=True, exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for date, group in picks.groupby("retest_date"):
         day = str(pd.Timestamp(date).date())
@@ -149,11 +161,12 @@ def main() -> int:
         table["planned_amount"] = 0
         table[["trade_date", "stock_code", "name", "board", "industry", "score", "rank",
                "in_portfolio", "target_weight", "lots_at_capital", "planned_amount",
-               "consolidated_amp", "offset", "level"]].to_csv(HISTORY / f"{day}.csv", index=False)
+               "consolidated_amp", "pre_amp20", "range_ratio", "offset", "level"]].to_csv(
+                   history_dir / f"{day}.csv", index=False)
         rows.append(table)
-    latest_date = max(rows, key=lambda t: t["trade_date"].iloc[0]) if rows else None
-    if latest_date is not None:
-        latest_date.to_csv(OUT / "box_arm_selection.csv", index=False)
+    latest = max(rows, key=lambda t: t["trade_date"].iloc[0]) if rows else None
+    if latest is not None:
+        latest.to_csv(OUT / f"{args.arm_id}_selection.csv", index=False)
 
     def stats(series: pd.Series) -> dict:
         x = np.r_[1.0, series.to_numpy(dtype=float)]
@@ -170,7 +183,8 @@ def main() -> int:
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "cadence": args.cadence, "holdings": args.holdings,
         "params": {"consolidation_amp": args.consolidation_amp, "pullback_min": args.pullback_min,
-                   "retest_band": args.retest_band},
+                   "retest_band": args.retest_band, "max_range_ratio": args.max_range_ratio,
+                   "max_pre_amp20": args.max_pre_amp20},
         "window": [str(frame.index[0].date()), str(frame.index[-1].date())],
         "n_decision_days": int(picks["retest_date"].nunique()), "n_trades": int(len(picks)),
         "avg_picks_per_day": float(daily["n"].mean()),
@@ -181,8 +195,16 @@ def main() -> int:
         "daily_report_nw_t": float(nw_t),
         "methodology": ("T 日（回踩日）选股 → T+1 开盘买 → T+1 收盘卖、隔夜空仓；"
                         f"{args.cadence} 节奏、每期最多 {args.holdings} 只等权、按箱体振幅升序（越窄越优先）；"
+                        f"突破前20日/60日振幅上限={args.max_range_ratio:.2f}，"
+                        f"突破前20日振幅绝对值上限={args.max_pre_amp20:.2%}；"
                         "扣 15.5bp/边（含滑点）。"),
-        "evidence": "output/research/box_breakout/REPORT.md（毛期望 t=+3.66、扣费≈0、降换手后仍 +2.56）",
+        "evidence": (
+            "output/research/box_breakout/REPORT.md（原始 60 日振幅 ≤45% 口径：毛 +0.352%、扣费 +0.042%、"
+            "日度聚类 NW t=+3.66）"
+            if args.arm_id == "box_arm" else
+            "output/research/box_breakout/BOX_SQUEEZE.md（压缩箱体：60 日振幅 ≤25%、突破前 20 日振幅 "
+            "≤10% 且 ≤50%×60 日振幅；事件层 263 笔毛 +0.89%、扣费 +0.58%、日度聚类 NW t=+3.64）"
+        ),
     }
     # ── 参数敏感性（同一信号、不同节奏/宽度）──────────────────────────────
     # 为什么必须跑：这个结构型信号的**逐笔**毛期望显著（t=3.66），但组合形态对节奏/宽度极其敏感
@@ -194,7 +216,8 @@ def main() -> int:
                 continue
             try:
                 alt = build_picks(args.start, cadence, holdings, args.consolidation_amp,
-                                  args.pullback_min, args.retest_band)
+                                  args.pullback_min, args.retest_band, args.max_range_ratio,
+                                  args.max_pre_amp20)
                 daily_alt = alt.groupby("retest_date")["open_next_ret"].mean()
                 net_alt = daily_alt - 2 * COST_ONE_WAY
                 nav_alt = (1 + net_alt.sort_index()).cumprod()
@@ -206,9 +229,16 @@ def main() -> int:
             except SystemExit:
                 continue
     payload["parameter_sensitivity"] = sensitivity
-    payload["sensitivity_note"] = ("结构型信号对节奏/宽度极敏感：只有 weekly×5 为正；"
-                                   "weekly×10 与 daily×10 都是深度亏损 —— 所以它只能当观察候选，不进生产权重。")
-    (CURVE_DIR / "curve.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+    positive = [f"{r['cadence']}×{r['holdings']}" for r in sensitivity
+                if (r.get("total_return_simple") or 0) > 0]
+    payload["sensitivity_note"] = (
+        "结构型信号对节奏/宽度极敏感：原始 45% 箱体只有 weekly×5 为正，"
+        "weekly×10 与 daily×10 都是深度亏损 —— 所以它只能当观察候选，不进生产权重。"
+        if args.arm_id == "box_arm" else
+        "压缩箱体变体的相邻口径见 parameter_sensitivity；只有样本足够、且相邻节奏不全为负时才考虑晋级。"
+        + (f" 本口径相邻正收益格：{'、'.join(positive)}。" if positive else " 本口径相邻格均为负。")
+    )
+    (curve_dir / "curve.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
                                           encoding="utf-8")
     print(f"[box-arm] 曲线 {payload['window'][0]} ~ {payload['window'][1]}："
           f"累计 {payload['metrics']['total_return']*100:+.2f}%（中证500 {payload['benchmark']['total_return']*100:+.2f}%）"
@@ -218,8 +248,8 @@ def main() -> int:
     for row in sensitivity:
         print(f"[box-arm] 敏感性 {row['cadence']}×{row['holdings']}: 逐笔毛 {row['trade_mean_gross']*100:+.3f}% "
               f"/ 累计 {row['total_return_simple']*100:+.1f}%", flush=True)
-    print(f"[box-arm] 写出 box_arm_history/{len(rows)} 个决策日 + box_arm_selection.csv + curve/nav_engine.csv",
-          flush=True)
+    print(f"[box-arm] 写出 {history_dir.relative_to(ROOT)}/{len(rows)} 个决策日 + "
+          f"{args.arm_id}_selection.csv + {(curve_dir / 'nav_engine.csv').relative_to(ROOT)}", flush=True)
     return 0
 
 

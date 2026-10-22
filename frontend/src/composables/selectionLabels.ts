@@ -13,6 +13,7 @@ export const LEDGER_SOURCE_LABEL: Record<string, string> = {
   arm_concept: '行业轮动（概念/板块手臂）',
   rot_arm: '行业轮动（MST 大类 + 7 因子等权）',
   box_arm: '打板/低吸（箱体突破回踩）',
+  rbreaker_arm: '突破/反转（R-Breaker）',
   first_ban_lowxi: '打板/低吸（首板低吸·反例）',
   jq_multi_factor: '多因子策略（低市值+高ROE）',
   jq_roe_roa: '多因子策略（ROE＋0.25×ROA）',

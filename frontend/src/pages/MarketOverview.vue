@@ -2,7 +2,7 @@
   <div class="page">
     <PageHeader
       title="大盘行情"
-      description="指数日线与全 A 成交额。指数只做市场温度参考，不进入个股策略池；成交额为 clean 日线名义金额汇总（元 → 亿元）。"
+      description="指数日线、全 A 成交额与个股涨跌家数。指数只做市场温度参考，不进入个股策略池；成交额为 clean 日线名义金额汇总（元 → 亿元）。"
     >
       <template #actions>
         <span class="pill tiny" v-if="overview?.asof">日线交易日 <b>{{ overview.asof }}</b></span>
@@ -18,7 +18,7 @@
         <StatTile label="日线交易日" :value="overview.asof || '—'" sub="指数收盘日" />
         <StatTile label="全 A 成交额" :value="money(overview.total_amount_yi)" tone="gold"
                   :sub="turnoverSub" />
-        <StatTile label="上涨 / 下跌" :value="upDown" :sub="`${overview.indices.length} 个指数`" />
+        <StatTile label="个股上涨 / 下跌" :value="upDown" :sub="breadthSub" />
         <StatTile label="20 日成交额变化" :value="trendText" :sub="trendSub" />
       </div>
 
@@ -41,6 +41,31 @@
         <TurnoverChart v-else-if="turnover?.available" :series="turnover.series" :height="280" />
         <p class="hint tiny">
           X 轴为交易日，Y 轴为亿元；黄色为每日成交额，绿色虚线为 20 日均值。
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="chart-head">
+          <div>
+            <b>个股涨跌家数</b>
+            <span class="tiny dim" v-if="overview.breadth">
+              · 上涨 {{ overview.breadth.up ?? '—' }} / 下跌 {{ overview.breadth.down ?? '—' }}
+              / 平盘 {{ overview.breadth.flat ?? '—' }}
+            </span>
+          </div>
+          <span class="pill tiny" v-if="overview.breadth?.up_ratio != null">
+            上涨占比 {{ (overview.breadth.up_ratio * 100).toFixed(1) }}%
+          </span>
+        </div>
+        <SvgCurve v-if="breadthLabels.length" :series="breadthSeries"
+                  :labels="breadthLabels" :height="230" />
+        <div v-else class="empty tiny">暂无个股涨跌统计</div>
+        <p class="hint tiny">
+          红线上涨家数、绿线下跌家数、灰线平盘；统计有成交且有前收的 A 股。
+          <span v-if="overview.breadth">
+            5% 以上 {{ overview.breadth.up5 ?? '—' }} 只，5% 以下 {{ overview.breadth.down5 ?? '—' }} 只，
+            个股涨跌幅中位数 {{ pct(overview.breadth.median_pct_chg == null ? null : overview.breadth.median_pct_chg * 100) }}。
+          </span>
         </p>
       </div>
 
@@ -170,6 +195,7 @@ import Sparkline from '@/components/ui/Sparkline.vue'
 import KlineChart from '@/components/KlineChart.vue'
 import IntradayChart from '@/components/IntradayChart.vue'
 import TurnoverChart from '@/components/TurnoverChart.vue'
+import SvgCurve from '@/components/ui/SvgCurve.vue'
 import { getMarketIndexIntraday, getMarketIndexOhlcv, getMarketOverview, getMarketTurnover } from '@/api/client'
 import type { MarketIndexIntraday, MarketIndexOhlcv, MarketOverview, MarketTurnoverSeries } from '@/types/api'
 
@@ -208,11 +234,24 @@ const activeChange = computed(() => chartMode.value === 'intraday'
   ? (intraday.value?.latest?.change_pct ?? null)
   : (chart.value?.latest.change_pct ?? null))
 const upDown = computed(() => {
-  const list = overview.value?.indices || []
-  const up = list.filter(x => (x.pct_chg ?? 0) > 0).length
-  const down = list.filter(x => (x.pct_chg ?? 0) < 0).length
-  return `${up} / ${down}`
+  const b = overview.value?.breadth
+  return b?.up == null || b?.down == null ? '—' : `${b.up.toLocaleString('zh-CN')} / ${b.down.toLocaleString('zh-CN')}`
 })
+const breadthSub = computed(() => {
+  const b = overview.value?.breadth
+  if (!b) return '暂无个股统计'
+  const ratio = b.up_ratio == null ? '—' : `${(b.up_ratio * 100).toFixed(1)}%`
+  return `上涨占比 ${ratio} · 平盘 ${b.flat?.toLocaleString('zh-CN') ?? '—'} · 5%以上 ${b.up5 ?? '—'}`
+})
+const breadthSeries = computed(() => {
+  const rows = overview.value?.breadth_series || []
+  return [
+    { name: '上涨', color: 'var(--state-bad)', points: rows.map(x => x.up ?? 0) },
+    { name: '下跌', color: 'var(--state-ok)', points: rows.map(x => x.down ?? 0) },
+    { name: '平盘', color: 'var(--text-dim)', points: rows.map(x => x.flat ?? 0) },
+  ]
+})
+const breadthLabels = computed(() => (overview.value?.breadth_series || []).map(x => x.date || ''))
 const trendText = computed(() => {
   const s = overview.value?.turnover_series || []
   const vals = s.map(x => x.amount_yi).filter((x): x is number => x != null)

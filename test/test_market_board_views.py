@@ -302,3 +302,14 @@ def test_lhb_daily_api_and_page_are_wired(client):
     nav = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")
     assert "getLhbDaily" in page and "龙虎榜" in page and "上榜原因" in page
     assert "path: '/lhb'" in router and "{ to: '/lhb', label: '龙虎榜' }" in nav
+
+
+def test_market_overview_exposes_stock_breadth(client):
+    body = client.get("/api/market/overview").json()
+    assert body["available"] is True
+    breadth = body.get("breadth") or {}
+    assert breadth["up"] + breadth["down"] + breadth["flat"] == breadth["n_priced"]
+    assert 0 <= breadth["up_ratio"] <= 1
+    assert body["breadth_series"], "大盘页需要近端个股涨跌家数序列"
+    last = body["breadth_series"][-1]
+    assert {"date", "up", "down", "flat", "up_ratio"} <= set(last)

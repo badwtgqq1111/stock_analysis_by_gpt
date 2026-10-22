@@ -23,6 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PY = str(ROOT / ".venv/bin/python")
 PLIST = Path.home() / "Library/LaunchAgents/com.quant.cn-pipeline.plist"
+STRATEGY_PLIST = Path.home() / "Library/LaunchAgents/com.quant.strategy-lists.plist"
 
 
 def _load(name: str, rel: str):
@@ -45,6 +46,21 @@ def test_plist_schedules_eighteen_hundred():
     assert (19, 30) not in pairs, "旧的 19:30 应当已移除"
     assert len(pairs) >= 2, "保留重试档（当天成功后 .done 会让后续触发跳过）"
     lint = subprocess.run(["plutil", "-lint", str(PLIST)], capture_output=True, text=True)
+    assert lint.returncode == 0, lint.stdout + lint.stderr
+
+
+def test_independent_strategy_refresh_schedule_is_registered():
+    assert STRATEGY_PLIST.exists(), "独立策略刷新 LaunchAgent 未安装"
+    payload = plistlib.loads(STRATEGY_PLIST.read_bytes())
+    assert payload["Label"] == "com.quant.strategy-lists"
+    pairs = {(x["Hour"], x["Minute"]) for x in payload["StartCalendarInterval"]}
+    assert (22, 15) in pairs and (23, 15) in pairs
+    assert payload["RunAtLoad"] is False
+    script = ROOT / "scripts/run_strategy_refresh.sh"
+    assert script.exists() and os.access(script, os.X_OK)
+    text = script.read_text(encoding="utf-8")
+    assert "refresh_strategy_lists.py" in text and "run_daily_production.sh" in text
+    lint = subprocess.run(["plutil", "-lint", str(STRATEGY_PLIST)], capture_output=True, text=True)
     assert lint.returncode == 0, lint.stdout + lint.stderr
 
 

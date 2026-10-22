@@ -336,6 +336,28 @@ def test_box_arm_registered_with_honest_sensitivity_note():
         assert all(v < 0 for v in sensitivity.values()), f"相邻口径都应为负（实测）：{sensitivity}"
 
 
+def test_box_squeeze_variant_encodes_low_vol_pivot_without_overwriting_box_arm():
+    """用户 2026-10-22：原箱体上下价差太大，应该买低波收口后的第一次扩张。
+
+    这条锁住三件事：① 变体是独立候选（不覆盖原 box_arm 的产物）；
+    ② 参数里同时有「20 日/60 日相对压缩」和「20 日振幅绝对值」；
+    ③ 登记的是低波拐点口径，不是原 45% 宽箱体。
+    """
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    entry = next((s for s in config["strategies"] if s["id"] == "box_squeeze_arm"), None)
+    assert entry, "config/strategies.json 必须登记 box_squeeze_arm"
+    assert entry["stage"] == "candidate" and entry.get("variant_of") == "box_arm"
+    assert "max-pre-amp20 0.10" in entry["entry"] and "--max-range-ratio 0.5" in entry["entry"]
+    assert "低波" in entry["summary"] and "涨完了" in entry["summary"]
+    assert entry["history_dir"] == "output/results_cn/box_squeeze_arm_history"
+    assert "box_squeeze_arm/curve/nav_engine.csv" in entry["curve_source"]["nav_csv"]
+    script = (ROOT / "scripts/select_box_breakout_arm.py").read_text(encoding="utf-8")
+    assert "--max-pre-amp20" in script and "max_pre_amp20" in script
+    main_body = script.split("def main", 1)[1]
+    assert "写出 box_arm_history" not in main_body, "落盘提示不得写死原 box_arm 路径"
+    assert "history_dir.relative_to(ROOT)" in main_body
+
+
 def test_verdict_flags_weak_risk_adjusted_returns():
     """卡玛与夏普都 < 0.5（且样本≥一年）→ 记「风险调整后收益偏弱」；否则会有"正期望"但风险很差的卡混过去。"""
     module = (ROOT / "frontend/src/components/strategyDetail.ts").read_text(encoding="utf-8")

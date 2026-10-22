@@ -110,6 +110,14 @@ export interface MarketTurnoverBar extends MarketTurnoverPoint {
   ma20: number | null
 }
 
+export interface MarketBreadthPoint {
+  date: string | null
+  up: number | null
+  down: number | null
+  flat: number | null
+  up_ratio: number | null
+}
+
 export interface MarketTurnoverSeries {
   available: boolean
   asof: string | null
@@ -133,6 +141,18 @@ export interface MarketOverview {
   total_amount_yi: number | null
   total_amount_yuan: number | null
   n_stocks: number | null
+  breadth?: {
+    n_stocks: number | null
+    n_priced: number | null
+    up: number | null
+    down: number | null
+    flat: number | null
+    up5: number | null
+    down5: number | null
+    median_pct_chg: number | null
+    up_ratio: number | null
+  } | null
+  breadth_series?: MarketBreadthPoint[]
   turnover_series: MarketTurnoverPoint[]
   indices: MarketIndexQuote[]
   source: Record<string, string>
@@ -1055,6 +1075,7 @@ export interface StrategyPoolEntry {
   id: string
   name: string
   group: string
+  variant_of?: string
   kind: string
   stage: string
   stage_label: string
@@ -1063,6 +1084,7 @@ export interface StrategyPoolEntry {
   summary: string
   entry: string
   schedule: string
+  daily_refresh?: { mode?: string; reason?: string }
   ledger_sources: string[]
   selection_source: string
   performance?: StrategyPerformance
@@ -1149,6 +1171,10 @@ export interface StrategyListRefresh {
   history_after?: string | null
   rows?: number | null
   elapsed_seconds?: number
+  codes_changed?: boolean | null
+  previous_date?: string | null
+  blocked_by?: string[]
+  dependencies?: { name: string; latest: string | null; required: string | null; ok: boolean }[]
   command?: string
   log?: string | null
   reason?: string

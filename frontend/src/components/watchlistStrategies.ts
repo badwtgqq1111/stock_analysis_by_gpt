@@ -36,13 +36,16 @@ export function strategyGroups(
   entries: {
     id: string; name: string; selection_source?: string; stage: string
     ledger_sources?: string[]
+    daily_refresh?: { mode?: string }
     stage_label?: string; summary?: string; latest_date?: string | null
     refresh?: StrategyListRefresh | null
     annual_rank?: StrategyPoolEntry['annual_rank']; annual_rank_reason?: string
   }[],
   verdictOf?: (entry: { id: string }) => GroupVerdict | undefined,
 ): WatchlistGroup[] {
-  return entries.filter((s) => Boolean(s.selection_source) && s.stage !== 'retired').map((s) => ({
+  return entries.filter((s) =>
+    Boolean(s.selection_source) && s.stage !== 'retired' && s.daily_refresh?.mode !== 'skip',
+  ).map((s) => ({
     key: s.id, label: s.name, source: s.selection_source!, stage: s.stage_label || s.stage,
     note: s.summary || s.name, date: s.latest_date || null,
     ledgerSources: s.ledger_sources || [], rows: [], loading: false, error: '',
@@ -55,6 +58,7 @@ export function strategyGroups(
 export function refreshMark(refresh?: StrategyListRefresh | null): { icon: string; tone: 'ok' | 'warn' | 'bad' | 'dim'; detail: string } | null {
   if (!refresh) return null
   const detail = `名单刷新 ${refresh.status}：${refresh.date_after || '—'}（${refresh.reason || ''}）`
+  if (refresh.status === 'blocked') return { icon: '⛔', tone: 'bad', detail }
   if (refresh.status === 'stale') return { icon: '⚠️', tone: 'warn', detail }
   if (refresh.status === 'timeout') return { icon: '⏱️', tone: 'warn', detail }
   if (refresh.status === 'failed') return { icon: '❌', tone: 'bad', detail }

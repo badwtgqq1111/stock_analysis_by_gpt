@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.quant.strategy-lists</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/ccs/code/quant/stock_analysis_by_gpt/scripts/run_strategy_refresh.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/ccs/code/quant/stock_analysis_by_gpt</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>15</integer></dict>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/ccs/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/ccs</string>
+    <key>UV_PROJECT_ENVIRONMENT</key>
+    <string>/Users/ccs/code/quant/stock_analysis_by_gpt/.venv</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/ccs/code/quant/stock_analysis_by_gpt/output/results_cn/strategy_lists/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ccs/code/quant/stock_analysis_by_gpt/output/results_cn/strategy_lists/launchd.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

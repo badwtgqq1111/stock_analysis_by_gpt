@@ -1,7 +1,7 @@
 {
   "version": 1,
   "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。 2026-10-13 追加 daily_refresh（每日名单刷新契约）与 selection/curve（抽象层的声明层，由 backend/services/strategy_registry.py 派生给选股结果页 / 曲线 / 导出 / 自选等消费端）。",
-  "updated_at": "2026-10-17",
+  "updated_at": "2026-10-22",
   "strategies": [
     {
       "id": "live_holdings",
@@ -540,7 +540,7 @@
       "stage": "candidate",
       "owner": "research",
       "tag_class": "warn",
-      "summary": "多日结构口径：60 日窄幅横盘（振幅 ≤45% 且 60 日无涨停）→ 首板且收盘创 60 日新高 → 1~5 日内回调 ≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → 次日开盘买、当日收盘卖（隔夜空仓），每周最多 5 只、按箱体振幅升序。逐笔毛 +0.40%/净 +0.09%（1,949 笔，日度聚类 NW t +3.66 显著）；累计 +26.4% 但最大回撤 −60.5%、卡玛仅 0.04。⚠️ **参数极敏感**：weekly×10 −68.8%、daily×5 −76.6%、daily×10 −74.7% —— 只作观察候选，不进生产权重。",
+      "summary": "⚠️ 2026-10-22 复核：60 日振幅 ≤45% 的箱体过宽，最新名单多为已涨 15%~19%、距 60 日低点 21%~23% 的中段票，形态上确实像『涨完了』；低波收口修正见 `box_squeeze_arm`（60 日 ≤25% + 突破前 20 日 ≤10% 且 ≤50%×60 日）。原口径保留作对照：60 日窄幅横盘（振幅 ≤45% 且 60 日无涨停）→ 首板且收盘创 60 日新高 → 1~5 日内回调 ≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → 次日开盘买、当日收盘卖（隔夜空仓），每周最多 5 只、按箱体振幅升序。逐笔毛 +0.40%/净 +0.09%（1,949 笔，日度聚类 NW t +3.66 显著）；累计 +26.4% 但最大回撤 −60.5%、卡玛仅 0.04。⚠️ **参数极敏感**：weekly×10 −68.8%、daily×5 −76.6%、daily×10 −74.7% —— 只作观察候选，不进生产权重。",
       "entry": "uv run python scripts/select_box_breakout_arm.py",
       "schedule": "按需（研究候选；不进每日自动化）",
       "artifacts": [
@@ -569,7 +569,7 @@
       },
       "selection": {
         "label": "CN 横盘箱体突破回踩手臂（box_arm）",
-        "note": "结构型候选（2026-10-10）：60 日窄幅横盘（振幅≤45% 且 60 日无涨停）→ 首板且收盘创 60 日新高 → 1~5 日内回调≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → 次日开盘买、当日收盘卖（隔夜空仓）；每周最多 5 只等权、按箱体振幅升序。逐笔毛 +0.40%/净 +0.09%（1,949 笔），累计 +28.2%、最大回撤 −60.5%、卡玛 0.04 —— ⚠️ 参数极敏感（weekly×10 −68.8%、daily×5 −76.6%），只作观察候选，不参与生产权重。",
+        "note": "结构型候选（2026-10-10；2026-10-22 复核箱体过宽，低波拐点修正见 `box_squeeze_arm`）：60 日窄幅横盘（振幅≤45% 且 60 日无涨停）→ 首板且收盘创 60 日新高 → 1~5 日内回调≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → 次日开盘买、当日收盘卖（隔夜空仓）；每周最多 5 只等权、按箱体振幅升序。逐笔毛 +0.40%/净 +0.09%（1,949 笔），累计 +28.2%、最大回撤 −60.5%、卡玛 0.04 —— ⚠️ 参数极敏感（weekly×10 −68.8%、daily×5 −76.6%），只作观察候选，不参与生产权重。",
         "roles": [
           [
             "research",
@@ -594,9 +594,74 @@
       }
     },
     {
+      "id": "box_squeeze_arm",
+      "name": "箱体压缩突破回踩（低波拐点版）",
+      "group": "打板/低吸",
+      "kind": "rule_strategy",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "warn",
+      "variant_of": "box_arm",
+      "summary": "针对用户 2026-10-22 的批评修正 box_arm：原口径 60 日振幅 ≤45%、不要求低波压缩，最新选出的票 60 日涨幅 +15%~+19%、距 60 日低点 +21%~+23%，看起来确实像『涨完了』。本口径把箱体收窄为：60 日振幅 ≤25% 且 60 日无涨停 → 首板收盘创 60 日新高 → **突破前 20 日振幅 ≤10% 且 ≤50%×60 日振幅**（低波收口后的第一次扩张）→ 1~5 日内回调 ≥3% → 回踩落在箱体上沿 −3%~+1% 内不破 → T+1 开盘买、当日收盘卖。事件层 263 笔：逐笔毛 +0.89%/净 +0.58%、胜率 57%、按回踩日聚类 NW t +3.64；组合层 weekly×5（252 笔）：累计 +127.5%、年化 +8.8%、最大回撤 −18.7%、NW t +2.22，同期中证500 +5.4%。⚠️ 收益集中在 2023（+62.5%）；剔除 2023 后累计 +40.0%、年化约 +3.4%、NW t +1.12。信号稀疏（207 个决策日 / 2,461 个交易日，平均 1.2 只/决策日），年化来自低频事件而非长期满仓；仍是观察候选，不进生产权重。",
+      "entry": "uv run python scripts/select_box_breakout_arm.py --arm-id box_squeeze_arm --consolidation-amp 0.25 --max-range-ratio 0.5 --max-pre-amp20 0.10 --cadence weekly --holdings 5",
+      "schedule": "每日自动化（名单刷新契约 strategy_lists / 非阻塞）",
+      "artifacts": [
+        "output/results_cn/box_squeeze_arm_selection.csv",
+        "output/research/box_breakout/box_squeeze_arm/curve/curve.json",
+        "output/research/box_breakout/BOX_SQUEEZE.md"
+      ],
+      "history_dir": "output/results_cn/box_squeeze_arm_history",
+      "no_tracking": true,
+      "curve_source": {
+        "nav_csv": "output/research/box_breakout/box_squeeze_arm/curve/nav_engine.csv",
+        "kind": "strategy_rule_net",
+        "reason": "策略原始口径逐笔模拟（回踩日选股 → T+1 开盘买 → 当日收盘卖、隔夜空仓），已扣 15.5bp/边。压缩条件把 60 日振幅从 45% 收到 25%，并额外要求突破前 20 日振幅 ≤10% 且 ≤50%×60 日振幅，用来区分『低波收口后的第一次扩张』与『趋势末端的高位突破』。",
+        "methodology": "每周最多 5 只等权、按箱体振幅升序（越窄越优先）；基准中证500 同窗归一到 1。"
+      },
+      "selection_source": "cn_box_squeeze_arm",
+      "date_column": "trade_date",
+      "ledger_sources": [
+        "box_squeeze_arm"
+      ],
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 30,
+        "empty_is_ok": true,
+        "note": "低频结构型信号：大多数交易日没有满足条件的票是正常的 → 记 no_signal，页面显示『当日无信号』；不是没更新。"
+      },
+      "selection": {
+        "label": "CN 箱体压缩突破回踩（box_squeeze_arm）",
+        "note": "低波拐点口径：60 日振幅≤25% 且 60 日无涨停 → 首板创 60 日新高 → 突破前 20 日振幅≤10% 且 ≤50%×60 日振幅 → 回调≥3% → 回踩箱体上沿 −3%~+1% 不破 → 次日开盘买、当日收盘卖。事件层 263 笔毛 +0.89%/净 +0.58%、NW t +3.64；组合层 252 笔累计 +127.5%、年化 +8.8%、回撤 −18.7%（同期中证500 +5.4%）。信号稀疏，只作观察候选。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/box_squeeze_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "board",
+          "industry",
+          "score",
+          "in_portfolio",
+          "target_weight",
+          "consolidated_amp",
+          "pre_amp20",
+          "range_ratio",
+          "offset",
+          "level"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      }
+    },
+    {
       "id": "cn_ensemble_pk_legacy",
       "name": "模型选股·旧 PK 口径（对照）",
-      "group": "模型策略",
+      "group": "研究基准（非每日）",
+      "variant_of": "cn_ensemble",
       "kind": "model_legacy",
       "stage": "research",
       "owner": "pipeline",
@@ -613,7 +678,7 @@
       "no_tracking": true,
       "daily_refresh": {
         "mode": "skip",
-        "reason": "影子对照变体（旧 PK 口径），没有独立名单，只有影子净值"
+        "reason": "已合并到 cn_ensemble 对照：旧 PK 口径没有独立名单，只保留影子净值，不参与每日策略刷新"
       },
       "curve": {
         "shadow": {
@@ -868,9 +933,76 @@
       }
     },
     {
+      "id": "rbreaker_arm",
+      "name": "R-Breaker（A股 T+1 长仓适配）",
+      "group": "突破/反转",
+      "kind": "rule_strategy",
+      "stage": "research",
+      "owner": "research",
+      "tag_class": "warn",
+      "summary": "标准 R-Breaker 六线：P=(H+L+C)/3、R2=P+(H-L)、R3=H+2(P-L)。A股 T+1 适配为盘前 R3 买入止损、持仓后 R2 卖出止损，只做多；量能与流动性用前一日数据。2018-01~2026-10-21：累计 −97.59%、日历年化 −34.51%、最大回撤 −97.59%、年双边换手约 195×，判定为**不通过**。原始策略依赖 T+0 日内平仓，A股不能当日卖出是主要失效原因；保留为研究反例，不接生产权重。",
+      "entry": "uv run python scripts/select_rbreaker.py",
+      "schedule": "每日自动化非阻塞研究（下一交易日 R3 买入止损候选）",
+      "artifacts": [
+        "output/results_cn/rbreaker_latest_selection.csv",
+        "output/research/rbreaker/metrics.json",
+        "output/research/rbreaker/trades.csv",
+        "output/research/rbreaker/REPORT.md"
+      ],
+      "history_dir": "output/results_cn/rbreaker_history",
+      "selection_source": "cn_rbreaker",
+      "date_column": "trade_date",
+      "ledger_sources": [
+        "rbreaker_arm"
+      ],
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 10,
+        "empty_is_ok": true,
+        "note": "R3 距昨收超过 12% 或无量能确认时可能没有候选；结构型无信号是正常态。"
+      },
+      "curve": {
+        "replay": {
+          "nav_csv": "output/research/rbreaker/curve/nav.csv",
+          "kind": "research_replay",
+          "nav_column": "nav",
+          "benchmark_column": "benchmark_nav",
+          "description": "R-Breaker 长仓适配：盘前 R3 买入止损、R2 卖出止损，T+1 不可当日平仓；5槽位、整手、佣金/印花税/滑点；2018-01 起。"
+        }
+      },
+      "selection": {
+        "label": "R-Breaker · 下一交易日 R3 买入止损候选",
+        "note": "研究反例：原版 T+0 日内规则无法直接适配 A 股 T+1；本名单只是下一交易日候选，不代表已成交，也不进入生产权重。历史回测 CAGR 为负，详见 REPORT。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/rbreaker_latest_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "stage",
+          "board",
+          "industry",
+          "score",
+          "r3",
+          "r2",
+          "r3_distance",
+          "volume_ratio_prev",
+          "last_close",
+          "target_weight",
+          "lots_at_capital"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      }
+    },
+    {
       "id": "cn_ensemble_volcap",
       "name": "模型直出 · 预测波动率限仓（影子）",
-      "group": "波动率影子研究",
+      "group": "波动率影子（每日归档）",
+      "variant_of": "cn_ensemble",
       "kind": "model",
       "stage": "research",
       "owner": "research",
@@ -887,8 +1019,9 @@
       "selection_source": "cn_ensemble_volcap",
       "date_column": "trade_date",
       "daily_refresh": {
-        "mode": "skip",
-        "reason": "独立研究由每日 volatility-forward 刷新并留档；本名单契约仍 skip，不执行生产下单。晋级需前向样本及PIT审计。"
+        "mode": "archive",
+        "max_minutes": 5,
+        "reason": "每日 volatility-forward 产出后归档名单；研究影子，不执行生产下单"
       },
       "selection": {
         "label": "模型直出 · 预测波动率限仓（影子）",
@@ -923,7 +1056,8 @@
     {
       "id": "arm_select_volrisk",
       "name": "研究手臂 · 预测波动率权重（影子）",
-      "group": "波动率影子研究",
+      "group": "波动率影子（每日归档）",
+      "variant_of": "arm_select",
       "kind": "research_arm",
       "stage": "research",
       "owner": "research",
@@ -940,8 +1074,9 @@
       "selection_source": "arm_select_volrisk",
       "date_column": "trade_date",
       "daily_refresh": {
-        "mode": "skip",
-        "reason": "独立研究由每日 volatility-forward 刷新并留档；本名单契约仍 skip，不执行生产下单。晋级需前向样本及PIT审计。"
+        "mode": "archive",
+        "max_minutes": 5,
+        "reason": "每日 volatility-forward 产出后归档名单；研究影子，不执行生产下单"
       },
       "selection": {
         "label": "研究手臂 · 预测波动率权重（影子）",
@@ -976,7 +1111,8 @@
     {
       "id": "moneyflow_factor_equivalent",
       "name": "主力资金流追踪（等价因子版）",
-      "group": "因子策略",
+      "group": "研究基准（非每日）",
+      "variant_of": "moneyflow_arm",
       "kind": "factor_pipeline",
       "stage": "research",
       "owner": "research",
@@ -993,7 +1129,7 @@
       "ledger_sources": [],
       "daily_refresh": {
         "mode": "skip",
-        "reason": "冻结研究回放；不生成生产名单或订单。数据日期在策略池明确展示。"
+        "reason": "已合并到 moneyflow_arm 策略家族：这是同一信号的等价因子实现，不重复生成每日名单"
       },
       "curve": {
         "replay": {
@@ -1007,7 +1143,8 @@
     {
       "id": "moneyflow_factor_institutional",
       "name": "主力资金流追踪（机构式组合版）",
-      "group": "因子策略",
+      "group": "研究基准（非每日）",
+      "variant_of": "moneyflow_arm",
       "kind": "factor_pipeline",
       "stage": "research",
       "owner": "research",
@@ -1026,7 +1163,7 @@
       "ledger_sources": [],
       "daily_refresh": {
         "mode": "skip",
-        "reason": "研究版组合优化；需满足至少252个留出观测、PIT、容量和前向影子后才能候选接线。"
+        "reason": "已并入 moneyflow_arm 家族；机构组合优化仍需252个留出观测、PIT、容量和前向影子，暂不每日运行"
       },
       "curve": {
         "replay": {
@@ -1052,14 +1189,15 @@
     {
       "id": "moneyflow_ml_nb",
       "name": "ML 选股版·剔除涨停开盘（历史研究）",
-      "group": "资金流·机器学习",
+      "group": "研究基准（非每日）",
+      "variant_of": "moneyflow_arm",
       "kind": "factor_pipeline",
       "stage": "research",
       "owner": "research",
       "tag_class": "info",
       "summary": "已复现Trae历史结果：累计+249.0%、原244日年化+77.4%、回撤−54.4%；原夏普0.73实为CAGR/波动率。策略池按统一252日和日均收益夏普重新计算。9.5%开盘阈值为粗略代理，历史候选使用次日开盘事后筛选，非当日已知信号；旧回放存在当日收盘定开盘预算等偏差，尚未证明优于规则版。",
       "entry": ".venv/bin/python scripts/moneyflow_ml.py --bars-start 2024-04-01",
-      "schedule": "手动研究重算，不接生产调度",
+      "schedule": "冻结研究（非每日；重新跑完整实验后手动更新）",
       "artifacts": [
         "output/results_cn/moneyflow_ml_nb_selection.csv",
         "output/research/moneyflow_ml/REPORT.md",
@@ -1075,7 +1213,7 @@
       "date_column": "trade_date",
       "daily_refresh": {
         "mode": "skip",
-        "reason": "研究版固定walk-forward结果；需重新跑完整实验后再更新名单，不接每日生产刷新。"
+        "reason": "已移出每日策略：当前为冻结 walk-forward 历史研究，补每日推理后再恢复 run"
       },
       "selection": {
         "label": "ML 选股版·剔除涨停开盘（历史研究）",
@@ -1121,14 +1259,14 @@
     {
       "id": "brain_quality_lowpe_momentum",
       "name": "质量-低估值-动量（头脑风暴）",
-      "group": "因子策略",
+      "group": "研究基准（非每日）",
       "kind": "factor_pipeline",
       "stage": "research",
       "owner": "research",
       "tag_class": "ok",
       "summary": "头脑风暴候选1：rank(roe) - rank(pe_ind_pct) + 0.5*rank(20日动量)，300只流动性面板top20等权、20日调仓、t+1开盘、每边15.5bp。2023-01-03至2026-10-15累计+27.63%、252日年化+6.97%、最大回撤−23.90%、Sharpe+0.440；同期中证500累计+13.66%、年化+3.60%，相对累计超额+12.30%。研究阶段，不接生产调度。",
       "entry": ".venv/bin/python scripts/p2_71_brainstorm_strategies.py --output output/research/p2_71/brainstorm_strategies --start 2023-01-01 --end 2026-10-15 --assets 300",
-      "schedule": "手动研究重算，不接生产调度",
+      "schedule": "冻结研究（非每日；作为候选因子/事件特征，不独立生成订单）",
       "artifacts": [
         "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/metrics.json",
         "output/research/p2_71/brainstorm_strategies/quality_lowpe_momentum/REPORT.md"
@@ -1138,7 +1276,7 @@
       "ledger_sources": [],
       "daily_refresh": {
         "mode": "skip",
-        "reason": "头脑风暴研究因子；不生成生产名单或订单。"
+        "reason": "已移出每日策略：作为候选因子/事件特征，不独立生成每日名单"
       },
       "curve": {
         "replay": {
@@ -1154,14 +1292,14 @@
     {
       "id": "brain_panic_reversal_quality",
       "name": "恐慌反转-质量过滤（头脑风暴）",
-      "group": "因子策略",
+      "group": "研究基准（非每日）",
       "kind": "factor_pipeline",
       "stage": "research",
       "owner": "research",
       "tag_class": "info",
       "summary": "头脑风暴候选2：单日跌幅≤−6%、量比≥2、close<MA20、PE行业分位≤20%；次日收涨且资金流z5>0，再次日开盘入场；最多10仓，持有20日或跌破恐慌低点退出，每边15.5bp。2023-01-03至2026-10-15共40个触发，累计+1.36%、年化+0.37%、最大回撤−2.20%、Sharpe+0.216；同期中证500累计+13.66%、年化+3.60%，相对超额−10.82%。低暴露事件策略，不接生产调度。",
       "entry": ".venv/bin/python scripts/p2_71_brainstorm_strategies.py --output output/research/p2_71/brainstorm_strategies --start 2023-01-01 --end 2026-10-15 --assets 300",
-      "schedule": "手动研究重算，不接生产调度",
+      "schedule": "冻结研究（非每日；作为候选因子/事件特征，不独立生成订单）",
       "artifacts": [
         "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/metrics.json",
         "output/research/p2_71/brainstorm_strategies/panic_reversal_quality/REPORT.md"
@@ -1171,7 +1309,7 @@
       "ledger_sources": [],
       "daily_refresh": {
         "mode": "skip",
-        "reason": "事件型头脑风暴研究；不生成生产名单或订单。"
+        "reason": "已移出每日策略：作为候选因子/事件特征，不独立生成每日名单"
       },
       "curve": {
         "replay": {

@@ -486,6 +486,43 @@ def read_box_arm_history() -> list[dict]:
     return rows
 
 
+def read_box_squeeze_arm_history() -> list[dict]:
+    """箱体压缩突破回踩（box_squeeze_arm）的历史快照 → 台账。
+
+    `box_arm` 的低波拐点变体：60 日振幅 ≤25%，且突破前 20 日振幅 ≤10% 与 ≤50%×60 日振幅。
+    产物 `output/results_cn/box_squeeze_arm_history/<决策日>.csv` 与 box_arm 分开，
+    避免两个口径互相覆盖。
+    """
+    rows = []
+    hist = RESULTS / "box_squeeze_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "box_squeeze_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"{r.get('board') or ''}｜箱体振幅 {r.get('consolidated_amp')}"
+                         f"｜突破前20日振幅 {r.get('pre_amp20')}"
+                         f"｜压缩比 {r.get('range_ratio')}"
+                         f"｜回踩第 {r.get('offset')} 日｜箱体上沿 {r.get('level')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"box_squeeze_arm_history/{path.name}",
+            })
+    return rows
+
+
 def read_donchian_breakout_history() -> list[dict]:
     """通道/箱体突破腿（donchian_breakout）的历史快照 → 台账。
 
@@ -643,6 +680,37 @@ def read_moneyflow_ml_nb_history() -> list[dict]:
     return rows
 
 
+def read_rbreaker_history() -> list[dict]:
+    """R-Breaker（A股 T+1 长仓适配）→ 台账。"""
+    rows = []
+    hist = RESULTS / "rbreaker_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "rbreaker_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"R3 {r.get('r3')}｜R2 {r.get('r2')}｜R3距昨收 "
+                         f"{round(float(r.get('r3_distance') or 0) * 100, 2)}%｜前日量比 "
+                         f"{r.get('volume_ratio_prev')}｜下一交易日挂 R3 买入止损；研究反例"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"rbreaker_history/{path.name}",
+            })
+    return rows
+
+
 def read_first_ban_lowxi_history() -> list[dict]:
     """首板低吸（社区策略）的历史快照 → 台账（**反例档案**：负期望，只为对照与追溯）。
 
@@ -758,10 +826,12 @@ def main() -> int:
 
     ledger = pd.DataFrame(read_feishu() + read_snapshots() + read_survey() + read_arm_history()
                           + read_arm_concept_history() + read_rot_arm_history()
-                          + read_box_arm_history() + read_first_ban_lowxi_history()
+                          + read_box_arm_history() + read_box_squeeze_arm_history()
+                          + read_first_ban_lowxi_history()
                           + read_wyckoff_arm_history() + read_moneyflow_arm_history()
                           + read_mainforce_arm_history() + read_moneyflow_ml_nb_history()
                           + read_donchian_breakout_history()
+                          + read_rbreaker_history()
                           + read_jq_history())
     if ledger.empty:
         raise SystemExit("三个来源都没读到选股记录")

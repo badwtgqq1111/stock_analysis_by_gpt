@@ -78,7 +78,9 @@ def _load_turnover_cached(path_str: str, ver: tuple[int, int]) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_parquet(path)
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
-    for col in ["amount_yuan", "amount_yi", "volume", "n_stocks"]:
+    for col in ["amount_yuan", "amount_yi", "volume", "n_stocks", "n_priced",
+                "up_count", "down_count", "flat_count", "up5_count", "down5_count",
+                "median_pct_chg", "up_ratio"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     if "amount_yi" not in df.columns and "amount_yuan" in df.columns:
@@ -151,6 +153,8 @@ class MarketService:
         n_stocks = None
         turnover_asof = None
         turnover_series: list[dict] = []
+        breadth = None
+        breadth_series: list[dict] = []
         if not turn.empty:
             t = turn[turn["trade_date"] <= asof]
             if not t.empty:
@@ -158,8 +162,29 @@ class MarketService:
                 turnover_asof = _iso(last["trade_date"])
                 total = _f(last.get("amount_yi"))
                 n_stocks = int(last["n_stocks"]) if pd.notna(last.get("n_stocks")) else None
+                breadth = {
+                    "n_stocks": n_stocks,
+                    "n_priced": (int(last["n_priced"]) if pd.notna(last.get("n_priced")) else None),
+                    "up": (int(last["up_count"]) if pd.notna(last.get("up_count")) else None),
+                    "down": (int(last["down_count"]) if pd.notna(last.get("down_count")) else None),
+                    "flat": (int(last["flat_count"]) if pd.notna(last.get("flat_count")) else None),
+                    "up5": (int(last["up5_count"]) if pd.notna(last.get("up5_count")) else None),
+                    "down5": (int(last["down5_count"]) if pd.notna(last.get("down5_count")) else None),
+                    "median_pct_chg": _f(last.get("median_pct_chg")),
+                    "up_ratio": _f(last.get("up_ratio")),
+                }
                 turnover_series = [
                     {"date": _iso(x["trade_date"]), "amount_yi": _f(x.get("amount_yi"))}
+                    for _, x in t.tail(max(2, int(spark))).iterrows()
+                ]
+                breadth_series = [
+                    {
+                        "date": _iso(x["trade_date"]),
+                        "up": int(x["up_count"]) if pd.notna(x.get("up_count")) else None,
+                        "down": int(x["down_count"]) if pd.notna(x.get("down_count")) else None,
+                        "flat": int(x["flat_count"]) if pd.notna(x.get("flat_count")) else None,
+                        "up_ratio": _f(x.get("up_ratio")),
+                    }
                     for _, x in t.tail(max(2, int(spark))).iterrows()
                 ]
 
@@ -170,6 +195,8 @@ class MarketService:
             "total_amount_yi": total,
             "total_amount_yuan": None if total is None else total * 1e8,
             "n_stocks": n_stocks,
+            "breadth": breadth,
+            "breadth_series": breadth_series,
             "turnover_series": turnover_series,
             "indices": quotes,
             "source": {

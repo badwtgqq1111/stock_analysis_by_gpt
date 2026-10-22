@@ -89,16 +89,69 @@ def test_refresh_states_and_no_signal_semantics(tmp_path, monkeypatch):
     assert row3["status"] == "skipped" and row3["reason"]
 
 
+def test_unchanged_codes_are_explicit(tmp_path, monkeypatch):
+    """命令重跑但股票集合没变时，状态里要明说，避免误判成“没跑”。"""
+    module = _load_refresh_module()
+    source = tmp_path / "picks.csv"
+    source.write_text(
+        "trade_date,stock_code\n2026-10-08,000001.SZ\n2026-10-08,600000.SH\n",
+        encoding="utf-8",
+    )
+    history = tmp_path / "history"
+    history.mkdir()
+    (history / "2026-10-07.csv").write_text(
+        "trade_date,stock_code\n2026-10-07,000001.SZ\n2026-10-07,600000.SH\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "OUT", tmp_path / "lists")
+    monkeypatch.setattr(module, "source_file", lambda _spec: source)
+    spec = {
+        "id": "demo_static", "name": "静态演示", "stage": "candidate",
+        "entry": "true", "selection_source": "demo",
+        "history_dir": str(history),
+        "daily_refresh": {"mode": "run"},
+    }
+    row = module.refresh_one(spec, "2026-10-08", print_log=False)
+    assert row["codes_changed"] is False
+    assert "股票集合与上次相同" in row["reason"]
+
+
+def test_stale_dependency_blocks_instead_of_running(tmp_path, monkeypatch):
+    module = _load_refresh_module()
+    dep = tmp_path / "daily.parquet"
+    __import__("pandas").DataFrame({"trade_date": ["2026-10-20"]}).to_parquet(dep, index=False)
+    source = tmp_path / "picks.csv"
+    source.write_text("trade_date,stock_code\n2026-10-19,000001.SZ\n", encoding="utf-8")
+    monkeypatch.setitem(module.DEPENDENCY_FILES, "demo_daily", dep)
+    monkeypatch.setitem(module.STRATEGY_DEPENDENCIES, "demo_dep", ["demo_daily"])
+    monkeypatch.setattr(module, "OUT", tmp_path / "lists")
+    monkeypatch.setattr(module, "source_file", lambda _spec: source)
+    spec = {
+        "id": "demo_dep", "name": "依赖阻塞演示", "stage": "candidate",
+        "entry": "false", "selection_source": "demo",
+        "daily_refresh": {"mode": "run"},
+    }
+    row = module.refresh_one(spec, "2026-10-21", print_log=False)
+    assert row["status"] == "blocked"
+    assert row["blocked_by"] == ["demo_daily"]
+    assert "没有执行" in row["reason"]
+
+
 def test_status_artifact_is_written_and_matches_config():
     if not STATUS_JSON.exists():
         pytest.skip("还没跑过 refresh_strategy_lists.py（每日流程 strategy_lists 步骤会生成）")
     payload = json.loads(STATUS_JSON.read_text(encoding="utf-8"))
     ids = {s["id"] for s in json.loads(CONFIG.read_text(encoding="utf-8"))["strategies"]}
     assert {row["id"] for row in payload["rows"]} == ids, "status.json 必须覆盖登记表里的每条策略"
-    assert payload["counts"]["stale"] == 0, f"有策略名单落后：{payload['counts']}"
+    # 最新交易日尚未写 production.done 时，允许部分依赖主流水线产物的策略暂时 stale；
+    # 完整跑完后仍然严格要求 stale=0（midrun_grace 只覆盖盘中/补跑间隔）。
+    from test._daily_state import midrun_grace
+    if not midrun_grace():
+        assert payload["counts"]["stale"] == 0, f"有策略名单落后：{payload['counts']}"
     assert payload["counts"]["failed"] == 0, f"有策略刷新失败：{payload['counts']}"
     for row in payload["rows"]:
-        assert row["status"] in ("updated", "already_fresh", "no_signal", "stale", "timeout", "failed", "skipped")
+        assert row["status"] in ("updated", "already_fresh", "no_signal", "blocked",
+                                 "stale", "timeout", "failed", "skipped")
 
 
 def test_api_exposes_lists_status(client):

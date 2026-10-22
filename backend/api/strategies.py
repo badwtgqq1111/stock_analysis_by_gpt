@@ -34,7 +34,7 @@ LISTS_STATUS = ROOT / "output/results_cn/strategy_lists/status.json"
 LISTS_STATUS_MD = ROOT / "output/results_cn/strategy_lists/STATUS.md"
 STRATEGY_CONFIG = ROOT / "config/strategies.json"
 CLEAN_BARS = ROOT / "assets/data/clean/ohlcv/market=CN"
-ATTENTION_STATUS = ("stale", "timeout", "failed")
+ATTENTION_STATUS = ("blocked", "stale", "timeout", "failed")
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 _LOCK = threading.Lock()

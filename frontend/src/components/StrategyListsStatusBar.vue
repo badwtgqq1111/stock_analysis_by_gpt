@@ -19,6 +19,8 @@
     <span v-for="row in shown" :key="row.id" class="ls-chip" :class="tone(row.status)" :title="chipTitle(row)">
       <i>{{ icon(row.status) }}</i>{{ row.name || row.id }}
       <span class="dim tiny">{{ row.date_after || '—' }}</span>
+      <span v-if="row.codes_changed === false" class="tiny">未变</span>
+      <span v-if="row.blocked_by?.length" class="tiny bad-text">依赖:{{ row.blocked_by.join(',') }}</span>
     </span>
     <span v-if="hiddenCount" class="dim tiny">… 另 {{ hiddenCount }} 条</span>
   </div>
@@ -50,14 +52,14 @@ onMounted(async () => {
 })
 
 const ORDER: Record<string, number> = {
-  stale: 0, failed: 1, timeout: 2, no_signal: 3, updated: 4, already_fresh: 5, skipped: 9,
+  blocked: 0, stale: 1, failed: 2, timeout: 3, no_signal: 4, updated: 5, already_fresh: 6, skipped: 9,
 }
 const ICONS: Record<string, string> = {
-  updated: '✅', already_fresh: '✅', no_signal: '➖', stale: '⚠️', timeout: '⏱️',
+  updated: '✅', already_fresh: '✅', no_signal: '➖', blocked: '⛔', stale: '⚠️', timeout: '⏱️',
   failed: '❌', skipped: '⏭️',
 }
 const TONES: Record<string, string> = {
-  updated: 'ok', already_fresh: 'ok', no_signal: 'dim', stale: 'warn', timeout: 'warn',
+  updated: 'ok', already_fresh: 'ok', no_signal: 'dim', blocked: 'bad', stale: 'warn', timeout: 'warn',
   failed: 'bad', skipped: 'dim',
 }
 const sorted = computed<StrategyListRefresh[]>(() => {
@@ -70,7 +72,10 @@ const hiddenCount = computed(() => Math.max(0, sorted.value.length - shown.value
 const icon = (status: string) => ICONS[status] ?? '•'
 const tone = (status: string) => TONES[status] ?? 'dim'
 const chipTitle = (row: StrategyListRefresh) =>
-  `${row.name || row.id}｜${row.status}｜名单 ${row.date_after || '—'}（历史 ${row.history_after || '—'}，${row.rows ?? '—'} 只，${row.elapsed_seconds ?? 0}s）\n${row.reason || ''}`
+  `${row.name || row.id}｜${row.status}｜名单 ${row.date_after || '—'}（历史 ${row.history_after || '—'}，${row.rows ?? '—'} 只，${row.elapsed_seconds ?? 0}s）\n`
+  + `${row.codes_changed === false ? '已重跑，股票集合与上次相同\n' : ''}`
+  + `${row.codes_changed != null && row.previous_date ? '对比上一名单日：' + row.previous_date + '\n' : ''}`
+  + `${row.blocked_by?.length ? '阻塞依赖：' + row.blocked_by.join('、') + '\n' : ''}${row.reason || ''}`
 </script>
 
 <style scoped>

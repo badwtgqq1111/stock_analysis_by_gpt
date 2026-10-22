@@ -69,7 +69,7 @@ FAMILIES: list[dict] = [
             # ⚠️ donchian_breakout 是 **zero-edge 观察候选**（A/B 8 个口径全为负、最好的打平），
             # 登记只为和中证500 逐日对照；box_arm 参数极敏感，同为观察候选。
             {"key": "breakout", "label": "突破（通道/箱体）",
-             "ids": ["box_arm", "donchian_breakout"]},
+             "ids": ["box_arm", "box_squeeze_arm", "donchian_breakout", "rbreaker_arm"]},
             # 主力追踪（2026-10-14）：资金流口径的规则策略（净流入 z 分数 + 吸筹形态），
             # 证据单位同样是「一笔」，所以同属族 A。
             {"key": "moneyflow", "label": "资金流（主力追踪）",

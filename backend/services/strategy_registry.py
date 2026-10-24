@@ -86,6 +86,8 @@ LEDGER_ADAPTERS = {
     "rot_arm": "build_selection_ledger._from_named_history(rot_arm)",
     "box_arm": "build_selection_ledger._from_named_history(box_arm)",
     "box_squeeze_arm": "build_selection_ledger.read_box_squeeze_arm_history",
+    "b4a_cap_arm": "build_selection_ledger.read_b4a_cap_arm_history",
+    "concept_watch_arm": "build_selection_ledger.read_concept_watch_arm_history",
     "first_ban_lowxi": "build_selection_ledger._from_named_history(first_ban_lowxi)",
     "wyckoff_arm": "build_selection_ledger.read_wyckoff_arm_history",
     "moneyflow_arm": "build_selection_ledger.read_moneyflow_arm_history",

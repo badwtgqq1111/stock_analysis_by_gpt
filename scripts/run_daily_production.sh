@@ -224,6 +224,15 @@ log "pipeline flags: ${PIPELINE_FLAGS:-none}"
 # 放在主阶段之前的原因：这些是 features / clean_panel 的输入。若放在主阶段之后，
 # 当天新披露的财报、新发布的行业分类要等到**第二天**才会进特征面板。
 # 每步非致命：失败只记日志不中断，最终由数据完整性报表汇总（见脚本末尾）。
+
+# 分时源冷却检查：baostock 被限流/拉黑时会写 cooldown.json，期间只走腾讯近端兜底，
+# 不再反复登录（否则黑名单会一直续期）。
+intraday_cooling() {
+  local file="$ROOT/assets/data/raw/intraday_baostock/_sync/cooldown.json"
+  [ -f "$file" ] || return 1
+  uv run python -c 'import json,sys,time; u=float(json.load(open(sys.argv[1])).get("until") or 0); sys.exit(0 if u>time.time() else 1)' "$file" 2>/dev/null
+}
+
 run_data_step() {
   local name="$1"; shift
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -312,6 +321,24 @@ done
 # 依赖 clean_panel 完成后的日线；只做页面展示汇总，失败不阻塞选股。
 if [ "$FAILED" -eq 0 ] && [ "${DAILY_MARKET_OVERVIEW:-1}" = "1" ]; then
   run_data_step market_overview uv run python scripts/build_cn_market_turnover.py
+  # 宽广度 + 阿姆士（TRIN）：给大盘页做「量价背离/广度骤降」读数，只读展示、不影响选股
+  run_data_step market_breadth uv run python scripts/build_market_breadth.py
+  # 概念排行 + 观察池（只读展示；概念成员来自新浪 + iFinD 快照）
+  # 概念成员：先合并 iFinD 快照，再校准（宽概念降噪/非主题剔除），最后出排行
+  run_data_step concept_members_rebuild uv run python scripts/rebuild_ifind_concept_members.py
+  run_data_step concept_calibrate uv run python scripts/calibrate_concept_members.py
+  run_data_step concept_relevance uv run python scripts/score_concept_relevance.py
+  run_data_step concept_ranking env NO_PROXY='*' uv run python scripts/concept_ranking.py --realtime --top 30
+  run_data_step concept_watchlist uv run python scripts/concept_watchlist.py --top 30
+fi
+
+# ── iFinD 每日资金流快照（研究/交叉核对，不替换本地多源 moneyflow）──────────
+# 本地 `cn_moneyflow_features` 仍是生产口径；iFinD 只写 raw + `mf_ifind_*` 研究特征，
+# 用于口径对照和 pre-2024 历史补齐。失败不阻塞生产。
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_IFIND_MONEYFLOW:-1}" = "1" ]; then
+  run_data_step ifind_moneyflow uv run python scripts/fetch_ifind_moneyflow_daily_snapshot.py \
+    --date "$TRADE_DATE"
+  run_data_step ifind_moneyflow_features uv run python scripts/build_ifind_moneyflow_daily_features.py
 fi
 
 # ── 研究手臂选股（arm_selection）：不替代生产名单，失败不阻塞当日生产 ──
@@ -376,6 +403,10 @@ if [ "${DAILY_ARM_CONCEPT:-1}" = "1" ]; then
   # 与 arm_selection 并列的独立策略项，产物 output/results_cn/arm_concept_selection.*，
   # 前端「选股结果」的来源下拉与「流水线」页各占一个 tab。
   run_data_step arm_concept uv run python scripts/run_cn_pipeline.py --stage arm_concept
+  # 概念热度选股（策略池 / K线左侧）：与 arm_concept 并列，独立名单
+  if [ "${DAILY_CONCEPT_WATCH_ARM:-1}" = "1" ]; then
+    run_data_step concept_watch_arm uv run python scripts/select_concept_watch_arm.py
+  fi
   # 月频回放摘要（前端「概念手臂」tab 与策略池卡上的期均/基准/超额数字）：规则一变就该重算，
   # 与名单一起放在同一步里，避免"名单是新的、回放数字是上个月的"。
   run_data_step arm_concept_backtest uv run python scripts/select_concept_arm.py --backtest --months "${DAILY_ARM_CONCEPT_BACKTEST_MONTHS:-24}"
@@ -430,9 +461,19 @@ if [ "${DAILY_SW2021:-1}" = "1" ]; then
       --max-per-run "${DAILY_SW2021_MAX:-4}" --sleep "${DAILY_SW2021_SLEEP:-2.0}"
 fi
 
+# ── 分时近端兜底：腾讯 mkline（320 根 ≈ 7 个交易日，无登录）先补最近缺口 ──────
+# 为什么放在 baostock 之前：baostock 会因并发会话拉黑 IP（实测 10001011），一旦被拉黑，
+# 当日增量会整批失败。腾讯不需要登录、0.2s/只，先把「昨天没补上的几天」补掉，
+# baostock 只剩更老的缺口要处理（或直接冷却跳过）。成交额是近似值（source 带 _est），
+# 深度回补会用 BaoStock 精确值覆盖同一 (date,time)。
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_INTRADAY_TENCENT_FILL:-1}" = "1" ]; then
+  run_data_step intraday_tencent_fill uv run python scripts/fill_intraday_gap_recent.py \
+    --limit "${DAILY_INTRADAY_TENCENT_LIMIT:-400}" --workers 8
+fi
+
 # ── 分时增量：只补「文件最后日期 < 最新交易日」的标的，且只抓缺失窗口后 --merge 回原文件 ──
 # 必须放在主阶段之后：它用日线的最大 trade_date 当"最新交易日"，日线没更新就没得补。
-if [ "$FAILED" -eq 0 ] && [ "${DAILY_INTRADAY:-1}" = "1" ]; then
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_INTRADAY:-1}" = "1" ] && ! intraday_cooling; then
   if [ "$DRY_RUN" -eq 1 ]; then
     log "step=intraday-refresh would run: sync_cn_intraday_full.py --refresh --session-seconds ${DAILY_INTRADAY_SECONDS:-1800}"
   else
@@ -446,6 +487,37 @@ if [ "$FAILED" -eq 0 ] && [ "${DAILY_INTRADAY:-1}" = "1" ]; then
       log "intraday-refresh FAILED exit=${code}（不影响生产名单）-> $LOG_DIR/intraday_refresh.log"
       tail -5 "$LOG_DIR/intraday_refresh.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
     fi
+  fi
+fi
+
+# ── 分时修补：对非停牌、仍落后的标的做一轮小批量重试 ──────────────────────
+# 2026-10-23 修：refresh 的 pending 判据改为「每只票自己的最后一条日线」，
+# 停牌/退市股不再被误报；这里只处理真正失败的非停牌票。
+# 每天最多重试 20 只、每只 90s 超时，避免再次变成"永远手动补"。
+if [ "$FAILED" -eq 0 ] && [ "${DAILY_INTRADAY_REPAIR:-1}" = "1" ] && ! intraday_cooling; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "step=intraday-repair would run: sync_cn_intraday_full.py --refresh --reset-quarantine --limit 20"
+  else
+    log "intraday-repair start（最多 20 只，600s）"
+    started=$(date +%s)
+    if NO_PROXY='*' uv run python scripts/sync_cn_intraday_full.py --refresh --reset-quarantine \
+         --batch-size 5 --batch-timeout 90 --session-seconds 600 --limit 20 \
+         > "$LOG_DIR/intraday_repair.log" 2>&1; then
+      log "intraday-repair ok ($(( $(date +%s) - started ))s) -> $LOG_DIR/intraday_repair.log"
+    else
+      code=$?
+      log "intraday-repair FAILED exit=${code}（不影响生产名单）-> $LOG_DIR/intraday_repair.log"
+      tail -5 "$LOG_DIR/intraday_repair.log" | sed 's/^/    /' | tee -a "$LOG_DIR/run.log"
+    fi
+  fi
+fi
+
+# ── 分时健康快照：把"文件在不在"升级为"最后日期够不够新"，写进当日报告 ──────
+if [ "$DRY_RUN" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
+  if uv run python scripts/sync_cn_intraday_full.py --status > "$LOG_DIR/intraday_status.json" 2>"$LOG_DIR/intraday_status.err"; then
+    log "intraday-status $(tr -d '\n' < "$LOG_DIR/intraday_status.json" | head -c 240)"
+  else
+    log "intraday-status FAILED（不影响生产名单）-> $LOG_DIR/intraday_status.err"
   fi
 fi
 

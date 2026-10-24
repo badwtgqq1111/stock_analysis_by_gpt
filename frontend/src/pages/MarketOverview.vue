@@ -19,6 +19,8 @@
         <StatTile label="全 A 成交额" :value="money(overview.total_amount_yi)" tone="gold"
                   :sub="turnoverSub" />
         <StatTile label="个股上涨 / 下跌" :value="upDown" :sub="breadthSub" />
+        <StatTile label="阿姆士指标 (TRIN)" :value="armsText" :sub="armsSub"
+                  :tone="overview?.breadth?.diverge ? 'gold' : undefined" />
         <StatTile label="20 日成交额变化" :value="trendText" :sub="trendSub" />
       </div>
 
@@ -66,6 +68,70 @@
             5% 以上 {{ overview.breadth.up5 ?? '—' }} 只，5% 以下 {{ overview.breadth.down5 ?? '—' }} 只，
             个股涨跌幅中位数 {{ pct(overview.breadth.median_pct_chg == null ? null : overview.breadth.median_pct_chg * 100) }}。
           </span>
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="chart-head">
+          <div>
+            <b>阿姆士指标（TRIN）</b>
+            <span class="tiny dim">
+              · 下跌股票成交额占比 {{ overview.breadth?.down_amount_share == null ? '—' : (overview.breadth.down_amount_share * 100).toFixed(1) + '%' }}
+            </span>
+          </div>
+          <span class="pill tiny" :class="{ warn: overview.breadth?.diverge }">
+            {{ armsBadge }}
+          </span>
+        </div>
+        <SvgCurve v-if="armsLabels.length" :series="armsSeries" :labels="armsLabels" :height="200" />
+        <div v-else class="empty tiny">暂无阿姆士指标（先跑 scripts/build_market_breadth.py）</div>
+        <p class="hint tiny">
+          TRIN =（上涨家数 / 下跌家数）÷（上涨成交额 / 下跌成交额）。
+          数值越高，说明下跌股票占用的成交额越大 —— 指数在涨但 TRIN &gt; 1.5 就是「量价背离」（权重放量、小票补涨）；
+          TRIN &lt; 0.7 且广度极低，多为放量恐慌。金线为 5 日均值。
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="chart-head">
+          <div>
+            <b>概念排行</b>
+            <span class="tiny dim" v-if="concepts?.coverage">
+              · 覆盖 {{ concepts.coverage.coverage_pct }}%（{{ concepts.coverage.covered }}/{{ concepts.coverage.stocks }} 只）
+              · 观察池 {{ concepts.watchlist?.length || 0 }} 只
+            </span>
+          </div>
+          <span class="pill tiny" v-if="concepts?.coverage?.watchlist_date">观察池 {{ concepts.coverage.watchlist_date }}</span>
+        </div>
+        <div class="table-scroll" v-if="concepts?.items?.length">
+          <table class="data-table">
+            <thead>
+              <tr><th>#</th><th class="text-left">概念</th><th class="text-left">家族</th><th>涨幅</th>
+                <th>广度</th><th>涨停</th><th>成交额占比</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="c in concepts.items.slice(0, 12)" :key="c.concept">
+                <td class="mono dim">{{ c.rank }}</td>
+                <td class="text-left"><b>{{ c.concept }}</b></td>
+                <td class="text-left tiny dim">{{ c.family }}</td>
+                <td class="mono" :class="tone(c.chg)">{{ c.chg.toFixed(2) }}%</td>
+                <td class="mono">{{ (c.breadth * 100).toFixed(1) }}%</td>
+                <td class="mono">{{ c.limit_up }}</td>
+                <td class="mono dim">{{ (c.amount_share * 100).toFixed(1) }}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="empty tiny">暂无概念排行（先跑 scripts/concept_ranking.py）</div>
+        <div v-if="concepts?.watchlist?.length" class="watch-row">
+          <span class="tiny dim">观察池：</span>
+          <span v-for="w in concepts.watchlist.slice(0, 10)" :key="w.stock_code + w.concept" class="pill tiny">
+            {{ w.concept }} · {{ w.stock_code }} <b>{{ w.pct.toFixed(1) }}%</b>
+          </span>
+        </div>
+        <p class="hint tiny">
+          概念 = 供应商成员（新浪 175 + iFinD 指定概念），按 涨幅/广度/成交额占比/涨停密度 合成；
+          同一 family 只展示最强代表。观察池只做提示，不生成买卖指令。
         </p>
       </div>
 
@@ -196,8 +262,8 @@ import KlineChart from '@/components/KlineChart.vue'
 import IntradayChart from '@/components/IntradayChart.vue'
 import TurnoverChart from '@/components/TurnoverChart.vue'
 import SvgCurve from '@/components/ui/SvgCurve.vue'
-import { getMarketIndexIntraday, getMarketIndexOhlcv, getMarketOverview, getMarketTurnover } from '@/api/client'
-import type { MarketIndexIntraday, MarketIndexOhlcv, MarketOverview, MarketTurnoverSeries } from '@/types/api'
+import { getMarketConcepts, getMarketIndexIntraday, getMarketIndexOhlcv, getMarketOverview, getMarketTurnover } from '@/api/client'
+import type { MarketConcepts, MarketIndexIntraday, MarketIndexOhlcv, MarketOverview, MarketTurnoverSeries } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -205,6 +271,7 @@ const overview = ref<MarketOverview | null>(null)
 const chart = ref<MarketIndexOhlcv | null>(null)
 const intraday = ref<MarketIndexIntraday | null>(null)
 const turnover = ref<MarketTurnoverSeries | null>(null)
+const concepts = ref<MarketConcepts | null>(null)
 const selected = ref(String(route.query.code || '000001.SH'))
 const chartMode = ref<'intraday' | 'kline'>('intraday')
 const days = ref(365)
@@ -252,6 +319,34 @@ const breadthSeries = computed(() => {
   ]
 })
 const breadthLabels = computed(() => (overview.value?.breadth_series || []).map(x => x.date || ''))
+const armsText = computed(() => {
+  const v = overview.value?.breadth?.arms
+  return v == null ? '—' : v.toFixed(2)
+})
+const armsBadge = computed(() => {
+  const b = overview.value?.breadth
+  if (!b) return '暂无数据'
+  if (b.diverge) return '量价背离'
+  if (b.breadth_drop) return '广度骤降'
+  const v = b.arms
+  if (v == null) return '暂无数据'
+  if (v >= 1.5) return '下跌放量'
+  if (v <= 0.7) return '上涨放量'
+  return '中性'
+})
+const armsSub = computed(() => {
+  const b = overview.value?.breadth
+  if (!b) return '涨跌家数与成交额之比'
+  const parts: string[] = []
+  if (b.down_amount_share != null) parts.push(`下跌额占比 ${(b.down_amount_share * 100).toFixed(1)}%`)
+  if (b.arms_ma5 != null) parts.push(`5 日均 ${b.arms_ma5.toFixed(2)}`)
+  return parts.join(' · ') || '涨跌家数与成交额之比'
+})
+const armsRows = computed(() => (overview.value?.breadth_series || []).filter(x => x.arms != null))
+const armsSeries = computed(() => [
+  { name: 'TRIN', color: 'var(--text-primary)', points: armsRows.value.map(x => x.arms as number) },
+])
+const armsLabels = computed(() => armsRows.value.map(x => x.date || ''))
 const trendText = computed(() => {
   const s = overview.value?.turnover_series || []
   const vals = s.map(x => x.amount_yi).filter((x): x is number => x != null)
@@ -292,6 +387,11 @@ async function loadOverview() {
   finally { loading.value = false }
 }
 
+async function loadConcepts() {
+  try { concepts.value = await getMarketConcepts(20) }
+  catch { concepts.value = null }
+}
+
 async function loadChart() {
   chartLoading.value = true; chartError.value = ''
   try { chart.value = await getMarketIndexOhlcv(selected.value, days.value) }
@@ -323,6 +423,7 @@ async function reload() {
   await loadChart()
   await loadIntraday()
   await loadTurnover()
+  await loadConcepts()
 }
 
 let intradayTimer: number | undefined
@@ -331,6 +432,7 @@ onMounted(async () => {
   await loadChart()
   await loadIntraday()
   await loadTurnover()
+  await loadConcepts()
   intradayTimer = window.setInterval(() => {
     if (chartMode.value === 'intraday' && !document.hidden) void loadIntraday()
   }, 30000)

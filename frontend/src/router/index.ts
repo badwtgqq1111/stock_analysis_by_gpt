@@ -28,6 +28,7 @@ const routes = [
   { path: '/lhb', name: 'lhb', component: () => import('@/pages/Lhb.vue') },
   { path: '/intraday', name: 'intraday', component: () => import('@/pages/Intraday.vue') },
   { path: '/industry', name: 'industry', component: () => import('@/pages/IndustryHeat.vue') },
+  { path: '/concepts', name: 'concepts', component: () => import('@/pages/ConceptHeat.vue') },
   // 投研执行台（2026-10-11）：两族/四层状态 + 运行轨迹 + 可编辑的提示词（默认角色「量化领域专家」）
   { path: '/agent', name: 'agent', component: () => import('@/pages/AgentConsole.vue') },
 ]

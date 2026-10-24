@@ -258,3 +258,17 @@ cat assets/data/raw/intraday_baostock/_sync/quarantine.json
 
 提速选项（未启用，按需选择）：① 只补需要的板块（主板小市值 ≈1,300 只，约 4 小时）；
 ② 只补策略交易过的 123 只（约 25 分钟，已排在最前）；③ 用付费源（Tushare 官方 token 的 `stk_mins`，本仓库中继不支持）。
+
+## 8. 2026-10-23 更新：深度 / 兜底 / 每日自愈
+
+| 结论 | 证据 |
+|---|---|
+| BaoStock 5min **从 2020-01-02 起**可用；2019 全年为空 | `query_history_k_data_plus(frequency="5")` 逐日探测 |
+| 新浪 `getKLineData` 的 `datalen` 上限 **1,970 根 ≈ 41 个交易日**，且返回 `amount` | `datalen=1970` 正常、`1971` 返回 `null` |
+| iFinD 试用 5min 仍只有近 1 年 | 2019/2020 请求 `-4309` |
+| BaoStock 并发会拉黑 IP | 6 worker 约 6 分钟后 `10001011 黑名单用户`，持续 >90 分钟 |
+| `--refresh` 曾漏刷 695 只 | `codes.txt` 只含"首次回补时没文件"的标的 → 684 只停在 09-30 |
+
+对应改动与操作手册见 [`intraday-history.md`](intraday-history.md)：
+`fill_intraday_gap_recent.py`（新浪 1970 根 / 腾讯 320 根兜底）、`backfill_cn_intraday_history.py`
+（2020+ 深度回补，多进程 + 冷却 + 断点）、`sync_cn_intraday_full.py` 的 `full_universe()` / `stale` 指标。

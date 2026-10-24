@@ -396,6 +396,8 @@ async function loadGroup(key: string) {
       target.date = data.source.trade_date
       target.rows = [...new Map((data.rows || []).map((r) => [String(r.stock_code), {
         code: String(r.stock_code), name: String(r.stock_name || r.name || ''),
+        // 概念策略每只票的概念不同：带上 concept，侧栏标签才能显示个股自己的概念
+        concept: String((r as any).concept || ''),
       }])).values()]
     }
     watchlist.rememberMany(target.rows)

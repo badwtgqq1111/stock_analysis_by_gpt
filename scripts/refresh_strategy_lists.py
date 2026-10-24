@@ -55,6 +55,8 @@ STRATEGY_DEPENDENCIES = {
     "first_ban_lowxi": ["daily_bars"],
     "box_arm": ["daily_bars"],
     "box_squeeze_arm": ["daily_bars"],
+    "b4a_cap_arm": ["daily_bars"],
+    "concept_watch_arm": ["daily_bars"],
     "wyckoff_arm": ["daily_bars"],
     "moneyflow_arm": ["daily_bars", "moneyflow"],
     "mainforce_arm": ["daily_bars", "moneyflow"],

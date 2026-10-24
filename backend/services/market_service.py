@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -20,6 +21,11 @@ from backend.services import live_quotes
 ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK = ROOT / "assets/data/meta/cn_benchmark_daily.parquet"
 TURNOVER = ROOT / "assets/data/meta/cn_market_turnover.parquet"
+BREADTH = ROOT / "assets/data/derived/cn_market_breadth.parquet"
+CONCEPT_RANK = ROOT / "output/results_cn/concept_ranking/latest_all.csv"
+CONCEPT_RANK_TOP = ROOT / "output/results_cn/concept_ranking/latest_top.csv"
+CONCEPT_COVERAGE = ROOT / "output/results_cn/concept_ranking/coverage.json"
+CONCEPT_WATCH = ROOT / "output/results_cn/concept_watchlist"
 
 INDEX_ORDER = [
     "000001.SH", "399001.SZ", "399006.SZ", "000300.SH",
@@ -41,6 +47,93 @@ CORE_CODES = ["000001.SH", "399001.SZ", "399006.SZ", "000905.SH"]
 def _version(path: Path) -> tuple[int, int]:
     stat = path.stat()
     return stat.st_mtime_ns, stat.st_size
+
+
+
+
+CONCEPT_MEMBERS_IFIND = ROOT / "assets/data/derived/cn_concept_members_ifind.parquet"
+CONCEPT_MEMBERS_LLM = ROOT / "assets/data/derived/cn_concept_members_llm.parquet"
+CONCEPT_MEMBERS_CALIBRATED = ROOT / "assets/data/derived/cn_concept_members_scored.parquet"
+
+
+@lru_cache(maxsize=1)
+def _concept_members_all() -> pd.DataFrame:
+    if CONCEPT_MEMBERS_CALIBRATED.exists():
+        d = pd.read_parquet(CONCEPT_MEMBERS_CALIBRATED)
+        return d[["concept", "stock_code", "source"]].drop_duplicates()
+    frames = []  # (concept, stock_code, source)
+    if ROOT.joinpath("assets/data/meta/cn_board_membership.parquet").exists():
+        m = pd.read_parquet(ROOT / "assets/data/meta/cn_board_membership.parquet")
+        m = m[m["taxonomy"] == "sina_concept"][["board", "code"]].rename(columns={"board": "concept"})
+        m["stock_code"] = m["code"].map(lambda x: x + (".SH" if str(x).startswith(("6", "9")) else ".SZ"))
+        m["source"] = "sina"
+        frames.append(m[["concept", "stock_code", "source"]])
+    if CONCEPT_MEMBERS_IFIND.exists():
+        f = pd.read_parquet(CONCEPT_MEMBERS_IFIND)
+        f = f[f["snapshot_date"] == f["snapshot_date"].max()][["concept", "stock_code"]]
+        f["source"] = "ifind"
+        frames.append(f)
+    if CONCEPT_MEMBERS_LLM.exists():
+        d = pd.read_parquet(CONCEPT_MEMBERS_LLM)
+        d = d[~d["concept"].isin(["专精特新", "融资融券", "股权激励"])][["concept", "stock_code"]]
+        d["source"] = "llm"
+        frames.append(d)
+    if not frames:
+        return pd.DataFrame(columns=["concept", "stock_code"])
+    return pd.concat(frames, ignore_index=True).drop_duplicates()
+
+
+_QUOTE_CACHE: dict[str, tuple[float, list]] = {}
+
+
+def _quotes(codes: list[str], ttl: float = 30.0) -> dict[str, dict]:
+    """腾讯批量报价（20 只/批），带 30 秒缓存。"""
+    import time
+
+    import requests
+
+    key = ",".join(sorted(codes)[:3]) + f"|{len(codes)}"
+    hit = _QUOTE_CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return {row["stock_code"]: row for row in hit[1]}
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    rows = []
+    for i in range(0, len(codes), 20):
+        chunk = codes[i:i + 20]
+        syms = [("sh" if c.endswith(".SH") else ("bj" if c.endswith(".BJ") else "sz")) + c[:6] for c in chunk]
+        try:
+            resp = session.get("https://qt.gtimg.cn/q=" + ",".join(syms), timeout=6)
+            resp.encoding = "gbk"
+            for line in resp.text.strip().split(";"):
+                if "=" not in line:
+                    continue
+                fields = line.split("=", 1)[1].strip().strip('"').split("~")
+                if len(fields) > 38 and fields[3]:
+                    code = fields[2] + (".SH" if fields[2].startswith(("6", "9")) else ".SZ")
+                    rows.append({"stock_code": code, "name": fields[1], "pct": float(fields[32]),
+                                 "amount": float(fields[37]) * 1e4, "turnover": float(fields[38] or 0)})
+        except Exception:  # noqa: BLE001
+            continue
+    _QUOTE_CACHE[key] = (time.time(), rows)
+    return {row["stock_code"]: row for row in rows}
+
+@lru_cache(maxsize=4)
+def _load_breadth_cached(path_str: str, ver: tuple[int, int]) -> pd.DataFrame:
+    """宽广度 + 阿姆士指标（scripts/build_market_breadth.py 生成）。"""
+    path = Path(path_str)
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+    return df.sort_values("trade_date")
+
+
+def _breadth() -> pd.DataFrame:
+    if not BREADTH.exists():
+        return pd.DataFrame()
+    return _load_breadth_cached(str(BREADTH), _version(BREADTH))
 
 
 @lru_cache(maxsize=4)
@@ -162,6 +255,12 @@ class MarketService:
                 turnover_asof = _iso(last["trade_date"])
                 total = _f(last.get("amount_yi"))
                 n_stocks = int(last["n_stocks"]) if pd.notna(last.get("n_stocks")) else None
+                br = _breadth()
+                br_row = None
+                if not br.empty:
+                    sub = br[br["trade_date"] <= asof]
+                    if not sub.empty:
+                        br_row = sub.iloc[-1]
                 breadth = {
                     "n_stocks": n_stocks,
                     "n_priced": (int(last["n_priced"]) if pd.notna(last.get("n_priced")) else None),
@@ -172,11 +271,19 @@ class MarketService:
                     "down5": (int(last["down5_count"]) if pd.notna(last.get("down5_count")) else None),
                     "median_pct_chg": _f(last.get("median_pct_chg")),
                     "up_ratio": _f(last.get("up_ratio")),
+                    "arms": None if br_row is None else _f(br_row.get("arms")),
+                    "arms_ma5": None if br_row is None else _f(br_row.get("arms_ma5")),
+                    "down_amount_share": None if br_row is None else _f(br_row.get("down_amount_share")),
+                    "diverge": None if br_row is None else bool(br_row.get("diverge")),
+                    "breadth_drop": None if br_row is None else bool(br_row.get("breadth_drop")),
                 }
                 turnover_series = [
                     {"date": _iso(x["trade_date"]), "amount_yi": _f(x.get("amount_yi"))}
                     for _, x in t.tail(max(2, int(spark))).iterrows()
                 ]
+                arms_map = {}
+                if not br.empty:
+                    arms_map = {pd.Timestamp(k): v for k, v in zip(br["trade_date"], br["arms"])}
                 breadth_series = [
                     {
                         "date": _iso(x["trade_date"]),
@@ -184,6 +291,7 @@ class MarketService:
                         "down": int(x["down_count"]) if pd.notna(x.get("down_count")) else None,
                         "flat": int(x["flat_count"]) if pd.notna(x.get("flat_count")) else None,
                         "up_ratio": _f(x.get("up_ratio")),
+                        "arms": _f(arms_map.get(pd.Timestamp(x["trade_date"]))),
                     }
                     for _, x in t.tail(max(2, int(spark))).iterrows()
                 ]
@@ -202,8 +310,66 @@ class MarketService:
             "source": {
                 "indices": "assets/data/meta/cn_benchmark_daily.parquet（Tushare index_daily）",
                 "turnover": "assets/data/meta/cn_market_turnover.parquet（clean 日线汇总）",
+                "arms": "assets/data/derived/cn_market_breadth.parquet（scripts/build_market_breadth.py）",
                 "turnover_unit": "元；页面换算为亿元",
             },
+        }
+
+    def concepts(self, top: int = 20) -> dict:
+        """概念排行 + 最新观察池（只读展示，不进选股）。"""
+        path = CONCEPT_RANK if CONCEPT_RANK.exists() else CONCEPT_RANK_TOP
+        if not path.exists():
+            return {"available": False, "reason": "尚未生成概念排行（scripts/concept_ranking.py）", "items": [], "watchlist": []}
+        rank = pd.read_csv(path)
+        coverage = {}
+        if CONCEPT_COVERAGE.exists():
+            coverage = json.loads(CONCEPT_COVERAGE.read_text(encoding="utf-8"))
+        watch = []
+        if CONCEPT_WATCH.exists():
+            files = sorted(CONCEPT_WATCH.glob("*.csv"))
+            if files:
+                latest = files[-1]
+                w = pd.read_csv(latest)
+                watch = w.head(30).to_dict("records")
+                coverage["watchlist_date"] = latest.stem
+        cols = [c for c in ("rank", "concept", "family", "is_family_lead", "n", "chg", "breadth",
+                            "limit_up", "amount_share", "score") if c in rank.columns]
+        items = rank.head(top)[cols].reset_index(drop=True)
+        items["rank"] = items.index + 1          # family 去重后重新编号，避免出现 1/3/5 的空号
+        return {"available": True, "items": items.to_dict("records"),
+                "coverage": coverage, "watchlist": watch}
+
+
+    def concept_stocks(self, name: str, top: int = 100) -> dict:
+        """某个概念的成分股（实时/收盘报价），供热度网格下钻。"""
+        members = _concept_members_all()
+        sub = members[members["concept"] == name]
+        if sub.empty:
+            return {"available": False, "reason": f"概念 {name} 没有成分数据", "stocks": []}
+        codes = sorted(sub["stock_code"].unique())
+        src_map = sub.groupby("stock_code")["source"].agg(lambda s: "+".join(sorted(set(s)))).to_dict()
+        quotes = _quotes(codes)
+        rows = []
+        for code in codes:
+            q = quotes.get(code)
+            if not q:
+                continue
+            rows.append({"stock_code": code, "name": q["name"], "pct": round(q["pct"], 2),
+                         "amount_yi": round(q["amount"] / 1e8, 2), "turnover": round(q["turnover"], 2),
+                         "source": src_map.get(code, "")})
+        if not rows:
+            return {"available": False, "reason": "行情源暂不可用", "stocks": []}
+        df = pd.DataFrame(rows)
+        up = float((df["pct"] > 0).mean())
+        return {
+            "available": True,
+            "concept": name,
+            "n": int(len(df)),
+            "chg": round(float(df["pct"].mean()), 2),
+            "breadth": round(up, 4),
+            "limit_up": int((df["pct"] >= 9.8).sum()),
+            "amount_yi": round(float(df["amount_yi"].sum()), 1),
+            "stocks": df.sort_values("pct", ascending=False).head(top).to_dict("records"),
         }
 
     def turnover(self, days: int = 365) -> dict:

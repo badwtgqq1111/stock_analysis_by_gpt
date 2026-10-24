@@ -92,6 +92,7 @@ const navGroups = [
       { to: '/market', label: '大盘行情' },
       { to: '/rankings', label: '涨跌/资金排行' },
       { to: '/industry', label: '行业热度' },
+      { to: '/concepts', label: '概念热度' },
       { to: '/limitup', label: '连板统计' },
       { to: '/lhb', label: '龙虎榜' },
       { to: '/intraday', label: '分时行情' },

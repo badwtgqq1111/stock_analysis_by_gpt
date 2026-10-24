@@ -116,6 +116,7 @@ export interface MarketBreadthPoint {
   down: number | null
   flat: number | null
   up_ratio: number | null
+  arms?: number | null
 }
 
 export interface MarketTurnoverSeries {
@@ -151,6 +152,12 @@ export interface MarketOverview {
     down5: number | null
     median_pct_chg: number | null
     up_ratio: number | null
+    /** 阿姆士指标 TRIN：(上涨家数/下跌家数) / (上涨成交额/下跌成交额) */
+    arms?: number | null
+    arms_ma5?: number | null
+    down_amount_share?: number | null
+    diverge?: boolean | null
+    breadth_drop?: boolean | null
   } | null
   breadth_series?: MarketBreadthPoint[]
   turnover_series: MarketTurnoverPoint[]
@@ -1990,4 +1997,50 @@ export interface VolatilityRiskResponse {
   contributions?: { stock_code: string; weight: number; marginal_vol: number; component_vol: number; risk_share: number | null; reference_budget_share: number; budget_deviation: number | null }[]
   correlation?: { names: string[]; rows: Record<string, string | number | null>[]; observations: number; asof: string; short_sample: boolean }
   forward?: { status: string; captured_at?: string; eligible_decisions?: number; gates?: Record<string, { status: string; observations: number; decisions: number; checks: Record<string, boolean> }> }
+}
+
+
+export interface ConceptRankItem {
+  rank: number
+  concept: string
+  family: string
+  is_family_lead?: boolean
+  n: number
+  chg: number
+  breadth: number
+  limit_up: number
+  amount_share: number
+  score: number
+}
+
+export interface ConceptWatchItem {
+  trade_date: string
+  concept: string
+  stock_code: string
+  pct: number
+  vr: number
+  listed_days: number
+  concept_breadth: number
+  signal: string
+}
+
+export interface MarketConcepts {
+  available: boolean
+  reason?: string
+  items: ConceptRankItem[]
+  coverage?: Record<string, unknown>
+  watchlist: ConceptWatchItem[]
+}
+
+
+export interface MarketConceptStocks {
+  available: boolean
+  reason?: string
+  concept?: string
+  n?: number
+  chg?: number
+  breadth?: number
+  limit_up?: number
+  amount_yi?: number
+  stocks: Array<{ stock_code: string; name: string; pct: number; amount_yi: number; turnover: number }>
 }

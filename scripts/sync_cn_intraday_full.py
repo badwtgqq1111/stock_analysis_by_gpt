@@ -51,6 +51,7 @@ DEFAULT_CODES = STATE_DIR / "codes.txt"
 DEFAULT_LOG = STATE_DIR / "sync.log"
 DEFAULT_PROGRESS = STATE_DIR / "progress.json"
 DEFAULT_QUARANTINE = STATE_DIR / "quarantine.json"
+COOLDOWN = STATE_DIR / "cooldown.json"
 UV = Path.home() / ".local/bin/uv"
 
 
@@ -83,6 +84,25 @@ def build_codes(freq: str, out: Path) -> int:
     return len(ordered)
 
 
+def full_universe(freq_dir: Path) -> list:
+    """刷新模式的目标集：全部在市 A 股 ∪ 已有分时文件（含已退市）。
+
+    2026-10-23 修：原来 --refresh 只遍历 `_sync/codes.txt`，而那份清单是**首次回补时
+    还没文件的标的**。结果是「文件已存在」的 695 只在清单之外，永远不会被刷新 ——
+    实测 684 只停在 2026-09-30，`--status` 却报 remaining=0，正好对上
+    「每天总有一部分同步不成功、要手动补」的现象。
+    """
+    codes = {p.name.replace("_", ".")[:-8] for p in freq_dir.glob("*.parquet")}
+    try:
+        basic = pd.read_parquet(ROOT / "assets/data/meta/cn_stock_basic.parquet")
+        col = "list_status" if "list_status" in basic.columns else "status"
+        live = basic[basic[col] == "L"]
+        codes |= set(live[live["ts_code"].str.match(r"^\d{6}\.(SH|SZ)$")]["ts_code"])
+    except Exception:  # noqa: BLE001
+        pass
+    return sorted(codes)
+
+
 def status(freq: str, codes_path: Path, progress_path: Path) -> dict:
     freq_dir = ROOT / f"assets/data/raw/intraday_baostock/frequency={freq}min"
     have = {p.name.replace("_", ".")[:-8] for p in freq_dir.glob("*.parquet")}
@@ -90,10 +110,30 @@ def status(freq: str, codes_path: Path, progress_path: Path) -> dict:
     remaining = [c for c in target if c not in have]
     ledger = json.loads(progress_path.read_text()) if progress_path.exists() else {}
     rate = float(ledger.get("rate_per_sec") or 0)
+    # 真实进度：不只看文件在不在，还要看最后日期是否落后于该股自己的最后一条日线
+    stale = []
+    try:
+        expected = latest_daily_by_code()
+        for code in sorted(have):
+            want = expected.get(code)
+            if want is None:
+                continue
+            try:
+                last = pd.to_datetime(pd.read_parquet(freq_dir / f"{code.replace('.', '_')}.parquet",
+                                                      columns=["date"])["date"]).max().date()
+            except Exception:  # noqa: BLE001
+                stale.append(code)
+                continue
+            if last < want:
+                stale.append(code)
+    except Exception:  # noqa: BLE001
+        pass
     return {
-        "target_total": len(target) + len(have & set(target)),
+        "target_total": len(target),
         "done": len(have),
         "remaining": len(remaining),
+        "stale": len(stale),
+        "stale_examples": stale[:5],
         "rate_per_sec": rate,
         "eta_hours": round(len(remaining) / rate / 3600, 2) if rate > 0 else None,
         "last_ledger": ledger.get("updated_at"),
@@ -166,14 +206,21 @@ def resolve_target_date(daily_max, now) -> "object":
     return daily_max
 
 
-def refresh_pending(freq_dir: Path, codes: list, latest) -> list:
+def refresh_pending(freq_dir: Path, codes: list, latest, expected_by_code=None) -> list:
     """返回 [(code, last_date_or_None)]，只含"没有文件"或"最后日期落后于最新交易日"的标的。
 
     只读 parquet 的 `date` 列（不解码 OHLCV），5,000+ 只大约几秒到几十秒。
     """
     pending = []
+    if expected_by_code is None:
+        expected_by_code = latest_daily_by_code() if latest is not None else {}
     for code in codes:
         path = freq_dir / f"{code.replace('.', '_')}.parquet"
+        # 停牌/退市股没有当日日线：它的"应有最后日期"是最后一条日线，不是全市场最新交易日。
+        # 不修这个，会把 002717.SZ 这类停牌票永远报成 pending，逼用户每天手动重跑。
+        expected = expected_by_code.get(code, latest)
+        if expected is None:
+            continue
         if not path.exists():
             pending.append((code, None))
             continue
@@ -183,9 +230,26 @@ def refresh_pending(freq_dir: Path, codes: list, latest) -> list:
         except Exception:
             pending.append((code, None))
             continue
-        if latest is None or last < latest:
+        if last < expected:
             pending.append((code, last))
     return pending
+
+
+def latest_daily_by_code():
+    """每只股票最后一条日线日期；停牌股用它判断分时是否已到自己的最后交易日。"""
+    import glob
+    import pyarrow.dataset as ds
+
+    files = sorted(glob.glob(str(ROOT / "assets/data/clean/ohlcv/market=CN/exchange=*/"
+                                    "asset_type=equity/frequency=daily/adjust=qfq/year=*/*.parquet")))
+    if not files:
+        return {}
+    table = ds.dataset(files, format="parquet").to_table(
+        columns=["trade_date", "stock_code"]).to_pandas()
+    table["trade_date"] = pd.to_datetime(table["trade_date"], errors="coerce")
+    table = table.dropna(subset=["trade_date", "stock_code"])
+    last = table.groupby("stock_code")["trade_date"].max()
+    return {str(code): value.date() for code, value in last.items()}
 
 
 def main() -> int:
@@ -231,6 +295,8 @@ def main() -> int:
     if not args.codes_file.exists():
         build_codes(args.freq, args.codes_file)
     target = [c for c in args.codes_file.read_text(encoding="utf-8").split() if c.strip()]
+    if args.refresh:
+        target = full_universe(freq_dir)      # 刷新必须覆盖"全部已有文件"，不能只看待建清单
     quarantine = json.loads(args.quarantine_file.read_text()) if args.quarantine_file.exists() else {}
     if args.reset_quarantine:
         quarantine = {}
@@ -241,9 +307,11 @@ def main() -> int:
     if args.refresh:
         latest = (datetime.fromisoformat(args.latest_trade_date).date() if args.latest_trade_date
                   else resolve_target_date(latest_trade_date(), datetime.now()))
+        expected_by_code = latest_daily_by_code()
         log(args.log, f"=== 刷新模式启动 目标 {len(target)} 只 freq={args.freq}min 最新交易日={latest} "
                       f"batch={args.batch_size} ===")
     else:
+        expected_by_code = {}
         log(args.log, f"=== 监督器启动 目标 {len(target)} 只 freq={args.freq}min batch={args.batch_size} ===")
 
     processed = 0
@@ -251,7 +319,7 @@ def main() -> int:
         have = {p.name.replace("_", ".")[:-8] for p in freq_dir.glob("*.parquet")}
         pending_count = 0
         if args.refresh:
-            pending = [(c, last) for c, last in refresh_pending(freq_dir, target, latest)
+            pending = [(c, last) for c, last in refresh_pending(freq_dir, target, latest, expected_by_code)
                        if quarantine.get(c, 0) < args.max_failures_per_code]
             pending_count = len(pending)
             if args.limit:
@@ -281,6 +349,7 @@ def main() -> int:
         codes_batch = [c for v in groups.values() for c in v]
         batch_start = time.time()
         timed_out = False
+        blacklisted = False
         for start, group_codes in groups.items():
             command = [
                 str(UV), "run", "python", str(ROOT / "scripts/backfill_cn_intraday_baostock.py"),
@@ -303,10 +372,20 @@ def main() -> int:
                         log(args.log, f"    {ln.strip()[:200]}")
                     if bad:
                         log(args.log, f"  批次 {len(group_codes)} 只有 {len(bad)} 行失败输出")
+                    # 黑名单/限流：这是账号级拒绝，不是这些票的问题 —— 不能计入 quarantine，
+                    # 否则一天就把几十只票"永久"隔离掉。
+                    if "10001011" in (proc.stdout or "") or "黑名单" in (proc.stdout or ""):
+                        blacklisted = True
+                        COOLDOWN.write_text(json.dumps({
+                            "until": time.time() + 6 * 3600, "reason": "baostock 10001011",
+                            "at": datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
+                        log(args.log, "baostock 返回 10001011（黑名单/限流）→ 中止本次会话，6 小时内不再尝试")
             except subprocess.TimeoutExpired:
                 timed_out = True
                 for code in group_codes:
                     quarantine[code] = quarantine.get(code, 0) + 1
+        if blacklisted:
+            break
         duration = time.time() - batch_start
         processed += len(codes_batch)
 
@@ -315,7 +394,7 @@ def main() -> int:
             # 刷新模式的成败只能靠"复核最后日期"来判断：文件本来就在，不能用"文件不存在=失败"。
             # 不这么做的话，"抓取全部失败"和"全部成功"在日志上无法区分（本次就踩到了：
             # 17:10 那轮到底补上没有，只能事后逐只读 parquet 才确认）。
-            still = {c for c, _ in refresh_pending(freq_dir, codes_batch, latest)}
+            still = {c for c, _ in refresh_pending(freq_dir, codes_batch, latest, expected_by_code)}
             updated = len(codes_batch) - len(still)
             log(args.log, f"批次复核：{updated}/{len(codes_batch)} 已更新到 {latest}（未更新 {len(still)}）")
             for code in still:

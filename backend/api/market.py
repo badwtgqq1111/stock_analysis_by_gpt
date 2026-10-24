@@ -7,9 +7,19 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 _service = MarketService()
 
 
+@router.get("/concepts/{name}/stocks")
+def concept_stocks(name: str, top: int = Query(100, ge=5, le=500)):
+    return _service.concept_stocks(name, top=top)
+
+
 @router.get("/overview")
 def overview(spark: int = Query(20, ge=2, le=120)):
     return _service.overview(spark=spark)
+
+
+@router.get("/concepts")
+def concepts(top: int = Query(20, ge=5, le=500)):
+    return _service.concepts(top=top)
 
 
 @router.get("/turnover")

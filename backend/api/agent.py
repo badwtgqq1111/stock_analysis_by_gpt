@@ -70,13 +70,15 @@ FAMILIES: list[dict] = [
             # 登记只为和中证500 逐日对照；box_arm 参数极敏感，同为观察候选。
             {"key": "breakout", "label": "突破（通道/箱体）",
              "ids": ["box_arm", "box_squeeze_arm", "donchian_breakout", "rbreaker_arm"]},
+            {"key": "ml_factor", "label": "机器学习多因子",
+             "ids": ["b4a_cap_arm"]},
             # 主力追踪（2026-10-14）：资金流口径的规则策略（净流入 z 分数 + 吸筹形态），
             # 证据单位同样是「一笔」，所以同属族 A。
             {"key": "moneyflow", "label": "资金流（主力追踪）",
              "ids": ["moneyflow_arm", "mainforce_arm"]},
             {"key": "formula", "label": "公式打分（不训练）", "ids": ["jq_multi_factor_size_roe", "jq_roe_roa_diagnostic"]},
             {"key": "arm", "label": "手臂规则（行业/概念/宽度）",
-             "ids": ["arm_concept", "rot_arm", "arm_select", "arm_select_volrisk"]},
+             "ids": ["arm_concept", "concept_watch_arm", "rot_arm", "arm_select", "arm_select_volrisk"]},
         ],
     },
     {

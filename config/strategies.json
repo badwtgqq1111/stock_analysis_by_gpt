@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。 2026-10-13 追加 daily_refresh（每日名单刷新契约）与 selection/curve（抽象层的声明层，由 backend/services/strategy_registry.py 派生给选股结果页 / 曲线 / 导出 / 自选等消费端）。",
+  "note": "策略池的**声明式登记表**（谁在生产、产物在哪、怎么跑）。运行时状态（最新交易日/条数/是否新鲜）由 scripts/sync_strategy_pool.py 扫描产物后写进 output/strategy_pool/strategy_pool.json，本文件不写运行时字段。新增一个策略 = 在这里加一项 + 把产物登记到 artifacts。 2026-10-13 追加 daily_refresh（每日名单刷新契约）与 selection/curve（抽象层的声明层，由 backend/services/strategy_registry.py 派生给选股结果页 / 曲线 / 导出 / 自选等消费端）。策略→因子暴露映射见 config/strategy_factor_map.json（P2.81）。",
   "updated_at": "2026-10-22",
   "strategies": [
     {
@@ -144,6 +144,64 @@
           "notify"
         ],
         "top_n": 10
+      }
+    },
+    {
+      "id": "b4a_cap_arm",
+      "name": "B4a-cap 机器学习多因子（100特征）",
+      "group": "机器学习/多因子",
+      "kind": "model",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "warn",
+      "summary": "P2.81 首个落地的 ML 选股候选：当前生产模型 100 个准入特征（Alpha101/158/GTJA191 等）+ LightGBM → 按模型分取 Top20，每 20 日换仓；组合约束：申万 L1 行业≤2、20 日均额≥2000 万、总市值≥10 亿。2023-2026 三折 walk-forward：20 日净超额均值 +2.456%、命中率 61.7%、累计超额 +188.86%、年化超额 +32.89%、超额回撤 −15.2%；分折 +0.92% / +1.22% / +4.17%。⚠️ 47 个非重叠期、仍有小市值暴露；市值≥20亿后年化降到 +18.6%，≥50亿降到 +7.1% —— 只作研究候选，不进生产权重。",
+      "entry": "uv run python scripts/select_b4a_cap_arm.py --print",
+      "schedule": "每日自动化（名单刷新契约 / 非阻塞）",
+      "artifacts": [
+        "output/results_cn/b4a_cap_arm_selection.csv",
+        "output/research/p2_81/b4a_cap/curve/curve.json",
+        "output/research/p2_81/B4_EXACT_SHADOW.md"
+      ],
+      "history_dir": "output/results_cn/b4a_cap_arm_history",
+      "ledger_sources": [
+        "b4a_cap_arm"
+      ],
+      "date_column": "trade_date",
+      "selection_source": "cn_b4a_cap_arm",
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 10,
+        "empty_is_ok": false
+      },
+      "selection": {
+        "label": "B4a-cap 机器学习多因子（100 特征）",
+        "note": "100 个生产准入特征 + LightGBM；Top20 等权、20 日换仓；行业≤2、20 日均额≥2000 万、总市值≥10 亿。研究候选，不是生产名单。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/b4a_cap_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "board",
+          "industry",
+          "score",
+          "in_portfolio",
+          "target_weight",
+          "mktcap",
+          "amount_ma20"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
+      },
+      "curve_source": {
+        "nav_csv": "output/research/p2_81/b4a_cap/curve/nav_engine.csv",
+        "kind": "strategy_rule_net",
+        "reason": "100 特征 B4a 的 3 折 walk-forward，Top20 行业≤2 + 日额≥2000万 + 市值≥10亿，20 日非重叠、双边 31bp；20 日收益按几何平均摊到 20 个交易日生成日频净值（研究近似）。",
+        "methodology": "20 日换仓、Top20 等权；研究回测，未建模涨跌停/停牌/整手。"
       }
     },
     {
@@ -1320,6 +1378,69 @@
           "description": "恐慌反转-质量过滤：恐慌日−6%、量比2、PE行业分位≤20%，次日收涨且资金流z5>0后再次日开盘入场；最多10仓，20日/恐慌低点退出，15.5bp/边。",
           "methodology": "300只训练期流动性面板；事件型长仓回测，现金闲置；2023-01-03至2026-10-15回顾式研究；分数股、close估值、期末不强平；未计整手、涨跌停/ST/停牌、容量和冲击。"
         }
+      }
+    },
+    {
+      "id": "concept_watch_arm",
+      "name": "概念升温选股（每日10只）",
+      "group": "概念/主题",
+      "kind": "rule_strategy",
+      "stage": "candidate",
+      "owner": "research",
+      "tag_class": "info",
+      "summary": "概念升温选股（strong 模式）：最强 3 个主题（family 去重、剔除基金重仓/央企50 等非主题标签、概念5日涨幅≤15%），概念内买滞涨股（leader 可切），10 只、每概念≤4；上市≥20日、20日均额≥5000万、非涨停、非ST、个股5日≤25%。回测 2024-2026：CAGR 35.5% vs 中证500 8.0%，最大回撤 -20.8%，Sharpe 1.18，849 笔、胜率 46.4%；分年 2024 +41.6% / 2025 +70.4% / 2026 -6.5%（基准 +5.8/+30.4/-10.9，三年均跑赢）。规则：中证500 在 MA20 上方才开仓（regime_ok），否则权重记 0 仅保留名单。成员为当前快照（有幸存者偏差）。概念因子并入 B4 100 特征会变差（RankIC 0.1310→0.1215），因此保持独立规则策略，不并入 B4。仍是候选，不进生产权重。",
+      "entry": "uv run python scripts/select_concept_watch_arm.py --top-stocks 10",
+      "schedule": "每日自动化（非阻塞）",
+      "artifacts": [
+        "output/results_cn/concept_watch_arm_selection.csv",
+        "output/results_cn/concept_watch_arm_history/",
+        "output/research/p2_concept_v2/WATCHLIST.md"
+      ],
+      "date_column": "trade_date",
+      "ledger_sources": [
+        "concept_watch_arm"
+      ],
+      "daily_refresh": {
+        "mode": "run",
+        "max_minutes": 10,
+        "empty_is_ok": true
+      },
+      "curve": {
+        "replay": {
+          "nav_csv": "output/research/p2_concept_v2/watch_backtest_nav.csv",
+          "kind": "research_replay",
+          "description": "概念观察信号组合回测（负结果留档，不代表可交易收益）"
+        }
+      },
+      "history_dir": "output/results_cn/concept_watch_arm_history",
+      "selection_source": "cn_concept_watch_arm",
+      "selection": {
+        "label": "概念升温选股（每日10只）",
+        "note": "strong=最强概念+不涨太高；默认 10 只、每概念≤4、买滞涨；regime_ok=False 时 target_weight=0（只观察）。",
+        "roles": [
+          [
+            "research",
+            "output/results_cn/concept_watch_arm_selection.csv"
+          ]
+        ],
+        "columns": [
+          "rank",
+          "stock_code",
+          "name",
+          "concept",
+          "industry",
+          "score",
+          "target_weight",
+          "close",
+          "ret5",
+          "vr",
+          "amount20",
+          "listed_days",
+          "concept_heat",
+          "regime_ok"
+        ],
+        "code_style": "ts_code",
+        "supports_shap": false
       }
     }
   ]

@@ -108,6 +108,8 @@ export interface WatchlistRow { code: string; name: string; tag: string; local: 
   displayRank?: number | null; displayScore?: number | null;
   flowScore?: number | null; flow5?: number | null; flow20?: number | null;
   longshort?: number | null; comboScore?: number | null;
+  /** 该股在策略里的概念（概念策略按股不同；有就优先展示，而不是策略名） */
+  concept?: string;
   /** 历史回顾：决策日收盘 / 当日涨跌 / 成交额，与回看日期对齐 */
   histClose?: number | null; histPct?: number | null; histAmount?: number | null }
 
@@ -124,7 +126,10 @@ export function groupRows(groups: WatchlistGroup[], key: string): WatchlistRow[]
         existing.tag = `${existing.baseTag || existing.tag} +${extra}`
         if (!existing.name) existing.name = item.name
       } else seen.set(item.code, {
-        ...item, tag: g.label, baseTag: g.label, local: false, source: g.source,
+        ...item,
+        tag: (item as any).concept || (item as any).board || g.label,
+        baseTag: (item as any).concept || (item as any).board || g.label,
+        local: false, source: g.source,
         histClose: item.close ?? null, histPct: item.pct_chg ?? null, histAmount: item.amount ?? null,
       } as WatchlistRow)
     }

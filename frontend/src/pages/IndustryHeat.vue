@@ -31,6 +31,23 @@
       </template>
     </PageHeader>
 
+    <div class="panel" v-if="concepts?.items?.length">
+      <div class="chart-head">
+        <div>
+          <b>概念热度 Top 8</b>
+          <span class="tiny dim">· 与行业热度同口径（涨幅/广度/成交额/涨停）· 只做观察</span>
+        </div>
+        <a class="btn-ghost btn-sm" href="#/market">大盘行情 → 概念排行</a>
+      </div>
+      <div class="pill-row">
+        <span v-for="c in concepts.items.slice(0, 8)" :key="c.concept" class="pill">
+          <b>{{ c.rank }}.</b> {{ c.concept }}
+          <b :class="tone(c.chg)">{{ c.chg.toFixed(2) }}%</b>
+          <span class="dim tiny">广度 {{ (c.breadth * 100).toFixed(0) }}% · 涨停 {{ c.limit_up }}</span>
+        </span>
+      </div>
+    </div>
+
     <RealtimeStatus :meta="heat?.realtime" :enabled="liveEnabled" show-flow />
     <StateBlock v-if="error" state="error" title="取不到行业热度" :detail="error" :retry="() => reload()" />
     <StateBlock v-else-if="!heat" state="loading" title="加载行业热度…" />
@@ -289,9 +306,10 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getIndustryHeat, getIndustryHeatHistory, getIndustryHeatmap, getIndustryOverview, getIndustryStocks } from '@/api/client'
+import { getIndustryHeat, getIndustryHeatHistory, getIndustryHeatmap, getIndustryOverview, getIndustryStocks, getMarketConcepts } from '@/api/client'
 import type {
   IndustryHeatHistoryResponse, IndustryHeatResponse, IndustryHeatmapResponse, IndustryOverview, IndustryStocksResponse,
+  MarketConcepts,
 } from '@/types/api'
 import { useWatchlist } from '@/composables/useWatchlist'
 const IndustryHeat3D = defineAsyncComponent(() => import('@/components/IndustryHeat3D.vue'))
@@ -311,6 +329,7 @@ const router = useRouter()
 const watchlist = useWatchlist()
 const overview = ref<IndustryOverview | null>(null)
 const heat = ref<IndustryHeatResponse | null>(null)
+const concepts = ref<MarketConcepts | null>(null)
 const stocks = ref<IndustryStocksResponse | null>(null)
 const heatmap = ref<IndustryHeatmapResponse | null>(null)
 const heatmapError = ref('')
@@ -405,7 +424,14 @@ async function selectIndustry(name: string) {
   await loadStocks()
 }
 
-onMounted(reload)
+async function loadConcepts() {
+  try { concepts.value = await getMarketConcepts(10) } catch { concepts.value = null }
+}
+
+onMounted(() => {
+  reload()
+  loadConcepts()
+})
 watch([period, minN, date, realtime], () => { void reload() })
 watch(market, () => { if (view.value === 'map') void loadHeatmap() })
 watch(view, (v) => { if (v === 'map' && !heatmap.value) void loadHeatmap() })

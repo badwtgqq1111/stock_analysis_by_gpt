@@ -8,6 +8,8 @@ import importlib.util
 from datetime import date, datetime
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -38,3 +40,34 @@ def test_weekend_and_no_daily_data():
     assert mod.resolve_target_date(date(2026, 10, 9), datetime(2026, 10, 10, 16, 0)) == date(2026, 10, 9)
     # 没有任何日线数据时：收盘后目标=今天
     assert mod.resolve_target_date(None, datetime(2026, 10, 12, 16, 0)) == date(2026, 10, 12)
+
+
+def test_suspended_stock_is_not_pending_after_its_last_daily_bar(tmp_path):
+    """停牌股没有最新交易日日线：分时到自己的最后日线就算完成，不能每天重跑。"""
+    mod = _load()
+    (tmp_path / "000001_SZ.parquet").parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"date": [pd.Timestamp("2026-10-10")]}).to_parquet(
+        tmp_path / "000001_SZ.parquet", index=False)
+    pd.DataFrame({"date": [pd.Timestamp("2026-10-09")]}).to_parquet(
+        tmp_path / "000002_SZ.parquet", index=False)
+    expected = {"000001.SZ": date(2026, 10, 10), "000002.SZ": date(2026, 10, 10)}
+    pending = mod.refresh_pending(tmp_path, ["000001.SZ", "000002.SZ"],
+                                  date(2026, 10, 12), expected)
+    assert pending == [("000002.SZ", date(2026, 10, 9))]
+
+
+def test_refresh_universe_includes_existing_files(tmp_path):
+    """刷新目标必须是「全部已有文件 ∪ 全部在市」，不能只遍历 codes.txt。
+
+    2026-10-23 事故：codes.txt 是首次回补时"还没有文件"的清单，文件已存在的 695 只
+    永远不在里面 → 实测 684 只停在 2026-09-30，而 --status 报 remaining=0。
+    """
+    mod = _load()
+    pd.DataFrame({"date": [pd.Timestamp("2026-09-30")]}).to_parquet(
+        tmp_path / "000001_SZ.parquet", index=False)
+    pd.DataFrame({"date": [pd.Timestamp("2026-09-30")]}).to_parquet(
+        tmp_path / "600000_SH.parquet", index=False)
+    universe = set(mod.full_universe(tmp_path))
+    assert {"000001.SZ", "600000.SH"} <= universe
+    # 在市清单也要进来（哪怕还没有文件）
+    assert len(universe) > 1000

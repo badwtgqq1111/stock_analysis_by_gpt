@@ -8,7 +8,7 @@ import type {
   IndustryOverview, IndustryHeatResponse, IndustryStocksResponse,
   IndustryHeatmapResponse,
   LivePerformance, LiveRealtime, AgentActionsResponse, AgentActionRun, MiningContext,
-  ResearchSourcesResponse, MarketOverview, MarketIndexOhlcv, MarketTurnoverSeries, MarketIndexIntraday,
+  ResearchSourcesResponse, MarketOverview, MarketIndexOhlcv, MarketTurnoverSeries, MarketIndexIntraday, MarketConcepts, MarketConceptStocks,
   LongShortRefreshJob,
 } from '@/types/api'
 
@@ -96,6 +96,16 @@ export async function getMarketIndexOhlcv(code: string, days: number): Promise<M
   const { data } = await http.get<MarketIndexOhlcv>(
     `/market/indices/${encodeURIComponent(code)}/ohlcv`, { params: { days } },
   )
+  return data
+}
+
+export async function getMarketConceptStocks(name: string, top = 100): Promise<MarketConceptStocks> {
+  const { data } = await http.get<MarketConceptStocks>(`/market/concepts/${encodeURIComponent(name)}/stocks`, { params: { top } })
+  return data
+}
+
+export async function getMarketConcepts(top = 20): Promise<MarketConcepts> {
+  const { data } = await http.get<MarketConcepts>('/market/concepts', { params: { top } })
   return data
 }
 

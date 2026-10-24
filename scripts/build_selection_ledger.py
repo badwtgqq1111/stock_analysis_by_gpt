@@ -523,6 +523,65 @@ def read_box_squeeze_arm_history() -> list[dict]:
     return rows
 
 
+def read_b4a_cap_arm_history() -> list[dict]:
+    """B4a-cap 100 特征 ML 策略的历史快照 → 台账。"""
+    rows = []
+    hist = RESULTS / "b4a_cap_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "b4a_cap_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "lots": r.get("lots_at_capital"),
+                "note": (f"{r.get('board') or ''}｜市值 {r.get('mktcap')}"
+                         f"｜20日均额 {r.get('amount_ma20')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"b4a_cap_arm_history/{path.name}",
+            })
+    return rows
+
+
+def read_concept_watch_arm_history() -> list[dict]:
+    """概念热度选股的历史快照 → 台账。"""
+    rows = []
+    hist = RESULTS / "concept_watch_arm_history"
+    if not hist.exists():
+        return rows
+    for path in sorted(hist.glob("*.csv")):
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
+            continue
+        for _, r in frame.iterrows():
+            rows.append({
+                "decision_date": path.stem,
+                "source": "concept_watch_arm",
+                "stock_code": _norm_code(r.get("stock_code")),
+                "name": r.get("name"),
+                "industry": r.get("concept") or r.get("industry"),
+                "model_score": r.get("score"),
+                "rank": r.get("rank"),
+                "weight": r.get("target_weight"),
+                "note": (f"概念 {r.get('concept')}｜5日 {r.get('ret5')}｜量比 {r.get('vr')}"
+                         f"｜regime_ok={r.get('regime_ok')}"),
+                "origin_date": str(r.get("trade_date"))[:10],
+                "file": f"concept_watch_arm_history/{path.name}",
+            })
+    return rows
+
+
 def read_donchian_breakout_history() -> list[dict]:
     """通道/箱体突破腿（donchian_breakout）的历史快照 → 台账。
 
@@ -827,6 +886,8 @@ def main() -> int:
     ledger = pd.DataFrame(read_feishu() + read_snapshots() + read_survey() + read_arm_history()
                           + read_arm_concept_history() + read_rot_arm_history()
                           + read_box_arm_history() + read_box_squeeze_arm_history()
+                          + read_b4a_cap_arm_history()
+                          + read_concept_watch_arm_history()
                           + read_first_ban_lowxi_history()
                           + read_wyckoff_arm_history() + read_moneyflow_arm_history()
                           + read_mainforce_arm_history() + read_moneyflow_ml_nb_history()

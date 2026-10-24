@@ -188,3 +188,31 @@ n_candidates_t = g(market_entropy_pct, breadth)
 → 只用于二次排序和仓位
 → 再用市场熵变化做总仓位覆盖
 ```
+
+## 8. 实施结果（2026-10-23）
+
+已按 §5 的 MVP 落地并做了证伪，结论有调整：
+
+| 检验 | 结果 | 判定 |
+|---|---|---|
+| 个股熵单因子 IC（全市场 2016-2026，5 日超额） | `entropy_ret_20` IC −0.055（t=−17.4） | 表面显著 |
+| 加入控制变量后（vol20/mom20/额/turnover） | AUC 0.5483 → **0.5394**，Top10% 超额 +38.4bp → +33.3bp | **无增量** |
+| 候选池概率模型（台账 walk-forward） | AUC 0.4915（先验）/ 0.4983（先验+熵） | **训不出来**：台账每日中位数仅 5 只 |
+| 市场熵 → 未来 20 日 | Q1 +1.20% / Q5 −0.59%；Q5 波动与回撤更大 | 有状态信息 |
+| 市场熵仓位覆盖（月度，5bp） | CAGR −0.8%→+1.3%，回撤 −39.3%→**−29.5%**，波动 20.6%→17.3% | **可落地（降风险）** |
+
+产物：
+
+- `scripts/build_entropy_features.py` → `assets/data/derived/cn_entropy_features.parquet`（1,199 万行）、`cn_market_entropy.parquet`
+- `scripts/p2_76_entropy_probe.py`（增量检验）
+- `scripts/p2_76_entropy_probability.py`（候选池概率，当前仅作诊断）
+- 报告：`output/research/p2_76/ENTROPY_LANDING.md`
+
+调整后的落地顺序：
+
+```text
+特征库（完成） → 市场熵仓位覆盖（Phase 2，唯一有证据） → 候选池概率模型（等候选全集 ≥1 年 + 5min 历史 2020+）
+```
+
+**不要**在现阶段把熵做成独立选股策略，也不要给候选股贴「上涨概率」——
+控制波动/动量后熵没有增量，候选台账的样本量也不支持截面模型。
